@@ -29,6 +29,23 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 (ROOT / ".build").mkdir(exist_ok=True)
 
+# A process that exits between opening and reading its stat is no longer active;
+# other read failures still propagate.
+boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+real_read = Path.read_text
+for error in (ProcessLookupError(3, "No such process"), FileNotFoundError(2, "No such file"),
+              PermissionError(13, "Permission denied")):
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/1/stat"):
+            raise error
+        return real_read(path, *args, **kwargs)
+    with mock.patch.object(Path, "read_text", read_text):
+        if isinstance(error, PermissionError):
+            with checks.assertRaises(PermissionError):
+                runner.active([1, "0", boot])
+        else:
+            assert runner.active([1, "0", boot]) is False
+
 # The normal helper boundary retains its failure status without exposing input.
 result = subprocess.run(["python3", str(HELPER), "capture", "check", "private-secret/path"],
                         env=dict(os.environ, SUBYARD_METADATA_FD="private-secret/path"), capture_output=True)

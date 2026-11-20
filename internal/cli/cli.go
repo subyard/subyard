@@ -128,6 +128,12 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
+	// configConsent is the consent an in-process init --configs child of a
+	// confirmed config apply writes with.
+	configConsent *ports.ConfigConsent
+	// configRefusals is where an init --configs child reports the files it
+	// refused to its config apply parent.
+	configRefusals *os.File
 	// gateAdmitted records how a non-ready release gate admitted this
 	// invocation; a repair admission is rechecked once after consent.
 	gateAdmitted *gateAdmission
@@ -447,6 +453,7 @@ func New(options Options) (*CLI, error) {
 	delete(baseEnvironment, "SUBYARD_SUDO_PREAUTHORIZED")
 	delete(baseEnvironment, "SUBYARD_PRESERVE_VM_REPORTING")
 	delete(baseEnvironment, releaseruntime.BootstrapDraftInput)
+	configRefusals := inheritedConfigRefusals(baseEnvironment)
 	activeEnvironment := make(map[string]string, len(baseEnvironment))
 	for name, value := range baseEnvironment {
 		activeEnvironment[name] = value
@@ -455,7 +462,7 @@ func New(options Options) (*CLI, error) {
 		catalog: settings, options: options, env: activeEnvironment, baseEnv: baseEnvironment, ownerAdmissionMutex: &sync.Mutex{},
 		commandInputs: releaseruntime.CaptureCommandInputs(options.Environment, func(name string) bool { _, ok := settings.LookupSetting(name); return ok }),
 		manifest:      manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
-		discoveredOwners: make(map[string]ownerinventory.Connection), coreActions: coreActions,
+		discoveredOwners: make(map[string]ownerinventory.Connection), coreActions: coreActions, configRefusals: configRefusals,
 	}
 	cli.promptInputTerminal = func() bool { return terminalStream(options.Stdin) }
 	cli.operatorTerminal = func() bool {
@@ -540,7 +547,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if !readOnlyInvocation && !commandHelpRequested(commandArguments) && (slices.Contains([]string{"@update", "@current-migration", "@host", "@config"}, definition.Handler) || definition.Handler == "@teardown" && slices.Contains(commandArguments, "--full")) {
 		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
-		pending, err := filepath.Glob(filepath.Join(home, "cleanup", "*", "journal.json"))
+		pending, err := hardCleanupJournalPaths(home)
 		if err != nil || len(pending) > 0 {
 			cli.errorf("hard cleanup is pending; finish selected-yard recovery before changing shared owner configuration or runtime")
 			return 1
@@ -586,6 +593,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSelectionSourceRepair(ctx, yard, admission.earlyArguments, yes)
 	case earlyConfigValidate:
 		return cli.runConfigValidate(yard, admission.earlyArguments)
+	case earlyInstallationCheck:
+		return cli.runInstallationCheck(ctx, explicit, commandArguments)
 	case earlyHelp:
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")

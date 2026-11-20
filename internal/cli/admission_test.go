@@ -49,7 +49,7 @@ func TestRunAdmissionStages(t *testing.T) {
 		marker    string // handler diagnostic that identifies stageDispatch
 	}{
 		// Manifest read effect.
-		{[]string{"check"}, stageLoad, ""},
+		{[]string{"check", "--host"}, stageLoad, ""},
 		{[]string{"security"}, stageLoad, ""},
 		{[]string{"status"}, stageLoad, ""},
 		{[]string{"space"}, stageLoad, ""},
@@ -222,6 +222,10 @@ func TestRunAdmissionEarlyPaths(t *testing.T) {
 		marker    string // substring of stdout or stderr owned by the expected path
 	}{
 		{[]string{"network", "--help"}, "", 0, "Usage: yard network status [--json]"},
+		{[]string{"check", "--help"}, "", 0, "Usage: yard check [--json]"},
+		{[]string{"check", "--bogus"}, "", 2, `yard: unknown check option "--bogus"`},
+		{[]string{"-Y", "admission-missing", "check"}, "", 2, "yard: check inspects the whole installation"},
+		{[]string{"check", "--json"}, "", 1, `"id":"release.metadata.read","class":"blocker"`},
 		{[]string{"list", "--complete-profiles"}, "", 0, "fixture\n"},
 		{[]string{"help"}, "", 0, "Usage: yard [option] <command> [args]"},
 		// A malformed frame proves that the RPC session, not another early path, read stdin.

@@ -80,7 +80,7 @@ func TestDispatcherConfigApplierRetainsOwnerBarrier(t *testing.T) {
 					} else {
 						applier := dispatcherConfigApplier{path: dispatcher, environment: environment,
 							stdout: &output, stderr: &output, applyDrift: mode == "drift-aware"}
-						err = applier.ApplyConfig(ctx, "named")
+						err = applier.ApplyConfig(ctx, "named", nil)
 					}
 					if err != nil {
 						t.Fatalf("configuration dispatch failed: %v\n%s", err, output.String())

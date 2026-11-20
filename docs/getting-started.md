@@ -14,7 +14,7 @@ runtime, so the operator CLI does not need Go or a source checkout at runtime.
 curl -fsSL --proto '=https' --tlsv1.2 \
   https://github.com/Subyard/Subyard/releases/latest/download/subyard-install.sh | bash
 exec "$SHELL" -l
-yard check
+yard check --host
 yard init
 ```
 
@@ -23,9 +23,10 @@ The installer shows every local change and asks once before it links `yard` and 
 contains the engine, public profiles and configuration, completions, and host adapters. It contains
 no source checkout, toolchain, or private data.
 
-`yard check` is a read-only host preflight. `yard init` installs or reconciles Incus, the selected
+`yard check --host` is a read-only host preflight. `yard init` installs or reconciles Incus, the selected
 yard, and its core configuration. Both `yard init` and later reconciliation runs are designed to be
-repeatable.
+repeatable. Afterwards, `yard check` inspects the installed release, configuration, host and local
+state without changing them; see [installation check](control-plane.md#installation-check).
 
 If NetworkManager is active, the first init or a guard migration without evidence that the
 released guard is held needs one host reboot before init can continue. Reboot, then rerun

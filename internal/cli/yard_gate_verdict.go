@@ -105,6 +105,16 @@ type gateSubject struct {
 	acts  []yardAction
 }
 
+// yardRefusal is one yard's refusal finding. Its text, with the yard's next
+// step, renders only when it is printed, so admission checks of proposed
+// steps never recurse into rendering.
+type yardRefusal struct {
+	yard string
+	text func() string
+}
+
+func (refusal yardRefusal) Error() string { return refusal.text() }
+
 // gateVerdict is the decision for one subject: every refusal in a stable
 // order, the optional actions left out, and whether it repairs the selected
 // yard.
@@ -144,23 +154,26 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		subject = gateSubject{scope: scopeEvery}
 	}
 	refused := map[string]bool{}
-	refuse := func(yard string, err error) {
+	refuse := func(yard string, text func() string) {
 		if !refused[yard] {
 			refused[yard] = true
-			result.refusals = append(result.refusals, err)
+			result.refusals = append(result.refusals, yardRefusal{yard, text})
 		}
 	}
+	next := func(yard string) string { return gate.step(yard, domain.Action{}) }
 	if !subject.host {
 		state := gate.state(selected)
 		switch {
 		case state.repairOnly() && subject.member == memberNone:
-			refuse(selected, errors.New(yardGateRefusal(selected, gate)))
+			refuse(selected, func() string { return yardGateRefusal(selected, gate) })
 		case state.repairOnly() && subject.unfit != nil:
-			refuse(selected, fmt.Errorf("%s\nthis invocation is not that repair: %v", yardGateRefusal(selected, gate), subject.unfit))
+			refuse(selected, func() string {
+				return fmt.Sprintf("%s\nthis invocation is not that repair: %v", yardGateRefusal(selected, gate), subject.unfit)
+			})
 		case state.repairOnly():
 			result.repair = true
 		case state.pending && !subject.pending:
-			refuse(selected, errors.New(yardGateRefusal(selected, gate)))
+			refuse(selected, func() string { return yardGateRefusal(selected, gate) })
 		}
 	}
 	var desired []string
@@ -179,10 +192,13 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		state := gate.state(yard)
 		switch {
 		case state.repairOnly() && !configRepair:
-			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, which needs repair\nnext: %s", yard, yardNextStep(yard, state)))
+			refuse(yard, func() string {
+				return fmt.Sprintf("release gate: this command writes the desired configuration of yard %s, which needs repair\nnext: %s", yard, next(yard))
+			})
 		case state.pending:
-			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, whose pending configuration refuses it\nnext: %s, then repeat this command",
-				yard, yardNextStep(yard, state)))
+			refuse(yard, func() string {
+				return fmt.Sprintf("release gate: this command writes the desired configuration of yard %s, whose pending configuration refuses it\nnext: %s, then repeat this command", yard, next(yard))
+			})
 		}
 	}
 	// A host command skipped the selected yard's check: each yard it acts on is
@@ -197,11 +213,17 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 			result.skip = append(result.skip, action.yard)
 		case action.optional:
 		case action.driftOnly && (state.failed || state.config || state.unreachable):
-			refuse(action.yard, fmt.Errorf("yard %s needs %s before its configuration is refreshed", action.yard, yardNextStep(action.yard, state)))
+			refuse(action.yard, func() string {
+				return fmt.Sprintf("yard %s needs %s before its configuration is refreshed", action.yard, next(action.yard))
+			})
 		case state.repairOnly() && !configRepair:
-			refuse(action.yard, fmt.Errorf("yard %s needs repair first; next: %s", action.yard, yardNextStep(action.yard, state)))
+			refuse(action.yard, func() string {
+				return fmt.Sprintf("yard %s needs repair first; next: %s", action.yard, next(action.yard))
+			})
 		case state.pending && action.refusePending:
-			refuse(action.yard, fmt.Errorf("yard %s has pending configuration that this command would act on; next: %s", action.yard, yardNextStep(action.yard, state)))
+			refuse(action.yard, func() string {
+				return fmt.Sprintf("yard %s has pending configuration that this command would act on; next: %s", action.yard, next(action.yard))
+			})
 		}
 	}
 	return result
@@ -420,7 +442,7 @@ func (prepared *preparedCommand) gateSkipped(targets []configTarget, report bool
 			return false
 		}
 		if report {
-			fmt.Fprintf(prepared.CLI.options.Stderr, "yard: skipped yard %s: it needs attention; next: %s\n", target.Name, yardNextStep(target.Name, admission.gate.state(target.Name)))
+			fmt.Fprintf(prepared.CLI.options.Stderr, "yard: skipped yard %s: it needs attention; next: %s\n", target.Name, admission.gate.step(target.Name, domain.Action{}))
 		}
 		return true
 	})

@@ -19,13 +19,15 @@ var profileOnlySettings = []string{"YARD_CAPS", "YARD_DEVICES", "YARD_MOUNTS"}
 // IsProfileOnlySetting reports whether only environment profiles declare name.
 func IsProfileOnlySetting(name string) bool { return slices.Contains(profileOnlySettings, name) }
 
-// IgnoredAssignment is a non-empty operator assignment of a profile-only
-// setting. The loader discards it, as it discards retired settings; readiness
-// reports it as configuration state with its repair. It is never a refusal.
+// IgnoredAssignment is a non-empty operator assignment of a profile-only or
+// retired setting. The loader discards both; readiness reports profile-only
+// assignments and installation inspection also reports retired ones, each
+// with its repair. It is never a refusal.
 type IgnoredAssignment struct {
 	Yard, Name, Scope, Path string
 	Line                    int
 	Git                     bool
+	Retired                 bool
 	// authored reports that config unset at Scope writes exactly Path and
 	// removes the assignment.
 	authored bool
@@ -36,12 +38,13 @@ func (assignment IgnoredAssignment) Command() bool { return assignment.Scope == 
 
 // Repair is the exact action that removes the assignment: the config unset
 // command when it writes the file the value came from, otherwise the file
-// line to remove. It is "" for the command environment.
+// line to remove. It is "" for the command environment. config unset refuses
+// retired names, so their repair is always the file line.
 func (assignment IgnoredAssignment) Repair() string {
 	switch {
 	case assignment.Command():
 		return ""
-	case assignment.authored:
+	case assignment.authored && !assignment.Retired:
 		storage := "--local"
 		if assignment.Git {
 			storage = "--git"
@@ -53,6 +56,9 @@ func (assignment IgnoredAssignment) Repair() string {
 }
 
 func (assignment IgnoredAssignment) String() string {
+	if assignment.Retired {
+		return fmt.Sprintf("%s in %s:%d is retired and ignored; %s", assignment.Name, assignment.Path, assignment.Line, assignment.Repair())
+	}
 	if assignment.Command() {
 		return assignment.Name + " in the command environment is ignored: only environment profiles declare it; unset it"
 	}
@@ -66,18 +72,24 @@ func (assignment IgnoredAssignment) String() string {
 
 // IgnoredAssignments returns every ignored profile-only assignment in stable order.
 func (loaded Loaded) IgnoredAssignments() []IgnoredAssignment {
-	return slices.Clone(loaded.ignored)
+	return slices.DeleteFunc(slices.Clone(loaded.ignored), func(assignment IgnoredAssignment) bool { return assignment.Retired })
+}
+
+// RetiredAssignments returns every ignored retired file assignment in stable order.
+func (loaded Loaded) RetiredAssignments() []IgnoredAssignment {
+	return slices.DeleteFunc(slices.Clone(loaded.ignored), func(assignment IgnoredAssignment) bool { return !assignment.Retired })
 }
 
 // observeProfileOnly records a non-empty operator assignment of a
-// profile-only setting; empty ones are tolerated.
+// profile-only or retired setting; empty ones are tolerated.
 func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, value, path string, line int) {
-	if !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "" {
+	retired := path != "" && (isRetiredSetting(name) || tracker.catalog.RetiredSetting(name))
+	if !retired && !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "" {
 		return
 	}
 	definition := tracker.layers[layer]
 	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
-		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "),
+		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "), Retired: retired,
 	})
 }
 

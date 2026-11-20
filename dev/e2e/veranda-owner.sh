@@ -178,7 +178,7 @@ fi
 printf '%s\n' subyard-e2e-platform-v1 > "$STATE/platform-marker"
 sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0600 "$STATE/platform-marker" "$platform/.subyard-e2e-platform-marker.$token"
 sudo -n mv -fT "$platform/.subyard-e2e-platform-marker.$token" "$platform/.subyard-e2e-platform-marker"
-yard check
+yard check --host
 if [ "${SUBYARD_E2E_VERANDA_BOOTSTRAP_ONLY:-0}" = 0 ]; then
   yard sync "$STATE/project" --yes
   install -d -m 0700 "$STATE/settings-source/shared"

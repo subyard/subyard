@@ -25,6 +25,8 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import records
 records.MAX_RECORDS = 2
+# Stream creation fsyncs under the spool lock; keep the wait below the run timeout.
+records.LOCK_WAIT = 2
 for index in range(6):
     body = {'agent_run_id': sys.argv[3], 'state': 'starting'}
     assert records.emit(sys.argv[2], 'run', body, broker=sys.argv[3] == 'broker')
@@ -57,6 +59,44 @@ for index in range(6):
                 self.assertTrue(records.emit(root, 'gap', {}, broker=True))
             self.assertEqual(len(list(spooled(root))), 2)
             self.assertEqual((root/'spool-loss').read_bytes(), marker)
+
+    def test_new_segment_creation_under_directory_contention(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = prepare(Path(directory))
+            with records.directory_lock(root/'spool', fcntl.LOCK_EX):
+                self.assertFalse(records.emit(root, 'gap', {}, broker=True))
+            self.assertEqual(list((root/'spool').iterdir()), [])
+            marker = (root/'spool-loss').read_bytes()
+            slots = [json.loads(slot.split(b' ', 1)[1].rstrip(b'\0')) for slot in
+                     (marker[:records.MARKER_SLOT], marker[records.MARKER_SLOT:]) if slot.strip(b'\0')]
+            self.assertEqual(max(slots, key=lambda slot: slot['revision'])['count'], 1)
+            # A longer bounded wait succeeds once the holder releases the lock.
+            script = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import records
+records.LOCK_WAIT = 30
+sleep = time.sleep
+def waiting(seconds):
+    if not waiting.told:
+        waiting.told = True
+        print('waiting', flush=True)
+    sleep(seconds)
+waiting.told = False
+time.sleep = waiting
+sys.exit(0 if records.emit(sys.argv[2], 'gap', {}, broker=True) else 1)
+"""
+            with records.directory_lock(root/'spool', fcntl.LOCK_EX):
+                child = subprocess.Popen([sys.executable, '-B', '-c', script, str(Path(records.__file__).parent), directory],
+                                         stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline(), 'waiting\n')
+                except BaseException:
+                    child.kill()
+                    raise
+            self.assertEqual(child.wait(timeout=30), 0)
+            child.stdout.close()
+            self.assertEqual(len(list(spooled(root))), 1)
 
     def test_policy_and_path_validation_fail_closed(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:

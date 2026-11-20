@@ -385,8 +385,10 @@ The declaration has exactly these fields:
 
 Paths resolve relative to the declaration. Repeat `--operator-acceptance` for separately authorized
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
-commands and versions must match. Evidence must prove terminal nonzero exit, complete launch/timing,
-VM identities, successful cleanup of every guest and lease release. Interrupted, incomplete, changed
+commands and versions must match. Evidence must prove a terminal nonzero exit (not a signal or
+timeout such as 124, 130, 137 or 143), complete launch/timing, VM identities, and that every lease
+of the lane ended cleanly under the [lane lease rule](#lane-lease-rule). The launcher and log
+header carry the same lane ID as for standalone evidence, and the cleanup summary lists the cleaned staged VMs. Interrupted, incomplete, changed
 or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
 passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
 the original exit and log hash without claiming a PASS.
@@ -624,10 +626,8 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
-marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
-Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
-environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+Exit 124 is a timeout; known signal exits retain the signal number. A `blocked` capacity result
+(see the [lane lease rule](#lane-lease-rule)) is an environment failure; otherwise cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub
@@ -640,8 +640,34 @@ the lease release budget, elapsed time and native status separately from aggrega
 Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
 Only one mutating collector may use an output directory at a time.
 
+#### Lane lease rule
+
+The collector gives each slot lane a random 32-hex ID: the log's first line is `E2E_LANE id=ID`,
+and the lane process gets `SUBYARD_E2E_LANE=ID`, which guests never receive. The lane's own client
+and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`,
+`grant type=TYPE vms=N base=FINGERPRINT`, `refused resource=memory|disk`, `work vm=N` (a run
+directory was staged), `cleaned vm=N exit_code=N` and `release exit_code=N`. Records go to stderr as
+single complete lines; a controller must not discard or redirect its stderr away from the lane log.
+One rule (`lane_status`) decides PASS and capacity blocks for collection, reuse of a recorded PASS,
+import, transfer, standalone evidence, hosted collection and operator acceptance. It reads the
+header, then only records with the lane's ID, and the native exit; other phase output does not
+change the verdict, and environments come only from typed grants. A slot lane passes with exit 0 when:
+
+- every record names the lane slot, is well formed and ends its line;
+- each run's request ends in a grant or a typed refusal, and each grant in a release with exit 0;
+- every staged VM has a `cleaned` record with exit 0 before its lease's release, and is not staged
+  again before then (`--ssh` and raw guest commands stage nothing);
+- at least one lease completed and the final record is not a refusal.
+
+Exit 4 with a final typed refusal and no other issue is `blocked/capacity_memory|disk`; otherwise
+the result is `failed` with the rule's reason. A log without the `E2E_LANE` header, or whose
+header differs from a declared launcher ID, never counts:
+a recorded PASS from an earlier collector reads as `failed` and runs again (its immutable attempt
+record is kept), and such evidence is refused as an import or transfer source.
+
 Explicit `import --output NEW --from OLD --check CHECK` copies passing command-bound evidence
 between bound candidates with matching source and release assets, retaining inherited provenance.
+The target check must be untouched: import never replaces an attempt, such as a fresh failure.
 Only provenance generation timestamps may differ; artifact identities and original metadata hashes remain bound.
 Local evidence also requires its recorded execution environment to match.
 The current run prints `REUSE` with direct/inherited origin and its validation reason for applicable
@@ -725,18 +751,23 @@ An uncollected physical controller PASS may instead supply `standalone` with exa
 `native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
-controller log must retain the VM base, successful cleanup of every VM and lease release.
+controller log must start with the launcher's lane header and pass the
+[lane lease rule](#lane-lease-rule); its typed grants are the VM bases.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
-for direct controllers and stays unknown; any observed failed phase rejects the transfer.
+for direct controllers and stays unknown.
 Rich launch records contain `cwd`, `argv`, `source_fingerprint`, `runtime_sha256`, `bundle_sha256`,
 `acceptance_script_sha256` and optional `launched_at_utc`. Original raw records with `cwd`, `argv`
 and timezone-aware `started_at` are also supported. Their checksum-bound bundle must exactly match
 the frozen source, executable modes, candidate metadata and complete release inventory; do not
 add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
 The command must be the exact check plus `--slot N`, in the supported
-`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR` and the three
-controller/transport assignments. Unmeasured duration and execution environment stay unknown;
+`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`, the three
+controller/transport assignments and `SUBYARD_E2E_LANE=ID`, a fresh random 32-hex ID per launch.
+The log starts with the matching header, for example
+`lane="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; printf 'E2E_LANE id=%s\n' "$lane" >"$LOG"`
+before the launcher appends stdout and stderr with `SUBYARD_E2E_LANE="$lane"`. A launcher or log
+without it, as before lane records, never counts. Unmeasured duration and execution environment stay unknown;
 preparation environment and final-poll duration cannot substitute for them.
 
 Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure

@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -284,28 +286,168 @@ func TestDispatcherConfigApplierSelectsDirectAndDriftAwareCommands(t *testing.T)
 	root := t.TempDir()
 	capture := filepath.Join(root, "arguments")
 	dispatcher := filepath.Join(root, "yard")
-	writeConfigCommandFile(t, dispatcher, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n", 0o700)
+	writeConfigCommandFile(t, dispatcher, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nif [ \"${6:-}\" = --config-consent-fd ]; then cat <&3 > \"$CAPTURE.consent\"; fi\n", 0o700)
+	consent := &ports.ConfigConsent{InstanceUUID: "uuid", Files: []ports.ConfigFileConsent{{Destination: "/home/dev/a", Token: "absent"}}}
 	for _, test := range []struct {
 		name       string
 		applyDrift bool
+		consent    *ports.ConfigConsent
 		want       string
 	}{
 		{name: "direct", want: "-Y\nnamed\ninit\n--configs\n--yes\n"},
-		{name: "drift-aware", applyDrift: true, want: "-Y\nnamed\nconfig\napply\n--yes\n"},
+		// An init child receives the confirmed tokens on a descriptor named by
+		// an option that a binary without compare-and-write rejects.
+		{name: "consented", consent: consent, want: "-Y\nnamed\ninit\n--configs\n--yes\n--config-consent-fd\n3\n"},
+		// A config apply child plans and confirms for itself.
+		{name: "drift-aware", applyDrift: true, consent: consent, want: "-Y\nnamed\nconfig\napply\n--yes\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			applier := dispatcherConfigApplier{
 				path: dispatcher, environment: map[string]string{"CAPTURE": capture},
 				applyDrift: test.applyDrift,
 			}
-			if err := applier.ApplyConfig(context.Background(), "named"); err != nil {
+			_ = os.Remove(capture + ".consent")
+			if err := applier.ApplyConfig(context.Background(), "named", test.consent); err != nil {
 				t.Fatal(err)
 			}
 			arguments, err := os.ReadFile(capture)
 			if err != nil || string(arguments) != test.want {
 				t.Fatalf("dispatcher arguments = %q, want %q, err=%v", arguments, test.want, err)
 			}
+			if passed, err := os.ReadFile(capture + ".consent"); test.name == "consented" && (err != nil || string(passed) != `{"instance_uuid":"uuid","files":[{"destination":"/home/dev/a","token":"absent"}]}`) {
+				t.Fatalf("consent descriptor = %q, %v", passed, err)
+			}
 		})
+	}
+}
+
+// refusalReportDispatcher is an init --configs child that writes the report
+// file $REPORT names, if any, on the descriptor its parent named, and exits
+// with $EXIT.
+const refusalReportDispatcher = `#!/bin/sh
+[ -z "$SUBYARD_CONFIG_REFUSALS_FD" ] || [ ! -f "$REPORT" ] || eval "cat \"\$REPORT\" >&$SUBYARD_CONFIG_REFUSALS_FD"
+exit "${EXIT:-1}"
+`
+
+// testFileRefusals are the refusals of each relayed state of yard named.
+func testFileRefusals() map[string]error {
+	return map[string]error{
+		"unreadable":      configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/CLAUDE.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		"changed":         configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemChanged}},
+		"unowned-invalid": configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnownedInvalid}},
+		"unassessed": domain.CollectRefusals(
+			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.codex/AGENTS.md", Problem: configmaterial.ProblemUnassessed, InitOnly: true}},
+			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnassessed}}),
+	}
+}
+
+// A failed init --configs child's typed file refusals replace its exit
+// status; no report, a malformed or an oversized one relays nothing.
+func TestDispatcherConfigApplierRelaysOnlyTypedFileRefusals(t *testing.T) {
+	root := testkit.TempDir(t)
+	dispatcher := filepath.Join(root, "yard")
+	writeConfigCommandFile(t, dispatcher, refusalReportDispatcher, 0o700)
+	refusal := testFileRefusals()["unassessed"]
+	reports := map[string][]byte{
+		"report":    configmaterial.EncodeRefusals(refusal),
+		"garbage":   []byte("not a report"),
+		"oversized": append(configmaterial.EncodeRefusals(refusal), bytes.Repeat([]byte(" "), configmaterial.MaxRefusalReport)...),
+	}
+	for _, test := range []struct {
+		name, exit, want string
+		drift, noTemp    bool
+	}{
+		{name: "report", want: refusal.Error()},
+		{name: "none", want: "exit status 1"},
+		{name: "garbage", want: "exit status 1"},
+		{name: "oversized", want: "exit status 1"},
+		{name: "report", exit: "0"},
+		// A config apply child plans for itself and is named no descriptor.
+		{name: "report", drift: true, want: "exit status 1"},
+		// Without a report file the child still refreshes, and relays nothing.
+		{name: "report", noTemp: true, exit: "0"},
+		{name: "report", noTemp: true, want: "exit status 1"},
+	} {
+		t.Run(fmt.Sprint(test.name, test.exit, test.drift, test.noTemp), func(t *testing.T) {
+			environment := map[string]string{"EXIT": test.exit}
+			if payload, ok := reports[test.name]; ok {
+				environment["REPORT"] = filepath.Join(testkit.TempDir(t), "report")
+				testkit.WriteFile(t, environment["REPORT"], payload, 0o600)
+			}
+			if test.noTemp {
+				t.Setenv("TMPDIR", filepath.Join(root, "missing"))
+			}
+			err := dispatcherConfigApplier{path: dispatcher, environment: environment, applyDrift: test.drift}.ApplyConfig(context.Background(), "named", nil)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || err.Error() != test.want) {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+			if relayed := errors.As(err, new(configmaterial.FileRefusal)); relayed != (test.want == refusal.Error()) {
+				t.Fatalf("relayed %v: %v", relayed, err)
+			}
+		})
+	}
+}
+
+// For each relayed state, config apply through an init --configs child and
+// through the in-process refresh print the same final line, which names the
+// writer's step; a child that relays nothing is run again.
+func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	loaded := loadConfigCommandContext(t, root, environment, "named")
+	dispatcher := filepath.Join(testkit.TempDir(t), "yard")
+	writeConfigCommandFile(t, dispatcher, refusalReportDispatcher, 0o700)
+	run := func(applier ports.ConfigApplier, report []byte) (string, string) {
+		t.Helper()
+		fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": "named"}}}}
+		childEnvironment := slices.Clone(environment)
+		if report != nil {
+			path := filepath.Join(testkit.TempDir(t), "report")
+			testkit.WriteFile(t, path, report, 0o600)
+			childEnvironment = append(childEnvironment, "REPORT="+path)
+		}
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "named", "config", "apply", "--yes"},
+			Environment: childEnvironment, WorkingDir: root, DispatcherPath: dispatcher, Prompt: &testkit.Prompt{},
+			Incus: fake, Executor: symlinkedSettingsExecutor{}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code == 0 {
+			t.Fatalf("config apply succeeded:\n%s%s", stdout.String(), stderr.String())
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		return lines[len(lines)-1], lastNext(lines[len(lines)-1])
+	}
+	for state, step := range map[string]string{
+		"unreadable":      "replace it with a regular file or remove it, then run yard -Y named init --configs",
+		"changed":         "run yard -Y named config apply",
+		"unowned-invalid": "correct or remove it in the yard, then run yard -Y named config apply",
+		"unassessed":      "run yard -Y named config apply",
+	} {
+		t.Run(state, func(t *testing.T) {
+			refusal := testFileRefusals()[state]
+			inProcess, next := run(failingConfigApplier{err: refusal}, nil)
+			relayed, _ := run(nil, configmaterial.EncodeRefusals(refusal))
+			if relayed != inProcess || next != step || !strings.Contains(inProcess, "/home/dev/") {
+				t.Fatalf("relayed %q\nin process %q\nwant step %q", relayed, inProcess, step)
+			}
+		})
+	}
+	for name, report := range map[string][]byte{"no report": nil, "garbage": []byte("{")} {
+		if _, next := run(nil, report); next != "run yard -Y named init --configs" {
+			t.Fatalf("%s: next %q", name, next)
+		}
+	}
+	// A file refusal beside another failure names no file's step on either
+	// path: the child reports nothing, and the refresh runs again.
+	mixed := domain.CollectRefusals(testFileRefusals()["unowned-invalid"], errors.New("apply agent: failed"))
+	_, inProcess := run(failingConfigApplier{err: mixed}, nil)
+	if _, relayed := run(nil, configmaterial.EncodeRefusals(mixed)); inProcess != "run yard -Y named init --configs" || relayed != inProcess {
+		t.Fatalf("mixed failure: in process %q, relayed %q", inProcess, relayed)
 	}
 }
 
@@ -334,6 +476,108 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "permissions") {
 		t.Fatal("status printed agent config contents")
+	}
+}
+
+// symlinkedSettingsExecutor observes every config file drifted, and in
+// instance the settings.json files unreadable, as a symlinked one is.
+type symlinkedSettingsExecutor struct{ instance string }
+
+func (executor symlinkedSettingsExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok || len(request.Command) < 7 || request.Command[4] != configmaterial.ModeObserve {
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	raw := configmaterial.TokenAbsent
+	if instance == executor.instance && strings.HasSuffix(request.Command[6], "/settings.json") {
+		raw = configmaterial.TokenUnreadable
+	}
+	return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q,"raw":%q}`, strings.Repeat("0", 64), raw))}, nil
+}
+
+// A symlinked settings.json refuses its yard alone, before consent, with the
+// file and the operator's step; the other yard is refreshed, and the plan
+// does not read as one without drift.
+func TestConfigApplyRefusesOnlyTheYardWithAnUnreadableFile(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
+	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	for _, loaded := range []config.Loaded{defaultLoaded, namedLoaded} {
+		fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": loaded.Context.YardName}}
+	}
+	assets, err := effectiveConfigAssets(namedLoaded)
+	settings := slices.IndexFunc(assets, func(asset configAsset) bool { return strings.HasSuffix(asset.Destination, "/settings.json") })
+	if err != nil || settings < 0 {
+		t.Fatalf("fixture needs a settings.json: %v", err)
+	}
+	executor := symlinkedSettingsExecutor{instance: namedLoaded.Context.YardInstanceName}
+	step := assets[settings].Destination + " is not a readable regular file; it was kept; next: replace it with a regular file or remove it, then run yard -Y named config apply"
+	for _, arguments := range [][]string{{"-Y", "named", "config", "status"}, {"config", "apply", "--all-local", "--yes"}} {
+		applier := &recordingConfigApplier{}
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
+			Incus: fake, Executor: executor, Config: applier, Stdout: &stdout, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := program.Run(context.Background())
+		output := stdout.String() + stderr.String()
+		if !strings.Contains(output, step) || strings.Contains(output, "no running local yards have materialized configuration drift") {
+			t.Fatalf("%v: code=%d\n%s", arguments, code, output)
+		}
+		if arguments[2] == "apply" && (code == 0 || !slices.Equal(applier.yards, []string{"default"})) {
+			t.Fatalf("apply: code=%d refreshed %v\n%s", code, applier.yards, output)
+		}
+	}
+}
+
+// lostGuestExecutor observes every config file drifted until lost, and then
+// loses the transport of instance.
+type lostGuestExecutor struct {
+	instance string
+	lost     *bool
+}
+
+func (executor lostGuestExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if *executor.lost && instance == executor.instance {
+		return ports.InstanceExecResult{}, errors.New("guest transport lost")
+	}
+	return symlinkedSettingsExecutor{}.Exec(ctx, project, instance, request)
+}
+
+// A yard that can no longer be assessed after confirmation is refused alone:
+// the other yard of the plan is still refreshed.
+func TestConfigApplyRefusesOnlyTheYardThatFailsReassessment(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	var named config.Loaded
+	for _, yard := range []string{"default", "named"} {
+		loaded := loadConfigCommandContext(t, root, environment, yard)
+		fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": yard}}
+		named = loaded
+	}
+	lost := false
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--all-local"},
+		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{callback: func() { lost = true }},
+		Incus: fake, Executor: lostGuestExecutor{instance: named.Context.YardInstanceName, lost: &lost}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := program.Run(context.Background())
+	output := stdout.String() + stderr.String()
+	if code == 0 || !slices.Equal(applier.yards, []string{"default"}) || !strings.Contains(output, "yard named materialized config") || !strings.Contains(output, "guest transport lost") {
+		t.Fatalf("code=%d refreshed %v\n%s", code, applier.yards, output)
 	}
 }
 
@@ -379,6 +623,20 @@ func TestConfigApplyRejectsUnsafeSettingsTreeBeforeMutation(t *testing.T) {
 	}
 	if len(applier.yards) != 0 {
 		t.Fatalf("unsafe tree was applied to %#v", applier.yards)
+	}
+}
+
+func TestManagedConfigTreeReportsEveryUnsafePath(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "config.env"), []byte("fixture\n"), 0o666)
+	if err := os.Mkdir(filepath.Join(root, "generated"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "generated", "unsafe"), []byte("fixture\n"), 0o666)
+	err := validateManagedConfigTree(root)
+	if findings := inspectManagedConfigTree(root); len(findings) != 2 || err == nil ||
+		!strings.Contains(err.Error(), "config.env") || !strings.Contains(err.Error(), "generated/unsafe") {
+		t.Fatalf("findings=%v err=%v", findings, err)
 	}
 }
 
@@ -975,7 +1233,9 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 	}
 }
 
-func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T) {
+// Drift that changes after confirmation is not a stale plan: the guest compares
+// each file with the confirmed tokens when it writes.
+func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
@@ -985,6 +1245,7 @@ func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T
 	}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	appendMismatchedHashSteps(t, fake, loaded, "1")
+	appendHashSteps(t, fake, loaded)
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
@@ -995,12 +1256,12 @@ func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 1 ||
-		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
-		t.Fatalf("stale materialized state: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("changed drift: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if len(applier.yards) != 0 {
-		t.Fatalf("stale apply reached applier: %#v", applier.yards)
+	if !slices.Equal(applier.yards, []string{"default"}) || applier.consents[0] == nil || len(applier.consents[0].Files) == 0 ||
+		!slices.ContainsFunc(applier.consents[0].Files, func(file ports.ConfigFileConsent) bool { return file.Token == "sha256:"+strings.Repeat("0", 64) }) {
+		t.Fatalf("apply did not carry the confirmed tokens: %#v %#v", applier.yards, applier.consents)
 	}
 }
 
@@ -1200,29 +1461,16 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 		},
 	}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
-		var hash string
+	appendObservationSteps(t, fake, loaded, func(asset configAsset) string {
+		hash, err := config.HashRegularFile(asset.Source)
 		if asset.Source == source {
 			hash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, []byte(after))
-			if err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			hash, err = config.HashRegularFile(asset.Source)
-			if err != nil {
-				t.Fatal(err)
-			}
 		}
-		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
-		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		if err != nil {
+			t.Fatal(err)
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: output}})
-	}
+		return hash
+	}, true)
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t, source, after)
 	}}
@@ -3383,7 +3631,8 @@ func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.
 }
 
 func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	source, _, home, environment := configCommandFixture(t)
+	root := checkoutMirrorFixture(t, source)
 	flat := filepath.Join(home, "yards/neighbor.env")
 	overlay := filepath.Join(root, "private/yards/neighbor.env")
 	const ignored = "SSH_PORT=2399\nGIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
@@ -3776,11 +4025,13 @@ func (prompt *callbackPrompt) Confirm(
 }
 
 type recordingConfigApplier struct {
-	yards []string
+	yards    []string
+	consents []*ports.ConfigConsent
 }
 
-func (applier *recordingConfigApplier) ApplyConfig(_ context.Context, yard string) error {
+func (applier *recordingConfigApplier) ApplyConfig(_ context.Context, yard string, consent *ports.ConfigConsent) error {
 	applier.yards = append(applier.yards, yard)
+	applier.consents = append(applier.consents, consent)
 	return nil
 }
 
@@ -3809,6 +4060,80 @@ func configCommandFixture(t *testing.T) (string, string, string, []string) {
 		"SUBYARD_NO_AUDIT=1",
 	}
 	return root, home, configHome, environment
+}
+
+// checkoutMirrorFixture returns a temporary repository root for tests that seed a
+// checkout overlay under private/. It copies the tracked config/ files, whose shipped
+// packages must be real directories, and links every other top-level entry of source
+// except private/.
+func checkoutMirrorFixture(t *testing.T, source string) string {
+	t.Helper()
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "private", "config":
+		default:
+			if err := os.Symlink(filepath.Join(source, entry.Name()), filepath.Join(root, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, relative := range checkoutConfigFiles(t, source) {
+		info, err := os.Lstat(filepath.Join(source, relative))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("unsupported checkout entry %s", relative)
+		}
+		data, err := os.ReadFile(filepath.Join(source, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(root, relative)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, destination, data, info.Mode().Perm())
+	}
+	return root
+}
+
+// checkoutConfigFiles lists the tracked config/ files of a Git checkout, leaving out
+// ignored operator-local files. A source tree without Git metadata has no ignore list,
+// so all of its regular config/ files are listed.
+func checkoutConfigFiles(t *testing.T, source string) []string {
+	t.Helper()
+	if prefix, err := exec.Command("git", "-C", source, "rev-parse", "--show-prefix").Output(); err == nil && strings.TrimSpace(string(prefix)) == "" {
+		listed, err := exec.Command("git", "-C", source, "ls-files", "-z", "--", "config").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00")
+	}
+	var files []string
+	err := filepath.WalkDir(filepath.Join(source, "config"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		files = append(files, relative)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
 }
 
 func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.FileMode) {
@@ -3849,24 +4174,39 @@ func loadConfigCommandContext(t *testing.T, root string, environment []string, y
 
 func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
+	appendObservationSteps(t, fake, loaded, func(asset configAsset) string {
 		hash, err := config.HashRegularFile(asset.Source)
 		if err != nil {
 			t.Fatal(err)
 		}
-		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
-		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		return hash
+	}, true)
+}
+
+// appendObservationSteps scripts one assessment of loaded: the structured
+// observation of each owned asset, then one observation of the raw assets,
+// each holding digest.
+func appendObservationSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded, digest func(configAsset) string, converged bool) {
+	t.Helper()
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := []string{"python3", "-B", "-c", configmaterial.CompareWriteProgram(), "observe", "/home/" + loaded.Context.DevUser}
+	tokens := map[string]string{}
+	for _, asset := range assets {
+		token := testkit.HashToken(digest(asset))
+		if asset.OwnedFormat == "" {
+			command, tokens[asset.Destination] = append(command, asset.Destination), token
+			continue
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout: output, ExitCode: 0,
-			},
-		})
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+			Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":%q}`, converged, cmp.Or(digest(asset), strings.Repeat("f", 64)), token)),
+		}})
+	}
+	if len(command) > 6 {
+		observation, _ := testkit.GuestTokenObservation(command, func(destination string) string { return tokens[destination] })
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: observation}})
 	}
 }
 
@@ -3877,40 +4217,17 @@ func appendMismatchedHashSteps(
 	digit string,
 ) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
-		output := []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n")
-		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q}`, strings.Repeat(digit, 64)))
-		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout:   output,
-				ExitCode: 0,
-			},
-		})
-	}
+	appendObservationSteps(t, fake, loaded, func(configAsset) string { return strings.Repeat(digit, 64) }, false)
 }
 
+// appendUnavailableHashSteps scripts an assessment that finds no guest file.
 func appendUnavailableHashSteps(
 	t *testing.T,
 	fake *testkit.Incus,
 	loaded config.Loaded,
 ) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range assets {
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{ExitCode: 1},
-			Err:    errors.New("instance command exited with status 1"),
-		})
-	}
+	appendObservationSteps(t, fake, loaded, func(configAsset) string { return "" }, false)
 }
 
 func runConfigSyncGit(t *testing.T, directory string, arguments ...string) {
@@ -4159,7 +4476,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			loaded.Environment["AGENT_"+test.agent+"_RULES"] = ""
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
-			}}
+			}, GuestTokens: map[string]string{}}
 			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
 			if err != nil {
 				t.Fatal(err)
@@ -4167,7 +4484,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			assess := func(converged bool, fingerprint string) configTargetAssessment {
 				t.Helper()
 				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
+					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":"absent"}`, converged, strings.Repeat(fingerprint, 64))),
 				}})
 				result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
 				if err != nil {

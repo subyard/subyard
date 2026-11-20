@@ -54,6 +54,7 @@ func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t 
 			name: "v2 target registry rejects current ledger prefix", version: "0.9.0",
 			registryPayload: incompatibleRegistry, registryDigest: fingerprintPayload(incompatibleRegistry),
 		},
+		{name: "v2 target registry differs although the ledger is readable", version: "0.30.0", registryDigest: Fingerprint(strings.Repeat("c", 64))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newV2RollbackBoundaryFixtureWithLedger(
@@ -96,6 +97,29 @@ func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t 
 			if err != nil || outcome.Status != StatusOperatorActionRequired ||
 				outcome.Code != CodeRollbackIncompatible {
 				t.Fatalf("blocked rollback convergence = %#v, err=%v", outcome, err)
+			}
+			fixture.assertUnchanged(t, true)
+		})
+	}
+}
+
+// Plan facts reject a missing target after observation; the observation itself
+// must already block it, also before reading a ledger the engine cannot parse.
+func TestV2RollbackObservationBlocksMissingTargetFacts(t *testing.T) {
+	unreadable := []byte(`{
+  "schemaVersion": 2,
+  "minimumEpochs": {"owner-registration": 1, "power-metadata": 1, "project-state": 1, "settings": 1},
+  "currentEpochs": {"owner-registration": 1, "power-metadata": 1, "project-state": 1, "settings": 1},
+  "migrations": []
+}
+`)
+	for name, registry := range map[string][]byte{"readable ledger": nil, "unreadable ledger": unreadable} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newV2RollbackBoundaryFixture(t, "0.30.0", "", registry)
+			fixture.transition.options.RollbackTarget = nil
+			observation, err := fixture.transition.observe(context.Background(), Goal{Target: "release-a", Direction: DirectionActivatePrevious})
+			if err != nil || len(observation.blockers) != 1 || observation.blockers[0].Code != CodeRollbackIncompatible {
+				t.Fatalf("missing rollback target observation = %#v, err=%v", observation.blockers, err)
 			}
 			fixture.assertUnchanged(t, true)
 		})

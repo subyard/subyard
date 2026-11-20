@@ -1261,7 +1261,9 @@ func (runtime *Runtime) prepareProtectedTransition(
 		(parsed.tag != "" && parsed.tag != exactTag) {
 		retry := "restore the verified journal-selected release before retrying"
 		if protected.inspection.Outcome != nil && protected.inspection.Outcome.Retry != "" {
-			retry = protected.inspection.Outcome.Retry
+			// Same-release recovery is yard migrate; a cross-release or
+			// specific owner step stays as the owner named it.
+			retry = CurrentReleaseRetry(*protected.inspection.Outcome)
 		}
 		return Prepared{}, fmt.Errorf(
 			"an unfinished or unsafe release transition permits only exact target %s; next: %s",

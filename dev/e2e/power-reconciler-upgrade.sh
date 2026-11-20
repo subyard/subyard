@@ -422,7 +422,8 @@ assert_runtime_state() {
     || die 'update changed boot.autostart=false'
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = \
     running ] || die 'update changed desired=running'
-  operator_yard check
+  # Published baselines predate check --host: their bare check is the host preflight.
+  if [ "$version" = "$OLD_VERSION" ]; then operator_yard check; else operator_yard check --host; fi
 }
 
 assert_runtime_links() {

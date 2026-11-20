@@ -422,7 +422,7 @@ func observeProgress(ctx context.Context, options Options, before Prepared, curr
 		return ProgressInProgress, nil
 	}
 	if !currentAlreadyChecked {
-		if err := run(ctx, options, CurrentYard, io.Discard, "check"); err != nil {
+		if err := run(ctx, options, CurrentYard, io.Discard, "check", "--host"); err != nil {
 			return ProgressInProgress, nil
 		}
 	}
@@ -669,7 +669,7 @@ func Commit(ctx context.Context, options Options, before Prepared) error {
 			if err := runYard(LegacyYard, "init", "--yes"); err != nil {
 				return fmt.Errorf("resume compensated legacy test yard: %w", err)
 			}
-			if err := runYard(LegacyYard, "check"); err != nil {
+			if err := runYard(LegacyYard, "check", "--host"); err != nil {
 				return fmt.Errorf("validate compensated legacy test yard: %w", err)
 			}
 		}
@@ -1448,7 +1448,7 @@ func preflightLegacyLease(
 		return nil
 	}
 	var result error
-	if err := run(ctx, options, LegacyYard, nil, "check"); err != nil {
+	if err := run(ctx, options, LegacyYard, nil, "check", "--host"); err != nil {
 		result = fmt.Errorf("validate legacy test yard: %w", err)
 	} else {
 		status, statusErr := runCaptured(ctx, options, LegacyYard, "test-vms", "status")
@@ -1729,7 +1729,7 @@ func finishCurrent(
 			return err
 		}
 	}
-	if err := run(CurrentYard, "check"); err != nil {
+	if err := run(CurrentYard, "check", "--host"); err != nil {
 		return fmt.Errorf("validate test-yard: %w", err)
 	}
 	if err := inject(options, "after-current-check"); err != nil {
@@ -1761,7 +1761,7 @@ func restoreLegacyOwnerForResume(
 	if err := runYard(LegacyYard, "init", "--yes"); err != nil {
 		return fmt.Errorf("resume legacy test yard recreation: %w", err)
 	}
-	if err := runYard(LegacyYard, "check"); err != nil {
+	if err := runYard(LegacyYard, "check", "--host"); err != nil {
 		return fmt.Errorf("validate resumed legacy test yard: %w", err)
 	}
 	return nil
@@ -1843,7 +1843,7 @@ func finishLegacyRollback(
 	if err := inject(options, "after-compensation-legacy-init"); err != nil {
 		return err
 	}
-	if err := runLegacy(LegacyYard, "check"); err != nil {
+	if err := runLegacy(LegacyYard, "check", "--host"); err != nil {
 		return fmt.Errorf("validate legacy test yard: %w", err)
 	}
 	if err := inject(options, "after-compensation-legacy-check"); err != nil {

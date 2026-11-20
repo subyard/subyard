@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "status": "drift",
+  "summary": {
+    "drift": 1,
+    "pending": 1,
+    "blocker": 0,
+    "not-inspected": 0,
+    "notice": 1
+  },
+  "sections": [
+    {
+      "id": "config",
+      "status": "ok",
+      "findings": []
+    },
+    {
+      "id": "release",
+      "status": "ok",
+      "findings": [
+        {
+          "id": "release.activation.sample.pending-configuration",
+          "class": "pending",
+          "resource": "activation.sample.pending-configuration",
+          "installed": "",
+          "desired": "",
+          "message": "sample settings wait for yard init",
+          "next": "yard -Y sample init"
+        }
+      ]
+    },
+    {
+      "id": "host",
+      "status": "ok",
+      "findings": [
+        {
+          "id": "host.preflight.kvm",
+          "class": "notice",
+          "resource": "KVM device",
+          "installed": "",
+          "desired": "",
+          "message": "/dev/kvm missing",
+          "next": "yard check --host"
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "status": "drift",
+      "findings": [
+        {
+          "id": "state.registrations.sample",
+          "class": "drift",
+          "resource": "sample",
+          "installed": "flat and nested",
+          "desired": "nested",
+          "message": "flat and nested registrations coexist",
+          "next": "yard config repair-registration sample"
+        }
+      ]
+    }
+  ]
+}

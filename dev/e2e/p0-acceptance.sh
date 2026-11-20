@@ -1340,6 +1340,7 @@ peer_lane() {
   direct_vm 1 peer-probe "$vm2_ip"
   direct_vm 2 peer-probe "$vm1_ip"
   direct_vm 2 peer-yard-start
+  direct_vm 2 peer-installation-check
   direct_vm 1 peer-projects "$vm2_ip"
   direct_vm 2 peer-deny
   direct_vm 1 peer-projects-offline "$vm2_ip"

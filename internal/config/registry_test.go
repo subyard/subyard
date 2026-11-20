@@ -5,8 +5,42 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
+
+func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
+	yard := func(name, ssh, preview string) Loaded {
+		return Loaded{Context: domain.Context{YardName: name}, Environment: map[string]string{"SSH_PORT": ssh, "WEB_PREVIEW_HOST_PORT": preview}}
+	}
+	a, b := yard("a", "2222", "32222"), yard("b", "2222", "32222")
+	err := HostListenerCollisions([]Loaded{b, a})
+	if err == nil || !strings.Contains(err.Error(), "yards a SSH_PORT and b SSH_PORT reserve the same host port 2222") ||
+		!strings.Contains(err.Error(), "yards a WEB_PREVIEW_HOST_PORT and b WEB_PREVIEW_HOST_PORT") {
+		t.Fatalf("collisions=%v", err)
+	}
+	b.Context.AccessKind = domain.AccessRemote
+	if err := HostListenerCollisions([]Loaded{a, b}); err != nil {
+		t.Fatalf("remote reservation collided locally: %v", err)
+	}
+	b.Context.AccessKind = domain.AccessLocal
+	b.Environment["SSH_PORT"], b.Environment["WEB_PREVIEW_HOST_PORT"] = "2223", "32223"
+	if err := HostListenerCollisions([]Loaded{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	b.Environment["SSH_PORT"] = "02222"
+	if err := HostListenerCollisions([]Loaded{a, b}); err == nil || !strings.Contains(err.Error(), "SSH_PORT reserve the same host port 2222") {
+		t.Fatalf("equivalent port spelling evaded collision: %v", err)
+	}
+	collisions := newPortCollisions()
+	addHostListenerCollisions(map[string]string{"SSH_PORT": "02222", "WEB_PREVIEW_HOST_PORT": "2222"}, Catalog{}, collisions)
+	if len(collisions.refusals) == 0 {
+		t.Fatal("equivalent port spelling evaded the within-yard collision")
+	}
+}
 
 func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {
 	configHome := t.TempDir()
@@ -188,5 +222,28 @@ func TestLocalYardSettingsCandidatesPreferNestedLayout(t *testing.T) {
 	}
 	if got := LocalYardSettingsCandidates("/operator/config/yards", "demo"); got != want {
 		t.Fatalf("LocalYardSettingsCandidates() = %v, want %v", got, want)
+	}
+}
+
+func TestIntegrationListenerCollisionsCompareParsedPorts(t *testing.T) {
+	metadata, err := profile.DecodeIntegration("synthetic", []byte(`{"schema_version":1,"settings":[{"name":"SYNTHETIC_PORT","type":"port","scopes":["shipped","host"],"application":"yard-init","minimum":1,"maximum":65535,"host_listener":true}],"provision":"missing.sh"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only integration listeners reserve against a stopped profile's listener.
+	stopped, err := profile.Decode("fixture", []byte(`{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := BuildCatalog([]profile.Metadata{stopped}, []profile.IntegrationMetadata{metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := newSettingTracker()
+	tracker.catalog = catalog
+	collisions := newPortCollisions()
+	addDerivedPortCollisions(environment{"CODING_TOOL_INTEGRATIONS": "synthetic", "SYNTHETIC_PORT": "02222", "FIXTURE_PORT": "2222", "SSH_PORT": "2300"}, tracker, collisions)
+	if len(collisions.refusals) == 0 {
+		t.Fatal("equivalent port spelling evaded the integration listener collision")
 	}
 }

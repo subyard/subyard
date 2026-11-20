@@ -44,6 +44,9 @@ type yardGate struct {
 	// everyYard is set when the default yard's own configuration is invalid:
 	// it underlies every yard, so each yard admits only its repair commands.
 	everyYard bool
+	// source is the refused installed-source prerequisite of a repair, when
+	// the caller observed it.
+	source *repairSourceRefusal
 }
 
 func (gate yardGate) state(yard string) yardGateState {
@@ -239,23 +242,6 @@ func (cli *CLI) completedHistoryClean(outcome releasetransition.Outcome) bool {
 	return err == nil && len(pending) == 0
 }
 
-// yardNextStep is the one next step of an implicated yard.
-func yardNextStep(yard string, state yardGateState) string {
-	switch {
-	case state.config:
-		return "correct the yard's configuration, then yard -Y " + yard + " config validate"
-	case state.unreachable:
-		return "yard migrate; if the guest agent still does not answer: yard -Y " + yard + " stop --force, yard -Y " + yard + " start, yard migrate"
-	case state.failed:
-		return "yard -Y " + yard + " init"
-	case state.drift:
-		return "yard -Y " + yard + " init"
-	case state.retry != "":
-		return state.retry
-	}
-	return "yard -Y " + yard + " init"
-}
-
 // yardGateRefusal is the one text refusal of a yard that admits only repair.
 func yardGateRefusal(yard string, gate yardGate) string {
 	state := gate.state(yard)
@@ -264,7 +250,7 @@ func yardGateRefusal(yard string, gate yardGate) string {
 		for _, name := range gate.order {
 			if other := gate.state(name); other.pending {
 				return fmt.Sprintf("release gate: a host or shared setting reaches yard %s, whose pending configuration refuses it\nnext: %s, then repeat this setting",
-					name, yardNextStep(name, other))
+					name, gate.step(name, domain.Action{}))
 			}
 		}
 	}
@@ -279,10 +265,9 @@ func yardGateRefusal(yard string, gate yardGate) string {
 	} else if gate.everyYard && yard != "default" {
 		cause = "the default yard's configuration is invalid; every yard admits only its repair commands"
 		yard = "default"
-		state = gate.state("default")
 	}
 	return fmt.Sprintf("release gate: yard %s needs repair: %s\nnext: %s\nuntil then only its repair commands run: %s",
-		yard, cause, yardNextStep(yard, state), yardRepairSetText())
+		yard, cause, gate.step(yard, domain.Action{}), yardRepairSetText())
 }
 
 // gateRequest is one invocation as the release gate decides it.
@@ -357,6 +342,7 @@ func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *re
 	if !ok {
 		return nil, gate, nil, false
 	}
+	gate = cli.withSource(ctx, gate)
 	subject := cli.provisionalSubject(request)
 	subject.scope, subject.named, subject.acts = scopeSelected, nil, nil
 	verdict := gate.verdict(request.yard, subject)
@@ -505,31 +491,97 @@ func (cli *CLI) readReleaseHistory() (*releaseHistoryToken, error) {
 // the same registry and catalog is not that source.
 type repairSourceBinding struct{ source, tooling string }
 
+// repairSourceRefusal names the one admission predicate a repair's installed
+// source failed. It stays a stale plan for callers that classify staleness.
+type repairSourceRefusal struct{ predicate, detail string }
+
+// sourceRefusalCauses is what each failed predicate means to the operator;
+// the finding's remedy is the command that makes it hold.
+var sourceRefusalCauses = map[string]string{
+	"release-options":      "no installed release can authorize a repair",
+	"store":                "the protected release store cannot be read",
+	"journal-absent":       "the installed release has no release journal",
+	"journal-not-complete": "the release transition is unfinished",
+	"tooling-dir":          "a repair behind the release gate runs only with the installed release's own tooling; run it with the installed yard command",
+	"pending-publication":  "finish the pending protected publication with its sealed owner before source repair",
+	"pending-archive":      "finish the pending protected archive publication with its sealed owner before source repair",
+	"recovery-history":     "the installed release history cannot authorize source repair",
+	"source-proof":         "the installed release source cannot be verified",
+	"proof-transaction":    "the installed release source belongs to another transaction",
+	"proof-artifact":       "the installed release source belongs to another artifact",
+}
+
+// public is the refusal's cause and its failed predicate, without a step.
+func (refusal repairSourceRefusal) public() string {
+	text := sourceRefusalCauses[refusal.predicate] + "; failed: " + refusal.predicate
+	if refusal.detail != "" {
+		text += " (" + refusal.detail + ")"
+	}
+	return text
+}
+
+func (refusal repairSourceRefusal) Error() string {
+	finding := refusal.finding()
+	text := domain.ErrPlanStale.Error() + ": " + refusal.public()
+	if action, _ := domain.NextStep([]domain.Finding{finding}, domain.Action{}, nil); action.Verb != domain.VerbNone {
+		text += "; next: " + domain.RenderAction(action)
+	}
+	return text
+}
+
+func (repairSourceRefusal) Unwrap() error { return domain.ErrPlanStale }
+
+func (refusal repairSourceRefusal) finding() domain.Finding {
+	return domain.Finding{Kind: domain.FindingSource, Predicate: refusal.predicate, Public: refusal.public()}
+}
+
+// sourceProofRefusal names the typed predicate of a refused source proof.
+func sourceProofRefusal(err error) repairSourceRefusal {
+	switch {
+	case errors.Is(err, releasetransition.ErrSourcePendingPublication):
+		return repairSourceRefusal{predicate: "pending-publication", detail: err.Error()}
+	case errors.Is(err, releasetransition.ErrSourcePendingArchive):
+		return repairSourceRefusal{predicate: "pending-archive", detail: err.Error()}
+	case errors.Is(err, releasetransition.ErrSourceRecoveryHistory):
+		return repairSourceRefusal{predicate: "recovery-history", detail: releasetransition.ErrSourceRecoveryHistory.Error()}
+	}
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(err, &diagnostic) {
+		if message, _ := diagnostic.ActivationDiagnostic(); message != "" {
+			return repairSourceRefusal{predicate: "source-proof", detail: message}
+		}
+	}
+	return repairSourceRefusal{predicate: "source-proof", detail: "installed release source proof failed verification"}
+}
+
 func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error) {
-	refused := fmt.Errorf("%w: a repair behind the release gate runs only with the installed release's own tooling; run it with the installed yard command", domain.ErrPlanStale)
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
-		return nil, refused
+		return nil, repairSourceRefusal{predicate: "release-options"}
 	}
 	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
 	if err != nil {
-		return nil, refused
+		return nil, repairSourceRefusal{predicate: "store"}
 	}
 	snapshot, err := store.ReadCurrentJournal()
 	if err != nil || !snapshot.Exists {
-		return nil, refused
+		return nil, repairSourceRefusal{predicate: "journal-absent"}
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
 	if err != nil || journal.Checkpoint != releasetransition.JournalComplete {
-		return nil, refused
+		return nil, repairSourceRefusal{predicate: "journal-not-complete"}
 	}
 	bind := cli.sourceBinding
 	if bind == nil {
 		bind = cli.completedSourceBindings
 	}
 	source, tooling, err := bind(ctx, journal)
+	var refusal repairSourceRefusal
+	if errors.As(err, &refusal) {
+		return nil, refusal
+	}
 	if err != nil {
-		return nil, refused
+		return nil, sourceProofRefusal(err)
 	}
 	return &repairSourceBinding{source: source, tooling: tooling}, nil
 }
@@ -538,18 +590,28 @@ func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error)
 func (cli *CLI) completedSourceBindings(ctx context.Context, journal releasetransition.JournalRecord) (string, string, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
-		return "", "", domain.ErrPlanStale
+		return "", "", repairSourceRefusal{predicate: "release-options"}
 	}
 	inspector := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
 	defer inspector.Close()
+	want := filepath.Join(options.RuntimeRoot, "releases", string(journal.Goal.Target), "config")
 	dir, tooling, err := inspector.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
-	if err != nil || dir != filepath.Join(options.RuntimeRoot, "releases", string(journal.Goal.Target), "config") {
-		return "", "", domain.ErrPlanStale
+	if err != nil {
+		return "", "", repairSourceRefusal{predicate: "tooling-dir", detail: "the running tooling is not a published release runtime; want " + want}
+	}
+	if dir != want {
+		return "", "", repairSourceRefusal{predicate: "tooling-dir", detail: "got " + dir + ", want " + want}
 	}
 	proof, err := cli.inspectConfigSourceAdmission(ctx, inspector)
-	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete ||
-		proof.Metadata.Journal.Transaction != journal.Transaction || proof.Metadata.Journal.ArtifactDigest != journal.ArtifactDigest {
-		return "", "", domain.ErrPlanStale
+	switch {
+	case err != nil:
+		return "", "", sourceProofRefusal(err)
+	case proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete:
+		return "", "", repairSourceRefusal{predicate: "source-proof", detail: "the proof names no completed journal"}
+	case proof.Metadata.Journal.Transaction != journal.Transaction:
+		return "", "", repairSourceRefusal{predicate: "proof-transaction", detail: "proof " + string(proof.Metadata.Journal.Transaction) + ", journal " + string(journal.Transaction)}
+	case proof.Metadata.Journal.ArtifactDigest != journal.ArtifactDigest:
+		return "", "", repairSourceRefusal{predicate: "proof-artifact"}
 	}
 	return proof.Binding, tooling, nil
 }
@@ -627,7 +689,7 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 	}
 	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
 		if state := gate.state(admission.request.yard); state.repairOnly() || state.pending {
-			fmt.Fprintf(cli.options.Stderr, "yard: yard %s still needs attention; next: %s\n", admission.request.yard, yardNextStep(admission.request.yard, state))
+			fmt.Fprintf(cli.options.Stderr, "yard: yard %s still needs attention; next: %s\n", admission.request.yard, gate.step(admission.request.yard, admission.attempted()))
 		}
 	}
 	return nil
@@ -643,12 +705,13 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 // refused with each consumer's own next step.
 func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names []string) (bool, func() error, error) {
 	done := func() error { return nil }
+	const published = "configuration was published, but its refresh is refused: "
 	refuse := func(cause string) (bool, func() error, error) {
 		steps := make([]string, 0, len(names))
 		for _, name := range names {
-			steps = append(steps, "yard -Y "+name+" config apply")
+			steps = append(steps, domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: name}))
 		}
-		return false, nil, fmt.Errorf("configuration was published, but its refresh is refused: %s; next: %s", cause, strings.Join(steps, ", "))
+		return false, nil, fmt.Errorf("%s%s; next: %s", published, cause, strings.Join(steps, ", "))
 	}
 	if cli.ownerMutationLock == nil {
 		return refuse("it runs only under the owner barrier")
@@ -662,21 +725,34 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 	}
 	gate, ok := cli.yardScopedGate(outcome, inspection)
 	if !ok {
-		return refuse(strings.TrimSpace(strings.ReplaceAll(mutationGateRefusalText(outcome, inspection), "\n", "; ")))
+		// A host-wide refusal carries its owner's own next step.
+		return false, nil, errors.New(published + strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
 	}
+	gate = cli.withSource(ctx, gate)
+	// Each consumer that config apply cannot refresh now is reported with the
+	// one step it needs. Another yard's refused installed source refuses only
+	// the consumers that need that repair.
+	attempted := func(name string) domain.Action { return domain.Action{Verb: domain.VerbConfigApply, Yard: name} }
+	var refusals []error
+	repair := false
 	for _, name := range names {
-		if state := gate.state(name); state.failed || state.config || state.unreachable || state.pending {
-			return refuse(fmt.Sprintf("yard %s needs %s first", name, yardNextStep(name, state)))
+		if !gate.admits(attempted(name)) {
+			refusals = append(refusals, fmt.Errorf("%syard %s: next: %s", published, name, gate.step(name, attempted(name))))
 		}
+		repair = repair || gate.state(name).repairOnly()
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return false, nil, err
+	}
+	if !repair {
+		// Open consumers refresh through the ordinary child, admitted on its own.
+		return false, done, nil
 	}
 	history, err := cli.readReleaseHistory()
 	if err != nil || history == nil {
 		return refuse("its release history cannot be read")
 	}
-	if _, err := cli.repairSources(ctx); err != nil {
-		return refuse("a repair runs only with the installed release's own tooling")
-	}
-	admission := &gateAdmission{kind: admissionRepair, request: gateRequest{yard: yard, handler: "@config", name: "config"}, history: *history, rechecked: true}
+	admission := &gateAdmission{kind: admissionRepair, request: gateRequest{yard: yard, handler: "@config", name: "config", arguments: []string{"apply"}}, history: *history, rechecked: true}
 	return true, func() error {
 		for _, name := range names {
 			admission.request.yard = name
@@ -709,7 +785,7 @@ func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker 
 		if len(state.messages) != 0 {
 			message = state.messages[0]
 		}
-		findings = append(findings, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Message: message, Retry: yardNextStep(name, state)})
+		findings = append(findings, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Message: message, Retry: gate.step(name, domain.Action{})})
 	}
 	return findings
 }
@@ -751,7 +827,11 @@ func (cli *CLI) statusYardGate(ctx context.Context, readiness *domain.ReleaseRea
 	if err != nil || outcome == nil {
 		return yardGate{}, false
 	}
-	return cli.yardScopedGate(outcome, inspection)
+	gate, ok := cli.yardScopedGate(outcome, inspection)
+	if ok {
+		gate = cli.withSource(ctx, gate)
+	}
+	return gate, ok
 }
 
 // releaseLine states the release once; the protocol word ready is never used
@@ -776,7 +856,7 @@ func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 	}
 	if gate.everyYard && yard != "default" {
 		fmt.Fprintln(cli.options.Stdout, "  attention the default yard's configuration is invalid; it underlies this yard")
-		fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep("default", gate.state("default")))
+		fmt.Fprintf(cli.options.Stdout, "    next: %s\n", gate.step("default", domain.Action{}))
 		return
 	}
 	messages := state.messages
@@ -786,7 +866,7 @@ func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 	for _, message := range messages {
 		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
 	}
-	fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep(yard, state))
+	fmt.Fprintf(cli.options.Stdout, "    next: %s\n", gate.step(yard, domain.Action{}))
 }
 
 // unfinishedActivationStop admits stopping one local yard while an activation

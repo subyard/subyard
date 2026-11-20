@@ -57,24 +57,37 @@ type HostCheck struct {
 	Incus       ports.Incus
 	Output      io.Writer
 	Probe       func(context.Context, HostCheck) (HostFacts, error)
+	// Observation inspects an installation instead of preflighting a new yard:
+	// it never probes or reports the yard SSH port, and reports yard storage and
+	// nested devices only for a configured Yard.
+	Observation bool
 }
 
+// finding is one keyed host preflight fact; level is ok, warn or fail.
 type finding struct {
+	key     string
 	section string
 	level   string
 	message string
 }
 
-func (check HostCheck) Run(ctx context.Context, options CheckOptions) error {
+func (check HostCheck) inspect(ctx context.Context, options CheckOptions) ([]finding, error) {
 	probe := check.Probe
 	if probe == nil {
 		probe = collectHostFacts
 	}
 	facts, err := probe(ctx, check)
 	if err != nil {
-		return fmt.Errorf("collect host facts: %w", err)
+		return nil, fmt.Errorf("collect host facts: %w", err)
 	}
-	findings := check.evaluate(facts, options)
+	return check.evaluate(facts, options), nil
+}
+
+func (check HostCheck) Run(ctx context.Context, options CheckOptions) error {
+	findings, err := check.inspect(ctx, options)
+	if err != nil {
+		return err
+	}
 	failures, warnings := renderHostCheck(check.Output, findings)
 	if failures != 0 {
 		var failed []string
@@ -91,45 +104,46 @@ func (check HostCheck) Run(ctx context.Context, options CheckOptions) error {
 
 func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding {
 	var result []finding
-	add := func(section, level, message string) {
-		result = append(result, finding{section: section, level: level, message: message})
+	add := func(key, section, level, message string) {
+		result = append(result, finding{key: key, section: section, level: level, message: message})
 	}
 	if facts.OSName == "" {
-		add("OS", "fail", "cannot read /etc/os-release")
+		add("os", "OS", "fail", "cannot read /etc/os-release")
 	} else {
-		add("OS", "ok", fmt.Sprintf("%s (kernel %s)", facts.OSName, facts.Kernel))
+		add("os", "OS", "ok", fmt.Sprintf("%s (kernel %s)", facts.OSName, facts.Kernel))
 	}
 	if len(facts.CPUFlags) == 0 {
-		add("CPU virtualization", "warn",
+		add("cpu.virtualization", "CPU virtualization", "warn",
 			"no vmx/svm flags — VM mode and the hardware-accelerated emulator will not work")
 	} else {
-		add("CPU virtualization", "ok",
+		add("cpu.virtualization", "CPU virtualization", "ok",
 			"hardware virtualization flags present ("+strings.Join(facts.CPUFlags, " ")+")")
 	}
 	if facts.KVM {
-		add("KVM device", "ok", "/dev/kvm present")
+		add("kvm", "KVM device", "ok", "/dev/kvm present")
 	} else {
-		add("KVM device", "warn", "/dev/kvm missing — needed for hardware-accelerated virtualization")
+		add("kvm", "KVM device", "warn", "/dev/kvm missing — needed for hardware-accelerated virtualization")
 	}
-	if check.Yard.NestedE2EVMs {
+	configured := !check.Observation || check.Yard.YardName != ""
+	if configured && check.Yard.NestedE2EVMs {
 		for _, path := range []string{"/dev/kvm", "/dev/vsock", "/dev/vhost-vsock", "/dev/net/tun"} {
 			if facts.NestedDevices[path] {
-				add("Nested E2E VM devices", "ok", path+" present")
+				add("nested."+domain.InspectionName(path), "Nested E2E VM devices", "ok", path+" present")
 			} else {
-				add("Nested E2E VM devices", "fail",
+				add("nested."+domain.InspectionName(path), "Nested E2E VM devices", "fail",
 					path+" missing — nested E2E VMs cannot work on this host")
 			}
 		}
 	}
 	if facts.CPUs > 0 {
-		add("Resources", "ok", fmt.Sprintf("%d CPU(s)", facts.CPUs))
+		add("resources.cpu", "Resources", "ok", fmt.Sprintf("%d CPU(s)", facts.CPUs))
 	} else {
-		add("Resources", "warn", "CPU count is unavailable")
+		add("resources.cpu", "Resources", "warn", "CPU count is unavailable")
 	}
 	if facts.MemoryBytes == 0 {
-		add("Resources", "warn", "cannot read /proc/meminfo")
+		add("resources.memory", "Resources", "warn", "cannot read /proc/meminfo")
 	} else {
-		add("Resources", "ok", fmt.Sprintf("%.1f GiB RAM",
+		add("resources.memory", "Resources", "ok", fmt.Sprintf("%.1f GiB RAM",
 			float64(facts.MemoryBytes)/(1024*1024*1024)))
 	}
 
@@ -142,18 +156,19 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	}
 	free := facts.StorageFree / (1024 * 1024 * 1024)
 	switch {
+	case !configured:
 	case !facts.StorageKnown:
-		add("Storage ("+check.Yard.Paths.StoragePath+")", "warn",
+		add("storage", "Storage ("+check.Yard.Paths.StoragePath+")", "warn",
 			"cannot determine free space for "+facts.StoragePath)
 	case free >= minimum:
-		add("Storage ("+check.Yard.Paths.StoragePath+")", "ok",
+		add("storage", "Storage ("+check.Yard.Paths.StoragePath+")", "ok",
 			fmt.Sprintf("%d GiB free on %s (fs: %s)", free, facts.StoragePath, facts.StorageFS))
 	case free >= floor && resume && free < minimum:
-		add("Storage ("+check.Yard.Paths.StoragePath+")", "warn",
+		add("storage", "Storage ("+check.Yard.Paths.StoragePath+")", "warn",
 			fmt.Sprintf("%d GiB free on %s — enough to repair this managed yard; a new yard needs >= %d GiB (fs: %s)",
 				free, facts.StoragePath, minimum, facts.StorageFS))
 	default:
-		add("Storage ("+check.Yard.Paths.StoragePath+")", "fail",
+		add("storage", "Storage ("+check.Yard.Paths.StoragePath+")", "fail",
 			fmt.Sprintf("only %d GiB free on %s; need >= %d GiB (fs: %s)",
 				free, facts.StoragePath, floor, facts.StorageFS))
 	}
@@ -163,28 +178,31 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 		if version == "" {
 			version = "?"
 		}
-		add("Existing tools", "ok", "incus present ("+version+")")
+		add("tools.incus", "Existing tools", "ok", "incus present ("+version+")")
 		minimumVersion := environmentValue(check.Environment, "MIN_INCUS_VER", "6.0.6")
 		if version != "?" && !versionAtLeast(version, minimumVersion) {
-			add("Existing tools", "warn",
+			add("tools.incus-version", "Existing tools", "warn",
 				fmt.Sprintf("incus %s < %s — nested Docker requires an Incus upgrade", version, minimumVersion))
 		}
 	} else {
-		add("Existing tools", "warn", "incus not installed — yard init will install it")
+		add("tools.incus", "Existing tools", "warn", "incus not installed — yard init will install it")
 	}
 	if facts.DockerPresent {
-		add("Existing tools", "warn", "docker present on host — Subyard runs Docker inside the yard")
+		add("tools.docker", "Existing tools", "warn", "docker present on host — Subyard runs Docker inside the yard")
 	} else {
-		add("Existing tools", "ok", "no host Docker (expected; Docker lives inside the yard)")
+		add("tools.docker", "Existing tools", "ok", "no host Docker (expected; Docker lives inside the yard)")
 	}
 
 	if facts.NetworkManagerRebootPending {
-		add("Host networking", "warn", NetworkManagerRebootReminder)
+		add("network-manager.reboot", "Host networking", "warn", NetworkManagerRebootReminder)
 	}
 	if facts.NetworkManagerGuardUnread {
-		add("Host networking", "warn", NetworkManagerUnreadReminder)
+		add("network-manager.unread", "Host networking", "warn", NetworkManagerUnreadReminder)
 	}
 
+	if check.Observation {
+		return result
+	}
 	var duplicates []string
 	for _, yard := range check.Yards {
 		if yard.AccessKind == domain.AccessRemote || yard.YardName == check.Yard.YardName {
@@ -196,14 +214,14 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	}
 	sort.Strings(duplicates)
 	if len(duplicates) == 0 {
-		add("Yard SSH port", "ok",
+		add("ssh-port.unique", "Yard SSH port", "ok",
 			fmt.Sprintf("SSH_PORT %d is unique across configured yards", check.Yard.SSHPort))
 	} else {
 		level := "warn"
 		if options.Strict {
 			level = "fail"
 		}
-		add("Yard SSH port", level,
+		add("ssh-port.unique", "Yard SSH port", level,
 			fmt.Sprintf("SSH_PORT %d also used by yard(s): %s", check.Yard.SSHPort,
 				strings.Join(duplicates, " ")))
 	}
@@ -212,12 +230,34 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 		if options.Strict && !options.BasePresent {
 			level = "fail"
 		}
-		add("Yard SSH port", level,
+		add("ssh-port.listener", "Yard SSH port", level,
 			fmt.Sprintf("host port %d is already listening (another service, or this yard is running)",
 				check.Yard.SSHPort))
 	} else {
-		add("Yard SSH port", "ok",
+		add("ssh-port.listener", "Yard SSH port", "ok",
 			fmt.Sprintf("host loopback port %d is free", check.Yard.SSHPort))
+	}
+	return result
+}
+
+// Observe projects the observation onto installation inspection: ok facts
+// are convergence, warnings are notices and hard failures block.
+func (check HostCheck) Observe(ctx context.Context) []domain.Inspected {
+	check.Observation = true
+	findings, err := check.inspect(ctx, CheckOptions{})
+	if err != nil {
+		return domain.InspectionRead("facts.read", "host", err)
+	}
+	var result []domain.Inspected
+	for _, fact := range findings {
+		if fact.level == "ok" {
+			continue
+		}
+		state := domain.InspectedNotice
+		if fact.level == "fail" {
+			state = domain.InspectedBlocked
+		}
+		result = append(result, domain.Inspected{Key: "preflight." + fact.key, State: state, Resource: fact.section, Message: fact.message, Next: "yard check --host"})
 	}
 	return result
 }
@@ -317,6 +357,9 @@ func collectHostFacts(ctx context.Context, check HostCheck) (HostFacts, error) {
 		state := LocalNetworkManagerGuardState()
 		facts.NetworkManagerRebootPending = state == "loaded-reboot" || state == "unread-migration"
 		facts.NetworkManagerGuardUnread = state == "unread-init"
+	}
+	if check.Observation {
+		return facts, nil
 	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(check.Yard.SSHPort))
 	connection, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp", address)

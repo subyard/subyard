@@ -202,6 +202,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 
 | Contract | Owning unit checks | Local integration | Physical gate | Trigger |
 | --- | --- | --- | --- | --- |
+| Read-only installation check | `go:application`: `TestConformance*` golden JSON/text and contract errors; owning release, host, credential, config, project-store and journal inspection checks; `go:adapters/hostruntime`: `TestHostCheckPreflightGoldenAndInspection` pins `check --host` output | `go:cli`: `TestInstallationCheck*` with non-writable homes and every independent finding, admission and usage cases | `p0:peer`: `yard check --json` is `ok` on the clean release install | `yard check`, its owners or `check --host` changes |
 | Incus AppArmor capability and nested Docker compatibility | `go:adapters/reconcileruntime`: `TestAppArmor*` | `tests/create-subyard-docker-apparmor.sh`: shell probe failure, exact mask and restored-state convergence | Periodic-only `vm:incus-apparmor-probe`: installed candidate, real Incus/systemd transitions, failed probes preserve Docker and runtime, override restoration and teardown | AppArmor/nested Docker handling in `scripts/01-install-incus.sh`, `scripts/03-create-subyard.sh`, or AppArmor-related reconciliation in `internal/adapters/reconcileruntime/{apparmor.go,runtime.go}` |
 | Cache cleanup and project-preserving recreation | `go:cli`: soft and hard cleanup contracts | Cleanup assessment, registry round-trip, and interruption checkpoint tests | Optional Periodic-only `periodic:cleanup-acceptance`: named and default containers, subyard-dev cache removal and Go rebuild, interrupted hard cleanup and recreation preserving projects, registrations, and power intent | Cleanup policies, recovery, or cache declarations |
 | Operator terminal ownership of sudo | `go:cli`: `TestRootStepPrivilegesAuthorizeBeforeBoundedAdapter` | `tests/runtime-privilege-reexec.sh`: dispatcher and elevated context | Optional Periodic-only `periodic:sudo-terminal-ownership`: real sudo password retry and caching, no-terminal refusal, cancellation, and Incus lifecycle on a disposable VM | Root authorization, PTY forwarding, or privileged lifecycle changes |
@@ -660,6 +661,13 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 [the test guide](test-vms.md), including Git and ripgrep: tests of Git behavior create their own
 temporary repositories. The release packaging test uses a disposable copy of the current public
 files because it adds fixtures; that copy needs no Git metadata.
+
+When the checkout is a Git work-tree root, `./tests/run.sh` ends with `checkout-unchanged`.
+It fails when the run added or removed a path outside `.build/`, in the checkout or in an
+optional `private/` clone. It compares path lists from `git ls-files`, with ignored directories
+collapsed, so content edits and Git status changes of existing paths during the run pass. In
+`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`. Outside
+a Git work-tree root the check is skipped. The runner also sets `PYTHONDONTWRITEBYTECODE=1`.
 
 `make test`, `./tests/run.sh`, the host-free profile runners and `dev/process-coverage.sh`
 place disposable fixtures in `/tmp`, independently of a workspace-local `TMPDIR`, so Orca

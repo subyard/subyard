@@ -1414,7 +1414,7 @@ type validatingConfigApplier struct {
 	yards      []string
 }
 
-func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard string) error {
+func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard string, _ *ports.ConfigConsent) error {
 	if err := validateManagedConfigTree(applier.configHome); err != nil {
 		return err
 	}
@@ -1424,7 +1424,9 @@ func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard stri
 
 type failingConfigApplier struct{ err error }
 
-func (applier failingConfigApplier) ApplyConfig(context.Context, string) error { return applier.err }
+func (applier failingConfigApplier) ApplyConfig(context.Context, string, *ports.ConfigConsent) error {
+	return applier.err
+}
 
 type finishedOperationAudit struct {
 	err    error
