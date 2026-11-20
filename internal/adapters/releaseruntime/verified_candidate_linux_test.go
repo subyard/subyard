@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,6 +99,60 @@ func TestExecutableMemfdFallsBackForPreMFDExecKernels(t *testing.T) {
 	if len(flags) != 2 || flags[0]&unix.MFD_EXEC == 0 || flags[1]&unix.MFD_EXEC != 0 ||
 		flags[1] != unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING {
 		t.Fatalf("memfd fallback flags=%#v", flags)
+	}
+}
+
+func TestSealVerifiedEngineRetriesOnlyBusy(t *testing.T) {
+	payload := []byte("#!/bin/sh\nexit 0\n")
+	path := filepath.Join(testkit.TempDir(t), "yard-engine")
+	testkit.WriteFile(t, path, payload, 0o700)
+	for _, scenario := range []struct {
+		name      string
+		wantCalls int
+		wantErr   error
+	}{
+		{name: "busy-then-success", wantCalls: 3},
+		{name: "always-busy", wantCalls: 5, wantErr: unix.EBUSY},
+		{name: "permission-denied", wantCalls: 1, wantErr: unix.EPERM},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			calls := 0
+			sealed, err := sealVerifiedEngineWith(file, sha256.Sum256(payload), func(fd uintptr, cmd, seals int) (int, error) {
+				calls++
+				if scenario.wantErr != nil {
+					return -1, scenario.wantErr
+				}
+				if calls <= 2 {
+					return -1, unix.EBUSY
+				}
+				return unix.FcntlInt(fd, cmd, seals)
+			})
+			if sealed != nil {
+				defer sealed.Close()
+			}
+			if calls != scenario.wantCalls {
+				t.Errorf("seal calls = %d, want %d", calls, scenario.wantCalls)
+			}
+			if scenario.wantErr != nil {
+				if sealed != nil || err == scenario.wantErr || !errors.Is(err, scenario.wantErr) {
+					t.Fatalf("sealed file = %v, error = %v, want nil file and wrapped %v", sealed, err, scenario.wantErr)
+				}
+				return
+			}
+			if sealed == nil || err != nil {
+				t.Fatalf("seal verified engine: file = %v, error = %v", sealed, err)
+			}
+			const wantSeals = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
+			seals, err := unix.FcntlInt(sealed.Fd(), unix.F_GET_SEALS, 0)
+			if err != nil || seals&wantSeals != wantSeals {
+				t.Fatalf("seals = %#x, error = %v, want bits %#x", seals, err, wantSeals)
+			}
+		})
 	}
 }
 
