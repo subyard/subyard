@@ -79,6 +79,7 @@ class Runtime:
         # The profile's TELEMETRY_DISK_BUDGET; the collector default applies without it.
         budget = os.environ.get('SUBYARD_TELEMETRY_DISK_BYTES', '')
         budget = ' --disk-bytes '+budget if re.fullmatch('[1-9][0-9]{0,18}', budget) else ''
+        self.budget = budget
         self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}{budget}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
         collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
@@ -292,9 +293,14 @@ class Runtime:
             # the inventory. Its bearer moves outside the analytics directory.
             old_auth = str(self.data/'auth.token')
             candidates = {command, command.removeprefix('/usr/bin/setpriv --no-new-privs ')}
+            start = fields.get('ExecStart', '')
             if unit == COLLECTOR:
                 candidates.update(value.replace(str(self.auth), old_auth) for value in tuple(candidates))
-            start = fields.get('ExecStart', '')
+                # v0.30 had no disk budget; a changed budget setting leaves the previous one loaded.
+                loaded = re.search(r'( --disk-bytes [1-9][0-9]{0,18})? ; ignore_errors=no ; ', start)
+                loaded = (loaded.group(1) or '') if loaded else ''
+                if self.budget != loaded:
+                    candidates.update(value.removesuffix(self.budget)+loaded for value in tuple(candidates))
             for candidate in sorted(candidates):
                 if candidate == command or not start.startswith('{ path='+candidate.split()[0]+' ; argv[]='+candidate+' ; ignore_errors=no ; '):
                     continue
