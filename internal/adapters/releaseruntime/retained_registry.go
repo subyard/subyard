@@ -35,6 +35,10 @@ type releaseSelection struct {
 	refusal                        string
 	retry                          string
 	cause                          error
+
+	// compatibility is the history verdict for an installed engine; a fresh
+	// forward draft has its own migration planner and no verdict.
+	compatibility *releasetransition.HistoryCompatibilityVerdict
 }
 
 func selectionContext(ctx context.Context, selection *releaseSelection) context.Context {
@@ -145,19 +149,10 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 		return selection, nil
 	}
 	selection.targetRegistry = identity
-	registriesDiffer := selection.activeRegistry != selection.targetRegistry
 	missingHistory := !selection.state.ledger.Exists && !selection.state.checkpoint.Exists
-	if registriesDiffer || (identity != "" && missingHistory) {
-		if err := runtime.stagedSourceRefusal(ctx, selection, active); err != nil {
-			return nil, err
-		}
-	}
-	if registriesDiffer {
-		selection.refusal = "the selected release's migration registry differs from the active release's registry"
-		return selection, nil
-	}
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
+	// Current then names the target, so its registry is the active one.
 	firstPublication := request.Direction == releasetransition.DirectionActivateTarget &&
 		request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
 		links.current.target == "releases/"+string(request.Target) && !links.previous.present &&
@@ -166,8 +161,20 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 	if identity != "" && firstPublication {
 		selection.firstPublication, publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	if identity != "" && !selection.firstPublication {
-		selection.refusal, selection.cause = verifyRetainedHistory(target, retained, selection.state.ledger, selection.state.checkpoint)
+	input := releasetransition.HistoryCompatibilityInput{ActiveRegistry: selection.activeRegistry, TargetRegistry: identity}
+	if !selection.firstPublication {
+		input.History = retainedHistoryEvidence(target, retained, selection.state.ledger, selection.state.checkpoint)
+	}
+	verdict := releasetransition.HistoryCompatibility(input)
+	selection.compatibility = &verdict
+	registryRefused := verdict.Kind == releasetransition.HistoryRefuse
+	if registryRefused || (identity != "" && missingHistory) {
+		if err := runtime.stagedSourceRefusal(ctx, selection, active); err != nil {
+			return nil, err
+		}
+	}
+	selection.refusal, selection.cause = verdict.Refusal()
+	if !registryRefused {
 		selection.cause = domain.CollectRefusals(selection.cause, publicationErr)
 	}
 	return selection, nil
@@ -306,31 +313,6 @@ func (runtime *Runtime) matchesReleaseDraft(selection *releaseSelection, target 
 	return errors.Is(err, os.ErrNotExist) && runtime.installedTransitionEngine(target, filepath.Dir(filepath.Dir(selection.draftPath)))
 }
 
-func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
-	state, err := releasetransition.ParseMigrationLedger(ledger, checkpoint, registry, target.registryDigest)
-	if err != nil {
-		return "the selected release cannot verify the authoritative active migration history", err
-	}
-	if !state.AuthoritySnapshot.Exists {
-		return "the authoritative active migration history is missing", nil
-	}
-	if state.Checkpointed {
-		reader, err := verifiedMigrationCheckpointReader(target)
-		if err != nil {
-			return "the selected release's migration checkpoint capability cannot be verified", err
-		}
-		if !reader {
-			if _, _, err := releasetransition.ParseLedgerV2(ledger.Payload, registry); err != nil {
-				return "the retained release cannot read the legacy migration ledger projection", err
-			}
-			if state.DiffersFromProjection(registry) {
-				return "the retained release requires a legacy ledger that matches the authoritative migration checkpoint", nil
-			}
-		}
-	}
-	return "", nil
-}
-
 // admitTransitionLaunch is the last admission check before a transition child
 // starts. The caller holds the owner barrier through invocation.
 func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
@@ -349,7 +331,7 @@ func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verif
 				selection.refusal, retainedRegistryRetry(selection))
 			return publicReleaseInspectionError{cause: domain.CollectRefusals(transitionOutcomeError(outcome), selection.cause), outcome: outcome}
 		}
-		if selection.activeRegistry != selection.targetRegistry {
+		if selection.compatibility != nil && !selection.compatibility.Admitted() {
 			return staleRetainedSelection(request.RuntimeRoot, request.Target)
 		}
 		return runtime.revalidateReleaseSelection(selection, engine)

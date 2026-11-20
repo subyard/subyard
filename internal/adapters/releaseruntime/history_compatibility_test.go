@@ -16,6 +16,15 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+// verifyRetainedHistory is the identity-registry history check of the
+// retained-runtime boundary, kept for the frozen rollback contract test.
+func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
+	return releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{
+		ActiveRegistry: target.registryDigest, TargetRegistry: target.registryDigest,
+		History: retainedHistoryEvidence(target, registry, ledger, checkpoint),
+	}).Refusal()
+}
+
 type historyFixture struct {
 	runtimeRoot, configHome string
 	registry                []byte
