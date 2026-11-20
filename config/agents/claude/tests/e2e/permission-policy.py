@@ -20,10 +20,16 @@ from claude_agent_sdk.types import PermissionRuleValue
 
 PROMPTS_OFF = os.environ.get("PARITY_GIT_APPROVAL") == "off"
 # DEV_SUDO=prompt: direct escalation asks each time; other literal spellings are blocked by the hook.
+# The hook passes a call that starts with a direct command, so Claude's one prompt must cover the
+# whole call, including a later spelling and an arbitrary tail.
 SUDO = os.environ.get("PARITY_SUDO") == "1"
 SUDO_COMMANDS = ["./ordinary.sh", "sudo -n touch sudo-one.marker", "sudo -n touch sudo-two.marker",
+                 "sudo -n touch multi-a.marker; /usr/bin/sudo -n touch multi-b.marker",
+                 "cd . && sudo -n touch tail-a.marker > /dev/null; echo $(id -u) | bash -c 'cat > tail-b.marker'",
                  "/usr/bin/sudo -n touch wrapped.marker", "env sudo -n touch env.marker",
-                 "bash -c 'sudo -n touch nested.marker'"]
+                 "bash -c 'sudo -n touch nested.marker'", "x=1; sudo -n touch assigned.marker"]
+SUDO_ASKED = ("sudo-one", "sudo-two", "multi-a", "multi-b", "tail-a", "tail-b")
+SUDO_BLOCKED = ("wrapped", "env", "nested", "assigned")
 GIT_COMMANDS = ["./ordinary.sh", "./private-denied.sh", "./project-denied.sh", "git commit --allow-empty -m parity-one",
             "git commit --allow-empty -m parity-two",
             "git commit --amend --allow-empty -m parity-amended", "git push"]
@@ -163,7 +169,7 @@ async def run_case(source, mode, decision, base, server):
                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
         options = ClaudeAgentOptions(cwd=str(repo), settings=json.dumps(settings),
                   setting_sources=["user", "project", "local"], tools=["Bash"], can_use_tool=permission,
-                  env=env, model="claude-sonnet-4-6", max_turns=8,
+                  env=env, model="claude-sonnet-4-6", max_turns=len(COMMANDS) + 2,
                   stderr=lambda line: emit("stderr", text=line))
         if os.environ.get("PARITY_CLAUDE_CLI"):
             options.cli_path = os.environ["PARITY_CLAUDE_CLI"]
@@ -186,16 +192,15 @@ async def run_case(source, mode, decision, base, server):
         assert effective == [mode], result
         assert (result["classifier_requests"] > 0) == (mode == "auto"), result
         if SUDO:
-            markers = {name: (repo / f"{name}.marker").exists()
-                       for name in ("sudo-one", "sudo-two", "wrapped", "env", "nested")}
+            markers = {name: (repo / f"{name}.marker").exists() for name in SUDO_ASKED + SUDO_BLOCKED}
             emit("sudo_markers", **markers)
-            assert "sudo-one.marker" not in STATE["classifier_text"], result
-            assert "sudo-two.marker" not in STATE["classifier_text"], result
-            # Both direct calls ask even after an allow added a session rule.
-            assert asks == COMMANDS[1:3], result
+            for name in SUDO_ASKED:
+                assert f"{name}.marker" not in STATE["classifier_text"], result
+            # Each direct call asks once for the whole call, even after an allow added a session rule.
+            assert asks == COMMANDS[1:5], result
             assert result["ordinary"], result
-            assert markers["sudo-one"] == markers["sudo-two"] == (decision == "allow"), markers
-            assert not any(markers[name] for name in ("wrapped", "env", "nested")), markers
+            assert all(markers[name] == (decision == "allow") for name in SUDO_ASKED), markers
+            assert not any(markers[name] for name in SUDO_BLOCKED), markers
             assert result["model_steps"] == len(COMMANDS) + 1, result
             return
         # Commit, amend and push must be decided by the ask rules, never by the classifier.

@@ -95,13 +95,26 @@ guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 PARITY_SUDO=1 \
 stage 'running native Codex sudo approval with installed DEV_SUDO=prompt'
 # A directory outside registered projects keeps the Codex fixture out of Orca's assessment.
 sudo_fixture=/home/dev/codex-sudo-fixture
-guest_root runuser -u dev -- mkdir -p "$sudo_fixture/one" "$sudo_fixture/two"
+guest_root runuser -u dev -- mkdir -p "$sudo_fixture/one" "$sudo_fixture/two" \
+  "$sudo_fixture/probe-one" "$sudo_fixture/probe-two"
 incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
-guest_root runuser -u dev -- env \
-  HOME=/home/dev CODEX_HOME=/home/dev/.codex \
-  PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
-  python3 -B "$guest_helper" --sudo "$sudo_fixture/one" "$sudo_fixture/two" \
-  || die 'native Codex sudo approval failed'
+codex_sudo() {
+  guest_root runuser -u dev -- env \
+    HOME=/home/dev CODEX_HOME=/home/dev/.codex \
+    PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+    python3 -B "$guest_helper" "$@"
+}
+# Record native Codex behavior on the forms the hook refuses, with the hook stubbed to pass.
+codex_hook=/etc/codex/subyard-git-approval-hook
+guest_root cp -p -- "$codex_hook" /root/codex-hook.saved
+guest_root sh -c 'printf "#!/bin/sh\nexit 0\n" > "$1"' _ "$codex_hook"
+probe_rc=0
+codex_sudo --sudo-probe "$sudo_fixture/probe-one" "$sudo_fixture/probe-two" || probe_rc=$?
+guest_root cp -p -- /root/codex-hook.saved "$codex_hook"
+guest_root rm -f -- /root/codex-hook.saved
+guest_root /usr/local/bin/codex-policy-check >/dev/null || die 'the restored Codex hook failed its check'
+[ "$probe_rc" = 0 ] || die 'native Codex sudo probe failed'
+codex_sudo --sudo "$sudo_fixture/one" "$sudo_fixture/two" || die 'native Codex sudo approval failed'
 guest_root rm -rf -- "$sudo_fixture"
 guest_root rm -f -- "$guest_helper"
 yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'

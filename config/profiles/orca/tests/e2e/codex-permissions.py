@@ -330,8 +330,14 @@ def sudo_checks(app, provider, workspace):
         ('pipe', 'sudo -n touch {m} | cat', True),
         ('and-list', 'true && sudo -n touch {m}', True),
         ('if', 'if sudo -n touch {m}; then true; fi', False),
+        ('reserved', '{{ true; sudo -n touch {m}; }}', False),
+        ('assignment', 'x=1; sudo -n touch {m}', False),
         ('substitution', 'echo "$(sudo -n touch {m})"', False),
         ('path', '/usr/bin/sudo -n touch {m}', False),
+        ('leading-redirect', '</dev/null sudo -n touch {m}', False),
+        ('stdin-shell', "echo 'sudo -n touch {m}' | bash", False),
+        # Codex parses glob words as plain words, so its rules still match.
+        ('glob', 'ls -d /t* && sudo -n touch {m}', True),
     ]
     for name, template, direct in cases:
         marker = workspace / ('sudo-' + name)
@@ -348,6 +354,29 @@ def sudo_checks(app, provider, workspace):
     print('ok: native Codex sudo prompts asked, declined compound forms did not run, approval ran', flush=True)
 
 
+def sudo_probe(app, provider, workspace):
+    """Record what Codex does natively, without the managed hook, on forms the hook refuses."""
+    thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
+    cases = [
+        ('direct', 'sudo -n touch {m}'),
+        ('reserved-if', 'if true; then sudo -n touch {m}; fi'),
+        ('reserved-brace', '{{ true; sudo -n touch {m}; }}'),
+        ('assignment-list', 'x=1; sudo -n touch {m}'),
+        ('assignment-prefix', 'x=1 sudo -n touch {m}'),
+        ('glob', 'ls -d /t* && sudo -n touch {m}'),
+    ]
+    outcomes = {}
+    for name, template in cases:
+        marker = workspace / ('probe-' + name)
+        approvals, result = observe_turn(app, provider, thread, workspace, template.format(m=marker), 'decline')
+        outcomes[name] = {'approvals': approvals, 'ran': marker.exists(),
+                          'status': result and result.get('status')}
+        print('codex-sudo-probe: ' + json.dumps(dict(case=name, **outcomes[name])), flush=True)
+    # The control shows that the native prompt rules were active for this probe.
+    assert outcomes['direct'] == {'approvals': 1, 'ran': False, 'status': 'declined'}, outcomes['direct']
+    print('ok: native Codex sudo probe recorded without the managed hook', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workspace', nargs=2, type=Path)
@@ -358,6 +387,8 @@ def main():
     parser.add_argument('--template', type=Path, default=Path('/home/dev/.codex/config.toml'))
     parser.add_argument('--home-rules', type=Path)
     parser.add_argument('--sudo', action='store_true', help='check DEV_SUDO=prompt only')
+    parser.add_argument('--sudo-probe', action='store_true',
+                        help='record native Codex sudo prompts while the managed hook is stubbed')
     args = parser.parse_args()
     executable = shutil.which(args.codex)
     assert executable, 'native Codex unavailable'
@@ -395,10 +426,10 @@ def main():
                 if args.terminal or args.orca:
                     terminal_checks(executable, env, provider, workspace, args.orca)
                     continue
-                if args.sudo:
+                if args.sudo or args.sudo_probe:
                     app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
                     try:
-                        sudo_checks(app, provider, workspace)
+                        (sudo_probe if args.sudo_probe else sudo_checks)(app, provider, workspace)
                     finally:
                         app.close()
                     break
@@ -452,7 +483,7 @@ def main():
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)
                 finally:
                     app.close()
-            if args.sudo:
+            if args.sudo or args.sudo_probe:
                 return
             # Keep the managed-only Git checks above independent of home rules.
             # A fresh process then checks the delivered local-cleanup allow rule.
