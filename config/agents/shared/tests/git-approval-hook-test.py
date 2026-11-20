@@ -283,3 +283,14 @@ for gates in each((["git", "sudo"],)):
     allowed(gates, "a" * (256 * 1024))
     result = run(gates, "a" * (256 * 1024 + 1))
     assert result.returncode == 2 and "256 KiB" in result.stderr, (gates, result.returncode, result.stderr)
+
+# Bash ends a $'…' string at its first NUL, however the NUL is spelled; \c makes control characters.
+for gates in each(SUDO_GATES):
+    for command in ("$'sudo\\0x' id", "$'sudo\\x00' id", "$'sudo\\x0' id", "$'sudo\\c@' id",
+                    "$'sudo\\000junk' id", "/usr/bin/$'sudo\\0' id", "$'sudo\\u0000x' id",
+                    "$'sudo\\U00000000x' id", "env -Ssudo id", "env -S'sudo id'"):
+        denied(gates, command, "sudo")
+    denied(gates, "$'su\\c@do' id", "su")
+    for command in ("echo $'\\cAsudo'", "$'s\\cudo' id"):
+        result = run(gates, command)
+        assert "`sudo" not in result.stderr, (gates, command, result)

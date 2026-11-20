@@ -75,7 +75,8 @@ def ansi_c(match):
         else:
             value = ANSI_C_NAMED.get(code, code)
         return value
-    return shlex.quote(ANSI_C_ESCAPE.sub(decode, match[1]))
+    # Bash ends the string at the first NUL, from \0, \x0, \u0000 or \c@ alike.
+    return shlex.quote(ANSI_C_ESCAPE.sub(decode, match[1]).partition("\0")[0])
 
 
 def unquote(raw):
@@ -89,8 +90,12 @@ def unquote(raw):
 
 
 def names(value):
-    """Return the command names a word spells, also inside braces or after = or !."""
-    return {posixpath.basename(part) for part in [value, *NAME_PARTS.split(value)]}
+    """Return the command names a word spells, also inside braces, after = or !, or after -S."""
+    parts = [value, *NAME_PARTS.split(value)]
+    if value.startswith("-S"):
+        # env -S takes its command in the same word.
+        parts.append(value[2:])
+    return {posixpath.basename(part) for part in parts}
 
 
 def git_mention(run):

@@ -257,7 +257,8 @@ a path such as `/usr/bin/sudo` or after `=`, is a mention. Use the bare command,
 as `rg sudo src | head`, `which sudo`, `du -su` and `cat /etc/sudoers` run as usual, and
 `git commit` counts as a listed command here, so `git commit -m 'Fix sudo'` does too. Expected
 false positives include `man sudo`, `grep sudo . 2>/dev/null`, a heredoc file that mentions sudo,
-`gh pr create --title 'Fix sudo'` and `ssh host 'sudo …'`. For Codex the whole command must be
+`gh pr create --title 'Fix sudo'`, `ssh host 'sudo …'`, and a word that glues a name after `=`
+or `,`, such as `--user=su` or `a,su`. For Codex the whole command must be
 plain, because Codex would otherwise run it without asking. The Git approval limits apply here
 too. In addition:
 
@@ -891,8 +892,9 @@ only letters, digits and `_@%+=:,./-`, and quoted words contain no `$`, backtick
 Commands such as `git stash push`, `git log --grep commit` and `git rebase` mention neither
 action and continue through the normal permission flow. Expected false positives are commands
 that only name an action outside that list, such as `gh pr create --title 'git push fix'`,
-`grep 'git push' docs 2>/dev/null`, `ssh host 'git push'`, or a heredoc or comment that
-contains `git push`; use a plain form or write the text with a separate command.
+`grep 'git push' docs 2>/dev/null`, `ssh host 'git push'`, `git-push` in a URL or a man page
+name such as `man git-push`, or a heredoc or comment that contains `git push`; use a plain form
+or write the text with a separate command.
 
 OpenCode's `prompt` template asks for direct `git commit` and `git push` commands. The `off`
 template removes those ask patterns. Config refreshes also apply the template for the selected
@@ -902,8 +904,9 @@ usual precedence. Use `opencode-permission-check` in the project to inspect the 
 Limits:
 
 - The hook is a client guardrail. It sees only names spelled literally: variables such as
-  `$cmd push`, globs, aliases, scripts, Make targets and options such as `env -Ssudo` are outside
-  its coverage, as are options that make a listed command run another one, such as `rg --pre`.
+  `$cmd push`, globs, aliases, scripts, Make targets and combined options such as `env -iSsudo`
+  are outside its coverage, as are options that make a listed command run another one, such as
+  `rg --pre`.
   Subprocesses and direct writes to `.git` are outside it too. Other Git subcommands such as
   `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
 - The hook refuses a command longer than 256 KiB, whatever it contains, so that its scan always
