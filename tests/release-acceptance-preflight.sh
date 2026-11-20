@@ -222,7 +222,8 @@ class ProfilePreflightTests(unittest.TestCase):
             def run_checks(output, slots, only, rerun, exclude=(), **kwargs):
                 calls.append(("run", list(only), list(exclude)))
                 # The local full P0 fails while the hosted split job is still running.
-                (output / "receipt.json").write_text(json.dumps({**receipt, "result": "failed"}))
+                checks = {**receipt["checks"], "vm:p0-full": {"status": "failed"}}
+                (output / "receipt.json").write_text(json.dumps({**receipt, "checks": checks, "result": "failed"}))
                 return 1
             stdout = io.StringIO()
             with patch.object(publication, "a", m), \
