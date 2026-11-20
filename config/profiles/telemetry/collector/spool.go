@@ -214,6 +214,57 @@ func segmentHeader(reader *bufio.Reader) (string, string, string, int64, error) 
 	return fields[1], id, run, int64(len(header)), nil
 }
 
+// The launcher publishes the starting frame before exec. An exporter can
+// arrive before the periodic drain projects it into runs.
+func (s *Store) ensureRun(ctx context.Context, run string, policy Policy) bool {
+	if s.RegisteredRun(ctx, run) {
+		return true
+	}
+	spool := filepath.Join(s.dir, "spool")
+	stream := streamForRun(run)
+	if !s.registerSpoolRun(ctx, spool, stream+".open", run, policy) {
+		// The producer or drainer may have rotated the open file. If it
+		// retired the sealed file too, the final lookup sees its commit.
+		entries, _ := os.ReadDir(spool)
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, stream+".") && strings.HasSuffix(name, ".sealed") &&
+				s.registerSpoolRun(ctx, spool, name, run, policy) {
+				break
+			}
+		}
+	}
+	return s.RegisteredRun(ctx, run)
+}
+
+func (s *Store) registerSpoolRun(ctx context.Context, spool, name, run string, policy Policy) bool {
+	f, err := openSpoolFile(filepath.Join(spool, name), os.O_RDONLY, segmentBytes)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	reader := bufio.NewReaderSize(f, frameBytes)
+	stream, id, owner, _, err := segmentHeader(reader)
+	if err != nil || owner != run || (name != stream+".open" && name != id+".sealed") {
+		return false
+	}
+	// The first frame is immutable and fsynced before the producer links
+	// the file. Read only that frame, even as other writers append to it.
+	frame, err := reader.ReadSlice('\n')
+	if err != nil {
+		return false
+	}
+	r, err := s.decodeSpoolRecord(stream, frame)
+	if err != nil || r.Kind != "run" || stringValue(r.Body, "state") != "starting" ||
+		stringValue(r.Body, "agent_run_id") != run {
+		return false
+	}
+	// A request's secret filter applies only to its OTLP payload. The
+	// normal drainer will deduplicate this event and advance its offset.
+	ctx = context.WithValue(ctx, sensitiveContextKey{}, []string(nil))
+	return s.ingest(ctx, []Record{r}, policy) == nil
+}
+
 func sealSegment(spool, name string) error {
 	path := filepath.Join(spool, name)
 	f, err := openSpoolFile(path, os.O_RDONLY, segmentBytes)
@@ -432,21 +483,29 @@ func (s *Store) reclaimOffsets(spool string) error {
 }
 
 func (s *Store) ingestFrame(ctx context.Context, a spoolAdvance, stream string, data []byte, policy Policy) error {
-	var r Record
-	if err := json.Unmarshal(data, &r); err != nil || r.Schema != RecordSchema || r.OriginID != s.origin {
-		return errInvalidRecord
-	}
-	if run := stringValue(r.Body, "agent_run_id"); stream != "broker" && run != "" && streamForRun(run) != stream {
-		return errInvalidRecord
-	}
-	if r.Filtered && (len(r.Body) != 0 || !r.hasSessionMetadata()) {
-		return errInvalidRecord
+	r, err := s.decodeSpoolRecord(stream, data)
+	if err != nil {
+		return err
 	}
 	e, err := recordEnvelope(r)
 	if err != nil {
 		return err
 	}
 	return s.captureAt(ctx, []Envelope{e}, policy, &a)
+}
+
+func (s *Store) decodeSpoolRecord(stream string, data []byte) (Record, error) {
+	var r Record
+	if err := json.Unmarshal(data, &r); err != nil || r.Schema != RecordSchema || r.OriginID != s.origin {
+		return Record{}, errInvalidRecord
+	}
+	if run := stringValue(r.Body, "agent_run_id"); stream != "broker" && run != "" && streamForRun(run) != stream {
+		return Record{}, errInvalidRecord
+	}
+	if r.Filtered && (len(r.Body) != 0 || !r.hasSessionMetadata()) {
+		return Record{}, errInvalidRecord
+	}
+	return r, nil
 }
 
 func (s *Store) spoolGap(id string, offset int64, run, reason string, count int64, first, last string) Envelope {
