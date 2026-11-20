@@ -518,7 +518,7 @@ def validate_operator_acceptance(document, name, command, identity):
         or canonical(document["target"]) != canonical(identity) or document["command"] != command
         or document["source_status"] not in ("pending", "failed") or document["target_status"] not in ("pending", "failed")
         or document["native_status"] != "failed" or type(document["exit_code"]) is not int
-        or not 1 <= document["exit_code"] <= 255 or document["exit_code"] in (130, 143)):
+        or not 1 <= document["exit_code"] <= 255 or a.termination(document["exit_code"]) != "exit"):
         raise ValueError("invalid exact-candidate operator acceptance")
     tested = document["tested"]
     if (not isinstance(tested, dict) or set(tested) != {"version", "source_fingerprint", "runtime_file", "runtime_sha256",
@@ -565,9 +565,12 @@ def validate_operator_acceptance(document, name, command, identity):
             or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
             raise ValueError("invalid operator acceptance physical environment")
         counts.add(item["vm_count"])
-    cleanup = {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in range(1, max(counts) + 1)],
-               "release_exit_code": 0, "lease_released": True}
-    if canonical(document["cleanup"]) != canonical(cleanup):
+    # Guest cleanup lists the VMs that were cleaned; a VM without a staged run directory needs none.
+    cleaned = document["cleanup"].get("guest_cleanup") if isinstance(document["cleanup"], dict) else None
+    vms = [item.get("vm") for item in cleaned] if isinstance(cleaned, list) and all(isinstance(item, dict) for item in cleaned) else None
+    if (vms is None or any(type(vm) is not int or not 1 <= vm <= max(counts) for vm in vms) or vms != sorted(set(vms))
+        or canonical(document["cleanup"]) != canonical({"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in vms],
+                                                        "release_exit_code": 0, "lease_released": True})):
         raise ValueError("operator acceptance cleanup or release unconfirmed")
 
 
@@ -609,7 +612,7 @@ def operator_acceptances(paths, identity, root, receipt):
                 raise ValueError("operator acceptance original artifact changed")
         native, launch, timing = (a.read_transfer_json(files[role]) for role in ("native", "launch", "timing"))
         if (type(native.get("exit_code")) is not int or not 1 <= native["exit_code"] <= 255
-            or native["exit_code"] in (130, 143) or native.get("session_id") is not None
+            or a.termination(native["exit_code"]) != "exit" or native.get("session_id") is not None
             or not isinstance(native.get("chunk_id"), str) or not native["chunk_id"] or not isinstance(native.get("output"), str)
             or type(native.get("wall_time_seconds")) not in (int, float) or not math.isfinite(native["wall_time_seconds"])
             or native["wall_time_seconds"] < 0):
@@ -617,13 +620,16 @@ def operator_acceptances(paths, identity, root, receipt):
         prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
         argv = launch.get("argv")
         if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
-            or argv[:6] != prefix or len(argv) != len(prefix) + 3 + len(command) + 2):
+            or argv[:6] != prefix or len(argv) != len(prefix) + 4 + len(command) + 2):
             raise ValueError("operator acceptance original launcher differs")
-        assignments = dict(value.split("=", 1) for value in argv[6:9] if "=" in value)
-        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256"}
+        # The launcher's lane ID must equal the log header that selects the lane's own records.
+        lane = a.launcher_lane(argv[6:10])
+        assignments = dict(value.split("=", 1) for value in argv[6:10] if "=" in value)
+        if (not lane or set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE",
+                                            "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LANE"}
             or assignments["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(source_output / "candidate-bundle.tar.gz")
             or assignments["SUBYARD_E2E_CANDIDATE_SHA256"] != original["candidate_bundle_sha256"]
-            or a.command_identity(argv[9:-2], source_root) != command or argv[-2] != "--slot"
+            or a.command_identity(argv[10:-2], source_root) != command or argv[-2] != "--slot"
             or not re.fullmatch(r"[1-9][0-9]{0,2}", argv[-1])):
             raise ValueError("operator acceptance original transport or command differs")
         duration = timing.get("whole_duration_seconds")
@@ -634,24 +640,10 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        environments, cleanup, release_codes, released = set(), {}, [], False
-        with files["log"].open("rb") as stream:
-            for line in stream:
-                environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-                if environment:
-                    environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-                stage = re.fullmatch(rb"E2E_PHASE phase=(guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-                if stage:
-                    if stage[1] == b"guest-cleanup":
-                        vm = int(stage[3]) if stage[3] else None
-                        if vm in cleanup:
-                            raise ValueError("operator acceptance cleanup evidence is ambiguous")
-                        cleanup[vm] = int(stage[2])
-                    else:
-                        release_codes.append(int(stage[2]))
-                released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-        if not environments or release_codes != [0] or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)} or not released:
-            raise ValueError("operator acceptance original cleanup or release unconfirmed")
+        evidence = a.lane_evidence(files["log"], argv[-1], lane)
+        if issue := a.lease_issue(evidence):
+            raise ValueError("operator acceptance original cleanup or release unconfirmed: " + issue)
+        environments = set(evidence.environments)
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
@@ -665,7 +657,7 @@ def operator_acceptances(paths, identity, root, receipt):
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
                   "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
-                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": cleanup[vm]} for vm in sorted(cleanup)],
+                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in evidence.cleaned],
                               "release_exit_code": 0, "lease_released": True}}
         validate_operator_acceptance(public, name, command, identity)
         accepted[name] = public
@@ -1628,6 +1620,10 @@ def collect_ci(github, directory, identity):
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
+            counts, reason, environments = a.pass_counts(cached, name, result)
+            if not counts:
+                raise ValueError("hosted evidence is not a complete PASS: " + reason)
+            result["environments"] = environments
             # Persist the immutable original evidence before publishing the result reference.
             for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):
                 target = output / relative
