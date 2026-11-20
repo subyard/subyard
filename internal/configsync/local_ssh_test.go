@@ -14,14 +14,14 @@ import (
 
 func TestLegacySSHSyncPreservesPersistentPortsAndUnrelatedLocalRecords(t *testing.T) {
 	f := newSyncFixture(t, "owner-a")
-	f.writeSource("hosts/owner-a/config.env", "# source host\nSSH_PORT=2500\nDEV_SUDO=0\n")
+	f.writeSource("hosts/owner-a/config.env", "# source host\nSSH_PORT=2500\nDEV_SUDO=no\n")
 	f.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2501\n")
 	f.writeSource("hosts/owner-b/config.env", "SSH_PORT=2600\n")
 	f.commit("legacy source")
 	writeSyncTestFile(t, filepath.Join(f.configHome, gitSettingsPath("config.env")), "SSH_PORT=2200\n", 0o600)
 	writeSyncTestFile(t, filepath.Join(f.configHome, gitSettingsPath("yards/demo/config.env")), "SSH_PORT=2201\n", 0o600)
 	local := filepath.Join(f.configHome, "yards/demo/config.env")
-	writeSyncTestFile(t, local, "# local choice\nDEV_SUDO=0\n", 0o640)
+	writeSyncTestFile(t, local, "# local choice\nDEV_SUDO=no\n", 0o640)
 	options := f.options(true)
 	options.Environment["SSH_PORT"] = "2999" // Temporary inputs never become pins.
 	plan, err := BuildPlan(options)
@@ -57,11 +57,11 @@ func TestLegacySSHSyncPreservesPersistentPortsAndUnrelatedLocalRecords(t *testin
 	if err := Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, local, "# local choice\nDEV_SUDO=0\nSSH_PORT='2201'\n", 0o640)
-	assertSyncTestFile(t, filepath.Join(f.configHome, gitSettingsPath("config.env")), "# source host\nDEV_SUDO=0\n", 0o600)
+	assertSyncTestFile(t, local, "# local choice\nDEV_SUDO=no\nSSH_PORT='2201'\n", 0o640)
+	assertSyncTestFile(t, filepath.Join(f.configHome, gitSettingsPath("config.env")), "# source host\nDEV_SUDO=no\n", 0o600)
 	assertSyncTestFile(t, filepath.Join(f.configHome, gitSettingsPath("yards/demo/config.env")), "", 0o600)
 	// Source publication is a separate explicit prepared Git operation.
-	assertSyncTestFile(t, filepath.Join(f.source, "hosts/owner-a/config.env"), "# source host\nSSH_PORT=2500\nDEV_SUDO=0\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(f.source, "hosts/owner-a/config.env"), "# source host\nSSH_PORT=2500\nDEV_SUDO=no\n", 0o600)
 	assertSyncTestFile(t, filepath.Join(f.source, "hosts/owner-b/config.env"), "SSH_PORT=2600\n", 0o600)
 	manifest, err := readManifest(f.configHome)
 	if err != nil {

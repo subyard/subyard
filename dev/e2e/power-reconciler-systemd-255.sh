@@ -348,7 +348,7 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
   SSH_HOST=yard \
   DEV_USER=dev \
   DEV_UID=2000 \
-  DEV_SUDO=1 \
+  DEV_SUDO=yes \
   FORWARD_SSH_AGENT=1 \
   NESTED_E2E_VMS=0 \
   SUBYARD_POWER_ENGINE_SOURCE="$INSTALL_ROOT/fixture-engine" \

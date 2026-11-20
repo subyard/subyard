@@ -33,7 +33,7 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export YARD_KIND=container
   export SHIFT_MODE=shift
   export FORWARD_SSH_AGENT=0
-  export DEV_SUDO=0
+  export DEV_SUDO=no
   export DEV_UID=1000
   export NESTED_E2E_VMS=0
   export E2E_VM_IMAGE=images:debian/13/cloud

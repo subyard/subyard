@@ -23,7 +23,7 @@ func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
 			files := map[string]string{
 				".sync/settings/config.env":             "SSH_PORT=2240\n",
 				".sync/settings/yards/named/config.env": "SSH_PORT=2241\n",
-				"yards/named/config.env":                "# unrelated local records\nDEV_SUDO=0\n",
+				"yards/named/config.env":                "# unrelated local records\nDEV_SUDO=no\n",
 				"yards/override/config.env":             "# exact winning override\nSSH_PORT=2242\n",
 			}
 			for name, content := range files {
@@ -494,11 +494,11 @@ func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
 }
 
 func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
-	for name, nested := range map[string]string{"flat-only": "", "flat-and-nested": "DEV_SUDO=0\n"} {
+	for name, nested := range map[string]string{"flat-only": "", "flat-and-nested": "DEV_SUDO=no\n"} {
 		t.Run(name, func(t *testing.T) {
 			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, "settings")
-			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n", "yards/default.env": "DEV_SUDO=0\n"}
+			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n", "yards/default.env": "DEV_SUDO=no\n"}
 			if nested != "" {
 				files["yards/default/config.env"] = nested
 			}
@@ -598,7 +598,7 @@ func TestLocalSSHMigrationSharedPortRefusalExemptsOnlyOwnerMigrationPair(t *test
 			configHome := filepath.Join(home, "settings")
 			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n"}
 			for _, yard := range []string{test.left, test.right} {
-				files["yards/"+yard+"/config.env"] = "DEV_SUDO=0\n"
+				files["yards/"+yard+"/config.env"] = "DEV_SUDO=no\n"
 				files[".sync/settings/yards/"+yard+"/config.env"] = "SSH_PORT=2241\n"
 			}
 			for name, content := range files {

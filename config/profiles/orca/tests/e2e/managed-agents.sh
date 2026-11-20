@@ -66,8 +66,10 @@ jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE/git-
   || die 'release readiness did not report ready before ordinary init'
 [ "$(package_records)" = "$prompt_packages" ] || die 'readiness changed the installed packages'
 yard init --yes || die 'ordinary init did not apply the new default'
-guest_root jq -e 'has("permissions") | not' "$claude_policy" >/dev/null \
+guest_root jq -e '[.permissions.ask[]? | select(startswith("Bash(git "))] == []' "$claude_policy" >/dev/null \
   || die 'ordinary init kept Claude Git prompts'
+guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \
+  || die 'the default DEV_SUDO=prompt did not install the Claude sudo ask rules'
 guest_root grep -Fxq 'git_approval=off' /usr/local/bin/codex-policy-check \
   || die 'ordinary init kept Codex Git prompts'
 guest_root cat "$inventory" | jq -e '.applied_settings.CODING_TOOL_GIT_APPROVAL == "off"' >/dev/null \
@@ -249,6 +251,13 @@ as_dev python3 -B "$helper" codex-routing --provider "$codex_provider" --package
 guest_root test ! -e "$daemon_home/daemon.pid" || die 'the routing check left a daemon running'
 guest_root rm -f /tmp/subyard-codex-bootstrap.out /tmp/subyard-codex-install.sh /tmp/subyard-codex-install.out
 
+stage 'installing sudo approval prompts before Claude sessions start'
+# An explicit prompt matches the default the yard already applied.
+printf 'DEV_SUDO=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
+guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \
+  || die 'DEV_SUDO=prompt did not install the Claude sudo ask rules'
+guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the passwordless grant'
 stage 'preparing a registered Git workspace for Claude prompts'
 mkdir -p "$STATE/managed-agents"
 printf 'Managed agents fixture\n' > "$STATE/managed-agents/fixture.txt"
@@ -326,15 +335,22 @@ orca_terminal_open() { # command title
     select(type == "string" and length > 0)' "$STATE/managed-terminal-create.json")" \
     || die "paired Orca returned no terminal handle: $2"
 }
-terminal_run() { # command choice expected-change commits-added
+# Without a marker the run's effect is the workspace head; with one, the marker's presence.
+terminal_state() { # [marker]
+  if [ -z "${1:-}" ]; then workspace_head
+  elif guest_root test -e "$1"; then echo present
+  else echo absent
+  fi
+}
+terminal_run() { # command choice expected-change commits-added [marker]
   local before after commits_before
-  before="$(workspace_head)"
+  before="$(terminal_state "${5:-}")"
   commits_before="$(workspace_commits)"
   as_dev sh -c 'printf "%s\n" "$1" > /tmp/subyard-managed-command' subyard "$1"
   terminal_press 'Run the fixture command.'
   terminal_wait 'Do you want to proceed' 45 || terminal_fail "Orca Claude terminal did not prompt for: $1"
   terminal_shows "$1" || terminal_fail "Orca Claude terminal prompt names another command than: $1"
-  [ "$(workspace_head)" = "$before" ] || terminal_fail 'Orca Claude terminal ran Git before approval'
+  [ "$(terminal_state "${5:-}")" = "$before" ] || terminal_fail "Orca Claude terminal ran before approval: $1"
   as_dev python3 -B "$helper" terminal-exe "$workspace" || terminal_fail 'Orca terminal ran another Claude executable'
   case "$2" in
     allow) terminal_press 1 ;;
@@ -348,11 +364,11 @@ terminal_run() { # command choice expected-change commits-added
   fi
   # A completed tool run settles after the prompt closes.
   sleep 2
-  after="$(workspace_head)"
+  after="$(terminal_state "${5:-}")"
   if [ "$3" = changed ]; then
-    [ "$after" != "$before" ] || terminal_fail "approved command did not run: $1"
+    [ "$after" != "$before" ] || terminal_fail "approved command did not take effect: $1"
   else
-    [ "$after" = "$before" ] || terminal_fail "declined command changed history: $1"
+    [ "$after" = "$before" ] || terminal_fail "declined command took effect: $1"
   fi
   [ "$(workspace_commits)" = "$((commits_before + $4))" ] \
     || terminal_fail "unexpected commit count after: $1"
@@ -610,6 +626,9 @@ terminal_run 'git commit --allow-empty -m terminal-repeated' allow changed 1
 terminal_run 'git commit --amend --allow-empty -m terminal-amended' allow changed 0
 terminal_run 'git push' deny same 0
 terminal_run 'git push' deny same 0
+guest_root rm -f /tmp/sudo-deny /tmp/sudo-allow
+terminal_run 'sudo -n touch /tmp/sudo-deny' deny same 0 /tmp/sudo-deny
+terminal_run 'sudo -n touch /tmp/sudo-allow' allow changed 0 /tmp/sudo-allow
 terminal_cleanup
 assert_managed_settings orca-claude-terminal-prompts
 yard config status >/dev/null || die 'a declined auto mode offer read as drift'
@@ -619,4 +638,4 @@ assert_managed_resolution after-orca-agents
 guest_root test ! -e /home/dev/.local/bin/claude || die 'Orca-launched Claude self-installed'
 guest_root rm -f -- "$helper" "$codex_provider"
 
-printf 'ok: managed Claude and Codex binaries, Codex routing, legacy convergence, and Claude Git prompts in stock Orca terminal and chat\n'
+printf 'ok: managed Claude and Codex binaries, Codex routing, legacy convergence, and Claude Git and sudo prompts in stock Orca terminal and chat\n'

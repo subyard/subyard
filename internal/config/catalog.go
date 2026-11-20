@@ -57,24 +57,26 @@ const (
 )
 
 type SettingDefinition struct {
-	Name         string
-	Kind         SettingKind
-	Type         SettingValueType
-	Aliases      []string
-	Scopes       []SettingScope
-	Syncable     bool
-	Sensitive    bool
-	Merge        string
-	Application  SettingApplication
-	Owner        string
-	Enum         []string
-	Minimum      int
-	Maximum      int
-	Optional     bool
-	Default      string
-	DefaultFrom  *profile.PortDefault
-	HostListener bool
-	HasDefault   bool
+	Name        string
+	Kind        SettingKind
+	Type        SettingValueType
+	Aliases     []string
+	Scopes      []SettingScope
+	Syncable    bool
+	Sensitive   bool
+	Merge       string
+	Application SettingApplication
+	Owner       string
+	Enum        []string
+	// RetiredValues are earlier accepted values that refusals name as no longer accepted.
+	RetiredValues []string
+	Minimum       int
+	Maximum       int
+	Optional      bool
+	Default       string
+	DefaultFrom   *profile.PortDefault
+	HostListener  bool
+	HasDefault    bool
 }
 
 var catalog = map[string]SettingDefinition{
@@ -123,8 +125,9 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"CCUSAGE_VERSION": scalar("agent-integration", SettingVersion, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"DEV_SUDO": scalar("yard-security", SettingBoolean, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("1")),
+	// Yes and prompt grant passwordless sudo; prompt, the default, also makes coding agents ask first.
+	"DEV_SUDO": scalar("yard-security", SettingString, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("prompt"), enum("yes", "no", "prompt"), retiredValues("1", "0")),
 	"DEV_UID": scalar("yard-runtime", SettingInteger, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(0, 1<<31-1)),
 	"DEV_USER": scalar("yard-runtime", SettingName, SettingYardInit, true,
@@ -293,6 +296,12 @@ func optionalRange(minimum, maximum int) definitionOption {
 		definition.Minimum = minimum
 		definition.Maximum = maximum
 		definition.Optional = true
+	}
+}
+
+func retiredValues(values ...string) definitionOption {
+	return func(definition *SettingDefinition) {
+		definition.RetiredValues = append([]string(nil), values...)
 	}
 }
 

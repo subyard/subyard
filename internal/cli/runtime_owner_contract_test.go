@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -175,7 +176,7 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 	}
 	for _, definition := range owners {
 		t.Run(definition.Runtime.ActivationID, func(t *testing.T) {
-			fixture := newPendingInitFixture(t, false, map[string]string{"default": "ENVIRONMENT_PROFILES=" + definition.Name + "\nDEV_SUDO=0\n"})
+			fixture := newPendingInitFixture(t, false, map[string]string{"default": "ENVIRONMENT_PROFILES=" + definition.Name + "\nDEV_SUDO=no\n"})
 			root := fixture.cli.options.RepositoryRoot
 			// Installed commands dispatch through the release engine and name
 			// their repository root, as activation does.
@@ -184,6 +185,9 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 			state, callsPath, fail := installSyntheticRuntimeOwner(t, root, definition)
 			executor := fixture.cli.options.Executor.(installedSettingsExecutor)
 			executor.profiles = []string{definition.Name}
+			// The yard already applied the sudo mode its configuration keeps.
+			executor.settings = maps.Clone(executor.settings)
+			executor.settings["DEV_SUDO"] = "no"
 			executor.guest = map[string]string{"ENVIRONMENT_PROFILES": definition.Name, "DEV_USER": "dev", "DEV_UID": "1000", "ALLOWS_CODING_TOOLS": "true"}
 			fixture.cli.options.Executor = executor
 			testkit.WriteFile(t, fail, nil, 0o600)

@@ -638,7 +638,7 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
 		{name: "capabilities", override: "YARD_CAPABILITIES=sample-device", want: "YARD_CAPABILITIES"},
 		{name: "SSH forwarding", override: "FORWARD_SSH_AGENT=1", want: "FORWARD_SSH_AGENT"},
-		{name: "sudo", override: "DEV_SUDO=1", want: "DEV_SUDO"},
+		{name: "sudo", override: "DEV_SUDO=yes", want: "DEV_SUDO"},
 		{name: "nested VMs", override: "NESTED_E2E_VMS=1", want: "NESTED_E2E_VMS"},
 		{name: "SSH port", override: "SSH_PORT=2299", want: "SSH_PORT"},
 	} {
@@ -670,7 +670,7 @@ HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 YARD_CAPABILITIES=
 FORWARD_SSH_AGENT=0
-DEV_SUDO=0
+DEV_SUDO=no
 NESTED_E2E_VMS=0
 SSH_PORT=2234
 `, 0o600)

@@ -510,7 +510,7 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 		"shared/config.env:1: E2E_VM_CPU", "hosts/owner-a/config.env:1: GIT_USER_EMAIL",
 		"hosts/owner-a/config.env:2: DEV_SUDO", "hosts/owner-a/config.env:3: AGENT_codex_RULES",
 		"yards/default/config.env:1: SSH_PORT", "yards/neighbor.env:1: GIT_USER_NAME",
-		"invalid boolean value", "store file settings under overrides/agents",
+		"invalid value; must be one of yes, no, prompt", "store file settings under overrides/agents",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in %v", want, err)
@@ -1456,7 +1456,7 @@ func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.
 		t.Run(test.stray, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
 			fixture.writeSource("shared/config.env", "E2E_VM_CPU=2\n")
-			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2233\nDEV_SUDO=1\n")
+			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2233\nDEV_SUDO=yes\n")
 			fixture.commit("demo yard")
 			plan, err := BuildPlan(fixture.options(true))
 			if err != nil {
@@ -1505,7 +1505,7 @@ func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
 }
 
 func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T) {
-	const vmYard = "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=0\n"
+	const vmYard = "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=no\n"
 	const spurious = "require YARD_KIND=vm"
 	for _, test := range []struct {
 		name         string

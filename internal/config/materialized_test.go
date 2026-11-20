@@ -8,21 +8,26 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
-func TestMaterializationUsesGitApprovalVariantForShippedSource(t *testing.T) {
+func TestMaterializationUsesApprovalVariantForShippedSource(t *testing.T) {
 	root := t.TempDir()
-	prompt := filepath.Join(root, "prompt.json")
-	off := filepath.Join(root, "off.json")
+	base := filepath.Join(root, "base.json")
+	git := filepath.Join(root, "git.json")
+	sudo := filepath.Join(root, "sudo.json")
+	both := filepath.Join(root, "git-sudo.json")
 	definition := profile.IntegrationDefinition{Name: "sample", Root: root, Artifacts: []profile.IntegrationArtifact{{
-		ID: "config", Kind: "config", Source: "prompt.json", GitApprovalOffSource: "off.json",
-		Destination: ".sample/config.json", Format: "destination",
+		ID: "config", Kind: "config", Source: "base.json",
+		ApprovalSources: map[string]string{"git": "git.json", "sudo": "sudo.json", "git sudo": "git-sudo.json"},
+		Destination:     ".sample/config.json", Format: "destination",
 	}}}
 	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
 		values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample"}
-		for _, test := range []struct{ mode, source, want string }{
-			{"", prompt, off}, {"prompt", prompt, prompt}, {"off", prompt, off},
-			{"off", "/override.json", "/override.json"}, {"off", "", ""},
+		for _, test := range []struct{ git, sudo, source, want string }{
+			{"", "", base, sudo}, {"prompt", "", base, both}, {"off", "yes", base, base}, {"", "yes", base, base},
+			{"off", "no", base, base}, {"off", "prompt", base, sudo}, {"prompt", "prompt", base, both},
+			{"prompt", "no", base, git}, {"prompt", "prompt", "/override.json", "/override.json"}, {"off", "prompt", "", ""},
 		} {
-			values["CODING_TOOL_GIT_APPROVAL"] = test.mode
+			values["CODING_TOOL_GIT_APPROVAL"] = test.git
+			values["DEV_SUDO"] = test.sudo
 			values["AGENT_sample_CONFIG"] = test.source
 			sources, err := SelectMaterializationSources(values, "dev", scope, definition)
 			if err != nil {
@@ -32,7 +37,7 @@ func TestMaterializationUsesGitApprovalVariantForShippedSource(t *testing.T) {
 				continue
 			}
 			if len(sources) != 1 || sources[0].Asset.Source != test.want || sources[0].Asset.Destination != "/home/dev/.sample/config.json" {
-				t.Fatalf("%s mode %q with source %q: got %#v, want %q at the same destination", scope, test.mode, test.source, sources, test.want)
+				t.Fatalf("%s Git %q sudo %q with source %q: got %#v, want %q at the same destination", scope, test.git, test.sudo, test.source, sources, test.want)
 			}
 		}
 	}

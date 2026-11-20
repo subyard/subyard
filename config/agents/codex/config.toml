@@ -12,7 +12,7 @@ approvals_reviewer = "user"      # commit/push prompts are routed to the operato
 # default_permissions profile here currently makes that UI path fall back to read-only.
 sandbox_mode = "danger-full-access"
 
-# Sudo is governed by DEV_SUDO (config/subyard.env), not gated here.
+# Sudo is governed by DEV_SUDO (config/subyard.env); DEV_SUDO=prompt adds managed prompt rules.
 
 [tui]
 # Keep mouse selection and copying in the terminal, including remote Orca panes.

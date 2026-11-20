@@ -19,7 +19,7 @@ func TestSSHPortPinNativeComponent(t *testing.T) {
 	if err := os.CopyFS(filepath.Join(root, "repository/config"), os.DirFS("../../config")); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{"owner.marker": SSHPortPinMarker, ".sync/settings/config.env": "SSH_PORT=2240\n", ".sync/settings/yards/named/config.env": "SSH_PORT=2241\n", "yards/named/config.env": "# retained\nDEV_SUDO=0\n"} {
+	for name, content := range map[string]string{"owner.marker": SSHPortPinMarker, ".sync/settings/config.env": "SSH_PORT=2240\n", ".sync/settings/yards/named/config.env": "SSH_PORT=2241\n", "yards/named/config.env": "# retained\nDEV_SUDO=no\n"} {
 		p := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
