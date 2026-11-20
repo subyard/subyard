@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Prove that a CLI test fixture migration slice keeps its coverage, against a base ref:
-#   1. the go test -list names and the -json pass sets are equal, both sides are green,
-#      and allowed added tests pass;
-#   2. every base assertion survives unchanged, renamed by a reviewed rule, as an error
-#      check replaced by its named helper, or under a reviewed waiver bound to its replacement;
+#   1. the go test -list names and the pass sets are equal, every run exits 0, and
+#      allowed added tests pass;
 #   3. the coverprofile blocks of non-test code covered on the base stay covered in some
-#      candidate run (a rerun absorbs blocks behind a lost race, and is reported);
-#   4. every listed mutant of a changed test file fails tests that pass without it.
+#      candidate run that exits 0 (a rerun absorbs blocks behind a lost race, and is reported);
+#   4. every listed mutant of a changed test file builds and makes its selected tests,
+#      which pass without it, exit non-zero.
+# Assertions are reviewed, not proved: the migration rule in docs/testing.md keeps them
+# byte-identical. Proof 2 was a heuristic for that and is gone; the numbering is kept.
 # Both sides run from exports in /tmp without Git metadata: the base from git archive,
 # the candidate from the current tracked and untracked, non-ignored files.
 set -euo pipefail
@@ -19,54 +20,36 @@ Usage: dev/cli-fixture-slice-check.sh [options]
   --base REF                 base ref (default: origin/master)
   --package PKG              Go package to check (default: ./internal/cli)
   --mutants FILE             mutant list (default: dev/cli-fixture-mutants.tsv)
-  --renames FILE             reviewed assertion rename rules (default: dev/cli-fixture-renames.tsv)
-  --waivers FILE             reviewed assertion waivers (default: dev/cli-fixture-waivers.tsv)
   --all-mutants              run every listed mutant, not only those of changed test files
   --skip-mutants             skip proof 4
   --allow-added-test REGEX   accept added top-level tests matching REGEX (repeatable)
-  --allow-error-check CALLEE=TEXT
-                             accept a removed `if err != nil { t.Fatal(err) }` check of CALLEE
-                             when its function adds one more occurrence of TEXT
-                             (repeatable; default New=fixture.New()
-  --without-coverage TEST    run top-level TEST without coverage on both sides (repeatable;
-                             default: tests that re-execute the instrumented test binary)
+  --without-coverage TEST    skip top-level TEST in the coverage runs and run it alone
+                             without coverage on both sides (repeatable; for ./internal/cli
+                             the default is the test that re-executes the instrumented binary)
   --coverage-reruns N        rerun the candidate up to N times while proof 3 loses blocks,
                              counting blocks covered in any run (default: 1)
   --keep                     keep the work directory
 Source admission tests need a normal runtime: SUBYARD_SOURCE_QUERY_TOOLING_ROOT, or
 .build/runtime/current from `make build VERSION=0.29.0-test`.
 
-Mutant list: tab-separated test file, -run regex, product file, old text, new text; old
-must occur exactly once. In the text fields \n, \t and \\ are escapes.
-Rename rules: tab-separated Python regex and replacement, applied in order to a base
-assertion unit that has no unchanged match.
-Waivers: tab-separated base function, removed assertion unit as proof 2 prints it,
-candidate function, replacement text that function must add, reason.
-In all three lists # starts a comment line.
+Mutant list: tab-separated test file, -run regex, mutated file, old text, new text; old
+must occur exactly once. The mutated file may be the test file itself, for example the
+expected argv of an AssertCalls. In the text fields \n, \t and \\ are escapes; # starts
+a comment line.
 EOF
 }
 
-base=origin/master package=./internal/cli
-mutants="$ROOT/dev/cli-fixture-mutants.tsv" renames="$ROOT/dev/cli-fixture-renames.tsv"
-waivers="$ROOT/dev/cli-fixture-waivers.tsv"
+base=origin/master package=./internal/cli mutants="$ROOT/dev/cli-fixture-mutants.tsv"
 all_mutants=0 skip_mutants=0 keep=0 coverage_reruns=1
-allowed_tests=() replacements=("New=fixture.New(")
-# This test's owner-protocol subtest re-executes the test binary and parses its
-# output, which an instrumented binary extends with a coverage warning.
-without_coverage=(TestResumedMigrateRunsPendingInitAfterRepair)
+allowed_tests=() without_coverage=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base) base="${2:?}"; shift 2 ;;
     --package) package="${2:?}"; shift 2 ;;
     --mutants) mutants="${2:?}"; shift 2 ;;
-    --renames) renames="${2:?}"; shift 2 ;;
-    --waivers) waivers="${2:?}"; shift 2 ;;
     --all-mutants) all_mutants=1; shift ;;
     --skip-mutants) skip_mutants=1; shift ;;
     --allow-added-test) allowed_tests+=("${2:?}"); shift 2 ;;
-    --allow-error-check)
-      case "${2:?}" in *=?*) ;; *) printf 'FAIL: --allow-error-check takes CALLEE=TEXT\n' >&2; exit 2 ;; esac
-      replacements+=("$2"); shift 2 ;;
     --without-coverage) without_coverage+=("${2:?}"); shift 2 ;;
     --coverage-reruns)
       case "${2:?}" in *[!0-9]*) printf 'FAIL: --coverage-reruns takes a count\n' >&2; exit 2 ;; esac
@@ -77,9 +60,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$package" in ./*) ;; *) printf 'FAIL: --package must be a ./relative package\n' >&2; exit 2 ;; esac
-for list in "$mutants" "$renames" "$waivers"; do
-  [ -f "$list" ] || { printf 'FAIL: missing list %s\n' "$list" >&2; exit 2; }
-done
+if [ "$package" = ./internal/cli ] && [ "${#without_coverage[@]}" -eq 0 ]; then
+  # Its owner-protocol subtest re-executes the test binary and parses its output,
+  # which an instrumented binary extends with a coverage warning.
+  without_coverage=(TestResumedMigrateRunsPendingInitAfterRepair)
+fi
+[ -f "$mutants" ] || { printf 'FAIL: missing mutant list %s\n' "$mutants" >&2; exit 2; }
 
 tooling="${SUBYARD_SOURCE_QUERY_TOOLING_ROOT:-$ROOT/.build/runtime/current}"
 [ -e "$tooling/bin/yard-engine" ] \
@@ -112,50 +98,71 @@ printf 'base %s (%s); candidate: current worktree of %s\n' "$base" "$base_commit
 cp -- "$ROOT/dev/cli-fixture-slice-check.py" "$work/check.py"
 check() { python3 -I "$work/check.py" "$@"; }
 
-plain_list="$(IFS=,; printf '%s' "${without_coverage[*]}")"
-plain_pattern="^($(IFS='|'; printf '%s' "${without_coverage[*]}"))\$"
+# run NAME SIDE ARGS...: one go test run whose exit status must be 0; JSON goes to $work/NAME.json.
+failed_runs=()
+run() {
+  local name="$1" side="$2" code=0
+  shift 2
+  go -C "$work/$side" test -count=1 -timeout=30m -json "$@" "$package" > "$work/$name.json" 2>&1 || code=$?
+  if [ "$code" != 0 ]; then
+    failed_runs+=("$name")
+    printf '  FAIL %s run exited %d\n' "$name" "$code"
+    tail -n 20 -- "$work/$name.json" | sed 's/^/    /'
+  fi
+  return "$code"
+}
+
+skip=()
+plain_pattern=
+if [ "${#without_coverage[@]}" -gt 0 ]; then
+  plain_pattern="^($(IFS='|'; printf '%s' "${without_coverage[*]}"))\$"
+  skip=(-skip "$plain_pattern")
+fi
 status=0
 for side in base candidate; do
   go -C "$work/$side" test -list '.*' "$package" > "$work/$side.list"
   printf 'running %s %s with coverage\n' "$side" "$package"
-  # Proof 1 reads every outcome, including package failures, from the JSON.
-  go -C "$work/$side" test -count=1 -timeout=30m -json -coverpkg=./... -coverprofile="$work/$side.cover" \
-    "$package" > "$work/$side.json" || true
-  [ -s "$work/$side.cover" ] || { printf 'FAIL: %s produced no coverprofile\n' "$side" >&2; exit 1; }
-  : > "$work/$side.plain.json"
-  if [ "${#without_coverage[@]}" -gt 0 ]; then
-    go -C "$work/$side" test -count=1 -timeout=30m -json -run "$plain_pattern" "$package" \
-      > "$work/$side.plain.json" || true
+  run "$side" "$side" "${skip[@]}" -coverpkg=./... -coverprofile="$work/$side.cover" || true
+  if [ -n "$plain_pattern" ]; then
+    printf 'running %s %s without coverage: %s\n' "$side" "$package" "$plain_pattern"
+    run "$side.plain" "$side" -run "$plain_pattern" || true
   fi
 done
+runs_of() {
+  local side="$1"
+  if [ -n "$plain_pattern" ]; then printf '%s,%s' "$work/$side.json" "$work/$side.plain.json"
+  else printf '%s' "$work/$side.json"; fi
+}
 
 printf '\n== proof 1: test list and pass set\n'
-if check tests "$work/base.list" "$work/candidate.list" "$work/base.json" "$work/candidate.json" \
-  "$work/base.plain.json" "$work/candidate.plain.json" "$plain_list" "${allowed_tests[@]}"; then
+if [ "${#failed_runs[@]}" -eq 0 ] && check tests "$work/base.list" "$work/candidate.list" \
+  "$(runs_of base)" "$(runs_of candidate)" "${allowed_tests[@]}"; then
   printf 'PASS\n'
-else status=1; printf 'FAIL\n'; fi
-
-printf '\n== proof 2: base assertions survive or are bound to reviewed replacements\n'
-if check asserts "$work/base/$package" "$work/candidate/$package" "$renames" "$waivers" "${replacements[@]}"; then
-  printf 'PASS\n'
-else status=1; printf 'FAIL\n'; fi
+else
+  [ "${#failed_runs[@]}" -eq 0 ] || printf '  FAIL runs that did not exit 0: %s\n' "${failed_runs[*]}"
+  status=1; printf 'FAIL\n'
+fi
 
 printf '\n== proof 3: covered non-test blocks are equal or a superset\n'
-profiles=("$work/candidate.cover")
-for rerun in $(seq 0 "$coverage_reruns"); do
-  if [ "$rerun" -gt 0 ]; then
-    printf 'rerunning candidate %s with coverage (%d of %d)\n' "$package" "$rerun" "$coverage_reruns"
-    go -C "$work/candidate" test -count=1 -timeout=30m -json -coverpkg=./... \
-      -coverprofile="$work/candidate.$rerun.cover" "$package" > "$work/candidate.$rerun.json" || true
-    [ -s "$work/candidate.$rerun.cover" ] || { printf 'FAIL: candidate rerun produced no coverprofile\n' >&2; exit 1; }
-    profiles+=("$work/candidate.$rerun.cover")
-  fi
-  if check coverage "$work/base.cover" "${profiles[@]}" > "$work/coverage.out"; then
-    coverage_ok=1
-  else coverage_ok=0; fi
-  [ "$coverage_ok" = 1 ] && break
-done
-cat "$work/coverage.out"
+coverage_ok=0
+if [ "${#failed_runs[@]}" -ne 0 ]; then
+  printf '  FAIL coverage needs base and candidate runs that exited 0\n'
+else
+  profiles=("$work/candidate.cover")
+  for rerun in $(seq 0 "$coverage_reruns"); do
+    if [ "$rerun" -gt 0 ]; then
+      printf 'rerunning candidate %s with coverage (%d of %d)\n' "$package" "$rerun" "$coverage_reruns"
+      run "candidate.rerun$rerun" candidate "${skip[@]}" -coverpkg=./... \
+        -coverprofile="$work/candidate.$rerun.cover" || break
+      profiles+=("$work/candidate.$rerun.cover")
+    fi
+    if check coverage "$work/base.cover" "${profiles[@]}" > "$work/coverage.out"; then
+      coverage_ok=1
+      break
+    fi
+  done
+  cat "$work/coverage.out"
+fi
 if [ "$coverage_ok" = 1 ]; then
   printf 'PASS\n'
 else status=1; printf 'FAIL\n'; fi
@@ -179,31 +186,35 @@ else
   check mutants "$mutants" "$work/candidate" "$selection" "${changed[@]}" > "$work/mutants.rows" || mutant_status=1
   declare -A pristine=()
   while IFS= read -r -d '' line && IFS= read -r -d '' test_file && IFS= read -r -d '' pattern \
-    && IFS= read -r -d '' product && IFS= read -r -d '' old && IFS= read -r -d '' new; do
+    && IFS= read -r -d '' target_file && IFS= read -r -d '' old && IFS= read -r -d '' new; do
     count=$((count + 1))
     if [ -z "${pristine[$pattern]+set}" ]; then
-      go -C "$work/candidate" test -count=1 -timeout=10m -json -run "$pattern" "$package" > "$work/pristine.json" 2>&1 || true
-      pristine[$pattern]="$(check verdict "$work/pristine.json")"
+      # The control must exit 0 and pass at least one selected test.
+      if go -C "$work/candidate" test -count=1 -timeout=10m -json -run "$pattern" "$package" \
+        > "$work/pristine.json" 2>&1 && [ "$(check passed "$work/pristine.json")" -gt 0 ]; then
+        pristine[$pattern]=passed
+      else
+        pristine[$pattern]=failed
+      fi
     fi
-    target="$work/candidate/$product"
+    target="$work/candidate/$target_file"
     if [ "${pristine[$pattern]}" != passed ]; then
-      result="broken (selected tests ${pristine[$pattern]} without the mutant)"
+      result="broken (selected tests do not pass without the mutant)"
     else
       cp -p -- "$target" "$work/original"
       if ! check apply "$target" "$old" "$new"; then
         result=invalid
+      elif ! go -C "$work/candidate" test -c -o "$work/mutant.test" "$package" > "$work/mutant.build" 2>&1; then
+        result="invalid (does not build)"
+      elif go -C "$work/candidate" test -count=1 -timeout=10m -run "$pattern" "$package" > "$work/mutant.out" 2>&1; then
+        result=survived
       else
-        go -C "$work/candidate" test -count=1 -timeout=10m -json -run "$pattern" "$package" > "$work/mutant.json" 2>&1 || true
-        case "$(check verdict "$work/mutant.json")" in
-          failed) result=killed ;;
-          passed) result=survived ;;
-          *) result="$(check verdict "$work/mutant.json")" ;;
-        esac
+        result=killed
       fi
       cp -p -- "$work/original" "$target"
     fi
     [ "$result" = killed ] || mutant_status=1
-    printf '  %-8s %s:%s %s (%s) -run %s\n' "$result" "${mutants#"$ROOT"/}" "$line" "$product" "$test_file" "$pattern"
+    printf '  %-8s %s:%s %s (%s) -run %s\n' "$result" "${mutants#"$ROOT"/}" "$line" "$target_file" "$test_file" "$pattern"
   done < "$work/mutants.rows"
   printf 'mutants run: %d\n' "$count"
   if [ "$mutant_status" = 0 ] && [ "$count" -gt 0 ]; then
