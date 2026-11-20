@@ -14,6 +14,24 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Disposable fixtures must not become workspace repositories in Orca.
 export TMPDIR=/tmp
+# Python helpers imported by tests must not leave bytecode in the checkout.
+export PYTHONDONTWRITEBYTECODE=1
+
+# Tests keep disposable state outside the checkout and its optional private/ clone;
+# only .build/ may change.
+checkout_state() {
+  git -C "$ROOT" status --porcelain=v1 --ignored=matching --untracked-files=all \
+    | { grep -vx '!! \.build/' || true; }
+  if [ -e "$ROOT/private/.git" ]; then
+    git -C "$ROOT/private" status --porcelain=v1 --ignored=matching --untracked-files=all \
+      | sed 's|^|private: |'
+  fi
+}
+CHECKOUT_TRACKED=0
+if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
+  CHECKOUT_TRACKED=1
+  CHECKOUT_BEFORE="$(checkout_state)"
+fi
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
 SUMMARY="$RUN_DIR/summary.tsv"
@@ -135,6 +153,17 @@ check_go_race() {
     './internal/audit:TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes'
 }
 
+check_checkout_unchanged() {
+  [ "$CHECKOUT_TRACKED" = 1 ] || { printf 'checkout is not a Git work tree root; skipped\n'; return 0; }
+  local after
+  after="$(checkout_state)"
+  [ "$after" = "$CHECKOUT_BEFORE" ] || {
+    printf 'FAIL: tests changed the checkout outside .build/ (before/after git status):\n' >&2
+    diff <(printf '%s\n' "$CHECKOUT_BEFORE") <(printf '%s\n' "$after") >&2 || true
+    exit 1
+  }
+}
+
 if [ "$selection" != go ]; then
   run_check syntax check_syntax
   while IFS= read -r test_name; do
@@ -158,7 +187,7 @@ if [ "$selection" != shell ]; then
   run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
   run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
 fi
-[ "$selection" != go ] || exit 0
+[ "$selection" != go ] || { run_check checkout-unchanged check_checkout_unchanged; exit 0; }
 run_check manifests check_manifests
 
 for suite in unit contract integration; do
@@ -173,3 +202,4 @@ for suite in unit contract integration; do
     run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
   done < "$ROOT/tests/suites/$suite.list"
 done
+run_check checkout-unchanged check_checkout_unchanged
