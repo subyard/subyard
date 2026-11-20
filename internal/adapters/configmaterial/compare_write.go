@@ -322,7 +322,7 @@ type reportedFile struct {
 // refusals: each file's destination, state and InitOnly, and no text. Any
 // other failure has no report.
 func EncodeRefusals(err error) []byte {
-	refusals, ok := fileRefusals(err)
+	refusals, ok := FileRefusals(err)
 	if !ok {
 		return nil
 	}
@@ -337,7 +337,9 @@ func EncodeRefusals(err error) []byte {
 	return payload
 }
 
-func fileRefusals(err error) ([]FileRefusal, bool) {
+// FileRefusals are the file refusals of err, in order, and true only when err
+// consists of nothing else.
+func FileRefusals(err error) ([]FileRefusal, bool) {
 	if refusal, ok := err.(FileRefusal); ok {
 		return []FileRefusal{refusal}, true
 	}
@@ -347,7 +349,7 @@ func fileRefusals(err error) ([]FileRefusal, bool) {
 	}
 	var refusals []FileRefusal
 	for _, cause := range joined.Unwrap() {
-		files, ok := fileRefusals(cause)
+		files, ok := FileRefusals(cause)
 		if !ok {
 			return nil, false
 		}

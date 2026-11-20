@@ -354,7 +354,7 @@ func TestDispatcherConfigApplierRelaysOnlyTypedFileRefusals(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, exit, want string
-		drift            bool
+		drift, noTemp    bool
 	}{
 		{name: "report", want: refusal.Error()},
 		{name: "none", want: "exit status 1"},
@@ -363,12 +363,18 @@ func TestDispatcherConfigApplierRelaysOnlyTypedFileRefusals(t *testing.T) {
 		{name: "report", exit: "0"},
 		// A config apply child plans for itself and is named no descriptor.
 		{name: "report", drift: true, want: "exit status 1"},
+		// Without a report file the child still refreshes, and relays nothing.
+		{name: "report", noTemp: true, exit: "0"},
+		{name: "report", noTemp: true, want: "exit status 1"},
 	} {
-		t.Run(fmt.Sprint(test.name, test.exit, test.drift), func(t *testing.T) {
+		t.Run(fmt.Sprint(test.name, test.exit, test.drift, test.noTemp), func(t *testing.T) {
 			environment := map[string]string{"EXIT": test.exit}
 			if payload, ok := reports[test.name]; ok {
 				environment["REPORT"] = filepath.Join(testkit.TempDir(t), "report")
 				testkit.WriteFile(t, environment["REPORT"], payload, 0o600)
+			}
+			if test.noTemp {
+				t.Setenv("TMPDIR", filepath.Join(root, "missing"))
 			}
 			err := dispatcherConfigApplier{path: dispatcher, environment: environment, applyDrift: test.drift}.ApplyConfig(context.Background(), "named", nil)
 			if test.want == "" && err != nil || test.want != "" && (err == nil || err.Error() != test.want) {
@@ -434,6 +440,13 @@ func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
 		if _, next := run(nil, report); next != "run yard -Y named init --configs" {
 			t.Fatalf("%s: next %q", name, next)
 		}
+	}
+	// A file refusal beside another failure names no file's step on either
+	// path: the child reports nothing, and the refresh runs again.
+	mixed := domain.CollectRefusals(testFileRefusals()["unowned-invalid"], errors.New("apply agent: failed"))
+	_, inProcess := run(failingConfigApplier{err: mixed}, nil)
+	if _, relayed := run(nil, configmaterial.EncodeRefusals(mixed)); inProcess != "run yard -Y named init --configs" || relayed != inProcess {
+		t.Fatalf("mixed failure: in process %q, relayed %q", inProcess, relayed)
 	}
 }
 

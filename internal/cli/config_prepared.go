@@ -643,14 +643,15 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 }
 
 // configApplyFailure is a refused refresh of one yard with its one next step.
-// Only the writer renders a file refusal's step: the first one in cause names
-// it, a changed file included. Otherwise the refresh child runs again and
-// plans over what the guest has then.
+// Only the writer renders a file refusal's step: when cause consists only of
+// file refusals, as a relayed report does, the first one names it, a changed
+// file included. Otherwise the refresh child runs again and plans over what
+// the guest has then.
 func configApplyFailure(approved configTargetAssessment, cause error) error {
 	name := approved.Target.Name
 	next := "run " + domain.RenderAction(domain.Action{Verb: domain.VerbInit, Yard: name}) + " --configs"
-	if refusal := new(configmaterial.FileRefusal); errors.As(cause, refusal) {
-		_, next = refusal.ActivationDiagnostic()
+	if refusals, ok := configmaterial.FileRefusals(cause); ok {
+		_, next = refusals[0].ActivationDiagnostic()
 	}
 	return configApplyRefusal{materializedConfigActivationError{cause, name, "materialized config", "config status", "apply", approved.Target.Loaded.Context.Paths.ConfigHome}, next}
 }

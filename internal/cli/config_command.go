@@ -1176,11 +1176,11 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 			}
 			defer consentFile.Close()
 		}
-		var err error
-		if refusalsFile, err = unlinkedPrivateFile("subyard-config-refusals-*", nil); err != nil {
-			return err
+		// Without a report file the child still refreshes; it relays nothing.
+		if file, err := unlinkedPrivateFile("subyard-config-refusals-*", nil); err == nil {
+			refusalsFile = file
+			defer refusalsFile.Close()
 		}
-		defer refusalsFile.Close()
 	}
 	command := exec.CommandContext(ctx, applier.path, arguments...)
 	if consentFile != nil {
