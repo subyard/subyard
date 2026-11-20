@@ -1435,16 +1435,8 @@ func contextFrom(
 	}
 	forwardAgent, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("NESTED_E2E_VMS")
 	// Yes and prompt grant the guest sudo; prompt adds coding-agent approval rules.
-	devSudo := false
-	if tracker.inputsAvailable("DEV_SUDO") {
-		switch values["DEV_SUDO"] {
-		case "yes", "prompt":
-			devSudo = true
-		case "no":
-		default:
-			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigDevSudoMode))
-		}
-	}
+	// The catalog enum refuses other values once, at the scope that set them.
+	devSudo := tracker.inputsAvailable("DEV_SUDO") && (values["DEV_SUDO"] == "yes" || values["DEV_SUDO"] == "prompt")
 	e2eVMCPUResolved := false
 	if tracker.inputsAvailable("E2E_VM_CPU") {
 		rawE2EVMCPU := values["E2E_VM_CPU"]

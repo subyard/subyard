@@ -410,6 +410,9 @@ func TestPendingInitReportsOnlySudoPromptChanges(t *testing.T) {
 		if pending := len(settings) == 1 && settings[0].Name == "DEV_SUDO"; pending != test.pending || len(settings) > 1 {
 			t.Fatalf("installed %q, desired %q: %#v", test.applied, test.desired, settings)
 		}
+		if test.pending && (settings[0].Desired != test.desired || !strings.Contains(settings[0].Value(), test.desired)) {
+			t.Fatalf("installed %q, desired %q: row shows %q", test.applied, test.desired, settings[0].Value())
+		}
 	}
 }
 

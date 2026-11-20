@@ -360,8 +360,9 @@ func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
 				environment["DEV_SUDO"] = value
 			}
 			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, Environment: environment})
-			if err == nil || !strings.Contains(err.Error(), "DEV_SUDO") || !strings.Contains(err.Error(), "must be one of yes, no, prompt") {
-				t.Fatalf("%s DEV_SUDO=%s: %v", scope, value, err)
+			if err == nil || strings.Count(err.Error(), "DEV_SUDO") != 1 ||
+				!strings.Contains(err.Error(), "must be one of yes, no, prompt; 1 and 0 are no longer accepted") {
+				t.Fatalf("%s DEV_SUDO=%s: want one refusal naming the new and retired values: %v", scope, value, err)
 			}
 		}
 	}
