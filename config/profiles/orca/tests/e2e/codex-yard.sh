@@ -103,6 +103,7 @@ guest_root runuser -u dev -- env \
   python3 -B "$guest_helper" --sudo "$sudo_fixture/one" "$sudo_fixture/two" \
   || die 'native Codex sudo approval failed'
 guest_root rm -rf -- "$sudo_fixture"
+guest_root rm -f -- "$guest_helper"
 yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
 yard init --yes >/dev/null || die 'yard init did not restore the default sudo mode'
 if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'default sudo mode kept the sudo ask rules'; fi
