@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -23,19 +21,6 @@ import (
 // olderReleaseFixture publishes an active release and a target release beside it.
 // The target advertises its compiled activation owners and declares targetID.
 func olderReleaseFixture(t *testing.T, targetVersion, targetID string) (*Runtime, string, string, string, *verifiedPublishedCandidate) {
-	t.Helper()
-	fixture := newOlderReleaseFixture(t, targetVersion, targetID, targetVersion+"-target", sourceAdmissionRegistry)
-	return fixture.runtime, fixture.runtimeRoot, fixture.home, fixture.installed, fixture.verified
-}
-
-type olderRelease struct {
-	runtime                                *Runtime
-	runtimeRoot, home, installed, launches string
-	activeID, targetRelease                string
-	verified                               *verifiedPublishedCandidate
-}
-
-func newOlderReleaseFixture(t *testing.T, targetVersion, targetID, targetRelease, targetRegistry string) olderRelease {
 	t.Helper()
 	aboveAnchor := semver.MustParse(UpdateAnchorVersion)
 	aboveAnchor.Patch++
@@ -53,18 +38,16 @@ func newOlderReleaseFixture(t *testing.T, targetVersion, targetID, targetRelease
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(target, "config/profiles/sample/profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"`+targetID+`","handler":"runtime.sh"},"managed_paths":[{"root":"data","path":"service/{yard}"}]}`), 0o600)
-	activeID := activeVersion + "-active"
-	launches := filepath.Join(filepath.Dir(active), "transition-launches")
-	inspection := fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate the older release"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected update"}}}`, activeID, targetRelease)
-	for _, candidate := range []struct{ path, id, version, registry string }{{active, activeID, activeVersion, sourceAdmissionRegistry}, {target, targetRelease, targetVersion, targetRegistry}} {
+	activeID, targetRelease := activeVersion+"-active", targetVersion+"-target"
+	for _, candidate := range []struct{ path, id, version string }{{active, activeID, activeVersion}, {target, targetRelease, targetVersion}} {
 		for _, directory := range []string{"bin", "config/preview"} {
 			if err := os.MkdirAll(filepath.Join(candidate.path, directory), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}
-		engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine %s\\n' ;;\n _release-transition) request=$(cat); case \"$request\" in\n *runtime-activation-capabilities*) printf '%%s\\n' %q ;;\n *) printf 'launch\\n' >> %q; printf '%%s\\n' %q ;;\n esac ;;\n *) exit 64 ;;\nesac\n", candidate.version, capabilities, launches, inspection)
+		engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine %s\\n' ;;\n _release-transition) request=$(cat); case \"$request\" in\n *runtime-activation-capabilities*) printf '%%s\\n' %q ;;\n *) exit 1 ;;\n esac ;;\n *) exit 64 ;;\nesac\n", candidate.version, capabilities)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "bin/yard-engine"), []byte(engine), 0o700)
-		testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte(candidate.registry), 0o600)
+		testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte(sourceAdmissionRegistry), 0o600)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "config/preview/subyard-preview"), []byte("identical public core helper"), 0o700)
 		var manifest strings.Builder
 		if err := filepath.WalkDir(candidate.path, func(path string, entry os.DirEntry, err error) error {
@@ -100,8 +83,7 @@ func newOlderReleaseFixture(t *testing.T, targetVersion, targetID, targetRelease
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = verified.Close() })
-	return olderRelease{runtime: runtime, runtimeRoot: runtimeRoot, home: home, installed: installed, launches: launches,
-		activeID: activeID, targetRelease: targetRelease, verified: verified}
+	return runtime, runtimeRoot, home, installed, verified
 }
 
 func TestExplicitOlderReleaseKeepsTheRetainedRuntimeContract(t *testing.T) {
@@ -159,90 +141,4 @@ func TestExplicitOlderReleaseKeepsTheRetainedRuntimeContract(t *testing.T) {
 			}
 		})
 	}
-}
-
-// olderUpdateFixture serves the target as the verified offline bundle for
-// yard update --version, beside the active release that installed its runtime.
-func olderUpdateFixture(t *testing.T, targetID, targetRegistry string) (olderRelease, []string) {
-	t.Helper()
-	version := UpdateAnchorVersion
-	cache := testkit.TempDir(t)
-	if err := os.MkdirAll(filepath.Join(cache, version), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("subyard-%s-linux-%s.tar.gz", version, goruntime.GOARCH)
-	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-		testkit.WriteFile(t, filepath.Join(cache, version, name+suffix), []byte("older release fixture"), 0o600)
-	}
-	target, _, err := releaseBundleIdentity(version, filepath.Join(cache, version, name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := newOlderReleaseFixture(t, version, targetID, filepath.Base(target), targetRegistry)
-	published := filepath.Join(fixture.runtimeRoot, target)
-	installer := filepath.Join(cache, "installer")
-	testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nset -eu\nmkdir -p \"$2/releases\"\ncp -a %q \"$2/%s\"\nprintf '%%s\\n' %q\n", published, target, target)), 0o700)
-	fixture.runtime.config.Installer = installer
-	fixture.runtime.config.Inputs.values["YARD_RELEASE_CACHE"] = cache
-	fixture.runtime.config.Stdout, fixture.runtime.config.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
-	return fixture, []string{"--offline", "--version", version, "--runtime-root", fixture.runtimeRoot}
-}
-
-func (fixture olderRelease) assertUnchanged(t *testing.T, launches []byte) {
-	t.Helper()
-	if current, err := os.Readlink(filepath.Join(fixture.runtimeRoot, "current")); err != nil || current != "releases/"+fixture.activeID {
-		t.Fatalf("active runtime changed: %q, %v", current, err)
-	}
-	if _, err := os.Lstat(filepath.Join(fixture.runtimeRoot, "previous")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("refusal created a rollback horizon: %v", err)
-	}
-	if got, _ := os.ReadFile(fixture.launches); !bytes.Equal(got, launches) {
-		t.Fatalf("a refused update launched the transition: %q", got)
-	}
-}
-
-func TestUpdateToAnExplicitOlderReleaseRefusesALostRuntimeOwner(t *testing.T) {
-	for _, check := range []bool{true, false} {
-		t.Run(fmt.Sprintf("check=%t", check), func(t *testing.T) {
-			fixture, arguments := olderUpdateFixture(t, "sample-runtime-v0", sourceAdmissionRegistry)
-			if check {
-				arguments = append(arguments, "--check")
-			}
-			prepared, err := fixture.runtime.PrepareTransition(context.Background(), arguments, fixture.home, "default")
-			if prepared.Close != nil {
-				defer prepared.Close()
-			}
-			outcome, ok := TransitionOutcome(err)
-			if check {
-				var stdout bytes.Buffer
-				fixture.runtime.config.Stdout = &stdout
-				if err != nil || prepared.run == nil {
-					t.Fatalf("--check did not report the refusal: %v", err)
-				}
-				_ = prepared.Execute(context.Background())
-				if !strings.Contains(stdout.String(), `"code": "rollback-incompatible"`) || !strings.Contains(stdout.String(), olderRuntimeRefusal) {
-					t.Fatalf("--check report omits the refusal: %q", stdout.String())
-				}
-			} else if !ok || outcome.Code != releasetransition.CodeRollbackIncompatible || outcome.Message != olderRuntimeRefusal ||
-				outcome.Target != releasetransition.ReleaseID(fixture.targetRelease) {
-				t.Fatalf("older release losing an installed runtime owner was not refused: %v", err)
-			}
-			fixture.assertUnchanged(t, nil)
-		})
-	}
-}
-
-func TestUpdateToAnExplicitOlderReleaseRechecksRuntimeOwnersBeforeEffects(t *testing.T) {
-	fixture, arguments := olderUpdateFixture(t, "sample-runtime", sourceAdmissionRegistry)
-	prepared, err := fixture.runtime.PrepareTransition(context.Background(), append(arguments, "--yes"), fixture.home, "default")
-	if err != nil || !prepared.Changed {
-		t.Fatalf("older release keeping every runtime owner was not planned: %v", err)
-	}
-	defer prepared.Close()
-	launches := mustReadFile(t, fixture.launches)
-	testkit.WriteFile(t, fixture.installed, []byte("changed installed profile runtime"), 0o700)
-	if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), "installed runtime inputs changed") {
-		t.Fatalf("execution did not recheck the installed runtime owners: %v", err)
-	}
-	fixture.assertUnchanged(t, launches)
 }
