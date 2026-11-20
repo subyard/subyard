@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -67,25 +68,70 @@ func (runtime *Runtime) retainedRuntimeBinding(ctx context.Context, activeRoot, 
 	if err != nil {
 		return "", err
 	}
+	refusals := []error{}
 	for _, consumer := range support.Consumers {
 		if consumer.Kind == "profile" {
 			loses := consumer.RetainedContract != "same" || targetOwners != nil && !targetOwners[consumer.Owner]
+			refusal := retainedProfileRuntimeRefusal{yard: consumer.Yard, profile: consumer.Profile, owner: consumer.Owner,
+				disable: consumer.Selected && consumer.Disableable}
 			if loses && (consumer.ManagedPathsPresent || consumer.ManagedPaths == 0 && consumer.Selected) {
-				return "", fmt.Errorf("retained release cannot activate installed profile runtime %s", consumer.Owner)
+				refusals = append(refusals, refusal)
+				continue
 			}
 			// An absent runtime, or a converged one that owns nothing or is deactivated,
 			// leaves the retained release no installed activation to take over.
 			if loses && (consumer.Observation == nil || consumer.Observation.State != ports.RuntimeStateAbsent &&
 				!(consumer.Observation.State == ports.RuntimeStateCurrent && (consumer.Observation.OwnershipAbsent || consumer.Observation.Deactivated))) {
-				return "", fmt.Errorf("retained release cannot activate installed profile runtime %s", consumer.Owner)
+				refusals = append(refusals, refusal)
 			}
 		} else if !targetOwners[consumer.Owner] {
 			for _, part := range consumer.Installed {
 				if part.Present && (part.Payload != "same" || part.Settings != "same") {
-					return "", errors.New("retained release cannot activate installed core helper contract")
+					refusals = append(refusals, errors.New("retained release cannot activate installed core helper contract"))
+					break
 				}
 			}
 		}
 	}
+	if err := domain.CollectOrderedRefusals(refusals...); err != nil {
+		return "", err
+	}
 	return support.Binding, nil
+}
+
+// retainedProfileRuntimeRefusal names an installed profile runtime that a
+// retained release cannot activate. disable reports an enabled profile whose
+// `profile disable` in that yard deactivates the runtime.
+type retainedProfileRuntimeRefusal struct {
+	yard, profile, owner string
+	disable              bool
+}
+
+func (refusal retainedProfileRuntimeRefusal) Error() string {
+	return fmt.Sprintf("retained release cannot activate installed profile runtime %s in yard %s", refusal.owner, refusal.yard)
+}
+
+// olderRuntimeOutcomeText is the public message and next step for a refused
+// older target. Enabled profiles the operator can disable are named with the
+// command; any other refusal keeps the general message and fallback.
+func olderRuntimeOutcomeText(refusal error, fallback string) (string, string) {
+	causes := []error{refusal}
+	if joined, ok := refusal.(interface{ Unwrap() []error }); ok {
+		causes = joined.Unwrap()
+	}
+	named, commands := []string{}, []string{}
+	for _, cause := range causes {
+		var profile retainedProfileRuntimeRefusal
+		if !errors.As(cause, &profile) || !profile.disable || !domain.SafeName(profile.profile) || !domain.SafeName(profile.yard) {
+			return olderRuntimeRefusal, fallback
+		}
+		named = append(named, fmt.Sprintf("profile %s in yard %s", profile.profile, profile.yard))
+		commands = append(commands, fmt.Sprintf("profile %s in yard %s (yard -Y %s profile disable %s)", profile.profile, profile.yard, profile.yard, profile.profile))
+	}
+	message := "the retained release cannot activate the installed runtime of enabled " + strings.Join(named, ", ")
+	retry := "disable " + strings.Join(commands, " and ") + ", then run yard update --check"
+	if len(message) > 512 || len(retry) > 512 {
+		return olderRuntimeRefusal, fallback
+	}
+	return message, retry
 }

@@ -31,7 +31,7 @@ func olderReleaseFixture(t *testing.T, targetVersion, targetID string) (*Runtime
 type olderRelease struct {
 	runtime                                *Runtime
 	runtimeRoot, home, installed, launches string
-	activeID, targetRelease                string
+	activeID, targetRelease, inspection    string
 	verified                               *verifiedPublishedCandidate
 }
 
@@ -55,14 +55,16 @@ func newOlderReleaseFixture(t *testing.T, targetVersion, targetID, targetRelease
 	testkit.WriteFile(t, filepath.Join(target, "config/profiles/sample/profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"`+targetID+`","handler":"runtime.sh"},"managed_paths":[{"root":"data","path":"service/{yard}"}]}`), 0o600)
 	activeID := activeVersion + "-active"
 	launches := filepath.Join(filepath.Dir(active), "transition-launches")
+	inspectionPath := filepath.Join(filepath.Dir(active), "inspection.json")
 	inspection := fmt.Sprintf(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["activate the older release"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected update"}}}`, activeID, targetRelease)
+	testkit.WriteFile(t, inspectionPath, []byte(inspection+"\n"), 0o600)
 	for _, candidate := range []struct{ path, id, version, registry string }{{active, activeID, activeVersion, sourceAdmissionRegistry}, {target, targetRelease, targetVersion, targetRegistry}} {
 		for _, directory := range []string{"bin", "config/preview"} {
 			if err := os.MkdirAll(filepath.Join(candidate.path, directory), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}
-		engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine %s\\n' ;;\n _release-transition) request=$(cat); case \"$request\" in\n *runtime-activation-capabilities*) printf '%%s\\n' %q ;;\n *) printf 'launch\\n' >> %q; printf '%%s\\n' %q ;;\n esac ;;\n *) exit 64 ;;\nesac\n", candidate.version, capabilities, launches, inspection)
+		engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine %s\\n' ;;\n _release-transition) request=$(cat); case \"$request\" in\n *runtime-activation-capabilities*) printf '%%s\\n' %q ;;\n *) printf 'launch\\n' >> %q; cat %q ;;\n esac ;;\n *) exit 64 ;;\nesac\n", candidate.version, capabilities, launches, inspectionPath)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "bin/yard-engine"), []byte(engine), 0o700)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte(candidate.registry), 0o600)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "config/preview/subyard-preview"), []byte("identical public core helper"), 0o700)
@@ -101,7 +103,7 @@ func newOlderReleaseFixture(t *testing.T, targetVersion, targetID, targetRelease
 	}
 	t.Cleanup(func() { _ = verified.Close() })
 	return olderRelease{runtime: runtime, runtimeRoot: runtimeRoot, home: home, installed: installed, launches: launches,
-		activeID: activeID, targetRelease: targetRelease, verified: verified}
+		activeID: activeID, targetRelease: targetRelease, inspection: inspectionPath, verified: verified}
 }
 
 func TestExplicitOlderReleaseKeepsTheRetainedRuntimeContract(t *testing.T) {
@@ -276,6 +278,99 @@ func TestUpdateToAnExplicitOlderReleaseReportsItsRegistryRefusal(t *testing.T) {
 				t.Fatalf("registry refusal was not reported: %q (%v)", report, err)
 			}
 			fixture.assertUnchanged(t, nil)
+		})
+	}
+}
+
+// declareDisableableProfile gives both releases a sample profile like telemetry:
+// an owner service, so `profile disable` exists, and no managed host paths.
+func (fixture olderRelease) declareDisableableProfile(t *testing.T, targetID string) {
+	t.Helper()
+	for release, id := range map[string]string{fixture.activeID: "sample-runtime", fixture.targetRelease: targetID} {
+		root := filepath.Join(fixture.runtimeRoot, "releases", release)
+		testkit.WriteFile(t, filepath.Join(root, "config/profiles/sample/profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"owner_service":"runtime.sh","runtime":{"activation_id":"`+id+`","handler":"runtime.sh"}}`), 0o600)
+		rewriteReleaseOwnerManifest(t, publishedCandidate{root: root})
+	}
+}
+
+func TestOlderReleaseRefusalNamesTheEnabledProfileToDisable(t *testing.T) {
+	const (
+		message = "the retained release cannot activate the installed runtime of enabled profile sample in yard default"
+		retry   = "disable profile sample in yard default (yard -Y default profile disable sample), then run yard update --check"
+	)
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback=%t", rollback), func(t *testing.T) {
+			fixture, arguments := olderUpdateFixture(t, "sample-runtime-v0", sourceAdmissionRegistry)
+			fixture.declareDisableableProfile(t, "sample-runtime-v0")
+			if rollback {
+				if err := os.Symlink("releases/"+fixture.targetRelease, filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+					t.Fatal(err)
+				}
+				arguments = []string{"--rollback", "--runtime-root", fixture.runtimeRoot}
+				inspection := strings.Replace(string(mustReadFile(t, fixture.inspection)), `"target":`, `"previous":"`+fixture.targetRelease+`","target":`, 1)
+				testkit.WriteFile(t, fixture.inspection, []byte(inspection), 0o600)
+			}
+			observation := ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("a", 64)}
+			fixture.runtime.config.ProfileRuntimeObservation = func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error) {
+				return observation, nil
+			}
+			prepare := func() (Prepared, error) {
+				prepared, err := fixture.runtime.PrepareTransition(context.Background(), arguments, fixture.home, "default")
+				if prepared.Close != nil {
+					t.Cleanup(func() { _ = prepared.Close() })
+				}
+				return prepared, err
+			}
+			// Enabled: the refusal names the profile, its yard and the command that deactivates it.
+			_, err := prepare()
+			if outcome, ok := TransitionOutcome(err); !ok || outcome.Code != releasetransition.CodeRollbackIncompatible ||
+				outcome.Message != message || outcome.Retry != retry {
+				t.Fatalf("enabled profile refusal = %v", err)
+			}
+			// Disabled but not proven deactivated: the general refusal remains.
+			testkit.WriteFile(t, filepath.Join(fixture.home, "config.env"), []byte("ENVIRONMENT_PROFILES=\n"), 0o600)
+			_, err = prepare()
+			if outcome, ok := TransitionOutcome(err); !ok || outcome.Message != olderRuntimeRefusal {
+				t.Fatalf("disabled runtime without a deactivation proof = %v", err)
+			}
+			// Disabled and deactivated: the older release is admitted.
+			observation.Deactivated = true
+			if prepared, err := prepare(); err != nil || !prepared.Changed {
+				t.Fatalf("deactivated runtime was not admitted: %v", err)
+			}
+		})
+	}
+}
+
+func TestOlderRuntimeOutcomeTextNamesEveryDisableableProfile(t *testing.T) {
+	const fallback = "keep the current release active"
+	enabled := func(yard, name string) error {
+		return retainedProfileRuntimeRefusal{yard: yard, profile: name, owner: name + "-runtime", disable: true}
+	}
+	for name, test := range map[string]struct {
+		refusal        error
+		message, retry string
+	}{
+		"two yards": {
+			refusal: domain.CollectOrderedRefusals(enabled("default", "sample"), enabled("work", "other")),
+			message: "the retained release cannot activate the installed runtime of enabled profile sample in yard default, profile other in yard work",
+			retry:   "disable profile sample in yard default (yard -Y default profile disable sample) and profile other in yard work (yard -Y work profile disable other), then run yard update --check",
+		},
+		"one profile without disable": {
+			refusal: domain.CollectOrderedRefusals(enabled("default", "sample"), retainedProfileRuntimeRefusal{yard: "work", profile: "other", owner: "other-runtime"}),
+			message: olderRuntimeRefusal, retry: fallback,
+		},
+		"core helper": {
+			refusal: domain.CollectOrderedRefusals(enabled("default", "sample"), errors.New("retained release cannot activate installed core helper contract")),
+			message: olderRuntimeRefusal, retry: fallback,
+		},
+		"unrelated failure": {refusal: errors.New("cannot capture retained runtime selection"), message: olderRuntimeRefusal, retry: fallback},
+	} {
+		t.Run(name, func(t *testing.T) {
+			message, retry := olderRuntimeOutcomeText(test.refusal, fallback)
+			if message != test.message || retry != test.retry {
+				t.Fatalf("outcome text = %q / %q", message, retry)
+			}
 		})
 	}
 }

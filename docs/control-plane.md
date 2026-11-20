@@ -2675,6 +2675,9 @@ completed migrations are not replayed for runtime repair. The input-free schema-
 IDs. It leaves frozen recovery capability responses unchanged. Rollback, and an update to an
 explicitly selected older release, refuse a target that loses an installed profile's runtime
 owner, including deselected owner or guest artifacts, or a selected guest-only runtime contract.
+The refusal reports every losing owner. When each one belongs to an enabled profile that
+declares an owner service, it names those profiles and yards, and its next step is
+`yard -Y YARD profile disable NAME` for each, then `yard update --check`.
 When host receipts are absent, before
 losing an owner admission asks that one native observer to prove guest absence or
 deactivation; stopped, missing or failed observations prove neither. That observation is

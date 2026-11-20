@@ -1297,20 +1297,20 @@ func (runtime *Runtime) prepareProtectedTransition(
 const olderRuntimeRefusal = "the retained release cannot verify installed runtime activation"
 
 // olderReleaseRuntimeBinding applies the retained runtime contract to an older
-// target. refused reports a target that would lose an installed profile runtime
-// or helper contract; err reports a failure to decide.
+// target. refusal reports every installed profile runtime or helper contract the
+// target would lose; err reports a failure to decide.
 func (runtime *Runtime) olderReleaseRuntimeBinding(
 	ctx context.Context,
 	runtimeRoot string,
 	verified *verifiedPublishedCandidate,
 	activeRoot, targetRoot, configHome string,
-) (binding string, targetOwners map[string]bool, refused bool, err error) {
+) (binding string, targetOwners map[string]bool, refusal error, err error) {
 	// Absence of the optional query advertises no profile owners. Identical
 	// public core payloads retain their existing historical compatibility path.
 	targetOwners = map[string]bool{}
 	applicable, err := retainedRuntimeApplicable(activeRoot)
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, nil, err
 	}
 	if applicable && verified.registryDigest != "" {
 		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, runtimeRoot, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
@@ -1319,10 +1319,10 @@ func (runtime *Runtime) olderReleaseRuntimeBinding(
 				targetOwners[id] = true
 			}
 		} else if errors.Is(capabilityErr, domain.ErrPlanStale) || errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
-			return "", nil, false, capabilityErr
+			return "", nil, nil, capabilityErr
 		} else if selectionRefusedQuery(ctx, capabilityErr) {
 			// The selection's own refusal blocked the query: a failed read, not absent owners.
-			return "", nil, false, capabilityErr
+			return "", nil, nil, capabilityErr
 		}
 	}
 	// A failed optional query grants no activation owners. The historical path
@@ -1331,9 +1331,9 @@ func (runtime *Runtime) olderReleaseRuntimeBinding(
 	// a version claim proves compatibility; execution rechecks both proofs.
 	binding, bindErr := runtime.retainedRuntimeBinding(ctx, activeRoot, targetRoot, configHome, targetOwners)
 	if bindErr != nil {
-		return "", targetOwners, true, nil
+		return "", targetOwners, bindErr, nil
 	}
-	return binding, targetOwners, false, nil
+	return binding, targetOwners, nil, nil
 }
 
 // admitOlderRelease keeps the rollback contract for an explicitly selected
@@ -1351,7 +1351,7 @@ func (runtime *Runtime) admitOlderRelease(
 		return nil, nil
 	}
 	older := &olderReleaseRuntime{activeRoot: filepath.Join(runtimeRoot, links.current.target), targetRoot: target.candidate.root}
-	binding, owners, refused, err := runtime.olderReleaseRuntimeBinding(ctx, runtimeRoot, target, older.activeRoot, older.targetRoot, configHome)
+	binding, owners, refusal, err := runtime.olderReleaseRuntimeBinding(ctx, runtimeRoot, target, older.activeRoot, older.targetRoot, configHome)
 	if selectionRefusedQuery(ctx, err) {
 		// The owner finding depends on that refused read. The ordinary inspection
 		// reports the selection's refusal with its other independent findings, and
@@ -1361,9 +1361,10 @@ func (runtime *Runtime) admitOlderRelease(
 	if err != nil {
 		return nil, err
 	}
-	if refused {
-		outcome := publicReleaseOutcome(observed, target.candidate.release, nil, releasetransition.CodeRollbackIncompatible, olderRuntimeRefusal,
+	if refusal != nil {
+		message, retry := olderRuntimeOutcomeText(refusal,
 			"keep the current release active or select a release with compatible component activation owners, then run yard update --check")
+		outcome := publicReleaseOutcome(observed, target.candidate.release, nil, releasetransition.CodeRollbackIncompatible, message, retry)
 		return nil, publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
 	}
 	older.binding, older.owners = binding, owners
@@ -1472,13 +1473,14 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(err)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
-	runtimeBinding, targetOwners, refused, err := runtime.olderReleaseRuntimeBinding(ctx, parsed.root, verified, activeRoot, candidate.root, configHome)
+	runtimeBinding, targetOwners, refusal, err := runtime.olderReleaseRuntimeBinding(ctx, parsed.root, verified, activeRoot, candidate.root, configHome)
 	if err != nil {
 		return Prepared{}, verifiedPreparation(err)
 	}
-	if refused {
+	if refusal != nil {
+		message, retry := olderRuntimeOutcomeText(refusal, "retain a release with compatible component activation owners, then run yard update --check")
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
-			releasetransition.CodeRollbackIncompatible, olderRuntimeRefusal, "retain a release with compatible component activation owners, then run yard update --check")))
+			releasetransition.CodeRollbackIncompatible, message, retry)))
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request, nil)
 	if err != nil {
