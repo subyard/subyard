@@ -232,16 +232,19 @@ def apply(source, old, new):
 
 def verdict(path):
     failed = ran = 0
+    broken = False
     for line in Path(path).read_text().splitlines():
         try:
             event = json.loads(line)
         except ValueError:
+            broken = broken or "build failed" in line or "setup failed" in line
             continue
+        broken = broken or event.get("Action") == "build-fail" or "[build failed]" in event.get("Output", "")
         if event.get("Test") and event.get("Action") == "fail":
             failed += 1
         if event.get("Test") and event.get("Action") in ("pass", "fail"):
             ran += 1
-    print("killed" if failed else ("survived" if ran else "no-tests"))
+    print("killed" if failed else ("survived" if ran else ("invalid" if broken else "no-tests")))
 
 command = sys.argv[1]
 if command == "tests":
