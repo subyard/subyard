@@ -852,6 +852,8 @@ acquire_lease() {
   IFS=$'\t' read -r LEASE_YARD LEASE_PROJECT <<<"$workspace_context"
   [ -n "$LEASE_RUN" ] || LEASE_RUN="$(new_run_id)"
   [[ "$LEASE_RUN" =~ ^[0-9a-f]{8}$ ]] || die "invalid E2E run identity"
+  # Release acceptance requires each request to end in a grant or a typed refusal.
+  printf 'E2E lease request: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
   [ -n "$LEASE_PURPOSE" ] || LEASE_PURPOSE=agent-e2e
   telemetry_correlation request
   if ! status_response="$(facade_request status)"; then

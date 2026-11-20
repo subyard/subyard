@@ -883,19 +883,23 @@ def execute(name, command, root, output, env, slot=None):
         log_sha256 = digest(log)
     except OSError:
         log_sha256, capture_error = None, True
-    blocked = capacity_reason(log) if code == 4 and not interrupted else None
-    result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 and not capture_error else "failed", "exit_code": code,
+    status, reason = ("interrupted", None) if interrupted else ("failed", None)
+    if not interrupted and not capture_error:
+        try:
+            status, reason = lane_status({"exit_code": code, "termination": termination(code),
+                                          "cleanup": phases.get("cleanup")}, log, slot)
+        except OSError:
+            capture_error = True
+    blocked = reason[len("capacity_"):] if status == "blocked" else None
+    result = {"status": status, "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
               "log_sha256": log_sha256, "command": command_identity(command, root)}
-    result["termination"] = ("signal" if code is not None and (code < 0 or code in (130, 137, 143))
-                             else "timeout" if code == 124 else "exit" if code is not None else "unknown")
+    result["termination"] = termination(code)
     if result["termination"] == "signal":
         result["signal"] = -code if code < 0 else code - 128
     result["last_completed_phase"] = phases.get("last_completed_phase", "unknown")
     if phases.get("cleanup"):
         result["cleanup"] = phases["cleanup"]
-        if result["status"] == "passed" and any(item["exit_code"] != 0 for item in phases["cleanup"].values()):
-            result["status"] = "failed"
     result["capture_status"] = "failed" if capture_error else "recorded"
     result["cleanup_status"] = "recorded" if phases.get("cleanup") else "unknown"
     if phases.get("budgets"):
@@ -908,8 +912,8 @@ def execute(name, command, root, output, env, slot=None):
         result["environments"] = [{"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
                                   for kind, count, fingerprint in environments]
         result["environment_evidence"] = "recorded" if environments else "unknown"
-    if blocked:
-        result["reason"] = "capacity_" + blocked
+    if reason:
+        result["reason"] = reason
     if cleanup_status:
         result["cleanup_status"] = cleanup_status
     if slot:
@@ -986,31 +990,134 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
     return offset, discard
 
 
-def capacity_reason(log):
-    # The shared broker client emits this only after validating the typed broker refusal,
-    # as the runner (agent-e2e) or as the installed standalone client (subyard-test-vms).
-    # A lane may take sequential leases; a refusal of a later acquire still blocks on
-    # capacity when every earlier lease ended with a witnessed clean release.
-    reason = None
-    held = 0
-    with log.open("rb") as stream:
-        for line in stream:
-            match = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", line)
-            release = re.fullmatch(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
-            if match:
-                reason = None if held else match[1].decode()
-            elif line.startswith(b"E2E lease:"):
-                held += 1
-                reason = None
-            elif re.match(rb"E2E_PHASE phase=guest state=start ", line):
-                # Guest work runs inside an already counted lease.
-                held = max(held, 1)
-                reason = None
-            elif release:
-                if release[1] != b"0":
-                    return None
-                held = max(held - 1, 0)
-    return None if held else reason
+LEASE_STAGE = re.compile(rb"E2E_PHASE phase=(allocation|transport|guest|guest-cleanup|cleanup/release) state=(start|end) duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n")
+LEASE_GRANT = re.compile(rb"E2E lease: ([^\r\n]{0,2000}) type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n")
+LEASE_REQUEST = re.compile(rb"E2E lease request: slot=((?:slot-)?[0-9]{1,3}) run=([0-9A-Za-z_-]{1,64})\n")
+LEASE_RELEASED = re.compile(rb"E2E lease released: (?:slot=((?:slot-)?[0-9]{1,3}) run=([0-9A-Za-z_-]{1,64})|handle=([0-9A-Za-z_-]{1,64}) slot=((?:slot-)?[0-9]{1,3}) reason=[a-z-]{1,32})\n")
+LEASE_RELEASE_END = re.compile(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
+CAPACITY_REFUSAL = re.compile(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for ((?:slot-)?[0-9]{1,3}): resource=(memory|disk); retry after resources become available\n")
+UNCONFIRMED_LEASE = re.compile(rb"(?:agent-e2e|subyard-test-vms): (?:(?:interrupted )?acquire cleanup remains unconfirmed|lease acquire unknown-outcome|broker capability probe failed|broker does not support)[^\r\n]*\n")
+
+
+def termination(code):
+    return ("signal" if code is not None and (code < 0 or code in (130, 137, 143))
+            else "timeout" if code == 124 else "exit" if code is not None else "unknown")
+
+
+def lane_leases(log, slot=None):
+    """Read the lane's own leases from its log: (first issue or None, final capacity refusal or None, environments).
+
+    Only lines outside guest windows belong to the lane; lease clients nested in a guest print
+    into the same log. Guest cleanup lines of concurrent VMs can sit inside another VM's window."""
+    lane_slot = int(slot) if slot is not None else None
+    depth, held, requested, refusal, issue, environments = 0, None, None, None, None, []
+
+    def number(value):
+        return int(value.decode().removeprefix("slot-"))
+
+    with open(log, "rb") as stream:
+        discard = False
+        while True:
+            line = stream.readline(4097)
+            if not line:
+                break
+            if discard or len(line) > 4096 or not line.endswith(b"\n"):
+                discard = not line.endswith(b"\n")
+                continue
+            found = None
+            stage = LEASE_STAGE.fullmatch(line)
+            if stage and int(stage[3]) <= 255 and bool(stage[4]) == (stage[1] != b"allocation" and stage[1] != b"cleanup/release"):
+                phase, state, code, vm = stage[1], stage[2], int(stage[3]), stage[4]
+                if depth == 0 and state == b"start" and phase in (b"transport", b"guest"):
+                    refusal = None  # Started guest work is not a refusal before any lease.
+                if phase == b"guest":
+                    depth = depth + 1 if state == b"start" else max(depth - 1, 0)
+                if held is not None and vm and state == b"start" and phase in (b"transport", b"guest"):
+                    held["dirty"].add(int(vm))
+                if phase == b"guest-cleanup" and state == b"end":
+                    if code:
+                        found = f"guest cleanup of VM{vm.decode()} exited {code}"
+                    elif held is not None:
+                        held["dirty"].discard(int(vm))
+                elif depth == 0 and state == b"end" and code and phase in (b"allocation", b"cleanup/release"):
+                    # A typed capacity refusal ends its allocation with exit 4.
+                    if not (phase == b"allocation" and code == 4 and refusal):
+                        found = f"{phase.decode()} exited {code}"
+            elif depth:
+                continue
+            elif grant := LEASE_GRANT.fullmatch(line):
+                fields = dict(item.split(b"=", 1) for item in grant[1].split() if b"=" in item)
+                run, granted = fields.get(b"run", b""), fields.get(b"slot", b"")
+                if not re.fullmatch(rb"[0-9A-Za-z_-]{1,64}", run) or not re.fullmatch(rb"(?:slot-)?[0-9]{1,3}", granted):
+                    found = "lease grant names no run or slot"
+                elif held is not None:
+                    found = f"second lease granted while slot-{held['slot']:03d} is held"
+                elif lane_slot is not None and number(granted) != lane_slot:
+                    found = f"lease granted for slot-{number(granted):03d}, not the lane slot"
+                else:
+                    held = {"slot": number(granted), "run": run, "dirty": set()}
+                    environments.append((grant[2].decode(), int(grant[3]), grant[4].decode()))
+                requested, refusal = None, None
+            elif line.startswith(b"E2E lease: "):
+                found = "unreadable lease grant"
+            elif request := LEASE_REQUEST.fullmatch(line):
+                if requested is not None:
+                    found = "lease request ended without a grant or typed refusal"
+                requested, refusal = request[1], None
+            elif released := LEASE_RELEASED.fullmatch(line):
+                run, freed = (released[2], released[1]) if released[1] else (released[3], released[4])
+                if held is None or (number(freed), run) != (held["slot"], held["run"]):
+                    found = "release of a lease the lane does not hold"
+                elif held["dirty"]:
+                    found = f"VM{min(held['dirty'])} guest work has no confirmed guest cleanup before release"
+                else:
+                    held = None
+                refusal = None
+            elif (end := LEASE_RELEASE_END.fullmatch(line)) and end[1] != b"0":
+                found = f"lease release exited {int(end[1])}"
+            elif capacity := CAPACITY_REFUSAL.fullmatch(line):
+                requested = None
+                refused = number(capacity[1])
+                refusal = capacity[2].decode() if lane_slot is None or refused == lane_slot else None
+            elif UNCONFIRMED_LEASE.fullmatch(line):
+                found = "lease outcome or cleanup is unconfirmed"
+            if found and issue is None:
+                issue = found
+    if issue is None and held is not None:
+        issue = f"lease slot-{held['slot']:03d} has no confirmed release"
+    if issue is None and requested is not None:
+        issue = "lease request ended without a grant or typed refusal"
+    return issue, None if issue else refusal, environments
+
+
+def lane_status(result, log, slot=None):
+    """The one PASS decision for a live or local check result and its bound log: (status, reason)."""
+    issue, refusal, _ = lane_leases(log, slot)
+    code = result.get("exit_code")
+    if refusal and code != 4:
+        issue = f"final lease request was refused for {refusal}"
+    if issue is None and code == 0 and result.get("termination", "exit") == "exit" \
+            and result.get("capture_status", "recorded") == "recorded" \
+            and all(item.get("exit_code") == 0 for item in (result.get("cleanup") or {}).values()):
+        return "passed", None
+    if issue is None and code == 4 and result.get("termination", "exit") == "exit" and refusal:
+        return "blocked", "capacity_" + refusal
+    return "failed", issue
+
+
+def result_slot(result):
+    actual = result.get("evidence_transfer", {}).get("actual_command") if isinstance(result.get("evidence_transfer"), dict) else None
+    if type(result.get("slot")) is int:
+        return result["slot"]
+    if isinstance(actual, list) and actual[-2:-1] == ["--slot"] and isinstance(actual[-1], str) and re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1]):
+        return int(actual[-1])
+    return None
+
+
+def pass_counts(directory, result):
+    """Whether a recorded PASS still counts under lane_status, with the refusal reason when not."""
+    status, reason = lane_status(result, Path(directory) / result["log"], result_slot(result))
+    return status == "passed", reason or "lane evidence is not a complete PASS"
 
 
 def prepare(output, version, prepared=None):
@@ -1193,6 +1300,14 @@ def load_bound(output, entries=None, context=None):
             if result.get("inherited") and result.get("evidence_transfer", {}).get("schema_version") != 2 and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
                                             or result.get("from_log_sha256") != result["log_sha256"]):
                 raise ValueError("inherited evidence provenance is incomplete")
+            counts, reason = pass_counts(output, result)
+            if not counts:
+                # An earlier collector counted this PASS under a weaker rule: rerun it.
+                receipt["checks"][name] = {"status": "failed", "reason": reason, **{key: result[key] for key in
+                    ("command", "log", "log_sha256", "exit_code", "slot") if key in result}}
+                if context is not None:
+                    context["attempts"].pop(name, None)
+                continue
             if "evidence_transfer" in result:
                 if not result.get("inherited"):
                     raise ValueError("reviewed transfer must remain inherited coverage")
@@ -2213,6 +2328,9 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
         expected_command = command_identity(check_commands[name], root)
         if result["status"] != "passed" or result.get("command") != expected_command:
             raise ValueError("evidence import requires passing command-bound evidence")
+        # Never replace a target attempt, such as a fresh failure, with older evidence.
+        if not transfer_target_open(name, receipt["checks"][name]) and receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC:
+            raise ValueError("evidence import target check was already attempted")
         if not is_live(name) and (receipt.get("environment") != source.get("environment")
                                  or result.get("execution_environment") != receipt.get("environment")):
             raise ValueError("evidence import local execution environment differs")
@@ -2588,7 +2706,7 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
         validate_historical_p0_log(files["log"], receipt["candidate_bundle_sha256"], actual[-1])
     # The bound source and exact launcher select a checksum-verified bundle.
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
-    environments, stages, released = set(), set(), False
+    environments, stages = set(), set()
     with files["log"].open("rb") as stream:
         for line in stream:
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
@@ -2601,10 +2719,10 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
             if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
                 raise ValueError("standalone controller contains a failed phase")
-            released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-    if (not environments or not released or not historical_p0 and ("cleanup/release", None) not in stages
-        or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
-        raise ValueError("standalone controller evidence incomplete")
+    issue, refusal, leased = lane_leases(files["log"], actual[-1])
+    issue = issue or refusal and f"final lease request was refused for {refusal}"
+    if not environments or not leased or issue or not historical_p0 and ("cleanup/release", None) not in stages:
+        raise ValueError("standalone controller evidence incomplete" + (": " + issue if issue else ""))
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
@@ -2697,6 +2815,8 @@ def prepare_attempt_transfer(target, source, name, review_path, review):
     if original.get("execution") == "ci-hosted":
         raise ValueError("CI hosted results cannot be transfer sources")
     expected = command_identity(target.context["commands"][name], target.root)
+    if original.get("status") != "passed":
+        raise ValueError("reviewed transfer requires an original attempt that still counts as PASS")
     if name not in source.context["attempts"]:
         raise ValueError("invalid original attempt reference")
     record, manifest = source.context["attempts"][name]
@@ -3182,6 +3302,9 @@ def apply_transfers(target, prepared, batch_id=None, verify_inputs=None):
                 copied[role] = copied_cache[key]
             result = transfer_result(transfer, copied, batch_id)
             validate_transferred_result(staging, receipt, name, result, command, root)
+            counts, reason = pass_counts(staging, result)
+            if not counts:
+                raise ValueError(f"{name}: transferred evidence is not a complete PASS: {reason}")
             incoming["checks"][name] = result
         if verify_inputs is not None:
             verify_inputs()

@@ -385,8 +385,9 @@ The declaration has exactly these fields:
 
 Paths resolve relative to the declaration. Repeat `--operator-acceptance` for separately authorized
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
-commands and versions must match. Evidence must prove terminal nonzero exit, complete launch/timing,
-VM identities, successful cleanup of every guest and lease release. Interrupted, incomplete, changed
+commands and versions must match. Evidence must prove a terminal nonzero exit (not a signal or
+timeout such as 124, 130, 137 or 143), complete launch/timing, VM identities, and that every lease
+of the lane ended cleanly under the [lane lease rule](#one-release-candidate). Interrupted, incomplete, changed
 or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
 passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
 the original exit and log hash without claiming a PASS.
@@ -624,10 +625,8 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
-marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
-Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
-environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+Exit 124 is a timeout; known signal exits retain the signal number. A `blocked` capacity result
+is an environment failure; otherwise cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub
@@ -640,8 +639,28 @@ the lease release budget, elapsed time and native status separately from aggrega
 Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
 Only one mutating collector may use an output directory at a time.
 
+**Lane lease rule.** One rule (`lane_status`) decides whether a result counts as PASS or a capacity block. The
+collector, reuse of a recorded PASS, import, transfer, hosted collection and operator acceptance
+all apply it to the bound log. Only the lane's own lines count: lines inside a guest window
+(`E2E_PHASE phase=guest` start to end) come from clients nested in the guest, except guest
+cleanup ends of concurrent VMs. A PASS needs exit 0 and every lease of the lane closed cleanly:
+
+- each `E2E lease request: slot=… run=…` ends in a grant or a typed capacity refusal;
+- each grant is for the lane slot and is released for the same slot and run before the next
+  grant; `E2E lease had already ended` does not count as a release;
+- each VM with transport or guest work has a successful guest cleanup after its last work and
+  before the release;
+- no nonzero lease release, allocation, cleanup/release or guest cleanup end, no explicit
+  unconfirmed acquire or cleanup diagnostic, and no final capacity refusal.
+
+Exit 4 is `blocked/capacity_memory|disk` only when the last lease event is the typed refusal for
+the lane slot and every earlier lease closed cleanly; otherwise it is `failed`. A recorded PASS
+that fails the rule, for example from an older collector, is read as `failed` with the rule's
+reason and runs again. Its immutable attempt record is kept.
+
 Explicit `import --output NEW --from OLD --check CHECK` copies passing command-bound evidence
 between bound candidates with matching source and release assets, retaining inherited provenance.
+The target check must be untouched: import never replaces an attempt, such as a fresh failure.
 Only provenance generation timestamps may differ; artifact identities and original metadata hashes remain bound.
 Local evidence also requires its recorded execution environment to match.
 The current run prints `REUSE` with direct/inherited origin and its validation reason for applicable

@@ -1670,13 +1670,21 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release"):
+        second = ("E2E lease: slot=2 run=second type=subyard-pair vms=1 base=" + "b" * 64 + "\n"
+                  "E2E_PHASE phase=transport state=start duration_seconds=0 exit_code=0 vm=1\n")
+        for change in ("nonterminal", "pass", "signal", "timeout", "kill", "timing", "transport", "cleanup", "release",
+                       "second-unclosed", "second-cleanup"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
-            if change in ("nonterminal", "pass", "signal"):
+            if change in ("nonterminal", "pass", "signal", "timeout", "kill"):
                 data = json.loads(files["native"].read_text())
-                data.update({"session_id": 99} if change == "nonterminal" else {"exit_code": 0 if change == "pass" else 143})
+                data.update({"session_id": 99} if change == "nonterminal" else
+                            {"exit_code": {"pass": 0, "signal": 143, "timeout": 124, "kill": 137}[change]})
                 m.write_json(files["native"], data)
+                m.write_json(files["timing"], dict(json.loads(files["timing"].read_text()), exit_code=data["exit_code"]))
+            elif change.startswith("second"):
+                files["log"].write_text(originals["log"].decode() + second
+                                        + ("E2E lease released: slot=2 run=second\n" if change == "second-cleanup" else ""))
             elif change in ("timing", "transport"):
                 role = "timing" if change == "timing" else "launch"
                 data = json.loads(files[role].read_text())
@@ -1692,6 +1700,28 @@ class Contracts(unittest.TestCase):
             m.write_json(path, declaration)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 m.attestation(self.output, self.identity, [path])
+
+    def test_operator_acceptance_counts_every_lease_and_accepts_two_clean_ones(self):
+        path, files, _ = self.operator_failure()
+        declaration = json.loads(path.read_text())
+        log = files["log"].read_text()
+        # Guest work on the second lease's VM ends in a clean guest cleanup before its release.
+        files["log"].write_text(log + "E2E lease: slot=2 run=second type=subyard-pair vms=1 base=" + "c" * 64 + "\n"
+            "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+            "E2E lease: slot=1 run=nested type=subyard-pair vms=1 base=" + "d" * 64 + "\n"
+            "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1\n"
+            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
+            "E2E lease released: slot=2 run=second\n")
+        declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
+        m.write_json(path, declaration)
+        decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
+        # The nested guest client's lease is not an environment of this lane.
+        self.assertEqual([(item["vm_count"], item["base_fingerprint"][0]) for item in decision["environments"]], [(1, "c"), (2, "b")])
+        self.assertEqual(decision["cleanup"], {"guest_cleanup": [{"vm": 1, "exit_code": 0}, {"vm": 2, "exit_code": 0}],
+                                               "release_exit_code": 0, "lease_released": True})
+        for code in (124, 137):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                m.validate_operator_acceptance(dict(decision, exit_code=code), "profile:sample", decision["command"], self.identity)
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()
@@ -2521,6 +2551,16 @@ class HostedChecks(unittest.TestCase):
                 self.receipt_mutation = lambda value: None
                 self.execution_attempt = 1
                 shutil.rmtree(self.directory / "ci-hosted-downloads", ignore_errors=True)
+
+    def test_hosted_pass_that_fails_the_lane_rule_stays_open(self):
+        counts = m.a.pass_counts
+        def hosted(directory, result):
+            return (False, "lease slot-001 has no confirmed release") if result.get("execution") == "ci-hosted" else counts(directory, result)
+        with patch.object(m.a, "pass_counts", side_effect=hosted) as counted:
+            result, report = self.collect()
+        self.assertEqual(result, {"status": "pending"})
+        self.assertIn("CI-HOSTED-SKIP profile:sample: hosted evidence is not a complete PASS: lease slot-001", report)
+        self.assertTrue(any(call.args[1].get("execution") == "ci-hosted" for call in counted.call_args_list))
 
     def test_publication_rechecks_job_and_refuses_tampered_hosted_policy_or_runner(self):
         self.collect()
