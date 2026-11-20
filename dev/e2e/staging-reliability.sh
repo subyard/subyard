@@ -1102,6 +1102,10 @@ PYBASELINE
     SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
     | jq -e '.status == "ok"' >/dev/null || die 'agent status without --yard did not discover the broker'
   runtime_yard -Y test-yard check
+  # Recreation replaced the marked project; mark its unmarked successor for cleanup.
+  name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
+  [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'
+  incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
   verify_broker_installation || die 'activated broker differs from candidate'
   [ "$(sha256sum "$candidate_engine" | cut -d' ' -f1)" = "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)" ] \
     || die 'installed engine differs from frozen candidate'
