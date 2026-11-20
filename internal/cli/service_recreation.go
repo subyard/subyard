@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerservice"
@@ -58,8 +59,9 @@ func (cli *CLI) activationService(activation string) (profile.Definition, bool) 
 }
 
 // serviceStageApplicability observes the service default yard when it is a
-// local runtime with the declared settings. A stopped runtime and an
-// unfinished init are left to their own lifecycle.
+// local runtime with the declared settings. A stopped runtime without running
+// intent and an unfinished init are left to their own lifecycle. Settings
+// without a finished runtime carry a warning that names the reinstall.
 func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string, names []string, load func(string) (config.Loaded, error)) (activationApplicability, error) {
 	definition, ok := cli.activationService(activation)
 	if !ok || !slices.Contains(names, definition.InfrastructureService.DefaultYard) {
@@ -72,33 +74,77 @@ func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string
 	if loaded.Context.AccessKind != domain.AccessLocal || !definition.InfrastructureService.Matches(loaded.Environment) {
 		return activationApplicability{state: "absent"}, nil
 	}
+	yard := loaded.Context.YardName
 	incus, _ := cli.statusPorts()
 	instance, err := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
-	if errors.Is(err, ports.ErrInstanceNotFound) || err != nil && ports.LocalInstallationAbsent(incus) {
+	if errors.Is(err, ports.ErrInstanceNotFound) {
+		warning, err := cli.serviceRuntimeMissing(definition, yard)
+		if err != nil {
+			return activationApplicability{}, err
+		}
+		return activationApplicability{state: "absent", warnings: []string{warning}}, nil
+	}
+	if err != nil && ports.LocalInstallationAbsent(incus) {
 		return activationApplicability{state: "absent"}, nil
 	}
 	if err != nil {
 		return activationApplicability{}, err
 	}
-	result := activationApplicability{state: "inactive", target: loaded.Context.YardName}
-	if instance.Config["user.subyard.initialized"] == "false" {
+	result := activationApplicability{state: "inactive", target: yard}
+	if instanceUninitialized(configTarget{Name: yard}, instance) {
+		service := definition.InfrastructureService
+		result.warnings = []string{fmt.Sprintf("service %s in yard %s has not finished installing; run %s", service.ID, yard, serviceInstallCommand(service.ID, yard, "default"))}
 		return result, nil
 	}
-	switch strings.ToUpper(instance.Status) {
-	case "RUNNING":
-	case "STOPPED":
-		switch desired := strings.ToLower(strings.TrimSpace(instance.Config["user.subyard.desired_power"])); desired {
-		case "", "stopped":
-			return result, nil
-		case "running":
-		default:
-			return activationApplicability{}, fmt.Errorf("yard %s has unsupported desired power %q", loaded.Context.YardName, desired)
-		}
+	switch {
+	case strings.EqualFold(instance.Status, "running"), application.InstanceStoppedForRunningIntent(instance):
+	case strings.EqualFold(instance.Status, "stopped"):
+		return result, nil
 	default:
-		return activationApplicability{}, fmt.Errorf("yard %s is in unsupported state %q", loaded.Context.YardName, instance.Status)
+		return activationApplicability{}, fmt.Errorf("yard %s is in unsupported state %q", yard, instance.Status)
 	}
 	result.state, result.applies = "active", true
 	return result, nil
+}
+
+// serviceRuntimeMissing names the commands that reinstall a service runtime
+// whose settings remain; a registration left by an interrupted teardown is
+// removed first.
+func (cli *CLI) serviceRuntimeMissing(definition profile.Definition, yard string) (string, error) {
+	service := definition.InfrastructureService
+	home, _, _, err := cli.servicePaths()
+	if err != nil {
+		return "", err
+	}
+	records, err := (ownerservice.Registry{Root: filepath.Join(home, "services")}).List(service.ID)
+	if err != nil {
+		return "", err
+	}
+	for _, record := range records {
+		if record.Yard == yard {
+			return fmt.Sprintf("service %s has no runtime in yard %s but keeps its registration; run %s, then %s", service.ID, yard, serviceRemoveCommand(service.ID, record.Pool), serviceInstallCommand(service.ID, yard, record.Pool)), nil
+		}
+	}
+	return fmt.Sprintf("service %s has no runtime in yard %s; run %s", service.ID, yard, serviceInstallCommand(service.ID, yard, "default")), nil
+}
+
+func serviceInstallArguments(id, yard, pool string) []string {
+	arguments := []string{"service", "install", id, "--yard", yard}
+	if pool != "default" {
+		arguments = append(arguments, "--pool", pool)
+	}
+	return arguments
+}
+
+func serviceInstallCommand(id, yard, pool string) string {
+	return "yard " + strings.Join(serviceInstallArguments(id, yard, pool), " ")
+}
+
+func serviceRemoveCommand(id, pool string) string {
+	if pool != "default" {
+		return "yard service remove " + id + " --pool " + pool
+	}
+	return "yard service remove " + id
 }
 
 // serviceRecreation replaces the in-place update of a registered service
@@ -119,8 +165,15 @@ type serviceRecreationPlan struct {
 	refusal   error
 }
 
-// assess proves the exact registered owner before any effect. Ownership
-// refusals leave the runtime as it is; only failed reads are errors.
+// serviceRuntimeStopper stops a runtime whose session loss the approved plan
+// disclosed. The guard still fences new SSH connections first.
+type serviceRuntimeStopper interface {
+	RunApprovedMigrationStop(context.Context) error
+}
+
+// assess proves the exact registered owner before any effect. Each ownership
+// finding is collected independently and leaves the runtime as it is; a
+// failed read is an error that blocks the stage for a retry.
 func (recreation *serviceRecreation) assess(ctx context.Context, yard string) (serviceRecreationPlan, error) {
 	cli, service := recreation.cli, recreation.definition.InfrastructureService
 	home, _, owner, err := cli.servicePaths()
@@ -140,35 +193,56 @@ func (recreation *serviceRecreation) assess(ctx context.Context, yard string) (s
 	if err != nil {
 		return serviceRecreationPlan{}, err
 	}
-	selection := &serviceSelection{definition: recreation.definition, record: records[0], registry: registry, publication: filepath.Join(home, service.RouteRoot, "services")}
+	record := records[0]
+	selection := &serviceSelection{definition: recreation.definition, record: record, registry: registry, publication: filepath.Join(home, service.RouteRoot, "services")}
 	var findings []error
 	if len(records) > 1 {
 		findings = append(findings, fmt.Errorf("yard %s has %d registrations", yard, len(records)))
 	}
-	if selection.record.Owner != owner {
-		findings = append(findings, fmt.Errorf("its registration belongs to installation %s", selection.record.Owner))
+	if record.Owner != owner {
+		findings = append(findings, fmt.Errorf("its registration belongs to installation %s", record.Owner))
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		findings = append(findings, errors.New("its yard is not a local runtime"))
-	} else if len(findings) == 0 {
-		findings = append(findings, cli.checkServiceSelection(ctx, loaded, selection))
+	} else {
+		uuid, ownership, err := cli.serviceRuntime(ctx, loaded, recreation.definition)
+		var unproven serviceRuntimeUnproven
+		switch {
+		case errors.As(err, &unproven):
+			findings = append(findings, err)
+		case err != nil:
+			return serviceRecreationPlan{}, err
+		case uuid != record.UUID || ownership != record.Ownership || loaded.Context.IncusProject != record.Project || loaded.Context.YardInstanceName != record.Instance:
+			findings = append(findings, errors.New("its infrastructure service runtime changed"))
+		}
 	}
 	return serviceRecreationPlan{selection: selection, loaded: loaded, refusal: domain.CollectRefusals(findings...)}, nil
 }
 
 func (recreation *serviceRecreation) consequence(plan serviceRecreationPlan) string {
-	return fmt.Sprintf("recreate service %s in yard %s for the new release: its VMs, leases and base images are removed; yard settings are kept", plan.selection.record.Service, plan.selection.record.Yard)
+	record := plan.selection.record
+	return fmt.Sprintf("recreate service %s in yard %s for the new release: its open SSH sessions are interrupted; teardown deletes its instance, Incus project and /srv volume with their VMs, leases and base images, and also the shared bridge, storage pool and power reconciler when it is the last managed yard; yard settings are kept and the runtime gets a new UUID", record.Service, record.Yard)
 }
 
 func (recreation *serviceRecreation) warning(yard string, refusal error) string {
 	id := recreation.definition.InfrastructureService.ID
-	return fmt.Sprintf("service %s in yard %s keeps its previous engine: %v; recreate it with yard service remove %s, then yard service install %s", id, yard, refusal, id, id)
+	return fmt.Sprintf("service %s in yard %s keeps its previous engine: %v; recreate it with %s, then %s", id, yard, refusal, serviceRemoveCommand(id, "default"), serviceInstallCommand(id, yard, "default"))
 }
 
-func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecreationPlan) error {
+// run rechecks the exact owner, stops the runtime with its disclosed session
+// loss, then removes and reinstalls it through the ordinary commands.
+func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecreationPlan, platform ports.ReconcileStageRunner) error {
 	cli, record := recreation.cli, plan.selection.record
 	if err := cli.checkServiceSelection(ctx, plan.loaded, plan.selection); err != nil {
 		return err
+	}
+	stopper, ok := platform.(serviceRuntimeStopper)
+	if !ok {
+		return errors.New("the approved service runtime stop is unavailable")
+	}
+	// Teardown refuses live SSH sessions; the approved plan already ends them.
+	if err := stopper.RunApprovedMigrationStop(ctx); err != nil {
+		return fmt.Errorf("stop service %s runtime in yard %s: %w", record.Service, record.Yard, err)
 	}
 	run := recreation.runYard
 	if run == nil {
@@ -178,10 +252,7 @@ func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecrea
 	if err := run(ctx, record.Yard, cli.options.Stderr, "teardown", "--yes"); err != nil {
 		return fmt.Errorf("remove service %s runtime in yard %s: %w", record.Service, record.Yard, err)
 	}
-	install := []string{"service", "install", record.Service, "--yard", record.Yard}
-	if record.Pool != "default" {
-		install = append(install, "--pool", record.Pool)
-	}
+	install := serviceInstallArguments(record.Service, record.Yard, record.Pool)
 	if err := run(ctx, record.Yard, cli.options.Stderr, append(install, "--yes")...); err != nil {
 		return serviceReinstallError{command: "yard " + strings.Join(install, " "), yard: record.Yard, err: err}
 	}
@@ -201,10 +272,12 @@ func (failure serviceReinstallError) ActivationDiagnostic() (string, string) {
 	return "the service runtime in yard " + failure.yard + " was removed for recreation but its install did not finish", failure.command
 }
 
-// bindServiceRecreation lets a new-release transition recreate drifted
-// registered service runtimes instead of updating them in place.
+// bindServiceRecreation lets every forward activation, including readiness
+// and same-release gates, recreate drifted registered service runtimes
+// instead of updating them in place. A refused recreation therefore stays
+// refused. Rollback activates an older engine, which updates in place.
 func (cli *CLI) bindServiceRecreation(request releasetransition.ProcessRequest, reconcilers []releasetransition.V2ActivationReconciler) []releasetransition.V2ActivationReconciler {
-	if !cli.newReleaseActivation(request) {
+	if request.Direction == releasetransition.DirectionActivatePrevious {
 		return reconcilers
 	}
 	for _, owner := range reconcilers {

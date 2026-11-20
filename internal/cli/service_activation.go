@@ -45,10 +45,12 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 					loaded, err := cli.resolveReleaseTransitionContext(context.Background(), name, request.ConfigHome, nil)
 					if err == nil && !cli.unobservedReleaseYard(name, request.ConfigHome) &&
 						loaded.Context.AccessKind == domain.AccessLocal && service.Matches(loaded.Environment) {
-						// An interrupted recreation leaves the settings without a runtime.
+						// Settings without a finished runtime have nothing to register;
+						// the stage warning names their reinstall.
 						incus, _ := cli.statusPorts()
-						if _, err := incus.Instance(context.Background(), loaded.Context.IncusProject, loaded.Context.YardInstanceName); errors.Is(err, ports.ErrInstanceNotFound) {
-							return []string{fmt.Sprintf("service %s has no runtime in yard %s; yard service install %s --yard %s recreates it", service.ID, name, service.ID, name)}
+						instance, err := incus.Instance(context.Background(), loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+						if errors.Is(err, ports.ErrInstanceNotFound) || err == nil && instanceUninitialized(configTarget{Name: name}, instance) {
+							return nil
 						}
 						return []string{fmt.Sprintf("register service %s (pool default) when exactly one owned runtime is proven; runtime and leases retained", service.ID)}
 					}

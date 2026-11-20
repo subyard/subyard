@@ -119,7 +119,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		return 1
 	}
 	operation := cli.releaseActivationOperation(request)
-	reconcilers := operation.bindServiceRecreation(request, operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request)))
+	reconcilers := operation.releaseTransitionReconcilers(request)
 	ownerRegistration := operation.legacyOwnerRegistration(request)
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
@@ -415,7 +415,7 @@ func (reconciler *activationStageReconciler) Reconcile(
 			}
 		}
 		if recreation.selection != nil {
-			if err := reconciler.recreation.run(ctx, recreation); err != nil {
+			if err := reconciler.recreation.run(ctx, recreation, platform); err != nil {
 				return reconciler.failure("recreation", err)
 			}
 			if platform, err = reconciler.platform(ctx, applicability); err != nil {
@@ -456,6 +456,12 @@ func activationStageFingerprint(value any) (releasetransition.Fingerprint, error
 	return releasetransition.Fingerprint(fmt.Sprintf("%x", digest[:])), nil
 }
 
+// releaseTransitionReconcilers binds registration and recreation of declared
+// infrastructure services onto the native activation owners.
+func (cli *CLI) releaseTransitionReconcilers(request releasetransition.ProcessRequest) []releasetransition.V2ActivationReconciler {
+	return cli.bindServiceRecreation(request, cli.bindServiceRegistrationActivation(request, cli.activationReconcilers(request)))
+}
+
 func (cli *CLI) brokerActivationReconciler(
 	request releasetransition.ProcessRequest,
 ) releasetransition.V2ActivationReconciler {
@@ -494,7 +500,7 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 				return cli.resolveReleaseTransitionContext(ctx, name, request.ConfigHome, files)
 			})
 			if err == nil && slices.Contains(names, legacyTestYardName) {
-				applicability.warnings = []string{legacyTestYardWarning}
+				applicability.warnings = append(applicability.warnings, legacyTestYardWarning)
 			}
 			return applicability, err
 		},
