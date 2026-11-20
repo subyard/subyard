@@ -237,9 +237,10 @@ func TestPublishCoalescesBindMountedStoreAliases(t *testing.T) {
 		defer cancel()
 		command := exec.CommandContext(ctx, unshare, "--user", "--map-root-user", "--mount",
 			os.Args[0], "-test.v", "-test.run=^TestPublishCoalescesBindMountedStoreAliases$")
-		command.Env = append(os.Environ(), inNamespace+"=1")
+		command.Env = append(os.Environ(), inNamespace+"=1", "LC_ALL=C")
 		output, err := command.CombinedOutput()
 		if strings.HasPrefix(string(output), "unshare: unshare failed: Operation not permitted") ||
+			strings.HasPrefix(string(output), "unshare: write failed /proc/self/uid_map: Operation not permitted") ||
 			strings.Contains(string(output), "--- SKIP: TestPublishCoalescesBindMountedStoreAliases") {
 			t.Skipf("private bind mount unavailable: %s", output)
 		}

@@ -42,6 +42,9 @@ func EnsureDir(path string, o DirOptions) error {
 	if expectedUID(o.Owner) != os.Geteuid() {
 		return refusal(path, ErrUnsafeOwner)
 	}
+	if o.Owner != nil && !validOwnerID(o.Owner.GID) {
+		return pathError("chown", path, unix.EINVAL)
+	}
 	if o.Mode == 0 {
 		o.Mode = 0o700
 	}
@@ -192,7 +195,7 @@ func (d *directory) finish(stat unix.Stat_t, mode uint32, o DirOptions) error {
 	if o.Existing == Finish && actualMode&0o777&^mode != 0 {
 		return dirRefusal(d.path, stat, ErrUnsafeMode)
 	}
-	changeGroup := o.Owner != nil && o.Owner.GID != -1 && stat.Gid != uint32(o.Owner.GID)
+	changeGroup := o.Owner != nil && o.Owner.GID != -1 && int64(stat.Gid) != int64(o.Owner.GID)
 	if changeGroup {
 		if err := unix.Fchownat(d.fd, "", -1, o.Owner.GID, unix.AT_EMPTY_PATH); err != nil {
 			return pathError("chown", d.path, err)

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,11 @@ const (
 
 // Ownership sets the uid and gid before publication. A value of -1 keeps that ID.
 type Ownership struct{ UID, GID int }
+
+// Linux reserves the all-ones uid_t and gid_t values for the -1 sentinel.
+func validOwnerID(id int) bool {
+	return id >= -1 && int64(id) < math.MaxUint32
+}
 
 type Options struct {
 	Mode        fs.FileMode // Zero defaults to 0600 unless ExactMode is set.
@@ -109,6 +115,9 @@ func WriteFrom(path string, o Options, fill func(*os.File) error) error {
 }
 
 func Create(path string, o Options) (*Pending, error) {
+	if owner := o.Owner; owner != nil && (!validOwnerID(owner.UID) || !validOwnerID(owner.GID)) {
+		return nil, pathError("chown", path, unix.EINVAL)
+	}
 	parent, name, err := openParent(path, o.ParentMode, o.Durability)
 	if err != nil {
 		return nil, err

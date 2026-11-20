@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 
@@ -181,6 +182,45 @@ func TestEnsureDirFinishesUnderSetgidParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkMode(t, path, 0o700)
+}
+
+func TestOwnershipRejectsOutOfRangeIDs(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("Linux ownership IDs exceed the range of int on this architecture")
+	}
+	overflow, err := strconv.Atoi("4294967296")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{-2, overflow - 1, overflow} {
+		t.Run(fmt.Sprint(id), func(t *testing.T) {
+			path := filepath.Join(testkit.TempDir(t), "missing", "entry")
+			for _, operation := range []func() error{
+				func() error {
+					return safefs.EnsureDir(path, safefs.DirOptions{
+						Owner: &safefs.Ownership{UID: -1, GID: id}, ParentMode: 0o700,
+					})
+				},
+				func() error {
+					return safefs.WriteFile(path, nil, safefs.Options{
+						Owner: &safefs.Ownership{UID: -1, GID: id}, ParentMode: 0o700,
+					})
+				},
+				func() error {
+					return safefs.WriteFile(path, nil, safefs.Options{
+						Owner: &safefs.Ownership{UID: id, GID: -1}, ParentMode: 0o700,
+					})
+				},
+			} {
+				if err := operation(); !errors.Is(err, unix.EINVAL) {
+					t.Errorf("invalid ownership operation = %v, want EINVAL", err)
+				}
+				if _, err := os.Lstat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("invalid ownership created a parent: %v", err)
+				}
+			}
+		})
+	}
 }
 
 func TestEnsureDirChangesGroupBeforeWidening(t *testing.T) {
