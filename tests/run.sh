@@ -17,20 +17,25 @@ export TMPDIR=/tmp
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
-# Tests keep disposable state outside the checkout and its optional private/ clone;
-# only .build/ may change.
+# Tests keep disposable state outside the checkout: no path outside .build/ may appear
+# or disappear. Content and Git status changes of existing paths are concurrent edits.
+# In private/, the coordinator- and operator-owned documents may change during a run.
+checkout_paths() {
+  { git -C "$1" ls-files --cached --others --exclude-standard
+    git -C "$1" ls-files --others --ignored --exclude-standard --directory
+  } | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(git -C "$1" ls-files --deleted | LC_ALL=C sort -u)
+}
 checkout_state() {
-  git -C "$ROOT" status --porcelain=v1 --ignored=matching --untracked-files=all \
-    | { grep -vx '!! \.build/' || true; }
+  checkout_paths "$ROOT" | { grep -vx '\.build/' || true; }
   if [ -e "$ROOT/private/.git" ]; then
-    git -C "$ROOT/private" status --porcelain=v1 --ignored=matching --untracked-files=all \
-      | sed 's|^|private: |'
+    checkout_paths "$ROOT/private" \
+      | { grep -vE '^(tasks|questions|reference|spec)/|^[^/]*\.md$' || true; } | sed 's|^|private/|'
   fi
 }
 CHECKOUT_TRACKED=0
 if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
   CHECKOUT_TRACKED=1
-  CHECKOUT_BEFORE="$(checkout_state)"
+  CHECKOUT_BEFORE="$(checkout_state | LC_ALL=C sort)"
 fi
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
@@ -155,11 +160,11 @@ check_go_race() {
 
 check_checkout_unchanged() {
   [ "$CHECKOUT_TRACKED" = 1 ] || { printf 'checkout is not a Git work tree root; skipped\n'; return 0; }
-  local after
-  after="$(checkout_state)"
-  [ "$after" = "$CHECKOUT_BEFORE" ] || {
-    printf 'FAIL: tests changed the checkout outside .build/ (before/after git status):\n' >&2
-    diff <(printf '%s\n' "$CHECKOUT_BEFORE") <(printf '%s\n' "$after") >&2 || true
+  local changes
+  changes="$(LC_ALL=C comm -3 <(printf '%s\n' "$CHECKOUT_BEFORE") <(checkout_state | LC_ALL=C sort))"
+  [ -z "$changes" ] || {
+    printf 'FAIL: tests added (+) or removed (-) checkout paths outside .build/:\n' >&2
+    printf '%s\n' "$changes" | sed -e 's/^\t/+ /' -e '/^+ /!s/^/- /' >&2
     exit 1
   }
 }
