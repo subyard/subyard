@@ -297,28 +297,25 @@ func (fake *ExecFake) render(name string) {
 	}
 	script.Write(chain.Bytes())
 	records := shellquote.Word(filepath.Join(fake.state, "records"))
-	// Builtins only: counting existing records gives a starting number, the
-	// exclusive create under set -C is the claim, and a failed create of a
-	// number that does not exist is a real failure. The create uses true, a
-	// regular builtin, because a failed redirection of the special builtin :
-	// would exit the shell.
-	fmt.Fprintf(&script, `execfake_call=0
+	// Builtins only: counting existing records gives a starting number, and
+	// writing the record under set -C is the exclusive claim of its number. A
+	// failed write that left no file is a real failure; one that left a file
+	// lost the race or left a truncated record, which records() reports; the
+	// retries are bounded so a write that keeps failing cannot loop forever.
+	fmt.Fprintf(&script, `execfake_call=0 execfake_tries=0
 for execfake_record in %[1]s/*; do
   [ -e "$execfake_record" ] && execfake_call=$((execfake_call + 1))
 done
 set -C
-until { true >%[1]s/"$execfake_call"; } 2>/dev/null; do
-  if [ ! -e %[1]s/"$execfake_call" ]; then
+until { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >%[1]s/"$execfake_call"; } 2>/dev/null; do
+  execfake_tries=$((execfake_tries + 1))
+  if [ ! -e %[1]s/"$execfake_call" ] || [ "$execfake_tries" -ge 4096 ]; then
     printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
     exit 126
   fi
   execfake_call=$((execfake_call + 1))
 done
 set +C
-if ! { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >>%[1]s/"$execfake_call"; } 2>/dev/null; then
-  printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
-  exit 126
-fi
 `, records, shellquote.Word(name))
 	script.WriteString("case $execfake_rule in\n")
 	script.Write(replies.Bytes())
