@@ -2,6 +2,8 @@
 # Exercise preview publication and ownership against a stateful Incus boundary double.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 temporary="$(mktemp -d)"
 trap 'rm -rf -- "$temporary"' EXIT
 mkdir -p "$temporary/bin"
@@ -65,7 +67,6 @@ YARD_KIND=container
 PREVIEW_HOST=127.0.0.1
 WEB_PREVIEW_HOST_PORT=32222
 PROJ=(--project fixture)
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 route() {
   subyard_preview_route "$PREVIEW_HOST"
 }

@@ -2,9 +2,10 @@
 # Host-free pinned age/SOPS installer: artifact selection, checksums, atomic replacement, idempotence.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-key-tools.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 mkdir -p "$TMP/fixture/age" "$TMP/bin" "$TMP/home"
 cat > "$TMP/fixture/age/age" <<'SH'

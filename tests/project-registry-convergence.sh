@@ -3,10 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-project-registry.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" <<<"$1" || fail "output does not contain: $2"; }
 assert_json() { jq -e "$2" "$1" >/dev/null || fail "unexpected state in $1: $2"; }
 

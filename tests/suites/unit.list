@@ -8,4 +8,5 @@ runtime-privilege-reexec.sh
 ssh-config.sh
 ssh-transport-identity.sh
 teardown-runtime-preservation.sh
+test-lib.sh
 zabbly-download.sh

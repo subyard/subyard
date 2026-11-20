@@ -3,15 +3,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_LIB_DIE_STATUS=1
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 RUNNER='tests/real-host/adapter-contracts.sh'
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
 DEEP_WORKFLOW="$ROOT/.github/workflows/deep-ci.yml"
 
-fail() {
-  printf 'workflow real-adapter gate: %s\n' "$*" >&2
-  exit 1
-}
+fail() { die "workflow real-adapter gate: $*"; }
 
 [ -x "$ROOT/$RUNNER" ] || fail "shared runner is missing or not executable: $RUNNER"
 
