@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-test_tmp
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home" SUBYARD_PROC_ROOT="$TMP/proc"
 mkdir -p "$HOME/.vscode-server" "$SUBYARD_PROC_ROOT"

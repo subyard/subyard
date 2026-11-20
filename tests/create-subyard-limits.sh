@@ -15,7 +15,7 @@ cleanup() {
   rm -rf "$TMP"
   exit "$rc"
 }
-on_exit cleanup
+trap cleanup EXIT
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"

@@ -14,7 +14,7 @@ cleanup() {
     || find "$EXTERNAL_TEST_ROOT" -depth -delete
   rm -rf "$TMP"
 }
-on_exit cleanup
+trap cleanup EXIT
 
 export HOME="$TMP/home"
 install -d -m 0700 "$HOME"

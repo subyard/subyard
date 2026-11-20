@@ -20,7 +20,7 @@ cleanup() {
     /tmp/subyard-systemd255-launch.*) find "$TEMPORARY" -depth -delete ;;
   esac
 }
-on_exit cleanup
+trap cleanup EXIT
 
 mkdir -p "$FAKE_BIN" "$STATE"
 

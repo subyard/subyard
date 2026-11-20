@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/helpers/test-lib.sh
-. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-release-candidate.XXXXXX)"
-on_exit rm -rf "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 . "$ROOT/tests/helpers/release-candidate.sh"
 root="$TMP/root"
 mkdir -p "$root/.subyard-acceptance/release"

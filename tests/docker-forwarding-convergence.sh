@@ -2,10 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/helpers/test-lib.sh
-. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-docker-forwarding.XXXXXX)"
-on_exit rm -rf "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 export TEST_LOG="$TMP/log"
 

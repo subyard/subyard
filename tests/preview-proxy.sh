@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 temporary="$(mktemp -d)"
-on_exit rm -rf -- "$temporary"
+trap 'rm -rf -- "$temporary"' EXIT
 mkdir -p "$temporary/bin"
 export PREVIEW_PROXY_STATE="$temporary/state.json" PREVIEW_PROXY_LOG="$temporary/log"
 printf '{"config":{},"devices":{}}\n' >"$PREVIEW_PROXY_STATE"

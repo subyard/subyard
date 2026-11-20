@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-acquire-session.XXXXXX)"
-on_exit rm -rf "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 # Capacity fixtures must fail fast unless they explicitly request a wait.
 unset SUBYARD_E2E_CAPACITY_WAIT
 # shellcheck source=dev/agent-e2e.sh

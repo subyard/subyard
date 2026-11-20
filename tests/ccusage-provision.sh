@@ -11,7 +11,7 @@ for command in cc jq sha256sum tar; do need "$command"; done
 [ -x "$HOOK" ] || fail "ccusage provision hook is not executable"
 
 tmp="$(mktemp -d)"
-on_exit rm -rf "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 registry="$tmp/registry"
 fake_bin="$tmp/fake-bin"
 curl_log="$tmp/curl.log"

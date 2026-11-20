@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 
 tmp="$(mktemp -d)"
-on_exit rm -rf "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/public-config" "$tmp/home"
 install -d -m 0700 "$tmp/config-home" "$tmp/config-home/yards"
 

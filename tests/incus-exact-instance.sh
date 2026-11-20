@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-exact-instance.XXXXXX)"
-on_exit rm -rf "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 
 install -d -m 0700 "$TMP/bin"
 export PATH="$TMP/bin:$PATH" MOCK_ROWS="$TMP/rows"

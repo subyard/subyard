@@ -16,7 +16,7 @@ cleanup() {
   fi
   exit "$rc"
 }
-on_exit cleanup
+trap cleanup EXIT
 fixture="$tmp/source with spaces"
 mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"

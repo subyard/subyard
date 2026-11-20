@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 python3 "$ROOT/tests/preview.py"
 
-test_tmp
+TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"

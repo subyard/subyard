@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 export SUBYARD_NO_AUDIT=1
 CLI_TMP="$(mktemp -d)"
-on_exit rm -rf "$CLI_TMP"
+trap 'rm -rf "$CLI_TMP"' EXIT
 
 commands="$($ROOT/bin/yard --list)"
 grep -qx security <<<"$commands" || fail "security command missing"

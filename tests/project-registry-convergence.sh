@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-project-registry.XXXXXX)"
-on_exit rm -rf "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 
 assert_contains() { grep -Fq -- "$2" <<<"$1" || fail "output does not contain: $2"; }
 assert_json() { jq -e "$2" "$1" >/dev/null || fail "unexpected state in $1: $2"; }

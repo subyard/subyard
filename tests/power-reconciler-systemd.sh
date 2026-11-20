@@ -28,7 +28,9 @@ temporary="$(mktemp -d)"
 cleanup() {
   find "$temporary" -depth -delete
 }
-on_exit cleanup
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 unit="$temporary/subyard-power-reconcile.service"
 v072_unit="$temporary/subyard-power-reconcile-v0.7.2.service"

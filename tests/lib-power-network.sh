@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 
 tmp="$(mktemp -d /tmp/subyard-power-network.XXXXXX)"
-on_exit rm -rf "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$tmp"

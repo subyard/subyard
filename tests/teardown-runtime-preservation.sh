@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-test_tmp
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
 SUBYARD_OPERATOR_HOME="$TMP/operator"
 # shellcheck source=scripts/lib/engine-context.sh

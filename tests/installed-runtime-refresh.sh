@@ -3,10 +3,8 @@
 set -euo pipefail
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/helpers/test-lib.sh
-. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-runtime-refresh.XXXXXX)"
-on_exit rm -rf -- "$TMP"
+trap 'rm -rf -- "$TMP"' EXIT
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP/context"

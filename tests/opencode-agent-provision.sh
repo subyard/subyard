@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$ROOT/config/agents/opencode/provision.sh"
 
 tmp="$(mktemp -d)"
-on_exit rm -rf "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/fake-bin" "$tmp/system-bin" "$tmp/home" "$tmp/bin"
 
 cat > "$tmp/fake-bin/curl" <<'CURL'
