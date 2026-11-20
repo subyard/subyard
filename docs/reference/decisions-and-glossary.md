@@ -555,6 +555,12 @@ no per-VM resident/PSS probes/new persisted schema. Unknown download/peak measur
 reported as zero/measured limits. Ordinary smoke requests one standard VM; pair only for
 both-guest checks. See [Test VMs](../test-vms.md).
 
+Release updates recreate a registered test-VM broker whose engine changed, after proving its exact
+registration; its leases, VMs and open sessions end, as the operator consented to by updating.
+Refused, unproven or failed reads never tear anything down. The pre-v0.11 test yard name
+`e2e-yard` is reserved: release activation matches it by name, skips it and warns with its
+recreation commands, so an ordinary yard must not use that name.
+
 Only proven test-owned fixtures are automatically deleted. Unknown unmarked retained
 yards/archives require explicit ownership/restore/delete decisions. Existing source/default
 profiles/networks/images and operator allocation/transport yard remain outside fixture cleanup.
