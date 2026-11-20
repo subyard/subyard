@@ -58,9 +58,10 @@ class HeadersHelperTest(unittest.TestCase):
                     self.assertEqual(json.loads(result.stdout), {'Authorization': 'Bearer '+token})
 
     def test_failures_are_fixed_text_without_token_material(self):
-        secret = 'f0e1d2c3b4a5'*5
-        cases = [('missing', None, ()), ('empty', '', ()), ('short', secret[:63], ()), ('long', secret+'abcde', ()),
-                 ('uppercase', secret.upper()[:64], ()), ('arguments', 'a'*64, ('ignored',)),
+        # A synthetic 64-digit value; failures must not echo any part of it.
+        sample = 'f0e1d2c3b4a5'*5
+        cases = [('missing', None, ()), ('empty', '', ()), ('short', sample[:63], ()), ('long', sample+'abcde', ()),
+                 ('uppercase', sample.upper()[:64], ()), ('arguments', 'a'*64, ('ignored',)),
                  ('spaces', ' '+'a'*63, ()), ('directory', 'directory', ())]
         for name, content, args in cases:
             if self.auth.is_dir():
@@ -77,8 +78,8 @@ class HeadersHelperTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stdout, b'')
                     self.assertIn(result.stderr, FAILURES)
-                    self.assertNotIn(secret[:12].encode(), result.stderr)
-                    self.assertNotIn(secret[:12].upper().encode(), result.stderr)
+                    self.assertNotIn(sample[:12].encode(), result.stderr)
+                    self.assertNotIn(sample[:12].upper().encode(), result.stderr)
 
     def test_observation_accepts_exactly_the_tokens_the_helper_exports(self):
         token = '0123456789abcdef'*4
