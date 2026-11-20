@@ -78,12 +78,15 @@ Rollback to v0.28–v0.30 is refused while telemetry is installed in a local yar
 after it is disabled with its data retained. Those releases put the collector token into home
 documents, where an older template writer can publish it with mode `0644`. The telemetry
 runtime's activation identity changed at this boundary. `yard update --rollback` and
-`yard update --version 0.30.0`, including its `--check`, then report the general refusal that
-the retained release cannot verify installed runtime activation, without naming telemetry;
-v0.28 and v0.29 are already refused because their
-migration registry differs. Absence must be observed in a running yard: a stopped yard, or one
-that init never provisioned, is refused even if telemetry was never enabled there. Start or
-initialize it, then retry. Process environment
+`yard update --version VERSION`, including its `--check`, report `rollback-incompatible`
+without naming telemetry. For v0.30 the message is that the retained release cannot verify
+installed runtime activation. For v0.28 and v0.29 it is that the selected release's migration
+registry differs from the active release's registry. Absence must be observed in a running
+yard: a stopped yard, or one that init never provisioned, is refused even if telemetry was
+never enabled there. Start or initialize it, then retry. This release does not check a
+downgrade through an older release's own installer or engine, such as the tagged v0.30.0
+installer or `runtime/previous/bin/yard update`. Before running one, disable and remove
+telemetry, or do not downgrade. Process environment
 settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy.
 Claude ignores local drop-ins when server-managed settings apply.
 
