@@ -2,7 +2,9 @@ package releasetransition
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -98,5 +100,49 @@ func TestRegistryRefusesRetiredDependencyWithoutPrefixProof(t *testing.T) {
 				t.Fatalf("unproved retired dependency was admitted: %v", err)
 			}
 		})
+	}
+}
+
+// A genuine power-metadata prefix alone must not satisfy the NetworkManager
+// guard: its retired disk-/tmp step depends on owner registration, which is
+// still pending at the owner-registration floor.
+func TestRegistryRefusesRetiredDependencyWithPendingPrerequisite(t *testing.T) {
+	payload, err := os.ReadFile("../../config/release-transition.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, _, err := ParseRegistryV2(payload, BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := registry.MigrationPrefixDigest("power-metadata", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := registry
+	partial.MinimumEpochs = maps.Clone(registry.MinimumEpochs)
+	partial.MinimumEpochs["power-metadata"] = 3
+	partial.RetiredPrefixes = map[string]RetiredMigrationPrefixV2{"power-metadata": {ThroughEpoch: 3, Digest: digest}}
+	partial.Migrations = nil
+	var guard migrationhistory.Migration
+	for _, migration := range registry.Migrations {
+		switch {
+		case migration.ID == "introduce-nm-device-guard-v4":
+			guard = migration
+		case migration.Domain != "power-metadata":
+			partial.Migrations = append(partial.Migrations, migration)
+		}
+	}
+	// The guard is ordered first among the live definitions.
+	partial.Migrations = append([]migrationhistory.Migration{guard}, partial.Migrations...)
+	if ids := partial.retiredMigrationIDs(); slices.Contains(ids, "complete-registered-guest-disk-tmp-v3") {
+		t.Fatalf("retired step with a pending prerequisite was granted: %v", ids)
+	}
+	encoded, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ParseRegistryV2(encoded, BuiltinCapabilityCatalog()); err == nil || !strings.Contains(err.Error(), "dependency") {
+		t.Fatalf("registry with a pending retired prerequisite was admitted: %v", err)
 	}
 }

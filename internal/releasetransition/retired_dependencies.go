@@ -24,9 +24,11 @@ var historyV028 = func() RegistryV2 {
 
 // retiredMigrationIDs names the historical definitions a retired prefix covers.
 // A prefix counts only when its digest proves exactly those definitions, so a
-// matching domain and epoch alone never satisfy a dependency.
+// matching domain and epoch alone never satisfy a dependency. A retired
+// definition counts as completed only when each of its own frozen dependencies
+// is retired too: a live dependency is still pending at the floor.
 func (registry RegistryV2) retiredMigrationIDs() []string {
-	ids := []string{}
+	proved := map[string]bool{}
 	for domain, prefix := range registry.RetiredPrefixes {
 		if prefix.ThroughEpoch > historyV028.CurrentEpochs[domain] {
 			continue
@@ -37,8 +39,29 @@ func (registry RegistryV2) retiredMigrationIDs() []string {
 		}
 		for _, migration := range historyV028.Migrations {
 			if migration.Domain == domain && migration.ToEpoch <= prefix.ThroughEpoch {
-				ids = append(ids, migration.ID)
+				proved[migration.ID] = true
 			}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, migration := range historyV028.Migrations {
+			if !proved[migration.ID] {
+				continue
+			}
+			for _, dependency := range migration.DependsOn {
+				if !proved[dependency] {
+					delete(proved, migration.ID)
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	ids := []string{}
+	for _, migration := range historyV028.Migrations {
+		if proved[migration.ID] {
+			ids = append(ids, migration.ID)
 		}
 	}
 	return ids
