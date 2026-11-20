@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -121,22 +123,30 @@ func TestSealVerifiedEngineRetriesOnlyBusy(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer file.Close()
-			calls := 0
-			sealed, err := sealVerifiedEngineWith(file, sha256.Sum256(payload), func(fd uintptr, cmd, seals int) (int, error) {
-				calls++
-				if scenario.wantErr != nil {
-					return -1, scenario.wantErr
-				}
-				if calls <= 2 {
-					return -1, unix.EBUSY
-				}
-				return unix.FcntlInt(fd, cmd, seals)
+			var callTimes []time.Time
+			var sealed *os.File
+			synctest.Test(t, func(*testing.T) {
+				sealed, err = sealVerifiedEngineWith(file, sha256.Sum256(payload), func(fd uintptr, cmd, seals int) (int, error) {
+					callTimes = append(callTimes, time.Now())
+					if scenario.wantErr != nil {
+						return -1, scenario.wantErr
+					}
+					if len(callTimes) <= 2 {
+						return -1, unix.EBUSY
+					}
+					return unix.FcntlInt(fd, cmd, seals)
+				})
 			})
 			if sealed != nil {
 				defer sealed.Close()
 			}
-			if calls != scenario.wantCalls {
-				t.Errorf("seal calls = %d, want %d", calls, scenario.wantCalls)
+			if len(callTimes) != scenario.wantCalls {
+				t.Errorf("seal calls = %d, want %d", len(callTimes), scenario.wantCalls)
+			}
+			for i := 1; i < len(callTimes); i++ {
+				if delay := callTimes[i].Sub(callTimes[i-1]); delay != 75*time.Millisecond {
+					t.Errorf("delay before seal call %d = %v, want 75ms", i+1, delay)
+				}
 			}
 			if scenario.wantErr != nil {
 				if sealed != nil || err == scenario.wantErr || !errors.Is(err, scenario.wantErr) {
