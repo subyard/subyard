@@ -914,7 +914,7 @@ def execute(name, command, root, output, env, slot=None):
         result["failure_class"] = ("environment" if blocked else "timeout" if code == 124
                                    else phases.get("failure_class", "unknown"))
     # Only the lane's own grants are its environments; nested guest clients lease their own.
-    environments = sorted(set(evidence.environments)) if evidence else []
+    environments = list(dict.fromkeys(evidence.environments)) if evidence else []
     if slot:
         result["environments"] = [{"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
                                   for kind, count, fingerprint in environments]
@@ -1145,7 +1145,7 @@ def pass_counts(directory, name, result, declared=None):
             return False, "lane evidence is unreadable", None
     status, reason = lane_status(result, evidence)
     environments = evidence and [{"type": kind, "vm_count": count, "base_fingerprint": base}
-                                 for kind, count, base in sorted(set(evidence.environments))]
+                                 for kind, count, base in dict.fromkeys(evidence.environments)]
     return status == "passed", reason or "lane evidence is not a complete PASS", environments
 
 
@@ -2659,12 +2659,12 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
     status, issue = lane_status({"exit_code": native["exit_code"]}, evidence)
     if status != "passed":
         raise ValueError(f"standalone controller evidence incomplete: {issue}")
-    environments = set(evidence.environments)
+    environments = dict.fromkeys(evidence.environments)
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
             "execution_environment": None, "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base}
-                for kind, count, base in sorted(environments)]}
+                for kind, count, base in environments]}
 
 
 def transfer_artifacts(output, result):
@@ -2935,8 +2935,7 @@ def complete_direct_pass(name, original, command, environment):
             and original.get("duration_seconds") is not None
             and ("original_attempt" not in original or original.get("capture_status") == "recorded")
             and (not is_live(name) or bool(original.get("environments"))
-                 and ("original_attempt" not in original or original.get("cleanup_status") == "recorded"
-                      and bool(original.get("cleanup")) and original.get("environment_evidence") == "recorded")))
+                 and ("original_attempt" not in original or original.get("environment_evidence") == "recorded")))
 
 
 def prepare_reviews(output, sources, request_path):
@@ -3088,9 +3087,8 @@ def transfer_batch(output, request_path, plan=False):
             if item["attempt"] != original.get("original_attempt"):
                 raise ValueError("batch current original attempt reference changed")
             if "original_attempt" in original:
-                if is_live(name) and (original.get("cleanup_status") != "recorded" or not original.get("cleanup")
-                    or original.get("environment_evidence") != "recorded"):
-                    raise ValueError("batch physical attempt lacks recorded environment or cleanup")
+                if is_live(name) and original.get("environment_evidence") != "recorded":
+                    raise ValueError("batch physical attempt lacks recorded environment")
             source_sha = evidence_hash(manifest)
             table[source_sha] = manifest
             if source_output not in pairs:

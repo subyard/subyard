@@ -807,14 +807,16 @@ exit "$COLLECTOR_EXIT"
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
             checkout = fixture_checkout(directory, optional_vms=True)
+            # r5: the lane prints no cleanup measurement; its own records decide, here as on every path.
             (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(
-                LANE_CONTROLLER)
+                LANE_CONTROLLER.replace("printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n", ""))
             source, target = directory / "source-candidate", directory / "target-candidate"
             source_root, old = prepare_fixture(checkout, source)
             name = "profile:sample/one"
             old["checks"][name] = m.execute(name, m.commands(source_root, "test", old["profiles"])[name], source_root, source, m.clean_environment(), slot=1)
             result = old["checks"][name]
-            self.assertEqual(result["status"], "passed")
+            self.assertEqual((result["status"], result["cleanup_status"]), ("passed", "unknown"))
+            self.assertNotIn("cleanup", result)
             result["execution_environment"] = old["environment"]
             result["original_attempt"] = m.completed_attempt(source, source_root, old, name, result)
             m.save(source, old)

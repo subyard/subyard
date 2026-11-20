@@ -28,9 +28,8 @@ def export(output, destination, check):
     if (len(invocations) != 1 or invocations[0].get("state") != "finished"
         or invocations[0].get("capture_status") != "recorded"
         or invocations[0].get("selected") != [check] or invocations[0].get("selected_status") != "passed"
-        or result["status"] != "passed" or result.get("cleanup_status") != "recorded"
-        or not result.get("cleanup")):
-        raise ValueError("hosted collector selection did not finish with a complete PASS and cleanup")
+        or result["status"] != "passed"):
+        raise ValueError("hosted collector selection did not finish with a complete PASS")
 
     destination.mkdir(parents=True, exist_ok=False)
     execution = {"run_id": int(os.environ["GITHUB_RUN_ID"]), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),

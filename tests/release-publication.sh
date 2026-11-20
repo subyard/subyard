@@ -52,6 +52,12 @@ LANE_LOG = (LANE_HEADER + "".join(lease_record(event, "0123abcd", 1) for event i
             + "synthetic passing evidence fixture\n")
 
 
+# Two clean leases on slot 1 whose typed grants are D, then B: environments keep grant order.
+TWO_GRANTS_LOG = LANE_HEADER + "".join(lease_record(event, run, 1) for run, base in (("0123abcd", "d" * 64), ("0123abce", "b" * 64))
+                                       for event in ("request", "grant type=subyard-pair vms=2 base=" + base, "release exit_code=0"))
+TWO_GRANTS = [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": base * 64} for base in ("d", "b")]
+
+
 def clean_lease(run="0f1c7e00", staged=(1, 2), base="b" * 64, middle=""):
     """A standalone controller's own lease on slot 2 with every staged VM cleaned before release."""
     return (lease_record("request", run) + lease_record(f"grant type=subyard-pair vms=2 base={base}", run) + "".join(lease_record(f"work vm={vm}", run) for vm in staged) + middle
@@ -750,7 +756,9 @@ class Contracts(unittest.TestCase):
             name = "profile:sample"
             root, old = m.a.load_bound(source)
             result = old["checks"][name]
-            result.update(termination="exit", capture_status="recorded", duration_seconds=1, environment_evidence="recorded")
+            (source / result["log"]).write_text(TWO_GRANTS_LOG)
+            result.update(termination="exit", capture_status="recorded", duration_seconds=1, environment_evidence="recorded",
+                          log_sha256=m.a.digest(source / result["log"]), environments=TWO_GRANTS)
             result["original_attempt"] = m.a.completed_attempt(source, root, old, name, result)
             m.a.save(source, old)
             target_dir = directory / "target"
@@ -767,7 +775,9 @@ class Contracts(unittest.TestCase):
             path = directory / "review-v2.json"
             path.write_text(json.dumps(review))
             self.assertEqual(m.a.transfer_evidence(target, source, name, path), 0)
-            self.assertEqual(m.a.load_bound(target)[1]["checks"][name]["status"], "passed")
+            # The reload keeps the grant order D, B that the immutable attempt records.
+            reloaded = m.a.load_bound(target)[1]["checks"][name]
+            self.assertEqual((reloaded["status"], reloaded["environments"]), ("passed", TWO_GRANTS))
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="subyard-publication-", dir="/tmp")
@@ -2635,6 +2645,19 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(result, {"status": "pending"})
         self.assertIn("profile:sample: hosted evidence is not a complete PASS: granted lease has no confirmed release", report)
         self.assertTrue(any(call.args[2].get("execution") == "ci-hosted" for call in counted.call_args_list))
+
+    def test_hosted_pass_keeps_grant_order_through_collection_and_reload(self):
+        # r5: two typed grants, D then B, stay in grant order as the immutable attempt records them.
+        root, receipt = m.a.load_bound(self.remote)
+        result = receipt["checks"]["profile:sample"]
+        (self.remote / result["log"]).write_text(TWO_GRANTS_LOG)
+        result.update(log_sha256=m.a.digest(self.remote / result["log"]), environments=TWO_GRANTS)
+        result["original_attempt"] = m.a.completed_attempt(self.remote, root, receipt, "profile:sample", result)
+        m.a.save(self.remote, receipt)
+        result, _ = self.collect()
+        self.assertEqual((result["execution"], result["environments"]), ("ci-hosted", TWO_GRANTS))
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"]["environments"], TWO_GRANTS)
+        m.attestation(self.output, self.identity)
 
     def test_hosted_pass_without_cleanup_measurements_counts_by_its_lane_records(self):
         # r5: untagged guest cleanup phases never decide a slot lane, absent or failed.
