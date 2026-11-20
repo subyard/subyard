@@ -606,7 +606,7 @@ verify_symlinked_instruction_file() { # <update command...>
   guest_dev test -f "$guest" -a ! -L "$guest" && guest_dev grep -Fqx 'p0 source-upgrade instructions' "$guest" \
     || die 'the replaced instruction file did not converge'
   [ "$rc" -eq 0 ] || "$@"
-  operator_env rm "$OPERATOR_HOME/.codex/AGENTS.md"
+  # The host instructions stay: removing them would leave the guest copy as drift.
 }
 
 wait_for_desired_yards() {
