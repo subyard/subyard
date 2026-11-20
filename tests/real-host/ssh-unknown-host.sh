@@ -58,7 +58,12 @@ cleanup() {
     exit 3
   fi
   # Controller registrations are local to this disposable fixture directory.
-  case "$STATE" in /var/tmp/subyard-ssh-unknown.*) find "$STATE" -depth -delete ;; esac
+  case "$STATE" in /var/tmp/subyard-ssh-unknown.*)
+    find "$STATE" -depth -delete || {
+      printf 'ssh-unknown-host: fixture deletion failed; remaining files under %s\n' "$STATE" >&2
+      exit 3
+    } ;;
+  esac
   exit "$rc"
 }
 trap cleanup EXIT
@@ -78,6 +83,9 @@ install -d -m 0700 "$OWNER_HOME" "$OWNER_CONFIG_HOME" "$OWNER_DATA_HOME" "$OWNER
   "$CONTROLLER_HOME" "$CONTROLLER_CONFIG_HOME" "$CONTROLLER_DATA_HOME" "$STATE/host"
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
+# Packaging keeps the operator's Go caches; the owner HOME holds only installer state.
+GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
+export GOMODCACHE GOCACHE
 installed="$(export HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
   SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
   release_candidate_install "$ROOT" "$OWNER_INSTALL")"
