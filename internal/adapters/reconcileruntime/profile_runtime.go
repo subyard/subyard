@@ -544,6 +544,9 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	if observation.OwnershipAbsent && observation.State != ports.RuntimeStateCurrent {
 		return ports.RuntimeObservation{}, errors.New("runtime ownership absence requires current state")
 	}
+	if observation.Deactivated && observation.State != ports.RuntimeStateCurrent {
+		return ports.RuntimeObservation{}, errors.New("runtime deactivation requires current state")
+	}
 	if observation.Consequence != "" && (observation.State != ports.RuntimeStateStale ||
 		len(observation.Consequence) > profileRuntimeConsequenceBytes || !profileRuntimeConsequence.MatchString(observation.Consequence) ||
 		strings.HasSuffix(observation.Consequence, " ")) {
