@@ -1204,11 +1204,13 @@ later definitions are unchanged. When the active registry is the retired one, th
 parse it: a release engine validates the active registry before it serves any request, and parsers
 up to v0.30.0 require every `dependsOn` to name a migration defined earlier in the same registry.
 A surviving definition that depends on retired history therefore refuses with `registry-unreadable`,
-together with the registry refusal when the pair is also undeclared. The current registry parser
-applies the same rule, so today the runtime and the verb refuse such an active registry earlier, as
-one whose sealed registry cannot be verified, and do not reach `registry-unreadable`.
-For the v0.30.0 registry this admits only retirements that also retire the NM guard step, or the
-definition-free `project-state` prefix. Any other relation is `refuse`; `steps` is not produced
+together with the registry refusal when the pair is also undeclared, unless the target's sealed
+declaration lists the `retired-prefix-dependencies` registry feature. Such a target, like the
+current parser, also accepts a dependency on a retired definition that a retired prefix proves
+against the frozen v0.28 history, when that definition's own prerequisites are retired too. For a
+v0.30.0 target this admits only retirements that also retire the NM guard step, or the
+definition-free `project-state` prefix; a feature-declaring target also admits the retirement of
+the six historical migrations. Any other relation is `refuse`; `steps` is not produced
 yet. For an admitted relation it then reads the authoritative ledger or checkpoint through the
 target registry and its checkpoint-reader marker. Checkpoint reading checks prefix digests and
 epochs, not the writer's registry digest, so either release of an equivalent pair reads history
