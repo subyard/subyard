@@ -309,10 +309,10 @@ prepare_broker_recovery_update() {
   local arch release artifact
   arch="$(go env GOARCH)"
   release="$ROOT/.build/p0-broker-recovery-update"
-  artifact="$release/subyard-p0-broker-recovery-update-linux-$arch"
+  artifact="$release/subyard-0.29.1-p0.broker-recovery-update-linux-$arch"
   dev/package-engine.sh \
     --output-dir "$release" \
-    --version p0-broker-recovery-update \
+    --version 0.29.1-p0.broker-recovery-update \
     --arch "$arch" >/dev/null
   P0_BROKER_RECOVERY_UPDATE_ARTIFACT="$artifact"
   export P0_BROKER_RECOVERY_UPDATE_ARTIFACT

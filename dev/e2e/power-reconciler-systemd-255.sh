@@ -250,10 +250,10 @@ if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   [ "$(sha256sum "$runtime_bundle" | cut -d' ' -f1)" = "$(jq -er '.runtime_sha256' "$ROOT/.subyard-acceptance/candidate.json")" ] \
     || die 'packaged runtime checksum changed'
 else
-  candidate_version=0.19.1-test.systemd255
+  candidate_version=1.0.0-test.systemd255
   release_root="$TEMPORARY/release"
   bash "$ROOT/dev/package-engine.sh" --output-dir "$release_root" --version "$candidate_version" >/dev/null
-  runtime_bundle="$TEMPORARY/release/subyard-0.19.1-test.systemd255-linux-amd64.tar.gz"
+  runtime_bundle="$TEMPORARY/release/subyard-$candidate_version-linux-amd64.tar.gz"
 fi
 tar -C "$release_root" --exclude=.build.lock -czf "$TEMPORARY/product.tar.gz" .
 # This fixture proves unit parsing and boot execution with no managed yard.

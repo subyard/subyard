@@ -10,7 +10,7 @@ state="/var/tmp/subyard-full-uninstall-$token"
 marker="subyard-full-uninstall-$token"
 operator="subyardfull${token:0:20}"
 home="/home/$operator"
-version="0.19.1-p0.full.$token"
+version="1.0.0-p0.full.$token"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
