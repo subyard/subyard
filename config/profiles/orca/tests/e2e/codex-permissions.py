@@ -339,6 +339,8 @@ def sudo_checks(app, provider, workspace):
         # Codex runs a command with a glob without asking, so the hook refuses it.
         ('glob', 'ls -d /t* && sudo -n touch {m}', False),
         ('quoted', "sudo -n touch {m} 'quoted text'", True),
+        # Every unquoted character and concatenation the hook accepts as a plain Codex word.
+        ('word-grammar', 'sudo -n touch {m} a"b" --k=\'v\' user@h 50% a:b,c+d', True),
     ]
     for name, template, direct in cases:
         marker = workspace / ('sudo-' + name)
@@ -367,6 +369,9 @@ def sudo_probe(app, provider, workspace):
         ('glob', 'ls -d /t* && sudo -n touch {m}'),
         ('tilde', 'cd ~ && sudo -n touch {m}'),
         ('quoted', "sudo -n touch {m} 'quoted text'"),
+        ('concat-double', 'sudo -n touch {m} a"b"'),
+        ('concat-single', "sudo -n touch {m} --k='v'"),
+        ('punctuation', 'sudo -n touch {m} --k=v user@h 50% a:b,c+d'),
     ]
     outcomes = {}
     for name, template in cases:
