@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -295,6 +296,7 @@ func TestHistoryCompatibilityAdmitsEquivalentWithinTheDeclaredPair(t *testing.T)
 		predecessor, successor bool
 		reason                 HistoryRefusalReason
 		message                string
+		undeclared             bool // also refused as an undeclared registry relation
 	}{
 		{name: "v0.30.0 checkpoint", kind: HistoryEquivalent, predecessor: true,
 			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: predecessor, History: v030History(checkpoint)}},
@@ -312,6 +314,9 @@ func TestHistoryCompatibilityAdmitsEquivalentWithinTheDeclaredPair(t *testing.T)
 		{name: "declared but unparseable active registry", kind: HistoryRefuse, predecessor: true, reason: HistoryRegistryUnreadable,
 			message: "the selected release cannot parse the active release's migration registry",
 			input:   HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: v030History(corrupt)}},
+		{name: "undeclared and unparseable active registry", kind: HistoryRefuse, reason: HistoryRegistryUnreadable, undeclared: true,
+			message: "the selected release cannot parse the active release's migration registry; " + differs,
+			input:   HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: other, History: v030History(corrupt)}},
 		{name: "return to the declaring successor", kind: HistoryEquivalent, successor: true,
 			input: HistoryCompatibilityInput{Active: &v030, Target: &retired, TargetPredecessor: predecessor,
 				History: evidence(retired, fingerprintPayload(retiredPayload), successor)}},
@@ -331,7 +336,15 @@ func TestHistoryCompatibilityAdmitsEquivalentWithinTheDeclaredPair(t *testing.T)
 				}
 				return
 			}
-			if verdict.Admitted() || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != test.reason || message != test.message {
+			reasons := []HistoryRefusalReason{test.reason}
+			if test.undeclared {
+				reasons = append(reasons, HistoryRegistryDiffers)
+			}
+			got := []HistoryRefusalReason{}
+			for _, refusal := range verdict.Refusals {
+				got = append(got, refusal.Reason)
+			}
+			if verdict.Admitted() || !slices.Equal(got, reasons) || message != test.message {
 				t.Fatalf("refusal = %#v", verdict)
 			}
 		})

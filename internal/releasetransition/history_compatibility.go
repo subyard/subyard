@@ -124,9 +124,13 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 	verdict.DeclaredPredecessor = input.Predecessor != "" && path.Target == input.Predecessor
 	verdict.DeclaredSuccessor = input.TargetPredecessor != "" && path.Active == input.TargetPredecessor
 	if path.Unreadable != nil {
+		// An unreadable pair can also be undeclared; report both.
 		verdict.Refusals = []HistoryRefusal{{
 			HistoryRegistryUnreadable, "the selected release cannot parse the active release's migration registry", path.Unreadable,
 		}}
+		if !verdict.DeclaredPredecessor {
+			verdict.Refusals = append(verdict.Refusals, registryDiffersRefusal)
+		}
 		return verdict
 	}
 	if verdict.RegistryAdmitted() && input.History != nil {
@@ -225,12 +229,14 @@ func undefinedDependency(registry RegistryV2) error {
 
 // sealed keeps the invariant that a verdict which is not admitted carries a
 // refusal. A relation that is not admitted keeps the identity refusal.
+var registryDiffersRefusal = HistoryRefusal{
+	Reason:  HistoryRegistryDiffers,
+	Message: "the selected release's migration registry differs from the active release's registry",
+}
+
 func (verdict HistoryCompatibilityVerdict) sealed() HistoryCompatibilityVerdict {
 	if !verdict.RegistryAdmitted() && len(verdict.Refusals) == 0 {
-		verdict.Refusals = []HistoryRefusal{{
-			Reason:  HistoryRegistryDiffers,
-			Message: "the selected release's migration registry differs from the active release's registry",
-		}}
+		verdict.Refusals = []HistoryRefusal{registryDiffersRefusal}
 	}
 	return verdict
 }

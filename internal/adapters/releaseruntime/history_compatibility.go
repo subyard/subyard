@@ -151,9 +151,11 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	}
 	history.targetRegistry = identity
 	// Only an Equivalent relation depends on a declaration, so a read failure
-	// refuses only that relation.
-	predecessor, activeDeclarationErr := declaredPredecessor(active)
-	targetPredecessor, targetDeclarationErr := declaredPredecessor(target)
+	// refuses only that relation. The active release's declaration is its own
+	// and parsed strictly; the target's may come from a newer release, so only
+	// its predecessor digest is read.
+	predecessor, activeDeclarationErr := declaredPredecessor(active, strictRollbackPredecessor)
+	targetPredecessor, targetDeclarationErr := declaredPredecessor(target, releasetransition.ParseRollbackPredecessor)
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -188,14 +190,13 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	return history, "", nil
 }
 
-// declaredPredecessor is the predecessor registry digest a verified release
-// declares, or empty when it declares none.
-func declaredPredecessor(verified *verifiedPublishedCandidate) (releasetransition.Fingerprint, error) {
-	declaration, err := verifiedRollbackDeclaration(verified)
-	if err != nil || declaration == nil {
-		return "", err
-	}
-	return declaration.PredecessorRegistryDigest, nil
+// rollbackPredecessorParser reads the predecessor digest from declaration bytes.
+type rollbackPredecessorParser func([]byte) (releasetransition.Fingerprint, error)
+
+// strictRollbackPredecessor parses a release's own declaration in full.
+func strictRollbackPredecessor(payload []byte) (releasetransition.Fingerprint, error) {
+	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
+	return declaration.PredecessorRegistryDigest, err
 }
 
 // needsSourceFloor reports when the source floor's upgrade advice may replace
@@ -229,41 +230,39 @@ func retainedHistoryEvidence(target *verifiedPublishedCandidate, registry releas
 	}
 }
 
-// verifiedRollbackDeclaration reads config/release-rollback.json the way the
-// checkpoint marker is read: only manifest-bound bytes captured during
-// verification, unchanged since. A release without it declares no predecessor.
-func verifiedRollbackDeclaration(verified *verifiedPublishedCandidate) (*releasetransition.RollbackDeclaration, error) {
+// declaredPredecessor is the predecessor registry digest a verified release
+// declares. It reads config/release-rollback.json the way the checkpoint
+// marker is read: only manifest-bound bytes captured during verification,
+// unchanged since. A release without it declares no predecessor.
+func declaredPredecessor(verified *verifiedPublishedCandidate, parse rollbackPredecessorParser) (releasetransition.Fingerprint, error) {
 	if !verified.rollbackBound {
-		return nil, nil
+		return "", nil
 	}
-	return readRollbackDeclaration(int(verified.root.Fd()), func(payload []byte) error {
+	return readRollbackPredecessor(int(verified.root.Fd()), func(payload []byte) error {
 		if sha256.Sum256(payload) != verified.rollbackDigest || !bytes.Equal(payload, verified.rollbackRaw) {
 			return errors.New("rollback declaration does not match its verified manifest")
 		}
 		return nil
-	})
+	}, parse)
 }
 
-// readRollbackDeclaration reads config/release-rollback.json below a release
-// root without following links, bounded, checks the bytes and parses them.
-func readRollbackDeclaration(rootFD int, check func([]byte) error) (*releasetransition.RollbackDeclaration, error) {
+// readRollbackPredecessor reads config/release-rollback.json below a release
+// root without following links, bounded, checks the bytes and parses its
+// predecessor digest.
+func readRollbackPredecessor(rootFD int, check func([]byte) error, parse rollbackPredecessorParser) (releasetransition.Fingerprint, error) {
 	file, err := openCandidateFile(rootFD, "config/release-rollback.json")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer file.Close()
 	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRollbackDeclarationBytes+1))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := check(payload); err != nil {
-		return nil, err
+		return "", err
 	}
-	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
-	if err != nil {
-		return nil, err
-	}
-	return &declaration, nil
+	return parse(payload)
 }
 
 // EngineRollbackPredecessor reads the rollback declaration of the running
@@ -275,12 +274,12 @@ func EngineRollbackPredecessor(releaseRoot string) (releasetransition.Fingerprin
 		return "", fmt.Errorf("open release root: %w", err)
 	}
 	defer root.Close()
-	declaration, err := readRollbackDeclaration(int(root.Fd()), func([]byte) error { return nil })
+	predecessor, err := readRollbackPredecessor(int(root.Fd()), func([]byte) error { return nil }, strictRollbackPredecessor)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("read release rollback declaration: %w", err)
 	}
-	return declaration.PredecessorRegistryDigest, nil
+	return predecessor, nil
 }

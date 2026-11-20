@@ -3763,5 +3763,3 @@ func TestRouteConsumerActivationKeepsUncertainFailuresBlocking(t *testing.T) {
 		}
 	}
 }
-
-// The engine reads its own sealed rollback declaration for an outgoing rollback.

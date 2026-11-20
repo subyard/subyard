@@ -293,14 +293,26 @@ func TestHistoryCompatibilityVerbDeclarationErrorsRefuseOnlyEquivalent(t *testin
 	for _, test := range []struct {
 		name                       string
 		retireActive, retireTarget bool
-		unreadableTarget           bool
-		code                       int
-		kind                       releasetransition.HistoryCompatibilityKind
+		// targetDeclaration formats the target's declaration around the
+		// quoted predecessor digest; empty is the schema 1 declaration.
+		targetDeclaration string
+		code              int
+		kind              releasetransition.HistoryCompatibilityKind
 	}{
 		{name: "identical", code: 0, kind: releasetransition.HistoryIdentity},
 		{name: "equivalent predecessor", retireActive: true, code: 2},
-		{name: "equivalent successor", retireTarget: true, unreadableTarget: true, code: 2},
+		{name: "equivalent successor with a malformed digest", retireTarget: true, code: 2,
+			targetDeclaration: `{"schemaVersion":1,"predecessorRegistryDigest":"AAAA","migrations":[],"profileFormats":[]}`},
+		{name: "equivalent successor without a schema version", retireTarget: true, code: 2,
+			targetDeclaration: `{"predecessorRegistryDigest":%q}`},
 		{name: "equivalent successor with readable declaration", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent},
+		// A newer release's declaration is read only for its predecessor digest.
+		{name: "equivalent successor with unknown fields", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[],"registryFeatures":["retired-dependencies"]}`},
+		{name: "equivalent successor with a higher schema", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":2,"predecessorRegistryDigest":%q}`},
+		{name: "equivalent successor with entries", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":2,"predecessorRegistryDigest":%q,"migrations":[{"id":"future"}],"profileFormats":[{"profile":"future","format":2}]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newHistoryFixture(t)
@@ -313,8 +325,12 @@ func TestHistoryCompatibilityVerbDeclarationErrorsRefuseOnlyEquivalent(t *testin
 			if test.retireTarget {
 				targetRegistry = retired
 				targetFiles["config/release-rollback.json"] = rollbackDeclarationPayload(canonical)
-				if test.unreadableTarget {
-					targetFiles["config/release-rollback.json"] = rollbackDeclarationPayload("AAAA")
+				if test.targetDeclaration != "" {
+					declaration := test.targetDeclaration
+					if strings.Contains(declaration, "%q") {
+						declaration = fmt.Sprintf(declaration, canonical)
+					}
+					targetFiles["config/release-rollback.json"] = []byte(declaration)
 				}
 			}
 			targetFiles["config/release-transition.json"] = targetRegistry
@@ -529,19 +545,19 @@ func TestRollbackDeclarationRequiresSealedManifest(t *testing.T) {
 			if scenario == "changed-after-verification" {
 				testkit.WriteFile(t, path, rollbackDeclarationPayload(releasetransition.Fingerprint(strings.Repeat("c", 64))), 0o600)
 			}
-			declaration, err := verifiedRollbackDeclaration(verified)
+			predecessor, err := declaredPredecessor(verified, strictRollbackPredecessor)
 			switch scenario {
 			case "absent":
-				if declaration != nil || err != nil {
-					t.Fatalf("absent declaration = %#v, %v", declaration, err)
+				if predecessor != "" || err != nil {
+					t.Fatalf("absent declaration = %q, %v", predecessor, err)
 				}
 			case "valid":
-				if err != nil || declaration == nil || declaration.PredecessorRegistryDigest != releasetransition.Fingerprint(strings.Repeat("a", 64)) {
-					t.Fatalf("valid declaration = %#v, %v", declaration, err)
+				if err != nil || predecessor != releasetransition.Fingerprint(strings.Repeat("a", 64)) {
+					t.Fatalf("valid declaration = %q, %v", predecessor, err)
 				}
 			default:
-				if err == nil || declaration != nil {
-					t.Fatalf("%s declaration = %#v, %v", scenario, declaration, err)
+				if err == nil || predecessor != "" {
+					t.Fatalf("%s declaration = %q, %v", scenario, predecessor, err)
 				}
 			}
 		})
