@@ -670,7 +670,14 @@ func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing
 								next = "yard update && yard update"
 							}
 							want := "source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: " + next + "\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v0.28.1 installer or use a later v0.28.x fix release. Do not uninstall."
-							if err == nil || err.Error() != want {
+							if target == "0.17.3-older" {
+								// The missing journal target is an independent inspection refusal.
+								unavailable := "code=dependency-unavailable active=" + string(active.release) + " previous=none target=0.17.3-older"
+								if err == nil || !strings.Contains(err.Error(), unavailable) || !strings.HasSuffix(err.Error(), "; "+want) ||
+									strings.Index(err.Error(), unavailable) > strings.Index(err.Error(), "source-anchor-required") {
+									t.Fatalf("flags=%v: refusal=%v, want %q and %q", flags, err, unavailable, want)
+								}
+							} else if err == nil || err.Error() != want {
 								t.Fatalf("flags=%v: refusal=%v, want %q", flags, err, want)
 							}
 						} else if err != nil && strings.Contains(err.Error(), "an unfinished release transition must first") {

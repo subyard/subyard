@@ -683,6 +683,12 @@ func (runtime *Runtime) PrepareTransition(
 	)
 	if parsed.versionExplicit {
 		if refusal := runtime.unfinishedSourceAnchorError(ctx, parsed.root, configHome); refusal != nil {
+			// The protected inspection's own public refusal is independent of the
+			// source anchor. An inspection that could not be read adds nothing.
+			var public publicReleaseInspectionError
+			if errors.As(err, &public) {
+				return Prepared{}, domain.CollectRefusals(refusal, public.publicError())
+			}
 			return Prepared{}, refusal
 		}
 	}
