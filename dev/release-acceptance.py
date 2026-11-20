@@ -1047,7 +1047,9 @@ def lane_leases(log, slot=None):
                         found = f"guest cleanup of VM{vm.decode()} exited {code}"
                     elif held is not None:
                         held["dirty"].discard(int(vm))
-                        cleaned.add(int(vm))
+                        if 1 <= int(vm) <= held["vms"]:
+                            # Nested clients may clean up higher-numbered VMs of their own leases.
+                            cleaned.add(int(vm))
                 elif depth == 0 and state == b"end" and code and phase in (b"allocation", b"cleanup/release"):
                     # A typed capacity refusal ends its allocation with exit 4.
                     if not (phase == b"allocation" and code == 4 and refusal):
@@ -1064,7 +1066,7 @@ def lane_leases(log, slot=None):
                 elif lane_slot is not None and number(granted) != lane_slot:
                     found = f"lease granted for slot-{number(granted):03d}, not the lane slot"
                 else:
-                    held = {"slot": number(granted), "run": run, "dirty": set()}
+                    held = {"slot": number(granted), "run": run, "vms": int(grant[3]), "dirty": set()}
                     environments.append((grant[2].decode(), int(grant[3]), grant[4].decode()))
                 requested, refusal = None, None
             elif line.startswith(b"E2E lease: "):

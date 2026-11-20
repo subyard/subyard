@@ -745,6 +745,8 @@ An uncollected physical controller PASS may instead supply `standalone` with exa
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
 controller log must retain the VM base, successful cleanup of every VM and lease release.
+Only the lane's own grants are its environments, so a standalone transfer committed earlier
+whose log has a nested grant fails reload as a provenance change; re-create that transfer.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
 for direct controllers and stays unknown; any observed failed phase rejects the transfer.

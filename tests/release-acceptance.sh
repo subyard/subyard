@@ -2489,6 +2489,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             # Cleanup reports only VMs cleaned inside the lane's own leases.
             log.write_text(stage("guest-cleanup", "end", vm=2) + request + grant(vms=2) + work(1) + release())
             self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 2, "a" * 64)], [1]))
+            log.write_text(request + grant() + stage("transport", "start", vm=1) + stage("guest", "start", vm=1)
+                           + stage("guest-cleanup", "end", vm=2) + stage("guest", "end", vm=1) + stage("guest-cleanup", "end", vm=1) + release())
+            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
             # One decision for PASS, capacity block and failure, including results recorded elsewhere.
             log.write_text(clean)
             self.assertEqual(m.lane_status({"exit_code": 0}, log, 1), ("passed", None))
