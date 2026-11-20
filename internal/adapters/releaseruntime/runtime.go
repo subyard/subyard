@@ -1430,26 +1430,35 @@ type candidateVerification struct {
 
 // VerifyRollbackTarget derives internal compatibility facts from the exact sealed
 // artifact. V1 requests and V2 journals bind that artifact digest without adding
-// fields their retained readers cannot understand.
+// fields their retained readers cannot understand. The parsed sealed registry
+// is returned separately. It is nil for a registryless target or one this
+// engine cannot parse; the engine then admits only identical sealed bytes.
 func VerifyRollbackTarget(ctx context.Context, runtimeRoot string, target releasetransition.ReleaseID,
 	artifactDigest releasetransition.Fingerprint,
-) (*releasetransition.RollbackTarget, error) {
+) (*releasetransition.RollbackTarget, *releasetransition.RegistryV2, error) {
 	runtime := New(Config{})
 	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{
 		release: target, root: filepath.Join(runtimeRoot, "releases", string(target)),
 	}, runtimeRoot, &artifactDigest)
 	if err != nil {
-		return nil, fmt.Errorf("verify rollback target: %w", err)
+		return nil, nil, fmt.Errorf("verify rollback target: %w", err)
 	}
 	defer verified.Close()
 	if !strings.HasPrefix(string(target), verified.version+"-") {
-		return nil, errors.New("rollback target identity does not match its sealed version")
+		return nil, nil, errors.New("rollback target identity does not match its sealed version")
 	}
 	facts := &releasetransition.RollbackTarget{Version: verified.version, RegistryDigest: verified.registryDigest}
 	if err := facts.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return facts, nil
+	if verified.registryDigest == "" {
+		return facts, nil, nil
+	}
+	registry, _, err := readVerifiedTransitionRegistry(verified)
+	if err != nil {
+		return facts, nil, nil
+	}
+	return facts, &registry, nil
 }
 
 // VerifyMigrationCheckpointReader derives the source capability from its exact

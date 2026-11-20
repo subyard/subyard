@@ -21,7 +21,7 @@ import (
 // retained-runtime boundary, kept for the frozen rollback contract test.
 func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
 	return releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: target.registryDigest, TargetRegistry: target.registryDigest,
+		Active: &registry, Target: &registry,
 		History: retainedHistoryEvidence(target, registry, ledger, checkpoint),
 	}).Refusal()
 }
@@ -297,15 +297,21 @@ func TestHistoryCompatibilityVerbMatchesRuntimeSelection(t *testing.T) {
 	}
 }
 
-// Callers read the registry relation, not admission: identical registries with
-// a history refusal are neither a registry difference nor an admission.
+// Callers read registry admission, not whole admission: identical registries
+// with a history refusal are neither a registry refusal nor an admission.
 func TestHistorySelectionReadsTheRegistryRelation(t *testing.T) {
+	fixture := newHistoryFixture(t)
+	olderPayload, _ := fixture.olderRegistry(t)
+	older, _, err := releasetransition.ParseRegistryV2(olderPayload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
 	publication := errors.New("cannot list published releases")
 	historyRefused := releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: "x", TargetRegistry: "x",
-		History: &releasetransition.HistoryEvidence{Ledger: releasetransition.ProtectedSnapshot{Exists: true, Payload: []byte("{}")}},
+		Active: &fixture.parsed, Target: &fixture.parsed,
+		History: &releasetransition.HistoryEvidence{Registry: fixture.parsed, Ledger: releasetransition.ProtectedSnapshot{Exists: true, Payload: []byte("{}")}},
 	})
-	differs := releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{ActiveRegistry: "x", TargetRegistry: "y"})
+	differs := releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{Active: &fixture.parsed, Target: &older})
 	if historyRefused.Admitted() || historyRefused.Registry != releasetransition.RegistryIdentical || differs.Registry != releasetransition.RegistryDiffers {
 		t.Fatalf("fixture verdicts = %#v / %#v", historyRefused, differs)
 	}

@@ -2142,9 +2142,15 @@ func executeReleaseTransitionRequest(
 		return releasetransition.ProcessResponse{}, errors.New("release transition roots must be absolute")
 	}
 	var rollbackTarget *releasetransition.RollbackTarget
+	var rollbackTargetRegistry *releasetransition.RegistryV2
+	var rollbackPredecessor releasetransition.Fingerprint
 	if request.Direction == releasetransition.DirectionActivatePrevious {
 		var err error
-		rollbackTarget, err = releaseruntime.VerifyRollbackTarget(ctx, request.RuntimeRoot, request.Target, request.ArtifactDigest)
+		rollbackTarget, rollbackTargetRegistry, err = releaseruntime.VerifyRollbackTarget(ctx, request.RuntimeRoot, request.Target, request.ArtifactDigest)
+		if err != nil {
+			return releasetransition.ProcessResponse{}, err
+		}
+		rollbackPredecessor, err = engineRollbackPredecessor(repositoryRoot)
 		if err != nil {
 			return releasetransition.ProcessResponse{}, err
 		}
@@ -2194,9 +2200,10 @@ func executeReleaseTransitionRequest(
 			return links.Activate(pair)
 		},
 		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
-		RegistryPayload:     registry,
-		ArtifactDigest:      request.ArtifactDigest,
-		RollbackTarget:      rollbackTarget,
+		RegistryPayload:        registry,
+		ArtifactDigest:         request.ArtifactDigest,
+		RollbackTarget:         rollbackTarget,
+		RollbackTargetRegistry: rollbackTargetRegistry, RollbackPredecessor: rollbackPredecessor,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
@@ -2314,6 +2321,28 @@ func candidateTransitionOptions(
 	options.Replacement = request.Replacement
 	options.CandidateVersion = Version
 	return options
+}
+
+// engineRollbackPredecessor reads this engine's sealed rollback declaration,
+// like its checkpoint capability. A release without one declares no predecessor.
+func engineRollbackPredecessor(repositoryRoot string) (releasetransition.Fingerprint, error) {
+	file, err := os.Open(filepath.Join(repositoryRoot, "config", "release-rollback.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read release rollback declaration: %w", err)
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRollbackDeclarationBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read release rollback declaration: %w", err)
+	}
+	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
+	if err != nil {
+		return "", err
+	}
+	return declaration.PredecessorRegistryDigest, nil
 }
 
 func readReleaseTransitionGrant() (releasetransition.Authorization, error) {

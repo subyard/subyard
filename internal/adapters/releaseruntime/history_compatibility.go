@@ -142,7 +142,8 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 ) (historySelection, string, error) {
 	var history historySelection
 	var err error
-	_, history.activeRegistry, err = selectedRegistry(active)
+	activeRegistry, activeIdentity, err := selectedRegistry(active)
+	history.activeRegistry = activeIdentity
 	if err != nil {
 		return history, "the active release's sealed migration registry cannot be verified", err
 	}
@@ -162,8 +163,12 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	if identity != "" && firstPublication {
 		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	input := releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: history.activeRegistry, TargetRegistry: identity, Predecessor: predecessor,
+	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor}
+	if activeIdentity != "" {
+		input.Active = &activeRegistry
+	}
+	if identity != "" {
+		input.Target = &retained
 	}
 	if !history.firstPublication {
 		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
@@ -173,17 +178,18 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 }
 
 // needsSourceFloor reports when the source floor's upgrade advice may replace
-// the selection: differing registries, or an installed registry without history.
+// the selection: a registry relation that is not admitted, or an installed
+// registry without history.
 func (history historySelection) needsSourceFloor() bool {
-	return history.verdict.Registry == releasetransition.RegistryDiffers ||
+	return !history.verdict.RegistryAdmitted() ||
 		(history.targetRegistry != "" && history.missingHistory)
 }
 
-// refusal is the selection's refusal. A registry difference is decided before
-// first-publication evidence, so that evidence's error is not reported then.
+// refusal is the selection's refusal. A refused registry relation is decided
+// before first-publication evidence, so that evidence's error is not reported then.
 func (history historySelection) refusal() (string, error) {
 	message, cause := history.verdict.Refusal()
-	if history.verdict.Registry != releasetransition.RegistryDiffers {
+	if history.verdict.RegistryAdmitted() {
 		cause = domain.CollectRefusals(cause, history.publicationErr)
 	}
 	return message, cause

@@ -52,12 +52,10 @@ type HistoryRefusal struct {
 	Cause   error
 }
 
-// HistoryCompatibilityInput carries sealed facts only. Both registry identities
-// must be of one kind: canonical digests at the runtime boundary, sealed file
-// digests inside the engine. An empty identity predates registry v2.
+// HistoryCompatibilityInput carries sealed facts only. A nil registry predates
+// registry v2. Registries are compared by canonical digest.
 type HistoryCompatibilityInput struct {
-	ActiveRegistry Fingerprint
-	TargetRegistry Fingerprint
+	Active, Target *RegistryV2
 	// Predecessor is the canonical registry digest the active release declares
 	// for rollback; empty when it declares none.
 	Predecessor Fingerprint
@@ -91,20 +89,28 @@ type HistoryCompatibilityVerdict struct {
 // History findings depend on the relation and on each preceding read, so a
 // failure skips the findings after it.
 func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityVerdict {
-	verdict := HistoryCompatibilityVerdict{
-		DeclaredPredecessor: input.Predecessor != "" && input.TargetRegistry == input.Predecessor,
-	}
+	var verdict HistoryCompatibilityVerdict
 	switch {
-	case input.ActiveRegistry != input.TargetRegistry:
-		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
-		return verdict.sealed()
-	case input.TargetRegistry == "":
+	case input.Active == nil && input.Target == nil:
 		// A registryless pair has no protected migration history to read.
 		verdict.Kind, verdict.Registry = HistoryIdentity, RegistryAbsent
 		return verdict.sealed()
+	case input.Active == nil || input.Target == nil:
+		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
+		return verdict.sealed()
 	}
-	verdict.Kind, verdict.Registry = HistoryIdentity, RegistryIdentical
-	if input.History != nil {
+	path, err := PlanDownPath(*input.Active, *input.Target)
+	if err != nil {
+		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
+		verdict.Refusals = []HistoryRefusal{{HistoryRegistryDiffers, "the migration registries cannot be identified", err}}
+		return verdict
+	}
+	verdict.Kind, verdict.Registry = path.Kind, RegistryDiffers
+	if path.Kind == HistoryIdentity {
+		verdict.Registry = RegistryIdentical
+	}
+	verdict.DeclaredPredecessor = input.Predecessor != "" && path.Target == input.Predecessor
+	if verdict.RegistryAdmitted() && input.History != nil {
 		if refusal := verifyHistoryEvidence(*input.History); refusal != nil {
 			verdict.Refusals = []HistoryRefusal{*refusal}
 		}
@@ -112,10 +118,34 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 	return verdict.sealed()
 }
 
+// DownPath relates the active registry to a target registry by canonical
+// digest. Target is the target's canonical digest.
+type DownPath struct {
+	Kind   HistoryCompatibilityKind
+	Target Fingerprint
+}
+
+// PlanDownPath decides how the active migration history reaches a target
+// registry. Identity is one registry. Every other relation refuses for now.
+func PlanDownPath(active, target RegistryV2) (DownPath, error) {
+	activeDigest, err := active.CanonicalDigest()
+	if err != nil {
+		return DownPath{}, err
+	}
+	path := DownPath{Kind: HistoryRefuse}
+	if path.Target, err = target.CanonicalDigest(); err != nil {
+		return DownPath{}, err
+	}
+	if path.Target == activeDigest {
+		path.Kind = HistoryIdentity
+	}
+	return path, nil
+}
+
 // sealed keeps the invariant that a verdict which is not admitted carries a
 // refusal. A relation this slice does not admit keeps the identity refusal.
 func (verdict HistoryCompatibilityVerdict) sealed() HistoryCompatibilityVerdict {
-	if verdict.Kind != HistoryIdentity && len(verdict.Refusals) == 0 {
+	if !verdict.RegistryAdmitted() && len(verdict.Refusals) == 0 {
 		verdict.Refusals = []HistoryRefusal{{
 			Reason:  HistoryRegistryDiffers,
 			Message: "the selected release's migration registry differs from the active release's registry",
@@ -150,10 +180,15 @@ func verifyHistoryEvidence(history HistoryEvidence) *HistoryRefusal {
 	return nil
 }
 
-// Admitted reports whether this slice lets the target own the history. Only
-// identity is admitted; Equivalent and Steps keep the identity refusal.
+// RegistryAdmitted reports whether the registry relation lets the target own
+// the history, before any history finding. Only identity is admitted for now.
+func (verdict HistoryCompatibilityVerdict) RegistryAdmitted() bool {
+	return verdict.Kind == HistoryIdentity
+}
+
+// Admitted reports whether the target may own the history.
 func (verdict HistoryCompatibilityVerdict) Admitted() bool {
-	return verdict.Kind == HistoryIdentity && len(verdict.Refusals) == 0
+	return verdict.RegistryAdmitted() && len(verdict.Refusals) == 0
 }
 
 // Refusal joins the refusal messages in their stable order and collects causes.
