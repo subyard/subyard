@@ -988,7 +988,7 @@ CLOUDOWNER
 # The normal staging fixture retains its independent synthetic owner history.
 prepare_supported_upgrade_owner() {
   local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state info
-  local installer_sha settings settings_before
+  local installer_sha settings settings_before session_config session_host session_pid route rolled_owner
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
@@ -1094,9 +1094,31 @@ PYBASELINE
   for suffix in '' .sha256 .manifest.json .provenance.json; do
     install -m 0600 "$ROOT/.subyard-acceptance/release/$name$suffix" "$SUBYARD_HOME/releases/$P0_OWNER_VERSION/$name$suffix"
   done
+  # An agent shell through the broker must not block recreation: the update
+  # interrupts it with the operator's consent to the update.
+  session_config="$HOME/.ssh/subyard-test-yard.config"
+  session_host="$(awk '$1 == "Host" { print $2; exit }' "$session_config")"
+  [ -n "$session_host" ] || die 'predecessor broker has no SSH client config'
+  ssh -F "$session_config" -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+    "$session_host" sleep 3600 </dev/null >/dev/null 2>&1 &
+  session_pid=$!
+  for _ in $(seq 1 30); do
+    [ "$(outer_exec sh -s -- check-ssh < "$ROOT/scripts/vscode-remote-maintenance.sh")" = active ] && break
+    kill -0 "$session_pid" 2>/dev/null || die 'SSH session to the predecessor broker ended before the update'
+    sleep 1
+  done
+  [ "$(outer_exec sh -s -- check-ssh < "$ROOT/scripts/vscode-remote-maintenance.sh")" = active ] \
+    || die 'predecessor broker does not report the open SSH session'
   env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
     "$baseline_owner" update --version "$P0_OWNER_VERSION" --offline --yes
   [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not activated'
+  for _ in $(seq 1 30); do
+    kill -0 "$session_pid" 2>/dev/null || break
+    sleep 1
+  done
+  ! kill -0 "$session_pid" 2>/dev/null || { kill "$session_pid" 2>/dev/null || true; die 'broker recreation left the open SSH session running'; }
+  wait "$session_pid" 2>/dev/null || true
+  printf 'STAGING_RECREATION_SESSION={"open_before_update":true,"interrupted":true}\n'
   [ -f "$SUBYARD_HOME/services/test-vms/default.json" ] || die 'upgrade did not register the broker'
   timeout --signal=TERM --kill-after=10 30 env -u SUBYARD_E2E_ROLLOUT_YARD \
     SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
@@ -1115,8 +1137,10 @@ PYBASELINE
   after_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   [[ "$after_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$before_owner" != "$after_owner" ] \
     || die 'upgrade did not recreate the registered broker'
+  route="$SUBYARD_HOME/e2e/routes/services/test-vms/default.json"
   [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
-    || die 'recreated broker registration does not bind the new runtime'
+    && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
+    || die 'recreated broker registration or route does not bind the new runtime'
   [ "$settings_before" = "$(grep -v '^#' "$settings" | tr -d "'\"" | sort | sha256sum | cut -d' ' -f1)" ] \
     || die 'broker recreation changed the yard settings'
   info="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status)" \
@@ -1126,6 +1150,32 @@ PYBASELINE
     || die 'recreated broker does not start with empty leases and bases'
   printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","recreated":true}\n' \
     "$baseline" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
+  # Rollback to the published release updates the recreated broker in place.
+  runtime_yard update --rollback --yes
+  [ "$(runtime_yard --version)" = "yard $baseline" ] || die 'rollback did not restore the published release'
+  [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$after_owner" ] \
+    && verify_broker_installation \
+    && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
+    && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
+    || die 'rollback did not update the recreated broker in place'
+  runtime_yard -Y test-yard test-vms status --json | jq -e '.status=="ok"' >/dev/null \
+    || die 'rolled-back broker status failed'
+  printf 'STAGING_PUBLISHED_ROLLBACK={"release":"%s","broker_owner":"%s","in_place":true}\n' "$baseline" "$after_owner"
+  # The next forward update recreates it again for the candidate.
+  rolled_owner="$after_owner"
+  env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
+    runtime_yard update --version "$P0_OWNER_VERSION" --offline --yes
+  [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not reactivated'
+  name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
+  [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'
+  incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
+  after_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+  [[ "$after_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$after_owner" != "$rolled_owner" ] \
+    && verify_broker_installation \
+    && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
+    && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
+    || die 'forward update after rollback did not recreate the broker'
+  printf 'STAGING_FORWARD_AFTER_ROLLBACK={"broker_owner":"%s","recreated":true}\n' "$after_owner"
   outer_exec cat /usr/local/libexec/subyard/e2e-recipes/manifest.sha256 \
     | (cd "$ROOT/.subyard-acceptance/runtime" && sha256sum -c - >/dev/null) \
     || die 'installed recipe bytes differ from frozen candidate'
