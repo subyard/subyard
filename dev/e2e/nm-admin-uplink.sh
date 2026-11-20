@@ -331,15 +331,18 @@ prepare)
   else
     die 'rollback was refused for an unexpected reason'
   fi
-  # The installed 0.29.0 and the candidate registries differ only by the NetworkManager device
-  # guard migration and power-metadata 3 -> 4.
+  # Beyond the NetworkManager device guard migration and power-metadata 3 -> 4, the candidate
+  # only retires the installed 0.29.0 migrations into its floor prefixes.
   installed_registry="$(find "$STATE/runtime/releases" -path "*$OLD_VERSION*/config/release-transition.json" -print -quit)"
   [ -n "$installed_registry" ] || die 'cannot find the installed 0.29.0 release-transition.json'
-  jq -S '.currentEpochs["power-metadata"] = 3 | .migrations |= map(select(.id != "introduce-nm-device-guard-v4"))' \
-    "$ROOT/config/release-transition.json" > "$STATE/candidate-registry.json"
-  jq -S . "$installed_registry" > "$STATE/installed-registry.json"
-  cmp -s "$STATE/candidate-registry.json" "$STATE/installed-registry.json" \
-    || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | sed -n '1,20p')"
+  jq -e --slurpfile installed "$installed_registry" '
+    . as $new | $installed[0] as $old |
+    (.currentEpochs | .["power-metadata"] = 3) == $old.currentEpochs and
+    ([.migrations[].id] == ["introduce-nm-device-guard-v4"]) and
+    all(.migrations[0].dependsOn[]; . as $id | any($old.migrations[]; .id == $id)) and
+    all($old.migrations[]; ($new.retiredPrefixes[.domain].throughEpoch // 0) >= .toEpoch)
+  ' "$ROOT/config/release-transition.json" >/dev/null \
+    || die "the registries differ beyond the device guard boundary: $(jq -cS 'del(.migrations)' "$installed_registry") vs $(jq -cS 'del(.migrations)' "$ROOT/config/release-transition.json")"
   jq -e '.currentEpochs["power-metadata"] == 4 and ([.migrations[] | select(.id == "introduce-nm-device-guard-v4" and .fromEpoch == 3 and .toEpoch == 4)] | length == 1)' \
     "$ROOT/config/release-transition.json" >/dev/null || die 'the candidate registry lacks the device guard boundary'
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
