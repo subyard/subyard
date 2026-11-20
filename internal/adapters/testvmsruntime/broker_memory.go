@@ -413,14 +413,12 @@ func publishBrokerInputs(path string, body []byte) error {
 	if _, err := file.Write(body); err != nil {
 		return errors.New("broker request handoff cannot be written")
 	}
-	if file.Sync() != nil || file.Close() != nil {
-		return errors.New("broker request handoff cannot be completed")
-	}
-	if err := pending.Publish(); err != nil {
+	if err := pending.Commit(); err != nil {
+		var pathErr *os.PathError
+		if pending.Published() || (errors.As(err, &pathErr) && (pathErr.Op == "sync" || pathErr.Op == "close")) {
+			return errors.New("broker request handoff cannot be completed")
+		}
 		return errors.New("broker request handoff cannot be published")
-	}
-	if err := pending.SyncParent(); err != nil {
-		return errors.New("broker request handoff cannot be completed")
 	}
 	return nil
 }

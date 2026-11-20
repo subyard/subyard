@@ -400,12 +400,25 @@ func (manager *Manager) publish(ctx context.Context) error {
 		lockOrder = append(lockOrder, directory)
 	}
 	sort.Strings(lockOrder)
+	locked := make(map[[2]uint64]bool)
 	for _, directory := range lockOrder {
-		unlock, err := lockKnownHosts(ctx, directory)
+		lock, err := openKnownHostsLock(ctx, directory)
 		if err != nil {
 			return err
 		}
-		defer unlock()
+		inode, err := lock.Identity()
+		if err != nil || locked[inode] {
+			lock.Release()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		defer lock.Release()
+		if err := lock.Acquire(ctx, false, 10*time.Millisecond); err != nil {
+			return err
+		}
+		locked[inode] = true
 	}
 	for index, request := range manager.pending {
 		path, err := resolveKnownHosts(request.proposal.File)
@@ -477,7 +490,7 @@ func (manager *Manager) publish(ctx context.Context) error {
 					_, restoreErr := writeFile(written, snapshot.data, snapshot.mode)
 					err = errors.Join(err, restoreErr)
 				} else {
-					err = errors.Join(err, os.Remove(written))
+					err = errors.Join(err, removeKnownHosts(written))
 				}
 			}
 			return err
@@ -486,31 +499,19 @@ func (manager *Manager) publish(ctx context.Context) error {
 	return nil
 }
 
-// resolveKnownHosts follows a final symlink even when the target file is absent.
 func resolveKnownHosts(path string) (string, error) {
-	for range 40 {
-		directory, name := filepath.Split(path)
-		if directory == "" {
-			directory = "."
-		}
-		directory, err := filepath.EvalSymlinks(directory)
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(directory, name)
-		target, err := os.Readlink(path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EINVAL) {
-				return path, nil
-			}
-			return "", err
-		}
-		if !filepath.IsAbs(target) {
-			target = directory + string(os.PathSeparator) + target
-		}
-		path = target
+	target, err := safefs.ResolveFile(path)
+	if errors.Is(err, syscall.ELOOP) {
+		return "", errors.New("refusing non-regular SSH trust store")
 	}
-	return "", errors.New("refusing non-regular SSH trust store")
+	return target, err
+}
+
+func removeKnownHosts(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return safefs.SyncDir(filepath.Dir(path))
 }
 
 func writeFile(path string, data []byte, mode os.FileMode) (published bool, err error) {
@@ -524,10 +525,8 @@ func writeFile(path string, data []byte, mode os.FileMode) (published bool, err 
 	if _, err := pending.File().Write(data); err != nil {
 		return false, err
 	}
-	if err := pending.Publish(); err != nil {
-		return false, knownHostsWriteError(err)
-	}
-	return true, pending.SyncParent()
+	err = pending.Commit()
+	return pending.Published(), knownHostsWriteError(err)
 }
 
 func knownHostsWriteError(err error) error {
@@ -547,10 +546,18 @@ func LockKnownHosts(ctx context.Context, path string) (func(), error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, err
 	}
-	return lockKnownHosts(ctx, directory)
+	lock, err := openKnownHostsLock(ctx, directory)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.Acquire(ctx, false, 10*time.Millisecond); err != nil {
+		lock.Release()
+		return nil, err
+	}
+	return lock.Release, nil
 }
 
-func lockKnownHosts(ctx context.Context, directory string) (func(), error) {
+func openKnownHostsLock(ctx context.Context, directory string) (*safefs.LockFile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -558,9 +565,5 @@ func lockKnownHosts(ctx context.Context, directory string) (func(), error) {
 	if err != nil {
 		return nil, errors.Unwrap(err)
 	}
-	if err := lock.Acquire(ctx, false, 10*time.Millisecond); err != nil {
-		lock.Release()
-		return nil, err
-	}
-	return lock.Release, nil
+	return lock, nil
 }

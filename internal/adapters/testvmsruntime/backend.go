@@ -362,7 +362,7 @@ func (backend *Backend) routeConverged(
 		_, err := os.Lstat(filepath.Join(state.clientDirectory, "current"))
 		return os.IsNotExist(err), nil
 	}
-	published, exists, err := ReadPublishedRoute(state.clientDirectory)
+	published, exists, err := readPublishedRoute(state.clientDirectory, true)
 	if err != nil || !exists {
 		return false, err
 	}

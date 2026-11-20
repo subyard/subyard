@@ -195,7 +195,11 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	dir, stat, err := openDirectoryAt(d.fd, name, path)
 	created := false
 	if errors.Is(err, fs.ErrNotExist) {
-		mkdirErr := unix.Mkdirat(d.fd, name, mode)
+		initialMode := mode
+		if o.Owner != nil && (o.Owner.UID != -1 || o.Owner.GID != -1) {
+			initialMode &= 0o700
+		}
+		mkdirErr := unix.Mkdirat(d.fd, name, initialMode)
 		created = mkdirErr == nil
 		if mkdirErr != nil && mkdirErr != unix.EEXIST {
 			return nil, pathError("mkdir", path, mkdirErr)
@@ -216,6 +220,12 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 		dir.close()
 		return nil, err
 	}
+	// Sync the directory inode as well as its entry in the parent. Do this
+	// even on an exact match so retry finishes an interrupted sync.
+	if err := dir.sync(o.Durability); err != nil {
+		dir.close()
+		return nil, err
+	}
 	if err := d.sync(o.Durability); err != nil {
 		dir.close()
 		return nil, err
@@ -229,33 +239,31 @@ func (d *directory) finish(stat unix.Stat_t, mode uint32, created bool, o DirOpt
 		gid = o.Owner.GID
 	}
 	actualMode := stat.Mode & 0o7777
-	changeOwner := stat.Uid != uint32(uid) || (gid != -1 && stat.Gid != uint32(gid))
-	// Root may finish a directory it created for a different owner.
-	if stat.Uid != uint32(uid) && (os.Geteuid() != 0 || stat.Uid != 0) {
+	changeUID := stat.Uid != uint32(uid)
+	changeGID := gid != -1 && stat.Gid != uint32(gid)
+	if changeUID && (!created || os.Geteuid() != 0 || stat.Uid != 0) {
 		return dirRefusal(d.path, stat, ErrUnsafeOwner)
 	}
 	if !created && (o.Existing == Exact && actualMode != mode || o.Existing == Finish && actualMode&^mode != 0) {
 		return dirRefusal(d.path, stat, ErrUnsafeMode)
 	}
-	if !created && o.Existing == Exact && changeOwner {
+	if !created && o.Existing == Exact && changeGID {
 		return dirRefusal(d.path, stat, ErrUnsafeOwner)
 	}
-	// The descriptor pins the actual directory, including when its mode is 0000.
-	if created || changeOwner || actualMode != mode {
-		if err := d.chmod(mode); err != nil {
-			return err
+	if changeUID || changeGID {
+		if !changeUID {
+			uid = -1
 		}
-		if err := faultAt(o.Fault, AfterDirChmod); err != nil {
-			return err
-		}
-	}
-	if changeOwner {
 		if err := unix.Fchownat(d.fd, "", uid, gid, unix.AT_EMPTY_PATH); err != nil {
 			return pathError("chown", d.path, err)
 		}
-		if mode&0o7000 != 0 {
-			return d.chmod(mode)
+	}
+	// The descriptor pins the actual directory, including when its mode is 0000.
+	if created || actualMode != mode || ((changeUID || changeGID) && mode&0o7000 != 0) {
+		if err := d.chmod(mode); err != nil {
+			return err
 		}
+		return faultAt(o.Fault, AfterDirChmod)
 	}
 	return nil
 }

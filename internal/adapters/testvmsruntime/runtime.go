@@ -1037,7 +1037,9 @@ func (runtime *Runtime) ensureKey(ctx context.Context) error {
 	if _, err := os.Stat(cfg.keyRevision()); os.IsNotExist(err) {
 		if payload, readErr := os.ReadFile(cfg.keyPath() + ".pub"); readErr == nil {
 			if key, normalizeErr := normalizedPublicKey(string(payload)); normalizeErr == nil {
-				_ = writePrivateFile(cfg.revokedKey(), []byte(key+"\n"))
+				if err := writePrivateFile(cfg.revokedKey(), []byte(key+"\n")); err != nil {
+					return err
+				}
 			}
 		}
 		_ = os.Remove(cfg.keyPath())

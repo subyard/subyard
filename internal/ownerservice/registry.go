@@ -292,16 +292,17 @@ func directory(path string, create bool, mode os.FileMode) error {
 			break
 		}
 	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) && create {
-		if err := os.Mkdir(path, mode); err != nil {
-			return err
+	if create {
+		err := safefs.EnsureDir(path, safefs.DirOptions{
+			Mode: mode, Owner: &safefs.Ownership{UID: os.Getuid(), GID: -1},
+		})
+		if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
+			errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
+			return errors.New("unsafe service registry directory")
 		}
-		if err := os.Chmod(path, mode); err != nil {
-			return err
-		}
-		info, err = os.Lstat(path)
+		return err
 	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}

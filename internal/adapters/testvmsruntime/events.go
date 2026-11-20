@@ -613,38 +613,18 @@ func writeImmutableOwned(path string, payload []byte, mode os.FileMode, owner *s
 	if !os.IsNotExist(err) {
 		return err
 	}
-	pending, err := safefs.Create(path, safefs.Options{
+	err = safefs.WriteFile(path, payload, safefs.Options{
 		Mode: mode, Owner: owner, ParentMode: 0o700, NoReplace: true,
 		TempPattern: "." + filepath.Base(path) + ".*",
 	})
+	if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	current, err = safefs.ReadRegular(path, safefs.ReadOptions{})
 	if err != nil {
-		return err
+		return errors.New("immutable broker record already exists with different contents")
 	}
-	defer pending.Abort()
-	file := pending.File()
-	if _, err := file.Write(payload); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(pending.Name(), path); err != nil {
-		if os.IsExist(err) {
-			current, readErr := safefs.ReadRegular(path, safefs.ReadOptions{})
-			if readErr != nil {
-				return errors.New("immutable broker record already exists with different contents")
-			}
-			return compareImmutable(path, current, payload, owner)
-		}
-		return err
-	}
-	if err := os.Remove(pending.Name()); err != nil {
-		return err
-	}
-	return pending.SyncParent()
+	return compareImmutable(path, current, payload, owner)
 }
 
 func compareImmutable(path string, current, payload []byte, owner *safefs.Ownership) error {
@@ -653,9 +633,11 @@ func compareImmutable(path string, current, payload []byte, owner *safefs.Owners
 	}
 	if owner != nil {
 		// Adopt matching records left by an older writer that set the group after publish.
-		return os.Lchown(path, owner.UID, owner.GID)
+		if err := os.Lchown(path, owner.UID, owner.GID); err != nil {
+			return err
+		}
 	}
-	return nil
+	return safefs.SyncDir(filepath.Dir(path))
 }
 
 func withFileLock(path string, operation func() error) error {

@@ -315,11 +315,13 @@ var execCommandContext = func(ctx context.Context, program string, arguments ...
 
 func (runtime *Runtime) commitRecord(ctx context.Context, scope ledgerScope, metadata domain.CredentialMetadata) error {
 	repository := runtime.repository(scope)
-	if _, err := runtime.gitRun(ctx, repository, "add", "--all"); err != nil {
+	revision := filepath.Join("records", metadata.CredentialID, metadata.RevisionID+".json")
+	signature := revision + ".sig"
+	if _, err := runtime.gitRun(ctx, repository, "add", "--", revision, signature); err != nil {
 		return err
 	}
 	message := fmt.Sprintf("Record %s revision %s", metadata.CredentialID, metadata.RevisionID)
-	if _, err := runtime.gitSigned(ctx, repository, "commit", "-S", "-m", message); err != nil {
+	if _, err := runtime.gitSigned(ctx, repository, "commit", "-S", "-m", message, "--only", "--", revision, signature); err != nil {
 		return err
 	}
 	if scope == sharedLedger {

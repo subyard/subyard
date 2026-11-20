@@ -23,6 +23,23 @@ import (
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
+func TestWriteSpaceCacheRetainsRenameErrorForDirectory(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "space.cache")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := writeSpaceCache(path, "10G", time.Unix(123, 0))
+	var rename *os.LinkError
+	if !errors.As(err, &rename) || rename.New != path ||
+		filepath.Dir(rename.Old) != filepath.Dir(path) || !strings.HasPrefix(filepath.Base(rename.Old), ".space-cache-") {
+		t.Fatalf("cache write failure = %v", err)
+	}
+	want := (&os.LinkError{Op: "rename", Old: rename.Old, New: path, Err: syscall.EEXIST}).Error()
+	if err.Error() != want {
+		t.Fatalf("cache write error = %q, want %q", err, want)
+	}
+}
+
 type securityStub struct{ state string }
 
 func installationSpaceHome(t *testing.T) string {

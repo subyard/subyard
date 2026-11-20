@@ -163,6 +163,48 @@ func TestPublishPreservesFinalSymlink(t *testing.T) {
 	}
 }
 
+func TestPublishDeduplicatesHardLinkedLockInodes(t *testing.T) {
+	configuredDir, targetDir := testkit.TempDir(t), testkit.TempDir(t)
+	store, target := filepath.Join(configuredDir, "known_hosts"), filepath.Join(targetDir, "known_hosts")
+	if err := os.Symlink(target, store); err != nil {
+		t.Fatal(err)
+	}
+	lock := ".subyard-known-hosts.lock"
+	testkit.WriteFile(t, filepath.Join(configuredDir, lock), nil, 0o600)
+	if err := os.Link(filepath.Join(configuredDir, lock), filepath.Join(targetDir, lock)); err != nil {
+		t.Fatal(err)
+	}
+	request := publicationCandidate(t, store, "owner.example")
+	manager := &Manager{Environment: os.Environ(), pending: []candidate{request}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != request.line+"\n" {
+		t.Fatalf("published trust = %q, %v", data, err)
+	}
+}
+
+func TestRemoveKnownHostsReportsRollbackSyncFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory read permission used to induce a sync failure")
+	}
+	directory := testkit.TempDir(t)
+	path := filepath.Join(directory, "known_hosts")
+	testkit.WriteFile(t, path, nil, 0o600)
+	if err := os.Chmod(directory, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(directory, 0o700)
+	if err := removeKnownHosts(path); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("rollback without a readable parent = %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback left the new file: %v", err)
+	}
+}
+
 func publicationCandidate(t *testing.T, path, namespace string) candidate {
 	t.Helper()
 	return candidate{

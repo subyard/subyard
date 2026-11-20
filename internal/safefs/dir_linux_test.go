@@ -93,7 +93,7 @@ func TestEnsureDirPolicies(t *testing.T) {
 	}
 }
 
-func TestOwnershipBeforePublishAndAfterDirectoryRetry(t *testing.T) {
+func TestOwnershipBeforePublishAndForeignDirectoryRefusal(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("chown to another uid needs root")
 	}
@@ -119,25 +119,82 @@ func TestOwnershipBeforePublishAndAfterDirectoryRetry(t *testing.T) {
 
 	directory := filepath.Join(root, "directory")
 	dirOptions := safefs.DirOptions{Owner: &owner, Fault: func(point safefs.Point) error {
-		if point == safefs.AfterDirChmod {
+		if point == safefs.AfterDirCreate {
 			return safefs.ErrCrash
 		}
 		return nil
 	}}
 	if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrCrash) {
-		t.Fatalf("interrupt before chown = %v", err)
+		t.Fatalf("interrupt after mkdir = %v", err)
 	}
-	checkMode(t, directory, 0o700)
-	checkOwner(t, directory, safefs.Ownership{UID: 0, GID: os.Getegid()})
+	rootOwner := safefs.Ownership{UID: 0, GID: os.Getegid()}
+	checkOwner(t, directory, rootOwner)
 	dirOptions.Fault = nil
-	if err := safefs.EnsureDir(directory, dirOptions); err != nil {
+	if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrUnsafeOwner) {
+		t.Fatalf("retry transferred a foreign directory: %v", err)
+	}
+	checkOwner(t, directory, rootOwner)
+	newDirectory := filepath.Join(root, "fresh")
+	if err := safefs.EnsureDir(newDirectory, dirOptions); err != nil {
 		t.Fatal(err)
 	}
-	checkOwner(t, directory, owner)
-	if err := safefs.EnsurePrivateDir(directory); !errors.Is(err, safefs.ErrUnsafeOwner) {
+	checkOwner(t, newDirectory, owner)
+	if err := safefs.EnsurePrivateDir(newDirectory); !errors.Is(err, safefs.ErrUnsafeOwner) {
 		t.Fatalf("refusal for foreign directory = %v", err)
 	}
-	checkOwner(t, directory, owner)
+	checkOwner(t, newDirectory, owner)
+}
+
+func TestEnsureDirChangesGroupBeforeWidening(t *testing.T) {
+	gid := -1
+	if os.Geteuid() == 0 {
+		gid = os.Getegid() + 1
+	} else {
+		groups, err := os.Getgroups()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, group := range groups {
+			if group != os.Getegid() {
+				gid = group
+				break
+			}
+		}
+	}
+	if gid == -1 {
+		t.Skip("a second permitted gid is required")
+	}
+	path := filepath.Join(testkit.TempDir(t), "logs")
+	if err := safefs.EnsurePrivateDir(path); err != nil {
+		t.Fatal(err)
+	}
+	owner := safefs.Ownership{UID: os.Geteuid(), GID: gid}
+	o := safefs.DirOptions{Mode: 0o770, Owner: &owner, Fault: func(point safefs.Point) error {
+		if point == safefs.AfterDirChmod {
+			checkMode(t, path, 0o770)
+			checkOwner(t, path, owner)
+			return safefs.ErrCrash
+		}
+		return nil
+	}}
+	if err := safefs.EnsureDir(path, o); !errors.Is(err, safefs.ErrCrash) {
+		t.Fatalf("interrupt after widening = %v", err)
+	}
+	o.Fault = nil
+	if err := safefs.EnsureDir(path, o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureDirSyncsChangedDirectoryInode(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory read permission used to induce a sync failure")
+	}
+	path := filepath.Join(testkit.TempDir(t), "new")
+	if err := safefs.EnsureDir(path, safefs.DirOptions{Mode: 0o300}); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("changing metadata on a directory that cannot be opened for sync: %v", err)
+	}
+	checkMode(t, path, 0o300)
 }
 
 func checkOwner(t *testing.T, path string, owner safefs.Ownership) {

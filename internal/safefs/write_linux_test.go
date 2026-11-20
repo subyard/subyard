@@ -178,29 +178,70 @@ func TestWriteWithRootAndPinnedParent(t *testing.T) {
 			t.Errorf("write %s = %v, want %v", path, err, want)
 		}
 	}
-	parent := filepath.Join(root, "nested", "directory")
-	path := filepath.Join(parent, "file")
-	pending, err := safefs.Create(path, o)
-	if err != nil {
-		t.Fatal(err)
+	for _, noReplace := range []bool{false, true} {
+		name := fmt.Sprintf("no-replace=%t", noReplace)
+		t.Run(name, func(t *testing.T) {
+			o.NoReplace = noReplace
+			parent := filepath.Join(root, name)
+			path := filepath.Join(parent, "file")
+			pending, err := safefs.Create(path, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pending.Abort()
+			if _, err := pending.File().WriteString("pinned"); err != nil {
+				t.Fatal(err)
+			}
+			moved := filepath.Join(root, name+"-moved")
+			if err := os.Rename(parent, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, parent); err != nil {
+				t.Fatal(err)
+			}
+			if err := pending.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			checkContents(t, filepath.Join(moved, "file"), "pinned")
+			if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+				t.Fatalf("write escaped the pinned parent: %v, %v", entries, err)
+			}
+		})
 	}
-	defer pending.Abort()
-	if _, err := pending.File().WriteString("pinned"); err != nil {
-		t.Fatal(err)
-	}
-	moved := filepath.Join(root, "moved")
-	if err := os.Rename(parent, moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, parent); err != nil {
-		t.Fatal(err)
-	}
-	if err := pending.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	checkContents(t, filepath.Join(moved, "file"), "pinned")
-	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
-		t.Fatalf("write escaped the pinned parent: %v, %v", entries, err)
+}
+
+func TestWriteRefusesSubstitutedStagingInode(t *testing.T) {
+	for _, noReplace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("no-replace=%t", noReplace), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			if err := os.Chmod(root, 0o770); err != nil {
+				t.Fatal(err)
+			}
+			path, stage := filepath.Join(root, "record"), filepath.Join(root, ".stage")
+			if !noReplace {
+				testkit.WriteFile(t, path, []byte("previous"), 0o600)
+			}
+			o := safefs.Options{NoReplace: noReplace, TempPattern: ".stage", Fault: func(point safefs.Point) error {
+				if point == safefs.BeforePublish {
+					if err := os.Rename(stage, stage+".moved"); err != nil {
+						return err
+					}
+					testkit.WriteFile(t, stage, []byte("different inode"), 0o600)
+				}
+				return nil
+			}}
+			if err := safefs.WriteFile(path, []byte("intended"), o); !errors.Is(err, safefs.ErrStageChanged) {
+				t.Fatalf("publish substituted staging inode: %v", err)
+			}
+			if noReplace {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("substituted inode was published: %v", err)
+				}
+			} else {
+				checkContents(t, path, "previous")
+			}
+			checkContents(t, stage, "different inode")
+		})
 	}
 }
 

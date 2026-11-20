@@ -15,6 +15,26 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestImmutableRetrySyncsRecordDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory read permission used to induce a sync failure")
+	}
+	directory := testkit.TempDir(t)
+	path := filepath.Join(directory, "record.json")
+	payload := []byte("same record")
+	testkit.WriteFile(t, path, payload, 0o600)
+	if err := os.Chmod(directory, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(directory, 0o700)
+	if err := writeImmutableDurable(path, payload, 0o600); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("equal-content retry without a readable parent = %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != string(payload) {
+		t.Fatalf("equal-content retry changed the record: %q, %v", data, err)
+	}
+}
+
 func TestEventRecorderPersistsRedactedImmutableSpoolAndAcknowledges(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{

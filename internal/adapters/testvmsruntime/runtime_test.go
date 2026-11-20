@@ -43,6 +43,35 @@ func TestWritePrivateFileRefusesSymlink(t *testing.T) {
 	}
 }
 
+func TestEnsureKeyRetainsOldPairWhenRevocationCannotBeRecorded(t *testing.T) {
+	cfg := fixtureConfig(t)
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	public := fixturePublicKey(t) + "\n"
+	testkit.WriteFile(t, cfg.keyPath(), []byte("fixture private key"), 0o600)
+	testkit.WriteFile(t, cfg.keyPath()+".pub", []byte(public), 0o644)
+	if err := os.Symlink(cfg.keyPath()+".pub", cfg.revokedKey()); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{handler: func(string, []string, []string, io.Reader) ([]byte, []byte, error) {
+		t.Fatal("key generation ran after failed revocation recording")
+		return nil, nil, nil
+	}}
+	runtime := Runtime{Config: cfg, Runner: runner}
+	if err := runtime.ensureKey(context.Background()); !errors.Is(err, safefs.ErrSymlink) {
+		t.Fatalf("key rotation = %v", err)
+	}
+	for path, want := range map[string]string{cfg.keyPath(): "fixture private key", cfg.keyPath() + ".pub": public} {
+		if data, err := os.ReadFile(path); err != nil || string(data) != want {
+			t.Fatalf("old key pair changed at %s: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(cfg.keyRevision()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("key revision marker exists after failed rotation: %v", err)
+	}
+}
+
 type fakeRunner struct {
 	calls    [][]string
 	contexts []context.Context

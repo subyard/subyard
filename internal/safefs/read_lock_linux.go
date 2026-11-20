@@ -67,6 +67,15 @@ func OpenLock(path string, mode fs.FileMode) (*LockFile, error) {
 
 func (l *LockFile) Chmod(mode fs.FileMode) error { return l.file.Chmod(mode) }
 
+// Identity identifies the actual lock inode, including through filesystem aliases.
+func (l *LockFile) Identity() ([2]uint64, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(l.file.Fd()), &stat); err != nil {
+		return [2]uint64{}, pathError("fstat", l.file.Name(), err)
+	}
+	return [2]uint64{stat.Dev, stat.Ino}, nil
+}
+
 // Acquire uses a blocking flock if poll is zero, or waits with cancellation otherwise.
 func (l *LockFile) Acquire(ctx context.Context, shared bool, poll time.Duration) error {
 	operation := unix.LOCK_EX
