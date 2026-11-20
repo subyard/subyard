@@ -1013,6 +1013,9 @@ resume() {
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
   verify_v2_release_transition "$VERSION_B"
+  # The update recreated the broker; prove and mark its successor project for cleanup.
+  DEFAULT_PROJECT="$PROJECT" DEFAULT_INSTANCE="$INSTANCE" mark_created_default_project "$YARD_NAME" \
+    || die 'recreated test-yard project ownership could not be proved'
   operator_yard -Y "$YARD_NAME" stop --yes
   operator_yard start --yes
   operator_yard migrate --yes
