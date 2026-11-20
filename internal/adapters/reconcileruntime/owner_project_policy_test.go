@@ -2,12 +2,10 @@ package reconcileruntime
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -66,53 +64,6 @@ func ownerRenderedMap(t *testing.T, raw []byte) map[string]string {
 		result[key] = value
 	}
 	return result
-}
-
-func TestOwnerProjectRendererUsesOriginalSharedPolicyAndLosslessPaths(t *testing.T) {
-	for _, setting := range [][2]string{{"0", "0"}, {"0", "1"}, {"1", "0"}, {"1", "1"}} {
-		t.Run(strings.Join(setting[:], "-"), func(t *testing.T) {
-			root := testkit.TempDir(t)
-			runtime := ownerProjectRendererFixture(t, root, true, setting[0], setting[1])
-			p, err := runtime.PrepareOwnerRuntimeSources(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer p.Close()
-			raw, err := runtime.RenderOwnerProjectConfig(context.Background(), p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			values := ownerRenderedMap(t, raw)
-			wantInterception := "block"
-			if setting[1] == "1" {
-				wantInterception = "allow"
-			}
-			if values["restricted.containers.interception"] != wantInterception || values["restricted.virtual-machines.lowlevel"] != "allow" || values["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || values["user.subyard.host_base"] != runtime.Yard.Paths.HostBase || values["user.subyard.data_home"] != runtime.Yard.Paths.DataHome || values["user.subyard.srv_pool"] != "original-pool" {
-				t.Fatal("original renderer policy or root bytes changed")
-			}
-			if _, included := values["features.images"]; included {
-				t.Fatal("yard renderer changed the separately prepared image namespace")
-			}
-			// A later path edit cannot replace the captured original helper body.
-			testkit.WriteFile(t, filepath.Join(root, ownerProjectRenderer), []byte("exit 99\n"), 0644)
-			again, err := runtime.RenderOwnerProjectConfig(context.Background(), p)
-			if err != nil || !bytes.Equal(again, raw) {
-				t.Fatal("renderer reread changed source", err)
-			}
-			metadata, _, err := decodeMaterializedMetadata(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, source := range metadata.Integrations.Sources {
-				if source.Layout == ownerProjectRenderer {
-					p.files[source.Payload] = []byte("unapproved cached helper")
-				}
-			}
-			if _, err := runtime.RenderOwnerProjectConfig(context.Background(), p); err == nil {
-				t.Fatal("changed cached helper bytes were executed")
-			}
-		})
-	}
 }
 
 func TestOwnerBlockVMPreInstancePortionPreservesOriginalRootDiskOrder(t *testing.T) {

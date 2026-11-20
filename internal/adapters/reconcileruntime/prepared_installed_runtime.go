@@ -61,7 +61,6 @@ type PreparedInstalledRuntime struct {
 	profile, handler       string
 	native                 []installedSourceGuard
 	executionFiles         map[string][]byte
-	ownerInputs            []ownerSourceInputBinding
 }
 
 func (p *PreparedInstalledRuntime) Close() error {

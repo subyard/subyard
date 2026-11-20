@@ -419,7 +419,7 @@ func New(options Options) (*CLI, error) {
 			continue
 		}
 		switch definition.Runtime.ActivationID {
-		case "materialized-config", "test-vm-broker", "test-yard-route-consumers", "host-power":
+		case "materialized-config", "test-vm-broker", "host-power":
 			return nil, fmt.Errorf("profile runtime activation ID conflicts with core: %s", definition.Runtime.ActivationID)
 		}
 	}
