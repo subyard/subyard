@@ -1442,11 +1442,7 @@ X.Y.Z core is greater than the latest release: it changes nothing and names two 
 `--version <installed>` to re-run the installed release (which also completes an interrupted
 install; an unpublished build needs its own assets) and `--version <latest>` to downgrade.
 Only an explicit `--version VERSION` or `YARD_RELEASE_VERSION` selects an older release, under the
-ordinary candidate inspection. An older target also keeps the
-[rollback runtime-owner contract](#profile-settings-and-installed-runtime-hooks): `--check` and
-update refuse it with the same `rollback-incompatible` diagnostic when it would lose an installed
-runtime activation owner, and execution rechecks that proof before publication.
-An equal version keeps the ordinary same-release inspection.
+ordinary candidate inspection. An equal version keeps the ordinary same-release inspection.
 
 ### Yard-scoped release gate
 Mutating commands consult the release gate (`internal/cli/admission.go`,
@@ -2669,10 +2665,9 @@ Runtime owners bind safe fresh recovery plans to complete per-yard native observ
 partial delivery. New authorization and the native compare-and-swap guards remain required;
 completed migrations are not replayed for runtime repair. The input-free schema-2
 `runtime-activation-capabilities` process probe reports the sealed engine's compiled activation
-IDs. It leaves frozen recovery capability responses unchanged. Rollback, and an update to an
-explicitly selected older release, refuse a target that loses an installed profile's runtime
-owner, including deselected owner or guest artifacts, or a selected guest-only runtime contract.
-When host receipts are absent, before
+IDs. It leaves frozen recovery capability responses unchanged. Rollback refuses a retained
+release that loses an installed profile's runtime owner, including deselected owner or guest
+artifacts, or a selected guest-only runtime contract. When host receipts are absent, before
 losing an owner admission asks that one native observer to prove guest absence; stopped, missing or failed
 observations cannot prove absence. That observation is rechecked before effects.
 A historical owner without the new probe may retain
