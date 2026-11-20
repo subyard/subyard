@@ -1451,7 +1451,10 @@ func contextFrom(
 	boolSetting := func(name string) bool {
 		return tracker.inputsAvailable(name) && zeroOne(values, name, &refusals)
 	}
-	forwardAgent, devSudo, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("DEV_SUDO"), boolSetting("NESTED_E2E_VMS")
+	forwardAgent, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("NESTED_E2E_VMS")
+	// Yes and prompt grant the guest sudo; prompt adds coding-agent approval rules.
+	// The catalog enum refuses other values once, at the scope that set them.
+	devSudo := tracker.inputsAvailable("DEV_SUDO") && (values["DEV_SUDO"] == "yes" || values["DEV_SUDO"] == "prompt")
 	e2eVMCPUResolved := false
 	if tracker.inputsAvailable("E2E_VM_CPU") {
 		rawE2EVMCPU := values["E2E_VM_CPU"]

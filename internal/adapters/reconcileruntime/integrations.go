@@ -726,6 +726,10 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
+			// The default prompt adds no input, as the snapshot records only yes and no.
+			if value := runtime.environmentValue("DEV_SUDO"); !config.SudoApprovalPrompt(value) {
+				inputs = append(inputs, "DEV_SUDO="+value)
+			}
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}

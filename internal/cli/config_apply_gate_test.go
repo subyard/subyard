@@ -360,7 +360,7 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 	}
 	writeCLIFile(t, sampleHandler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222",
 		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),

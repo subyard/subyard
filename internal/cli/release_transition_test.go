@@ -1543,7 +1543,7 @@ func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev",
 		"SSH_PORT=2222", "STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
 	}, "\n")+"\n", 0o600)
@@ -1937,7 +1937,7 @@ func TestReleaseTransitionRouteConsumersReloadIsolatedYardContext(t *testing.T) 
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
 		"STORAGE_PATH=" + filepath.Join(root, "data/storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),
 		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
@@ -1996,7 +1996,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	installCanonicalOwnerInventory(t, root)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
 		"STORAGE_PATH=" + filepath.Join(root, "data/storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),
 		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
@@ -2616,7 +2616,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 			if scenario.defaults {
 				source.rules = filepath.Join(configHome, "overrides", "host", "agents", "codex", "repo.rules")
 				source.rulesContent = "allow_rule()\n"
-				source.defaultsContent = "DEV_SUDO=1\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='" + source.rules + "'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n"
+				source.defaultsContent = "DEV_SUDO=yes\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='" + source.rules + "'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n"
 			}
 			request := releasetransition.ProcessRequest{
 				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
@@ -2735,7 +2735,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -3004,7 +3004,7 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -3053,7 +3053,7 @@ func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",

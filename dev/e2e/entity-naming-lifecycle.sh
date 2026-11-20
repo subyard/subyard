@@ -264,7 +264,7 @@ export SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1
 export SUBYARD_CONFIG_DIR="$runtime/config" STORAGE_PATH="$SUBYARD_HOME/incus/storage"
 export HOST_BASE="$SUBYARD_HOME/host" RESTRICTED_DISK_PATHS="$SUBYARD_HOME/host"
 export ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT=subyard INCUS_BRIDGE=incusbr0
-export SSH_HOST=yard DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
+export SSH_HOST=yard DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
 "$runtime/scripts/install-keys-auto-sync.sh" --yes
 "$runtime/scripts/install-keys-auto-sync.sh" --check
 [ "$(stat -c %a "$root/home/.config/systemd/user/subyard-keys-sync.service")" = 644 ]

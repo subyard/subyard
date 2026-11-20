@@ -1741,6 +1741,8 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	if applied.Installed {
 		target.installed.known["CODING_TOOL_INTEGRATIONS"] = true
 		target.installed.known["CODING_TOOL_GIT_APPROVAL"] = true
+		// The snapshot records yes and no; its absence is the default prompt.
+		target.installed.known["DEV_SUDO"] = true
 	}
 	loaded := target.Loaded
 	if err := loaded.Catalog.ValidateIntegrationInitSettings(applied.Settings); err != nil {
@@ -2146,9 +2148,11 @@ func executeReleaseTransitionRequest(
 		return releasetransition.ProcessResponse{}, errors.New("release transition roots must be absolute")
 	}
 	var rollbackTarget *releasetransition.RollbackTarget
+	var rollbackTargetRegistry *releasetransition.RegistryV2
+	var rollbackPredecessor releasetransition.Fingerprint
 	if request.Direction == releasetransition.DirectionActivatePrevious {
 		var err error
-		rollbackTarget, err = releaseruntime.VerifyRollbackTarget(ctx, request.RuntimeRoot, request.Target, request.ArtifactDigest)
+		rollbackTarget, rollbackTargetRegistry, err = releaseruntime.VerifyRollbackTarget(ctx, request.RuntimeRoot, request.Target, request.ArtifactDigest)
 		if err != nil {
 			return releasetransition.ProcessResponse{}, err
 		}
@@ -2156,6 +2160,11 @@ func executeReleaseTransitionRequest(
 	registry, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-transition.json"))
 	if err != nil {
 		return releasetransition.ProcessResponse{}, fmt.Errorf("read release transition registry: %w", err)
+	}
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		// Only an Equivalent relation depends on the declaration: one that
+		// cannot be read declares no predecessor, which refuses only that.
+		rollbackPredecessor, _ = releaseruntime.EngineRollbackPredecessor(repositoryRoot)
 	}
 	if request.RegistryDigest != "" {
 		digest := sha256.Sum256(registry)
@@ -2198,9 +2207,10 @@ func executeReleaseTransitionRequest(
 			return links.Activate(pair)
 		},
 		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
-		RegistryPayload:     registry,
-		ArtifactDigest:      request.ArtifactDigest,
-		RollbackTarget:      rollbackTarget,
+		RegistryPayload:        registry,
+		ArtifactDigest:         request.ArtifactDigest,
+		RollbackTarget:         rollbackTarget,
+		RollbackTargetRegistry: rollbackTargetRegistry, RollbackPredecessor: rollbackPredecessor,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})

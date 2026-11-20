@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow",
+    "bash": {
+      "*": "allow",
+      "git commit": "ask",
+      "git commit *": "ask",
+      "git push": "ask",
+      "git push *": "ask",
+      "sudo": "ask",
+      "sudo *": "ask",
+      "su": "ask",
+      "su *": "ask",
+      "doas": "ask",
+      "doas *": "ask",
+      "pkexec": "ask",
+      "pkexec *": "ask",
+      "sudoedit": "ask",
+      "sudoedit *": "ask",
+      "run0": "ask",
+      "run0 *": "ask"
+    }
+  }
+}

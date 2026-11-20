@@ -670,7 +670,7 @@ fi
   || die 'Hermes preset resolved an unexpected project'
 [ "$(hermes_setting YARD_INSTANCE_NAME)" = "$HERMES_INSTANCE" ] \
   || die 'Hermes preset resolved an unexpected instance'
-[ "$(hermes_setting DEV_SUDO)" = 0 ] || die 'Hermes preset enabled DEV_SUDO'
+[ "$(hermes_setting DEV_SUDO)" = no ] || die 'Hermes preset enabled DEV_SUDO'
 [ "$(hermes_setting CODING_TOOL_INTEGRATIONS)" = '<unset>' ] \
   || die 'Hermes preset selected broad coding-tool integrations'
 hermes_profiles="$(hermes_setting ENVIRONMENT_PROFILES | tr ' ' '\n')"
@@ -710,15 +710,15 @@ opaque=/home/dev/.hermes/operator-opaque/github-state
 hermes_dev install -d -m 0700 "$(dirname "$opaque")"
 hermes_dev sh -c 'printf "%s\n" hermes-opaque-fixture > /home/dev/.hermes/operator-opaque/github-state && chmod 0600 /home/dev/.hermes/operator-opaque/github-state'
 opaque_before="$(hermes_dev sha256sum "$opaque" | awk '{print $1}')"
-info 're-running Hermes provision and init with DEV_SUDO=0'
+info 're-running Hermes provision and init with DEV_SUDO=no'
 hermes_yard provision --yes
-[ "$(hermes_setting DEV_SUDO)" = 0 ] || die 'Hermes provision changed DEV_SUDO'
+[ "$(hermes_setting DEV_SUDO)" = no ] || die 'Hermes provision changed DEV_SUDO'
 [ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
   || die 'Hermes provision changed operator-managed opaque state'
 hermes_yard init --yes
 [ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
   || die 'Hermes init changed operator-managed opaque state'
-ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps DEV_SUDO=0'
+ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps DEV_SUDO=no'
 
 info 'scoped enable/disable preserves the second yard and unrelated init drift'
 verify_scoped_broker_lifecycle "$connection_before_lifecycle" "$opaque" "$opaque_before"

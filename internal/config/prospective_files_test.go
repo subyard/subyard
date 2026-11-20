@@ -12,7 +12,7 @@ import (
 func TestProspectiveFilesRejectsInvalidSnapshotsAndScope(t *testing.T) {
 	root := testkit.TempDir(t)
 	path := filepath.Join(root, "config.env")
-	valid := PersistentFileSnapshot{Exists: true, Content: []byte("DEV_SUDO=1\n")}
+	valid := PersistentFileSnapshot{Exists: true, Content: []byte("DEV_SUDO=yes\n")}
 	testkit.WriteFile(t, path, valid.Content, 0o600)
 	existing, err := ReadPersistentFileSnapshot(root, path)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestProspectiveFilesPreservesRetainedReadableModes(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			root := testkit.TempDir(t)
 			path := filepath.Join(root, "config.env")
-			content := []byte("DEV_SUDO=1\n")
+			content := []byte("DEV_SUDO=yes\n")
 			testkit.WriteFile(t, path, content, mode)
 			files := &ProspectiveFiles{Root: root, ReadSnapshot: func(candidate string) (PersistentFileSnapshot, error) {
 				return ReadPersistentFileSnapshot(root, candidate)

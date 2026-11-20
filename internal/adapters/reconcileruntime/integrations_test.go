@@ -2054,3 +2054,28 @@ func TestReconcileIntegrationsStepIsSafePlanText(t *testing.T) {
 		}
 	}
 }
+
+// The default prompt keeps the package identity of an unset mode; yes and no,
+// which the snapshot records, each change it.
+func TestPackageDigestRecordsOnlyNonDefaultSudo(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "provision.sh")
+	testkit.WriteFile(t, source, []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	digest := func(extra ...string) string {
+		runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{},
+			Environment: append([]string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION=" + source}, extra...)}
+		entries, err := runtime.integrationPackageArtifacts("observe", nil)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("package receipt: %#v, error: %v", entries, err)
+		}
+		return entries[0].Digest
+	}
+	base := digest()
+	if digest("DEV_SUDO=prompt") != base {
+		t.Fatal("the default DEV_SUDO=prompt changed the package identity")
+	}
+	yes, no := digest("DEV_SUDO=yes"), digest("DEV_SUDO=no")
+	if yes == base || no == base || yes == no {
+		t.Fatalf("yes and no must each change the package identity: base %s, yes %s, no %s", base, yes, no)
+	}
+}

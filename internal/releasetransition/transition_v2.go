@@ -90,8 +90,13 @@ type V2Options struct {
 	RegistryPayload            []byte
 	ArtifactDigest             Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
-	CandidateVersion          string
-	RollbackTarget            *RollbackTarget
+	CandidateVersion string
+	RollbackTarget   *RollbackTarget
+	// RollbackTargetRegistry is the rollback target's sealed registry when it
+	// may differ from this engine's; RollbackPredecessor is the canonical
+	// registry digest this release declares for rollback.
+	RollbackTargetRegistry    *RegistryV2
+	RollbackPredecessor       Fingerprint
 	InheritedSettingIDs       []string
 	SourceIngress             *SourceIngressRequest
 	Replacement               *JournalReplacement
@@ -285,6 +290,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	}
 	if err := validateRollbackTarget(options.Direction, options.RollbackTarget); err != nil {
 		return nil, err
+	}
+	if options.RollbackTargetRegistry != nil && (options.RollbackTarget == nil || options.RollbackTarget.RegistryDigest == "") {
+		return nil, invalid("a rollback target registry requires registry-bearing rollback target facts")
 	}
 	if err := options.Releases.Validate(); err != nil {
 		return nil, err
@@ -1709,9 +1717,10 @@ func (transition *V2Transition) rollbackCompatibilityBlocker(fresh bool) *Blocke
 	return nil
 }
 
-// rollbackRegistryRefused applies HistoryCompatibility to the sealed registry
-// file digests of this engine and the retained target. A registryless target
-// keeps the catalog rule in rollbackCompatibilityBlocker.
+// rollbackRegistryRefused applies HistoryCompatibility to this engine's and the
+// retained target's parsed registries. Identical sealed bytes need no separate
+// target registry. A registryless target keeps the catalog rule in
+// rollbackCompatibilityBlocker.
 func (transition *V2Transition) rollbackRegistryRefused() bool {
 	target := transition.options.RollbackTarget
 	if target == nil {
@@ -1720,8 +1729,15 @@ func (transition *V2Transition) rollbackRegistryRefused() bool {
 	if target.RegistryDigest == "" {
 		return false
 	}
+	registry := transition.options.RollbackTargetRegistry
+	if registry == nil {
+		if target.RegistryDigest != transition.registryDigest {
+			return true
+		}
+		registry = &transition.registry
+	}
 	return !HistoryCompatibility(HistoryCompatibilityInput{
-		ActiveRegistry: transition.registryDigest, TargetRegistry: target.RegistryDigest,
+		Active: &transition.registry, Target: registry, Predecessor: transition.options.RollbackPredecessor,
 	}).Admitted()
 }
 

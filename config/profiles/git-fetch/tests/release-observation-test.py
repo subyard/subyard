@@ -30,7 +30,7 @@ class ReleaseObservationTest(unittest.TestCase):
                 'ACCESS_KIND': 'local', 'YARD_KIND': 'container', 'YARD_INSTANCE_NAME': 'yard',
                 'INCUS_PROJECT': 'subyard', 'INCUS_BRIDGE': 'fixture', 'SSH_HOST': '127.0.0.1',
                 'SUBYARD_STARTUP_REMAINING_MS': '1234',
-                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': '0',
+                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': 'no',
                 'FORWARD_SSH_AGENT': '0', 'NESTED_E2E_VMS': '0', 'ENVIRONMENT_PROFILES': '',
             }
             result = subprocess.run(['bash', str(PROFILE / 'runtime.sh'), 'observe'],

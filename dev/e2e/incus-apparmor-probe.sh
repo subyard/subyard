@@ -370,7 +370,7 @@ run_create_stage_failed_probe() {
     SSH_HOST="yard-$YARD_NAME" \
     DEV_USER=dev \
     DEV_UID=1000 \
-    DEV_SUDO=0 \
+    DEV_SUDO=no \
     FORWARD_SSH_AGENT=0 \
     NESTED_E2E_VMS=0 \
     SHIFT_MODE=shift \

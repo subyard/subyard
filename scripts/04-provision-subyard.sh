@@ -156,12 +156,20 @@ usermod -aG yard,kvm,docker "$DEV_USER"
 # dev sudo: reconcile the developer's managed passwordless grant inside the guest.
 reconcile_dev_sudo() {
   local sudoers="$1"
-  if [ "$DEV_SUDO" = 1 ]; then
+  # prompt keeps an existing grant here; init publishes a new one only after the coding-agent
+  # approval policies are installed, so an interrupted init never leaves sudo without prompts.
+  if [ "$DEV_SUDO" = prompt ] && [ ! -e "$sudoers" ]; then
+    return 0
+  fi
+  if [ "$DEV_SUDO" = yes ] || [ "$DEV_SUDO" = prompt ]; then
     printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$DEV_USER" > "$sudoers.tmp"
     chmod 0440 "$sudoers.tmp"
     visudo -cf "$sudoers.tmp" >/dev/null && mv -f "$sudoers.tmp" "$sudoers" || { rm -f "$sudoers.tmp"; echo "sudoers validation failed — left dev without sudo" >&2; }
-  else
+  elif [ "$DEV_SUDO" = no ]; then
     rm -f "$sudoers"
+  else
+    echo "DEV_SUDO must be yes, no or prompt — left the sudoers grant unchanged" >&2
+    exit 1
   fi
 }
 reconcile_dev_sudo "/etc/sudoers.d/90-subyard-$DEV_USER"

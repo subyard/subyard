@@ -81,3 +81,26 @@ func CheckOwnRollbackDeclaration(payload []byte) error {
 	}
 	return nil
 }
+
+// ParseRollbackPredecessor reads only the predecessor registry digest from
+// another release's declaration. A newer release may add schema versions,
+// fields and entries this release does not know, and the digest keeps its
+// meaning across them, so only the bound, the JSON object, a schema version of
+// at least 1 and a well-formed digest are checked. A release's own declaration
+// is parsed strictly by ParseRollbackDeclaration.
+func ParseRollbackPredecessor(payload []byte) (Fingerprint, error) {
+	var declaration struct {
+		SchemaVersion             *int        `json:"schemaVersion"`
+		PredecessorRegistryDigest Fingerprint `json:"predecessorRegistryDigest"`
+	}
+	if err := decodeBounded(payload, MaxRollbackDeclarationBytes, &declaration, false); err != nil {
+		return "", invalid("decode rollback declaration: %v", err)
+	}
+	if declaration.SchemaVersion == nil || *declaration.SchemaVersion < RollbackDeclarationSchemaV1 {
+		return "", invalid("rollback declaration has no supported schema version")
+	}
+	if err := validateFingerprint(declaration.PredecessorRegistryDigest, "rollback predecessor registry digest"); err != nil {
+		return "", err
+	}
+	return declaration.PredecessorRegistryDigest, nil
+}

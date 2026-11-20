@@ -213,7 +213,7 @@ func newConfigSSHFixtureFrom(t *testing.T, root string, environment []string, ex
 			configHome = value
 		}
 	}
-	remote, publisher := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=0\n")
+	remote, publisher := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=no\n")
 	bin, ssh, log := writeConfigFakeSSH(t)
 	environment = append(environment, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SUBYARD_TEST_SSH_LOG="+log, configSSHWatchdogRace,

@@ -797,7 +797,7 @@ func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			facts, err := VerifyRollbackTarget(context.Background(), fixture.runtimeRoot, releasetransition.ReleaseID(fixture.target), digest)
+			facts, _, err := VerifyRollbackTarget(context.Background(), fixture.runtimeRoot, releasetransition.ReleaseID(fixture.target), digest)
 			if scenario == "valid" || scenario == "legacy" {
 				if err != nil || facts == nil || facts.Version != "1.2.3" || (facts.RegistryDigest == "") != (scenario == "legacy") {
 					t.Fatalf("verified rollback facts = %#v, %v", facts, err)

@@ -57,6 +57,10 @@ func (runtime Runtime) codexRulesStatus(ctx context.Context, yard domain.Context
 		status.State, status.Hint = "missing", "Codex CLI not found on the default developer PATH"
 	case result.ExitCode == codexRulesPromptsOff:
 		status.State, status.Hint = "rules-ok", "installed policy: managed Git prompts off; session approvals unverified"
+	case result.ExitCode == codexRulesGitAndSudoPrompt:
+		status.State, status.Hint = "rules-ok", "installed policy: commit/push and sudo prompt; home matcher ok; session approvals unverified"
+	case result.ExitCode == codexRulesSudoPromptOnly:
+		status.State, status.Hint = "rules-ok", "installed policy: sudo prompt; managed Git prompts off; session approvals unverified"
 	case result.ExitCode != 0:
 		status.State, status.Hint = "incompatible", "home rule check failed; review rules or update Subyard"
 	case err != nil:
@@ -67,9 +71,14 @@ func (runtime Runtime) codexRulesStatus(ctx context.Context, yard domain.Context
 	return status
 }
 
-// Exit status of a passing check whose installed requirements carry no Git
-// prompt rules (CODING_TOOL_GIT_APPROVAL=off).
-const codexRulesPromptsOff = 3
+// Exit statuses of a passing check by the installed requirements' prompt rules:
+// none (CODING_TOOL_GIT_APPROVAL=off), Git and sudo (DEV_SUDO=prompt), or sudo only.
+// Git rules alone exit 0.
+const (
+	codexRulesPromptsOff       = 3
+	codexRulesGitAndSudoPrompt = 4
+	codexRulesSudoPromptOnly   = 5
+)
 
 // Codex owns rule parsing. The guest returns only an exit code; commands after
 // -- are matcher input, never executed. Coreutils bounds time and captured output.
@@ -98,6 +107,12 @@ check() {
 }
 check local git status
 check local sh dev-check.sh
-# Managed requirements own the Git gate; home Git rules are the operator's own choice.
-grep -Fq 'decision = "prompt"' /etc/codex/requirements.toml || exit 3
+# Managed requirements own the Git and sudo gates; home Git rules are the operator's own choice.
+git=0
+sudo=0
+grep -Fq '{ token = "git" }' /etc/codex/requirements.toml && git=1
+grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml && sudo=1
+[ "$sudo" = 1 ] || { [ "$git" = 1 ] || exit 3; exit 0; }
+[ "$git" = 1 ] || exit 5
+exit 4
 `

@@ -122,7 +122,7 @@ func TestEnvironmentProfileSelectionPreservesLayerPrecedence(t *testing.T) {
 }
 
 func profileSelectionTestEnvironment(home string) map[string]string {
-	return map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, "config"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}
+	return map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, "config"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}
 }
 
 func TestEnvironmentProfileSelectionSuppressesIneligibleDefaultWithoutAcceptingExplicitRole(t *testing.T) {
