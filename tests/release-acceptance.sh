@@ -2386,6 +2386,24 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
+    def test_lane_result_environments_are_only_the_lanes_own_grants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            lines = ("E2E lease request: slot=slot-001 run=0123abcd",
+                     "E2E lease: yard=y project=p run=0123abcd purpose=t slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64,
+                     "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1",
+                     "E2E lease: yard=nested project=p run=fedcba98 purpose=t slot=slot-002 type=android-test vms=1 base=" + "b" * 64,
+                     "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1",
+                     "E2E_PHASE phase=guest-cleanup state=end duration_seconds=0 exit_code=0 vm=1",
+                     "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0",
+                     "E2E lease released: slot=slot-001 run=0123abcd")
+            script = output / "lane.sh"
+            script.write_text("#!/bin/bash\nprintf '%s\\n' " + " ".join(shlex.quote(line) for line in lines) + "\n")
+            result = m.execute("profile:sample/one", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["environments"], [{"type": "subyard-pair", "vm_count": 1, "base_fingerprint": "a" * 64}])
+            self.assertEqual(result["environment_evidence"], "recorded")
+
     def test_client_handle_release_evidence_records_cleanup_after_a_lane_failure(self):
         # The standalone client's acquire line and handle-release markers, then a lane failure.
         with tempfile.TemporaryDirectory() as temporary:

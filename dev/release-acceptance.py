@@ -890,6 +890,13 @@ def execute(name, command, root, output, env, slot=None):
                                           "cleanup": phases.get("cleanup")}, log, slot)
         except OSError:
             capture_error = True
+    environments = []
+    if slot:
+        # Only the lane's own grants are its environments; nested guest clients lease their own.
+        try:
+            environments = sorted(set(lane_leases(log, slot)[2]))
+        except OSError:
+            capture_error = True
     blocked = reason[len("capacity_"):] if status == "blocked" else None
     result = {"status": status, "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
@@ -907,7 +914,6 @@ def execute(name, command, root, output, env, slot=None):
     if code != 0:
         result["failure_class"] = ("environment" if blocked else "timeout" if code == 124
                                    else phases.get("failure_class", "unknown"))
-    environments = sorted(marker[1:] for marker in markers if marker[0] == "environment")
     if slot:
         result["environments"] = [{"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
                                   for kind, count, fingerprint in environments]
