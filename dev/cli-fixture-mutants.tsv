@@ -1,10 +1,12 @@
-# Mutants for dev/cli-fixture-slice-check.sh: each must make its migrated tests fail.
-# test file	-run regex	product file	old text	new text
+# Mutants for dev/cli-fixture-slice-check.sh: each must build and make its migrated tests fail.
+# test file	-run regex	mutated file	old text	new text
 internal/cli/core_handlers_test.go	^TestTestVMStatusFormatsPublicOutput$	internal/cli/test_vms.go	json.Indent(&formatted, []byte(stderr), "", "  ")	json.Indent(&formatted, []byte(stderr), "", " ")
 internal/cli/core_handlers_test.go	^TestTestVMStatusFormatsPublicOutput$	internal/cli/test_vms.go	if execution.action == "status" && !execution.json {	if execution.action == "status" {
 internal/cli/core_handlers_test.go	^TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity$	internal/cli/test_vms.go	fmt.Sprintf("retire-legacy-slot-%d", execution.slot)	fmt.Sprintf("retire-legacy-%d", execution.slot)
 internal/cli/core_handlers_test.go	^TestTestVMsRejectsStoppedYardBeforePrompt$	internal/cli/test_vms.go	if !strings.EqualFold(instance.Status, "running") {\n\t\t\treturn nil,	if strings.EqualFold(instance.Status, "never") {\n\t\t\treturn nil,
 internal/cli/core_handlers_test.go	^TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard$	internal/cli/teardown.go	!execution.full && hasOtherRegisteredLocalYard(loaded.Context.YardName, yards)	!execution.full && hasOtherRegisteredLocalYard(loaded.Context.YardName, yards[:0])
+internal/cli/core_handlers_test.go	^TestTestVMStatusFormatsPublicOutput$	internal/cli/core_handlers_test.go	AssertCalls(testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: []string{"status"}})	AssertCalls(testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: []string{"status", "--json"}})
+internal/cli/core_handlers_test.go	^TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity$	internal/cli/core_handlers_test.go	"--expect-lease-epoch", "0", "--yes",	"--expect-lease-epoch", "0",
 internal/cli/host_test.go	^TestHostRemoveFindsUnmergedLegacyRouteByEndpointBeforePrompt$	internal/cli/host_prepared.go	if record.Spec.OwnerEndpoint == connection.Destination {	if record.Spec.OwnerEndpoint != connection.Destination {
 internal/cli/host_test.go	^TestHostRenamePrintsExactPlanAndAppliesAfterConfirmation$	internal/cli/host_prepared.go	fmt.Sprintf("Owner HostID renamed: %s -> %s", plan.OldHostID, plan.NewHostID)	fmt.Sprintf("Owner HostID renamed: %s -> %s", plan.NewHostID, plan.OldHostID)
 internal/cli/host_test.go	^TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether$	internal/cli/host_prepared.go	fmt.Sprintf("register OwnerHost %s at %s (SSH %s)", inventory.HostID, endpoint, trust.Fingerprint)	fmt.Sprintf("register OwnerHost %s at %s (SSH %s)", endpoint, endpoint, trust.Fingerprint)

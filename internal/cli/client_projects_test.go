@@ -32,6 +32,7 @@ func TestClientProjectsSelectsExactlyOneLocalYard(t *testing.T) {
 	for _, selector := range []string{"default", "named", "local-owner/default", "local-owner/named"} {
 		t.Run(selector, func(t *testing.T) {
 			fixture := clientProjectsFixture(t, withEnv("SUBYARD_NO_AUDIT="))
+			environment := fixture.Environment
 			fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "named", "config.env"), "SSH_PORT=2223\n")
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				"subyard/yard": {Status: "RUNNING"}, "subyard-named/yard-named": {Status: "RUNNING"},
@@ -84,7 +85,7 @@ func TestClientProjectsSelectsExactlyOneLocalYard(t *testing.T) {
 				received.Projects[0].Path != state.YardPath(projectRemovalRecord(domain.ProjectSync).ProjectID) || probes != 1 || applies != 0 || opens != 0 {
 				t.Fatalf("scope/preview: %#v probes=%d apply=%d open=%d", received, probes, applies, opens)
 			}
-			if _, err := os.Stat(filepath.Join(fixture.DataHome, "logs")); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "logs")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("preview created audit files or locks: %v", err)
 			}
 		})
@@ -130,6 +131,7 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 	for _, scenario := range []string{"canonical", "legacy", "unreachable", "identity", "missing-route", "probe", "ambiguous", "drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := clientProjectsFixture(t)
+			environment := fixture.Environment
 			live := inventoryResult("remote-owner", "default", "Live").inventory
 			live.Yards[0].Projects[0].Target = "synthetic-profile"
 			if scenario == "identity" {
@@ -139,8 +141,9 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 			if scenario == "unreachable" {
 				testkit.WriteFile(t, filepath.Join(bin, "ssh"), []byte("#!/bin/sh\nexit 255\n"), 0o700)
 			}
-			configHome := fixture.ConfigHome
-			store := ownerinventory.Connections{Root: filepath.Join(fixture.DataHome, "owner-inventory")}
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			dataHome := environmentValue(environment, "SUBYARD_HOME")
+			store := ownerinventory.Connections{Root: filepath.Join(dataHome, "owner-inventory")}
 			connection := ownerinventory.Connection{HostID: "remote-owner", Destination: "owner-alias", Trust: &trust,
 				Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-remote"}}}
 			if scenario == "missing-route" {

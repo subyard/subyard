@@ -141,6 +141,7 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover"))
+			root := fixture.Root
 			incus := lifecycleIncus()
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
@@ -158,7 +159,7 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 						State: testvmsruntime.SlotQuarantined, LeaseID: "quarantined-lease"},
 				},
 			}
-			store := testvmsruntime.LeaseStore{Path: filepath.Join(fixture.Root, "recovery-leases.json"), SlotCount: 2}
+			store := testvmsruntime.LeaseStore{Path: filepath.Join(root, "recovery-leases.json"), SlotCount: 2}
 			payload, err := json.Marshal(pool)
 			if err != nil {
 				t.Fatal(err)
@@ -580,8 +581,10 @@ func (probe *testVMStatusProbe) Stream(
 
 func TestTestVMLogsReadsHostWideLogWithoutYardBrokerContext(t *testing.T) {
 	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
+	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	recorder := testvmsruntime.EventRecorder{
-		StateDir: filepath.Join(fixture.Root, "broker"),
+		StateDir: filepath.Join(root, "broker"),
 		Source:   "test-yard",
 		Now:      func() time.Time { return time.Unix(100, 0).UTC() },
 	}
@@ -597,7 +600,7 @@ func TestTestVMLogsReadsHostWideLogWithoutYardBrokerContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := (&testvmsruntime.HostSink{
-		DataHome:    fixture.DataHome,
+		DataHome:    dataHome,
 		Now:         func() time.Time { return time.Unix(100, 0).UTC() },
 		OperatorGID: -1,
 	}).Ingest(batch); err != nil {
@@ -629,7 +632,8 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 		t.Fatal("unsafe teardown argument was accepted")
 	}
 	fixture := newFixture(t)
-	dispatcher := filepath.Join(fixture.Root, ".build", "yard")
+	root := fixture.Root
+	dispatcher := filepath.Join(root, ".build", "yard")
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "teardown-test", Status: "ok",
 	}}}}
@@ -655,7 +659,7 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 	if err := json.Unmarshal([]byte(runner.Requests[0].Context["SUBYARD_TEARDOWN_ARTIFACTS"]), &artifacts); err != nil || len(artifacts) == 0 {
 		t.Fatalf("physical teardown lost approved artifact scope: count=%d err=%v", len(artifacts), err)
 	}
-	if artifacts[1].Path != filepath.Join(fixture.Root, "home", ".ssh", "subyard.config") || artifacts[2].Path != filepath.Join(fixture.Root, "data", "space.cache") {
+	if artifacts[1].Path != filepath.Join(root, "home", ".ssh", "subyard.config") || artifacts[2].Path != filepath.Join(root, "data", "space.cache") {
 		t.Fatalf("default-yard artifacts differ from physical cleanup paths: %#v", artifacts)
 	}
 }
@@ -820,6 +824,7 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 	for _, selection := range []string{"explicit", "inherited", "canonical", "follow"} {
 		t.Run(selection, func(t *testing.T) {
 			fixture := newFixture(t, withCommands("ssh"))
+			root, environment := fixture.Root, fixture.Environment
 			fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"), "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 			log := trustedSSHMock(t) + "printf 'selected-owner-log\\n'\n"
 			if selection == "follow" {
@@ -829,11 +834,11 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 			arguments := []string{"-Y", "remote", "test-vms", "logs"}
 			if selection == "inherited" {
 				arguments = []string{"test-vms", "logs"}
-				fixture.Environment = append(fixture.Environment, "SUBYARD_YARD=remote")
+				environment = append(environment, "SUBYARD_YARD=remote")
 			}
 			if selection == "canonical" {
-				fixture.Environment = append(fixture.Environment, "SUBYARD_HOST_ID=local-owner")
-				ownerRoot := filepath.Join(fixture.DataHome, "owner-inventory")
+				environment = append(environment, "SUBYARD_HOST_ID=local-owner")
+				ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
 				if err := (ownerinventory.Connections{Root: ownerRoot}).Write(ownerinventory.Connection{HostID: "remote-owner", Destination: "owner.example", Yards: map[string]ownerinventory.YardRoute{"inner": {SSHHost: "yard-remote"}}}); err != nil {
 					t.Fatal(err)
 				}
@@ -842,9 +847,9 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 				}
 				arguments = []string{"-Y", "remote-owner/inner", "test-vms", "logs"}
 			}
-			runtimeRoot := filepath.Join(fixture.Root, "runtime")
-			fixture.Environment = append(fixture.Environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(fixture.Root, "capture"))
-			journal, _ := installUnfinishedV2MutationGateFixture(t, fixture.Root, fixture.Environment, runtimeRoot)
+			runtimeRoot := filepath.Join(root, "runtime")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+			journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 			before, err := os.ReadFile(journal)
 			if err != nil {
 				t.Fatal(err)
@@ -857,7 +862,7 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 				arguments = append(arguments, "-f")
 				output = &cancelLogWriter{output: &stdout, cancel: cancel}
 			}
-			program := fixture.New(Options{Arguments: arguments, Stdout: output, Stderr: &stderr})
+			program := fixture.New(Options{Arguments: arguments, Environment: environment, Stdout: output, Stderr: &stderr})
 			if code := program.Run(ctx); (code != 0 && selection != "follow") || !strings.Contains(stdout.String(), "selected-owner-log") {
 				t.Fatalf("selected remote log: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
@@ -871,9 +876,10 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 
 func TestTestVMLogsReadOnlyDuringRecovery(t *testing.T) {
 	fixture := newFixture(t)
-	runtimeRoot := filepath.Join(fixture.Root, "runtime")
-	fixture.Environment = append(fixture.Environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(fixture.Root, "capture"))
-	journal, _ := installUnfinishedV2MutationGateFixture(t, fixture.Root, fixture.Environment, runtimeRoot)
+	root, environment := fixture.Root, fixture.Environment
+	runtimeRoot := filepath.Join(root, "runtime")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	before, err := os.ReadFile(journal)
 	if err != nil {
 		t.Fatal(err)
@@ -888,7 +894,7 @@ func TestTestVMLogsReadOnlyDuringRecovery(t *testing.T) {
 		{[]string{"test-vms", "logs", "-n", "0"}, 2},
 	} {
 		var stdout, stderr bytes.Buffer
-		program := fixture.New(Options{Arguments: test.args, Stdout: &stdout, Stderr: &stderr})
+		program := fixture.New(Options{Arguments: test.args, Environment: environment, Stdout: &stdout, Stderr: &stderr})
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if code := program.Run(ctx); code != test.code {

@@ -22,8 +22,8 @@ func installationCheckFixture(t *testing.T) *cliFixture {
 	// The installation check constructors leave WorkingDir empty, as before the fixture.
 	fixture := newFixture(t, withAudit(), withWorkingDir(""))
 	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"check||@check||forward|read|never|public|lifecycle|simple|check|check|--json --host --help|\n")
-	for _, directory := range []string{fixture.ConfigHome, fixture.DataHome} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
+	for _, directory := range []string{"state", "data"} {
+		if err := os.MkdirAll(filepath.Join(fixture.Root, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -31,18 +31,20 @@ func installationCheckFixture(t *testing.T) *cliFixture {
 	return fixture
 }
 
-func runInstallationCheck(t *testing.T, fixture *cliFixture, environment []string, arguments ...string) (int, application.ConformanceReport, string) {
+func runInstallationCheck(t *testing.T, root string, environment []string, arguments ...string) (int, application.ConformanceReport, string) {
 	t.Helper()
-	return runInstallationCheckWith(t, fixture, environment, true, arguments...)
+	return runInstallationCheckWith(t, root, environment, true, arguments...)
 }
 
 // runInstallationCheckWith compares the tree before and after when it is readable.
-func runInstallationCheckWith(t *testing.T, fixture *cliFixture, environment []string, snapshot bool, arguments ...string) (int, application.ConformanceReport, string) {
+func runInstallationCheckWith(t *testing.T, root string, environment []string, snapshot bool, arguments ...string) (int, application.ConformanceReport, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	program := fixture.New(Options{Arguments: append([]string{"check", "--json"}, arguments...),
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"check", "--json"}, arguments...),
 		Environment: environment, Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus()})
-	root := fixture.Root
+	if err != nil {
+		t.Fatal(err)
+	}
 	var before any
 	if snapshot {
 		before = nativeTreeSnapshot(t, root)
@@ -72,7 +74,8 @@ func reportFindings(report application.ConformanceReport) map[string]application
 
 func TestInstallationCheckIsReadOnlyWithNonWritableHomes(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	code, writable, stderr := runInstallationCheck(t, fixture, fixture.Environment, "--yes")
+	root, environment := fixture.Root, fixture.Environment
+	code, writable, stderr := runInstallationCheck(t, root, environment, "--yes")
 	var sections []string
 	for _, section := range writable.Sections {
 		sections = append(sections, section.ID)
@@ -82,24 +85,25 @@ func TestInstallationCheckIsReadOnlyWithNonWritableHomes(t *testing.T) {
 		findings["release.read"].Class != application.FindingBlocker || findings["host.credentials.initialization"].Class != application.FindingDrift {
 		t.Fatalf("code=%d stderr=%q report=%+v", code, stderr, writable)
 	}
-	for _, directory := range []string{fixture.ConfigHome, fixture.DataHome} {
-		if err := os.Chmod(directory, 0o500); err != nil {
+	for _, directory := range []string{"state", "data"} {
+		if err := os.Chmod(filepath.Join(root, directory), 0o500); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Cleanup(func() {
-		for _, directory := range []string{fixture.ConfigHome, fixture.DataHome} {
-			_ = os.Chmod(directory, 0o700)
+		for _, directory := range []string{"state", "data"} {
+			_ = os.Chmod(filepath.Join(root, directory), 0o700)
 		}
 	})
-	if code, readOnly, _ := runInstallationCheck(t, fixture, fixture.Environment, "--yes"); code != 1 || !reflect.DeepEqual(readOnly, writable) {
+	if code, readOnly, _ := runInstallationCheck(t, root, environment, "--yes"); code != 1 || !reflect.DeepEqual(readOnly, writable) {
 		t.Fatalf("report depends on write access: code=%d\n%+v\n%+v", code, readOnly, writable)
 	}
 }
 
 func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	configHome, data := fixture.ConfigHome, fixture.DataHome
+	root, environment := fixture.Root, fixture.Environment
+	configHome, data := filepath.Join(root, "state"), filepath.Join(root, "data")
 	fixture.Write(filepath.Join(configHome, "config.env"), "YARD_CAPS=ignored\n")
 	fixture.Write(filepath.Join(configHome, "yards", "broken", "config.env"), "UNKNOWN_SETTING=1\n")
 	for _, name := range []string{"a", "b"} {
@@ -108,7 +112,7 @@ func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 	fixture.Write(filepath.Join(data, "owner-inventory", "registration.json"), "{}\n")
 	fixture.Write(filepath.Join(data, "cleanup", "token", "journal.json"), "{}\n")
 	fixture.Write(filepath.Join(configHome, "projects", "bad.json"), "{")
-	code, report, _ := runInstallationCheck(t, fixture, fixture.Environment)
+	code, report, _ := runInstallationCheck(t, root, environment)
 	findings := reportFindings(report)
 	want := map[string]application.FindingClass{
 		"config.schema.broken":                             application.FindingBlocker,
@@ -133,24 +137,26 @@ func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 
 func TestInstallationCheckUsesEnvironmentSuppliedSettings(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	keys := filepath.Join(fixture.Root, "custom keys")
+	root := fixture.Root
+	keys := filepath.Join(root, "custom keys")
 	environment := append(slices.DeleteFunc(slices.Clone(fixture.Environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
-	_, report, _ := runInstallationCheck(t, fixture, environment)
+	_, report, _ := runInstallationCheck(t, root, environment)
 	if message := reportFindings(report)["host.credentials.initialization"].Message; !strings.Contains(message, filepath.Join(keys, "identity.json")) {
 		t.Fatalf("credential inspection ignored SUBYARD_KEYS_ROOT: %q", message)
 	}
 }
 
-func reportOf(t *testing.T, fixture *cliFixture, environment []string) (int, map[string]application.ConformanceFinding) {
+func reportOf(t *testing.T, root string, environment []string) (int, map[string]application.ConformanceFinding) {
 	t.Helper()
-	code, report, _ := runInstallationCheck(t, fixture, environment)
+	code, report, _ := runInstallationCheck(t, root, environment)
 	return code, reportFindings(report)
 }
 
 func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
 	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	fixture.Write(filepath.Join(fixture.ConfigHome, "generated", "a"), "fixture\n", 0o666)
-	directory, err := os.Open(fixture.ConfigHome)
+	directory, err := os.Open(filepath.Join(root, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +165,7 @@ func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	code, findings := reportOf(t, fixture, fixture.Environment)
+	code, findings := reportOf(t, root, environment)
 	if code != 1 || time.Since(started) > 10*time.Second || findings["config.root.lock"].Class != application.FindingBlocker ||
 		findings["release.config"].Class != application.FindingNotInspected || findings["config.permissions.generated%2Fa"].Class != application.FindingDrift ||
 		findings["host.credentials.config"].Class != application.FindingNotInspected || findings["state.stores.projects.config"].Class != application.FindingNotInspected {
@@ -169,12 +175,13 @@ func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
 
 func TestInstallationCheckReportsLegacyInputsWithoutAYardLoad(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	configHome := fixture.ConfigHome
+	root, environment := fixture.Root, fixture.Environment
+	configHome := filepath.Join(root, "state")
 	fixture.Write(filepath.Join(configHome, "config.env"), "UNKNOWN_SETTING=1\n")
 	for _, name := range []string{"a.env", "b.env"} {
 		fixture.Write(filepath.Join(configHome, "secrets", "legacy", name), "fixture\n")
 	}
-	code, findings := reportOf(t, fixture, fixture.Environment)
+	code, findings := reportOf(t, root, environment)
 	if code != 1 || findings["config.schema.default"].Class != application.FindingBlocker ||
 		findings["config.sources.legacy.secrets%2Flegacy%2Fa.env"].Resource != filepath.Join(configHome, "secrets", "legacy", "a.env") ||
 		findings["config.sources.legacy.secrets%2Flegacy%2Fb.env"].Class != application.FindingNotice {
@@ -184,14 +191,15 @@ func TestInstallationCheckReportsLegacyInputsWithoutAYardLoad(t *testing.T) {
 
 func TestInstallationCheckJudgesConfigurationFromPersistedSources(t *testing.T) {
 	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "other", "config.env"), "SSH_PORT=2224\n")
 	// The fixture exports SSH_PORT=2222, which would reserve one port for both yards.
-	_, findings := reportOf(t, fixture, fixture.Environment)
+	_, findings := reportOf(t, root, environment)
 	if _, conflict := findings["config.conflicts.listeners"]; conflict {
 		t.Fatalf("exported SSH_PORT produced a listener conflict: %+v", findings)
 	}
-	rejected := append(slices.DeleteFunc(slices.Clone(fixture.Environment), func(value string) bool { return strings.HasPrefix(value, "SSH_PORT=") }), "SSH_PORT=bogus")
-	code, findings := reportOf(t, fixture, rejected)
+	rejected := append(slices.DeleteFunc(slices.Clone(environment), func(value string) bool { return strings.HasPrefix(value, "SSH_PORT=") }), "SSH_PORT=bogus")
+	code, findings := reportOf(t, root, rejected)
 	for id, finding := range findings {
 		if strings.HasPrefix(id, "config.schema.") {
 			t.Fatalf("a rejected environment value failed persisted schema %s: %+v", id, finding)
@@ -204,7 +212,8 @@ func TestInstallationCheckJudgesConfigurationFromPersistedSources(t *testing.T) 
 
 func TestInstallationCheckSeparatesUnreadableCleanupAndConfigPaths(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	data, configHome := fixture.DataHome, fixture.ConfigHome
+	root, environment := fixture.Root, fixture.Environment
+	data, configHome := filepath.Join(root, "data"), filepath.Join(root, "state")
 	if err := os.MkdirAll(filepath.Join(data, "cleanup", "fifo"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +227,7 @@ func TestInstallationCheckSeparatesUnreadableCleanupAndConfigPaths(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(configHome, "generated"), 0o700) })
-	code, report, _ := runInstallationCheckWith(t, fixture, fixture.Environment, false)
+	code, report, _ := runInstallationCheckWith(t, root, environment, false)
 	findings := reportFindings(report)
 	if code != 1 || findings["state.journals.cleanup.fifo"].Class != application.FindingBlocker || findings["state.journals.cleanup.read"].Class != application.FindingBlocker ||
 		findings["config.permissions.generated"].Class != application.FindingDrift ||
@@ -230,17 +239,18 @@ func TestInstallationCheckSeparatesUnreadableCleanupAndConfigPaths(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(data, "cleanup"), 0o700) })
-	if _, report, _ = runInstallationCheckWith(t, fixture, fixture.Environment, false); reportFindings(report)["state.journals.cleanup.read"].Class != application.FindingBlocker {
+	if _, report, _ = runInstallationCheckWith(t, root, environment, false); reportFindings(report)["state.journals.cleanup.read"].Class != application.FindingBlocker {
 		t.Fatalf("unreadable cleanup directory was skipped: %+v", findings)
 	}
 }
 
 func TestInstallationCheckBlocksAPartialIdentityThatInitRefuses(t *testing.T) {
 	fixture := installationCheckFixture(t)
-	keys := filepath.Join(fixture.Root, "custom keys")
+	root := fixture.Root
+	keys := filepath.Join(root, "custom keys")
 	fixture.Write(filepath.Join(keys, "identity", "age.txt"), "partial\n")
 	environment := append(slices.DeleteFunc(slices.Clone(fixture.Environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
-	_, findings := reportOf(t, fixture, environment)
+	_, findings := reportOf(t, root, environment)
 	if finding := findings["host.credentials.initialization"]; finding.Class != application.FindingBlocker || finding.Next != "" || !strings.Contains(finding.Message, "refuses") {
 		t.Fatalf("partial identity: %+v", finding)
 	}
