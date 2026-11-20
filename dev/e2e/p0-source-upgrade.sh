@@ -9,6 +9,8 @@ TOKEN="${2:-}"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 # shellcheck source=dev/e2e/lib-p0-init-retry.sh
 . "$ROOT/dev/e2e/lib-p0-init-retry.sh"
+# shellcheck source=dev/e2e/lib-p0-incus-image.sh
+. "$ROOT/dev/e2e/lib-p0-incus-image.sh"
 p0_capacity_init "$TOKEN"
 
 MARKER="subyard-p0-source-$TOKEN"
@@ -707,7 +709,7 @@ ordinary_yard_facts() {
 }
 
 recreate_legacy_test_owner() {
-  local before after report init_rc=0
+  local before after report image init_rc=0
   before="$(operator_env tar -C "$OPERATOR_HOME/.config/subyard" -cf - . | sha256sum)"
   before+="$(incus config show "$INSTANCE" --project "$PROJECT" --expanded)"
   # Init has no check mode. Inspect the active release's public warning before
@@ -750,6 +752,10 @@ recreate_legacy_test_owner() {
       || die 'fresh test-yard cannot access the shared fixture image'
     p0_retry_init_after_plan_stale operator_yard service install test-vms --yes
   fi
+  # A later update recreates the broker in a fresh project with isolated images;
+  # select the same immutable public image so that install resolves it there.
+  image="$(p0_container_image_reference "$BASE_IMAGE")"
+  operator_yard -Y test-yard config set YARD_IMAGE "$image" YARD_IMAGE_FALLBACK "$image" --scope yard --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'fresh test-yard installation changed the ordinary yard'
   operator_yard test-vms status --json
   operator_yard -Y test-yard check
