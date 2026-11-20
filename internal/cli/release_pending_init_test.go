@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -387,8 +388,9 @@ func TestPendingInitReportsNewGitApprovalDefaultAgainstLegacySnapshot(t *testing
 	}
 }
 
-// Yes and no install the same agent policy; only a change to or from prompt awaits init.
-func TestPendingInitReportsOnlySudoPromptChanges(t *testing.T) {
+// The snapshot records yes and no, and its absence is the default prompt, also for a
+// snapshot from before the setting. Every mode change awaits init.
+func TestPendingInitReportsSudoModeChanges(t *testing.T) {
 	catalog, err := config.LoadCatalog(repositoryRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +400,8 @@ func TestPendingInitReportsOnlySudoPromptChanges(t *testing.T) {
 		applied, desired string
 		pending          bool
 	}{
-		{"", "yes", false}, {"", "no", false}, {"", "prompt", true}, {"prompt", "prompt", false}, {"prompt", "yes", true}, {"prompt", "no", true},
+		{"", "prompt", false}, {"", "", false}, {"", "yes", true}, {"", "no", true}, {"prompt", "prompt", false}, {"prompt", "yes", true},
+		{"yes", "yes", false}, {"yes", "prompt", true}, {"yes", "", true}, {"yes", "no", true}, {"no", "no", false}, {"no", "prompt", true}, {"no", "yes", true},
 	} {
 		applied := map[string]string{"DEV_USER": "dev"}
 		if test.applied != "" {
@@ -410,7 +413,8 @@ func TestPendingInitReportsOnlySudoPromptChanges(t *testing.T) {
 		if pending := len(settings) == 1 && settings[0].Name == "DEV_SUDO"; pending != test.pending || len(settings) > 1 {
 			t.Fatalf("installed %q, desired %q: %#v", test.applied, test.desired, settings)
 		}
-		if test.pending && (settings[0].Desired != test.desired || !strings.Contains(settings[0].Value(), test.desired)) {
+		want := cmp.Or(test.desired, "prompt")
+		if test.pending && (settings[0].Desired != want || !strings.Contains(settings[0].Value(), want)) {
 			t.Fatalf("installed %q, desired %q: row shows %q", test.applied, test.desired, settings[0].Value())
 		}
 	}
@@ -586,6 +590,9 @@ func TestRepairRPCListsInitWithoutRunningIt(t *testing.T) {
 // to be pending rather than requiring an endless series of no-op inits.
 func TestPendingInitEmptyAfterRealNoOpInit(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	// A command-scope sudo mode would be recorded and stay pending against the
+	// persistent default, as any other command-scope init input does.
+	environment = slices.DeleteFunc(environment, func(entry string) bool { return strings.HasPrefix(entry, "DEV_SUDO=") })
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	testkit.WriteFile(t, filepath.Join(root, "config/agents.env"), []byte("CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"), 0o600)
 	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
@@ -1108,5 +1115,21 @@ func TestPendingInitAndConfigStatusFindRemovedDigestOnlyConsumer(t *testing.T) {
 		if pending.Pending != selected || strings.Contains(strings.Join((pendingInitPlan{Yards: []pendingInitYard{pending}}).lines(), "\n"), expected) != selected || strings.Contains(domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{status}), expected) != selected {
 			t.Fatalf("selected=%v pending=%#v status=%#v", selected, pending, status)
 		}
+	}
+}
+
+// DEV_SUDO also owns the guest grant, so an unchanged integration scope, here
+// none at all, cannot hide a pending sudo mode as it hides integration inputs.
+func TestPendingSudoModeSurvivesUnchangedIntegrationScope(t *testing.T) {
+	catalog, err := config.LoadCatalog(repositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := &CLI{options: Options{RepositoryRoot: repositoryRoot(t)}}
+	desired := config.Loaded{Catalog: catalog, Environment: map[string]string{"DEV_SUDO": "no", "AGENT_codex_COMMAND": "next"}}
+	installed := config.Loaded{Catalog: catalog, Environment: map[string]string{"DEV_SUDO": "prompt", "AGENT_codex_COMMAND": "codex"}}
+	settings, err := program.pendingEffectiveSettings(desired, installed, pendingInitSettings(desired, installed))
+	if err != nil || len(settings) != 1 || settings[0].Name != "DEV_SUDO" {
+		t.Fatalf("pending settings: %#v, error: %v", settings, err)
 	}
 }

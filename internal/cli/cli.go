@@ -1525,12 +1525,12 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 // sudoStatusLine names the configured DEV_SUDO mode of a local yard.
 func sudoStatusLine(mode string) string {
 	switch mode {
-	case "prompt":
-		return "  sudo     prompt  (passwordless; coding agents ask before sudo)"
+	case "yes":
+		return "  sudo     yes  (passwordless)"
 	case "no":
 		return "  sudo     no"
 	default:
-		return "  sudo     yes  (passwordless)"
+		return "  sudo     prompt  (passwordless; coding agents ask before sudo)"
 	}
 }
 

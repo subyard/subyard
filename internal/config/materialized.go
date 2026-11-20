@@ -186,9 +186,10 @@ func GitApprovalOff(value string) bool {
 	return value == "" || value == "off"
 }
 
-// SudoApprovalPrompt reports whether DEV_SUDO asks coding agents to prompt before escalation.
+// SudoApprovalPrompt reports whether DEV_SUDO asks coding agents to prompt before
+// escalation. Unset means the default, prompt.
 func SudoApprovalPrompt(value string) bool {
-	return value == "prompt"
+	return value == "" || value == "prompt"
 }
 
 // ApprovalGates names the active prompt gates in the order the agent packages accept.

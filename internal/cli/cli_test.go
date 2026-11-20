@@ -552,3 +552,12 @@ func trustedSSHMock(t *testing.T) string {
 fi
 `, "__KNOWN_HOSTS__", knownHosts)
 }
+
+// Unset DEV_SUDO is the default prompt mode.
+func TestSudoStatusLineNamesTheDefaultPrompt(t *testing.T) {
+	for mode, want := range map[string]string{"": "sudo     prompt", "prompt": "sudo     prompt", "yes": "sudo     yes", "no": "sudo     no"} {
+		if got := sudoStatusLine(mode); !strings.HasPrefix(strings.TrimSpace(got), want) {
+			t.Fatalf("sudoStatusLine(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}

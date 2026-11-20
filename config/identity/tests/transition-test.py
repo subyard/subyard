@@ -114,7 +114,7 @@ class IdentityTransitionTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.root/'etc/sudoers.d/90-subyard-next').stat().st_mode),0o440)
         self.transition.apply_account(plan,identity.fingerprint(plan))
 
-    def test_provision_grants_default_sudo_and_removes_it_when_disabled(self):
+    def test_provision_defers_new_default_sudo_grant_and_removes_it_when_disabled(self):
         repository = Path(__file__).resolve().parents[3]
         provision = (repository/'scripts/04-provision-subyard.sh').read_text()
         start = provision.index('reconcile_dev_sudo() {\n')
@@ -128,9 +128,14 @@ reconcile_dev_sudo "$2"
 '''
         command = ['bash', '-euc', script, 'fixture', repository/'config/subyard.env', sudoers]
         environment = {'PATH': os.defpath, 'DEV_USER': 'dev'}
+        # The default prompt publishes a new grant only after the agent policies.
         subprocess.run(command, env=environment, check=True)
+        self.assertFalse(sudoers.exists())
+        subprocess.run(command, env={**environment, 'DEV_SUDO': 'yes'}, check=True)
         self.assertEqual(sudoers.read_text(), 'dev ALL=(ALL) NOPASSWD:ALL\n')
         self.assertEqual(stat.S_IMODE(sudoers.stat().st_mode), 0o440)
+        subprocess.run(command, env=environment, check=True)
+        self.assertEqual(sudoers.read_text(), 'dev ALL=(ALL) NOPASSWD:ALL\n')
         subprocess.run(command, env={**environment, 'DEV_SUDO': 'no'}, check=True)
         self.assertFalse(sudoers.exists())
 

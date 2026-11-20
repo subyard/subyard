@@ -19,7 +19,7 @@ fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
-DEV_SUDO="${DEV_SUDO:-yes}"
+DEV_SUDO="${DEV_SUDO:-prompt}"
 
 # BEGIN generated Git approval hook
 git_approval_hook() {

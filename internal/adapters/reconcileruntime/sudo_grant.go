@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -31,7 +32,7 @@ func (runtime Runtime) withPromptSudoGrant(ctx context.Context, install func() e
 	if err := install(); err != nil {
 		return err
 	}
-	if runtime.environmentValue("DEV_SUDO") != "prompt" {
+	if !config.SudoApprovalPrompt(runtime.environmentValue("DEV_SUDO")) {
 		return nil
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{

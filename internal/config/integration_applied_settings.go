@@ -48,13 +48,10 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 	// Both legacy inventories without a snapshot and snapshots that omit the
 	// setting record the installed prompt mode. Explicit off overrides it below.
 	result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
-	// Only prompt changes agent policy, so snapshots record only prompt and the
-	// grant keeps its desired value. No earlier runtime installed sudo prompts.
-	if value := values["DEV_SUDO"]; value == "no" {
-		result["DEV_SUDO"] = value
-	} else {
-		result["DEV_SUDO"] = "yes"
-	}
+	// Snapshots record only yes and no, so older runtimes can still read the
+	// default. A snapshot from before the setting also reads as prompt: release
+	// activation reprovisions those agents with prompt, since their hooks changed.
+	result["DEV_SUDO"] = "prompt"
 	for name, value := range applied {
 		result[name] = value
 	}
@@ -85,10 +82,8 @@ func (catalog Catalog) ValidateIntegrationInitSettings(values map[string]string)
 	return nil
 }
 
-// ImplicitAppliedSetting reports the values a snapshot omits: the legacy
-// encoding for Git prompt, which readers from before the setting can still
-// read, and DEV_SUDO yes and no, which install the same agent policy.
+// ImplicitAppliedSetting reports the default values a snapshot omits, so readers
+// from before each setting can still read it: Git prompt and DEV_SUDO prompt.
 func ImplicitAppliedSetting(name, value string) bool {
-	return name == "CODING_TOOL_GIT_APPROVAL" && (value == "" || value == "prompt") ||
-		name == "DEV_SUDO" && (value == "yes" || value == "no")
+	return (name == "CODING_TOOL_GIT_APPROVAL" || name == "DEV_SUDO") && (value == "" || value == "prompt")
 }

@@ -17,7 +17,7 @@ DEV_USER="${DEV_USER:-dev}"
 DEV_HOME="${CODEX_DEV_HOME:-}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
-DEV_SUDO="${DEV_SUDO:-yes}"
+DEV_SUDO="${DEV_SUDO:-prompt}"
 # The hook receives the gates whose direct commands the prefix rules prompt for.
 APPROVAL_GATES=''
 [ "$GIT_APPROVAL" != prompt ] || APPROVAL_GATES=git

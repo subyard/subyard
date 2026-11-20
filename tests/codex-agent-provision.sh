@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$ROOT/config/agents/codex/provision.sh"
+# The Git-mode cases run without sudo prompts; the default prompt mode is checked below.
+export DEV_SUDO=yes
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; }
 for command in cc jq sha256sum tar; do need "$command"; done
@@ -309,7 +311,8 @@ run_hook amd64 "$root" >/dev/null
 grep -Fq 'decision = "prompt"' "$requirements" || fail "prompt mode was not restored"
 CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null || fail "restored prompt mode failed readiness"
 
-# DEV_SUDO=prompt adds escalation prompt rules and the sudo hook gate; yes and no change nothing.
+# DEV_SUDO=prompt, the default, adds escalation prompt rules and the sudo hook gate;
+# yes and no change nothing.
 cp "$requirements" "$tmp/git-prompt-requirements"
 for git_mode in prompt off; do
   run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL="$git_mode" DEV_SUDO=prompt >/dev/null
@@ -328,6 +331,9 @@ assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-
 PY
   CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "sudo prompt readiness failed with Git $git_mode"
 done
+cp "$requirements" "$tmp/sudo-prompt-requirements"
+(unset DEV_SUDO; run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null)
+cmp "$requirements" "$tmp/sudo-prompt-requirements" || fail "unset DEV_SUDO did not install the prompt rules"
 for sudo_mode in yes no; do
   run_hook amd64 "$root" DEV_SUDO="$sudo_mode" >/dev/null
   cmp "$requirements" "$tmp/git-prompt-requirements" || fail "DEV_SUDO=$sudo_mode changed the requirements"

@@ -22,7 +22,7 @@ func TestMaterializationUsesApprovalVariantForShippedSource(t *testing.T) {
 	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
 		values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample"}
 		for _, test := range []struct{ git, sudo, source, want string }{
-			{"", "", base, base}, {"prompt", "", base, git}, {"off", "yes", base, base},
+			{"", "", base, sudo}, {"prompt", "", base, both}, {"off", "yes", base, base}, {"", "yes", base, base},
 			{"off", "no", base, base}, {"off", "prompt", base, sudo}, {"prompt", "prompt", base, both},
 			{"prompt", "no", base, git}, {"prompt", "prompt", "/override.json", "/override.json"}, {"off", "prompt", "", ""},
 		} {

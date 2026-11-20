@@ -3,6 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 hook="$ROOT/config/agents/claude/provision.sh"
+# The Git-mode cases run without sudo prompts; the default prompt mode is checked below.
+export DEV_SUDO=yes
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 tmp="$(mktemp -d /tmp/subyard-claude-provision.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
@@ -205,7 +207,8 @@ jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode
 "$check" >/dev/null || fail 'restored prompt mode failed readiness'
 [ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
 
-# DEV_SUDO=prompt adds sudo ask rules and the sudo hook gate in both Git modes; no and yes install neither.
+# DEV_SUDO=prompt, the default, adds sudo ask rules and the sudo hook gate in both Git modes;
+# no and yes install neither.
 sudo_rules='["Bash(sudo)","Bash(sudo:*)","Bash(su)","Bash(su:*)","Bash(doas)","Bash(doas:*)","Bash(pkexec)","Bash(pkexec:*)","Bash(sudoedit)","Bash(sudoedit:*)","Bash(run0)","Bash(run0:*)"]'
 prompt_policy="$(cat "$policy")"
 for git_mode in prompt off; do
@@ -223,6 +226,9 @@ for git_mode in prompt off; do
     fail 'installed hook allowed a wrapped sudo'
   fi
 done
+sudo_policy="$(cat "$policy")"
+(unset DEV_SUDO; CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null)
+[ "$(cat "$policy")" = "$sudo_policy" ] || fail 'unset DEV_SUDO did not install the prompt policy'
 for sudo_mode in no yes; do
   DEV_SUDO="$sudo_mode" run_hook "$root" >/dev/null
   [ "$(cat "$policy")" = "$prompt_policy" ] || fail "DEV_SUDO=$sudo_mode changed the Git prompt policy"

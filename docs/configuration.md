@@ -204,30 +204,32 @@ same explicit yard-scope repair.
 
 | Value | Effect after `yard init` |
 | --- | --- |
-| `yes` (default) | The yard's developer account runs commands as guest root without a password. |
+| `prompt` (default) | The yard's developer account runs commands as guest root without a password. Claude, Codex and OpenCode ask for approval before `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. |
+| `yes` | The grant stays as with `prompt`, and the agents run sudo without asking. |
 | `no` | Subyard removes its managed sudoers grant and installs no sudo approval rules. Docker group access remains; see below. |
-| `prompt` | The grant stays as with `yes`. Claude, Codex and OpenCode ask for approval before `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. |
 
 Set `DEV_SUDO` at shared, host or yard scope, or for one command, and run `yard init` to apply it.
 Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
 
 The earlier values `1` and `0` are not migrated, and no value is accepted by both an older runtime
 and this one: older runtimes refuse `yes`, `no` and `prompt`, and this runtime refuses `1` and `0`
-with a message that names the file, the line and the new values. Absent `DEV_SUDO` means sudo on
-for both. To update:
+with a message that names the file, the line and the new values. Absent `DEV_SUDO` means
+passwordless sudo without prompts for an older runtime and `prompt` for this one. To update:
 
 1. With the older runtime, remove every assignment, for example
    `yard config unset DEV_SUDO --scope host --yes`, at each scope that sets it. Add `--git` for a
    synced assignment and push it. Note which yards set `0` on purpose.
-2. Run `yard update`.
-3. With the new runtime, set `no` (or `prompt`) again where you need it, for example
-   `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`, before the next `yard init`.
-   Release activation does not touch the guest grant, but a `yard init` without the assignment
-   applies the default `yes`.
+2. Run `yard update`. Release activation reprovisions the coding agents of each running yard with
+   the default `prompt`, so they ask before sudo from then on; no other step is needed. Stopped
+   yards stay unchanged until the release reaches them, at the latest on their next `yard init`.
+3. With the new runtime, set `yes` where you want to keep the old behaviour, or `no` where the
+   yard had `0`, for example `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`, and run
+   `yard init`. Release activation does not touch the guest grant: a yard that had `0` keeps no
+   grant until a `yard init` without `no` publishes one after the agents' approval policies.
 
 With shared configuration, remove the shared assignment while every owner host still runs an
-older runtime, and publish `no` or `prompt` at shared scope only after all owner hosts are
-updated. Until then, keep `no` at host or yard scope on the updated hosts.
+older runtime, and publish `yes` or `no` at shared scope only after all owner hosts are updated.
+Until then, keep those values at host or yard scope on the updated hosts.
 
 `prompt` is a guardrail against casual escalation, not a security boundary. It covers commands
 an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the
@@ -273,9 +275,9 @@ loaded policy until restarted.
 After an upgrade, an existing yard that inherits the shipped default gets the grant on its next
 `yard init`. Release activation leaves the guest sudoers file alone. `yard config show DEV_SUDO`
 shows the desired value and `yard status` names it. `yard config status` does not inspect guest
-sudoers, so it can report a clean yard while the grant still awaits `yard init`. A change to or
-from `prompt` changes the agent policies, so it is listed as a pending init-owned setting until
-`yard init` applies it.
+sudoers, so it can report a clean yard while the grant still awaits `yard init`. The installed
+record keeps `yes` and `no`; an installation without one, also from an older runtime, counts as
+`prompt`. A change of mode is listed as a pending init-owned setting until `yard init` applies it.
 
 To disable the grant across owner hosts, publish a shared override in the connected private
 configuration repository:
@@ -291,8 +293,11 @@ Restrict write access to the configuration repository to trusted operators.
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
 the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
 `DEV_SUDO` assignment and, if one was Git-backed, sync the removal while the runtime still
-supports it. If a yard has applied `prompt`, also run `yard init` without it before
-downgrading, because older runtimes cannot read an installed record of that value.
+supports it. A yard that runs the default needs nothing more: an older runtime reads its
+installed record, its own default keeps the grant, and its hooks remove the sudo prompts. A yard
+that applied `yes` or `no` must also run `yard init` without the assignment before downgrading,
+because older runtimes refuse an installed record of either value. For a `no` yard that init
+publishes the grant; after the downgrade, set `DEV_SUDO=0` and run `yard init` to remove it.
 
 ### Git identity
 

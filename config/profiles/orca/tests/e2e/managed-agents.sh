@@ -250,6 +250,7 @@ guest_root test ! -e "$daemon_home/daemon.pid" || die 'the routing check left a 
 guest_root rm -f /tmp/subyard-codex-bootstrap.out /tmp/subyard-codex-install.sh /tmp/subyard-codex-install.out
 
 stage 'installing sudo approval prompts before Claude sessions start'
+# An explicit prompt matches the default the yard already applied.
 printf 'DEV_SUDO=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
 guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \

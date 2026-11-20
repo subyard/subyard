@@ -74,15 +74,17 @@ guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 \
   bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
   || die 'native Claude installed policy acceptance failed'
 
-stage 'removing the sudo grant before enabling DEV_SUDO=prompt'
+stage 'removing the sudo grant before restoring the default DEV_SUDO=prompt'
 yard config set DEV_SUDO no --scope yard --yes >/dev/null || die 'DEV_SUDO=no was refused'
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=no'
 if guest_root runuser -u dev -- sudo -n true 2>/dev/null; then die 'DEV_SUDO=no kept the passwordless grant'; fi
 
-stage 'running native Claude sudo approval with installed DEV_SUDO=prompt'
-# From no, init publishes the new grant only after the agent approval policies.
-yard config set DEV_SUDO prompt --scope yard --yes >/dev/null || die 'DEV_SUDO=prompt was refused'
-yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
+stage 'running native Claude sudo approval with the default DEV_SUDO=prompt'
+# Unset DEV_SUDO is prompt. From no, init publishes the new grant only after the agent
+# approval policies.
+yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
+grep -Fxq 'effective: prompt' <<<"$(yard config show DEV_SUDO)" || die 'unset DEV_SUDO is not prompt'
+yard init --yes >/dev/null || die 'yard init did not apply the default DEV_SUDO=prompt'
 sudo_status="$(yard status 2>&1 || true)"
 grep -Fq 'sudo     prompt' <<<"$sudo_status" \
   || { printf '%s\n' "$sudo_status" >&2; die 'yard status does not name the sudo prompt mode'; }
@@ -117,9 +119,12 @@ guest_root /usr/local/bin/codex-policy-check >/dev/null || die 'the restored Cod
 codex_sudo --sudo "$sudo_fixture/one" "$sudo_fixture/two" || die 'native Codex sudo approval failed'
 guest_root rm -rf -- "$sudo_fixture"
 guest_root rm -f -- "$guest_helper"
-yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
-yard init --yes >/dev/null || die 'yard init did not restore the default sudo mode'
-if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'default sudo mode kept the sudo ask rules'; fi
+# The remaining checks run without sudo prompts.
+yard config set DEV_SUDO yes --scope yard --yes >/dev/null || die 'DEV_SUDO=yes was refused'
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=yes'
+if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'DEV_SUDO=yes kept the Claude sudo ask rules'; fi
+if guest_root grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then die 'DEV_SUDO=yes kept the Codex sudo rules'; fi
+guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=yes removed the passwordless grant'
 
 fi
 

@@ -78,27 +78,32 @@ func TestAppliedIntegrationSettingsPreserveGitApprovalEncoding(t *testing.T) {
 	}
 }
 
-// Yes and no install the same agent policy, so only prompt enters the snapshot
-// and the projection keeps the desired grant.
-func TestAppliedIntegrationSettingsRecordOnlySudoPrompt(t *testing.T) {
+// The default prompt stays out of the snapshot, so older runtimes can read it;
+// yes and no are recorded. A snapshot without the setting, also one from before
+// it, reads as prompt whatever the desired mode.
+func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
 	catalog := Catalog{}
-	for _, value := range []string{"yes", "no"} {
+	for _, value := range []string{"prompt", ""} {
 		if settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": value}); len(settings) != 0 {
-			t.Fatalf("sudo mode %q entered the snapshot: %#v", value, settings)
+			t.Fatalf("default sudo mode %q entered the snapshot: %#v", value, settings)
 		}
 	}
-	settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": "prompt"})
-	if settings["DEV_SUDO"] != "prompt" || catalog.ValidateIntegrationInitSettings(settings) != nil {
-		t.Fatalf("sudo prompt was not recorded: %#v", settings)
+	recorded := map[string]map[string]string{}
+	for _, value := range []string{"yes", "no"} {
+		settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": value})
+		if len(settings) != 1 || settings["DEV_SUDO"] != value || catalog.ValidateIntegrationInitSettings(settings) != nil {
+			t.Fatalf("sudo mode %q was not recorded: %#v", value, settings)
+		}
+		recorded[value] = settings
 	}
 	for _, test := range []struct {
 		desired string
 		applied map[string]string
 		want    string
 	}{
-		{"yes", map[string]string{}, "yes"}, {"no", map[string]string{}, "no"}, {"prompt", map[string]string{}, "yes"},
-		{"", map[string]string{}, "yes"}, {"no", nil, "no"}, {"prompt", nil, "yes"},
-		{"yes", settings, "prompt"}, {"no", settings, "prompt"},
+		{"yes", map[string]string{}, "prompt"}, {"no", map[string]string{}, "prompt"}, {"prompt", map[string]string{}, "prompt"},
+		{"", map[string]string{}, "prompt"}, {"yes", nil, "prompt"}, {"no", nil, "prompt"},
+		{"prompt", recorded["yes"], "yes"}, {"no", recorded["yes"], "yes"}, {"prompt", recorded["no"], "no"}, {"yes", recorded["no"], "no"},
 	} {
 		if got := catalog.WithAppliedIntegrationInitSettings(map[string]string{"DEV_SUDO": test.desired}, test.applied)["DEV_SUDO"]; got != test.want {
 			t.Fatalf("desired %q with snapshot %#v projected as %q, want %q", test.desired, test.applied, got, test.want)

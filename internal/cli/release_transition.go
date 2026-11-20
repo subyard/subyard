@@ -1737,7 +1737,7 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	if applied.Installed {
 		target.installed.known["CODING_TOOL_INTEGRATIONS"] = true
 		target.installed.known["CODING_TOOL_GIT_APPROVAL"] = true
-		// No installation from before the snapshot carries sudo prompts.
+		// The snapshot records yes and no; its absence is the default prompt.
 		target.installed.known["DEV_SUDO"] = true
 	}
 	loaded := target.Loaded

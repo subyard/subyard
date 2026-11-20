@@ -60,7 +60,7 @@ func TestLoadNamedContext(t *testing.T) {
 	if !ctx.DevSudo {
 		t.Fatal("retained shipped DEV_SUDO=no replaced the catalog default")
 	}
-	assertEffectiveSetting(t, loaded.Settings["DEV_SUDO"], "yes", "default", "shipped defaults", "built-in resolver default")
+	assertEffectiveSetting(t, loaded.Settings["DEV_SUDO"], "prompt", "default", "shipped defaults", "built-in resolver default")
 	if loaded.Environment["E2E_VM_CPU"] != "1" {
 		t.Fatalf("yard settings did not override the selected template: %#v", loaded.Environment)
 	}
@@ -301,14 +301,15 @@ func TestGitApprovalDefaultAndExplicitPromptScopes(t *testing.T) {
 
 func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 	definition, ok := LookupSetting("DEV_SUDO")
-	if !ok || !definition.HasDefault || definition.Default != "yes" {
+	if !ok || !definition.HasDefault || definition.Default != "prompt" {
 		t.Fatalf("DEV_SUDO catalog default = %#v", definition)
 	}
 	for _, test := range []struct {
 		name, gitHost, gitYard, shared, host, yard, command string
 		want, scope, role                                   string
 	}{
-		{name: "shipped default", want: "yes", scope: "default", role: "shipped defaults"},
+		{name: "shipped default", want: "prompt", scope: "default", role: "shipped defaults"},
+		{name: "host keeps passwordless sudo without prompts", host: "yes", want: "yes", scope: "host", role: "scalar settings"},
 		{name: "Git host turns off", gitHost: "no", want: "no", scope: "host", role: "Git scalar settings"},
 		{name: "Git yard prompts", gitYard: "prompt", want: "prompt", scope: "yard", role: "Git scalar settings"},
 		{name: "shared turns off", shared: "no", want: "no", scope: "shared", role: "scalar settings"},

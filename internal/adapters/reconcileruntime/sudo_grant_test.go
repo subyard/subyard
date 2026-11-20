@@ -21,8 +21,8 @@ func (recorder *grantRecorder) Exec(_ context.Context, _, _ string, request port
 	return ports.InstanceExecResult{}, nil
 }
 
-// Under prompt the grant follows the agent policies: an interrupted policy
-// installation publishes nothing, and yes and no never publish from this step.
+// Under prompt, also when unset, the grant follows the agent policies: an interrupted
+// policy installation publishes nothing, and yes and no never publish from this step.
 func TestPromptSudoGrantFollowsAgentPolicies(t *testing.T) {
 	interrupted := errors.New("policy installation interrupted")
 	for _, test := range []struct {
@@ -30,10 +30,14 @@ func TestPromptSudoGrantFollowsAgentPolicies(t *testing.T) {
 		install error
 		grants  int
 	}{
-		{"prompt", interrupted, 0}, {"prompt", nil, 1}, {"yes", nil, 0}, {"no", nil, 0}, {"yes", interrupted, 0},
+		{"prompt", interrupted, 0}, {"prompt", nil, 1}, {"", interrupted, 0}, {"", nil, 1}, {"yes", nil, 0}, {"no", nil, 0}, {"yes", interrupted, 0},
 	} {
 		recorder := &grantRecorder{}
-		runtime := Runtime{Executor: recorder, Yard: domain.Context{DevUser: "dev"}, Environment: []string{"DEV_USER=dev", "DEV_SUDO=" + test.mode}}
+		environment := []string{"DEV_USER=dev"}
+		if test.mode != "" {
+			environment = append(environment, "DEV_SUDO="+test.mode)
+		}
+		runtime := Runtime{Executor: recorder, Yard: domain.Context{DevUser: "dev"}, Environment: environment}
 		installed := false
 		err := runtime.withPromptSudoGrant(context.Background(), func() error { installed = true; return test.install })
 		if !installed || !errors.Is(err, test.install) {

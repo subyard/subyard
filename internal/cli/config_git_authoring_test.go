@@ -57,20 +57,20 @@ func TestConfigGitAuthoringSharedDevSudo(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
 	peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
-	peer.assertSetting("DEV_SUDO", "yes")
+	peer.assertSetting("DEV_SUDO", "prompt") // The shipped default.
 
 	author.run(0, "config", "set", "DEV_SUDO", "yes", "--scope", "host", "--git", "--yes")
 	author.run(0, "config", "set", "DEV_SUDO", "no", "--scope", "shared", "--git", "--yes")
 	if got := configSourceGitOutput(t, author.remote, "show", "HEAD:shared/config.env"); got != "DEV_SUDO='no'\n" {
 		t.Fatalf("shared Git settings = %q", got)
 	}
-	author.assertSetting("DEV_SUDO", "yes") // The Git host override wins on owner-a.
-	peer.assertSetting("DEV_SUDO", "yes")
+	author.assertSetting("DEV_SUDO", "yes")  // The Git host override wins on owner-a.
+	peer.assertSetting("DEV_SUDO", "prompt") // Unchanged until the peer pulls.
 	peer.run(0, "config", "sync", "pull", "--yes")
 	peer.assertSetting("DEV_SUDO", "no")
 
 	peer.run(0, "config", "fields", "DEV_SUDO")
-	for _, want := range []string{"default: yes\n", "scopes: shipped,shared,host,yard,command\n", "syncable: yes\n", "applies: yard init\n"} {
+	for _, want := range []string{"default: prompt\n", "scopes: shipped,shared,host,yard,command\n", "syncable: yes\n", "applies: yard init\n"} {
 		if !strings.Contains(peer.stdout.String(), want) {
 			t.Fatalf("config fields missing %q:\n%s", want, peer.stdout.String())
 		}
@@ -100,7 +100,7 @@ func TestConfigGitAuthoringSharedDevSudoWithdrawal(t *testing.T) {
 			}
 
 			peer.run(0, "config", "sync", "pull", "--yes")
-			peer.assertSetting("DEV_SUDO", "yes")
+			peer.assertSetting("DEV_SUDO", "prompt") // The withdrawn override falls back to the default.
 			output := peer.stdout.String()
 			if !strings.Contains(output, "\n  yard init: yard init\n") || strings.Contains(output, "\n  config apply:") {
 				t.Fatalf("peer pull should report yard init as its follow-up:\n%s", output)
@@ -135,7 +135,7 @@ func TestConfigSyncSharedDevSudoCacheReplacement(t *testing.T) {
 			} else {
 				peer.run(0, "config", "sync", "--adopt", "--yes")
 			}
-			peer.assertSetting("DEV_SUDO", "yes")
+			peer.assertSetting("DEV_SUDO", "prompt")
 			output := peer.stdout.String()
 			if !strings.Contains(output, "\n  yard init: yard init\n") ||
 				!strings.Contains(output, "\n  next command: effective automatically\n") || strings.Contains(output, "\n  config apply:") {
