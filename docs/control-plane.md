@@ -1205,7 +1205,8 @@ differ read the relation, not admission. The sealed
 digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
 in schema 1. Its optional `registryFeatures` list names the registry forms the release reads beyond
 the v0.30.0 form, exactly as compiled: `retired-prefix-dependencies` means live migrations may
-depend on definitions retired into a digest-proved prefix. It is verified from the sealed manifest
+depend on definitions retired into a digest-proved prefix. A release reading another release's
+declaration ignores features it does not know. It is verified from the sealed manifest
 like the checkpoint marker, and a release without it declares no predecessor and no registry
 features.
 

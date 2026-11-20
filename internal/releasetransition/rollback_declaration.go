@@ -15,8 +15,9 @@ const (
 const RegistryFeatureRetiredPrefixDependencies = "retired-prefix-dependencies"
 
 // RegistryReaderFeatures lists, sorted, the registry forms this release's
-// compiled parser reads beyond the v0.30.0 form. The sealed declaration must
-// list exactly these, so a newer release can ask a retained target what it reads.
+// compiled parser reads beyond the v0.30.0 form. Its own sealed declaration
+// lists exactly these (checked at packaging time), so a newer release can ask a
+// retained target what it reads. A reader ignores features it does not know.
 func RegistryReaderFeatures() []string {
 	return []string{RegistryFeatureRetiredPrefixDependencies}
 }
@@ -56,12 +57,6 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 	}
 	if len(declaration.Migrations) != 0 || len(declaration.ProfileFormats) != 0 {
 		return RollbackDeclaration{}, invalid("rollback declaration schema 1 defines no migration or profile-format entries")
-	}
-	known := []string{RegistryFeatureRetiredPrefixDependencies}
-	for index, feature := range declaration.RegistryFeatures {
-		if !slices.Contains(known, feature) || (index > 0 && declaration.RegistryFeatures[index-1] >= feature) {
-			return RollbackDeclaration{}, invalid("rollback declaration registry features must be known, sorted and unique")
-		}
 	}
 	return declaration, nil
 }

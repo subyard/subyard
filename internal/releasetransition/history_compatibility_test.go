@@ -233,6 +233,12 @@ func TestRollbackDeclarationContract(t *testing.T) {
 		older.ReadsRegistryFeature(RegistryFeatureRetiredPrefixDependencies) {
 		t.Fatalf("declaration without features: %v %v", older, err)
 	}
+	// Another release's features are read tolerantly: unknown ones are ignored.
+	newer, err := ParseRollbackDeclaration([]byte(`{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) +
+		`","migrations":[],"profileFormats":[],"registryFeatures":["a-later-form","retired-prefix-dependencies"]}`))
+	if err != nil || !newer.ReadsRegistryFeature(RegistryFeatureRetiredPrefixDependencies) || newer.ReadsRegistryFeature("x") {
+		t.Fatalf("declaration with an unknown feature: %v %v", newer, err)
+	}
 	valid := `{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) + `","migrations":[],"profileFormats":[]}`
 	if _, err := ParseRollbackDeclaration([]byte(valid)); err != nil {
 		t.Fatalf("valid declaration: %v", err)
@@ -247,8 +253,6 @@ func TestRollbackDeclarationContract(t *testing.T) {
 		"migration entry":  strings.Replace(valid, `"migrations":[]`, `"migrations":[{"id":"x"}]`, 1),
 		"profile entry":    strings.Replace(valid, `"profileFormats":[]`, `"profileFormats":[{}]`, 1),
 		"unknown field":    strings.Replace(valid, `{`, `{"extra":true,`, 1),
-		"unknown feature":  strings.Replace(valid, `[]}`, `[],"registryFeatures":["x"]}`, 1),
-		"repeated feature": strings.Replace(valid, `[]}`, `[],"registryFeatures":["retired-prefix-dependencies","retired-prefix-dependencies"]}`, 1),
 		"trailing":         valid + "{}",
 		"oversize":         valid + strings.Repeat(" ", MaxRollbackDeclarationBytes),
 	} {
