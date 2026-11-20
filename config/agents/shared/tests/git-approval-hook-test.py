@@ -255,3 +255,31 @@ for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo
     for command in (f"echo $HOME; {call}", f"ls > f; {call}", f"x=1 {call}", f"echo '{call}' | bash; {call}"):
         denied(CLAUDE + gates, command, name)
         denied(CODEX + gates, command, name)
+
+# ANSI-C escapes, braces, `!` and `=` glue, and Git's exec-path commands still name the command.
+for gates in each(SUDO_GATES):
+    for command in ("$'\\x73udo' id", "$'\\163udo' id", "$'\\u0073udo' id", "{sudo,} id",
+                    "/usr/bin/{sudo,x} id", "git -c alias.x='!sudo id' x", "!sudo id"):
+        denied(gates, command, "sudo")
+    for command in ("cat {a,b}.txt", "echo a,b", "echo $'a\\x62'", "rg '!x' src"):
+        allowed(gates, command)
+for gates in each(GIT_GATES):
+    for command in ("/usr/lib/git-core/git-push origin", "git-commit -m x", "env PATH=/usr/lib/git-core git-push"):
+        denied(gates, command, "git " + ("push" if "push" in command else "commit"))
+    allowed(gates, "cat /usr/lib/git-core/git-push")
+
+for gates in SUDO_GATES:
+    # A lone & runs the next command unprompted, and Codex runs a quoted backslash without asking.
+    denied(CLAUDE + gates, "ls & sudo id", "sudo")
+    denied(CODEX + gates, "ls & sudo id", "sudo")
+    allowed(CLAUDE + gates, 'sudo id "a\\b"')
+    denied(CODEX + gates, 'sudo id "a\\b"', "sudo")
+    for mode in MODES:
+        allowed(mode + gates, "\tsudo id")
+        allowed(mode + gates, " \t cd /tmp && \tsudo id")
+
+# Commands above the scan limit fail closed instead of outlasting the client's hook timeout.
+for gates in each((["git", "sudo"],)):
+    allowed(gates, "a" * (256 * 1024))
+    result = run(gates, "a" * (256 * 1024 + 1))
+    assert result.returncode == 2 and "256 KiB" in result.stderr, (gates, result.returncode, result.stderr)

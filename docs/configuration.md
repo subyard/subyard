@@ -866,9 +866,11 @@ With prompts off, the remaining boundary for pushed changes is the remote's bran
 In `prompt` mode, Claude and Codex also use a managed Bash `PreToolUse` hook. It refuses a
 literal mention of `git commit` or `git push` unless the client's own prompt covers it. A mention
 is a `git` word, also as a path such as `/usr/bin/git`, followed by words that resolve to `commit`
-or `push` after Git global options such as `-C` and `-c`. The hook finds it anywhere in the
-command text, including quoted strings, heredoc bodies and comments, without running or expanding
-anything:
+or `push` after Git global options such as `-C` and `-c`, or a `git-commit` or `git-push` word
+such as `/usr/lib/git-core/git-push`. Quotes, escapes and `$'…'` escapes are decoded first, and
+a name inside braces or after `=` or `!` counts, as in `{git,} push`. The hook finds it anywhere
+in the command text, including quoted strings, heredoc bodies and comments, without running or
+expanding anything:
 
 - A command without a mention runs as usual.
 - A direct command reaches the client's prompt: it starts literally with `git commit` or
@@ -904,6 +906,8 @@ Limits:
   its coverage, as are options that make a listed command run another one, such as `rg --pre`.
   Subprocesses and direct writes to `.git` are outside it too. Other Git subcommands such as
   `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
+- The hook refuses a command longer than 256 KiB, whatever it contains, so that its scan always
+  finishes within the client's hook timeout. Write longer scripts to a file and run the file.
 - Claude is configured to block a Bash call if the hook fails or times out. Codex continues
   its normal permission flow on hook failures and timeouts, including its direct Git prompt rules.
 - When Claude runs under an organization's server-managed settings, the yard's drop-in is not the

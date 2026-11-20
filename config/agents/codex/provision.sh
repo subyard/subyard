@@ -35,6 +35,7 @@ Arguments name the gates: git (commit and push) and sudo (privilege escalation).
 it, the Claude rules check the plain prefix up to the first direct gated command.
 """
 
+import collections
 import json
 import posixpath
 import re
@@ -62,57 +63,86 @@ PLAIN_SEPARATORS = {";", "|", "&&", "||"}
 # use only these characters outside quotes, and quotes without expansions or escapes.
 CODEX_WORD = re.compile(r"""(?:[A-Za-z0-9_@%+=:,./-]|'[^'\n]*'|"[^"\\$`\n]*")+""")
 RESCAN = re.compile(r"""[\s;&|()<>`$#'"\\]""")
+# Larger commands are refused: scanning them could outlast the client's hook timeout.
+MAX_COMMAND_BYTES = 256 * 1024
+ANSI_C = re.compile(r"""(?<!\\)\$'((?:\\.|[^'\\])*)'""", re.S)
+ANSI_C_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)", re.S)
+ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+                "r": "\r", "t": "\t", "v": "\v"}
+# Brace expansion, option values and history expansion glue names to other text.
+NAME_PARTS = re.compile(r"[{},=!]")
 
 
-def git_action(words):
-    """Return the subcommand a git argument list runs; ... marks one hidden by an expansion."""
-    args = iter(words)
-    for arg in args:
+def git_action(words, start=0):
+    """Return the subcommand git runs from words[start:]; ... marks one hidden by an expansion."""
+    index = start
+    while index < len(words):
+        arg = words[index]
+        index += 1
         if arg is None or "$" in arg or "`" in arg:
             return "..."
         if arg in GIT_VALUE_OPTIONS:
-            next(args, None)
-        elif arg in GIT_FLAGS or (
+            index += 1
+        elif not (arg in GIT_FLAGS or (
             "=" in arg and arg.partition("=")[0] in GIT_VALUE_OPTIONS | {"--exec-path"}
-        ):
-            continue
-        else:
+        )):
             return arg
     return None
 
 
+def ansi_c(match):
+    """Return a $'…' body with its escapes decoded, quoted again for shlex."""
+    def decode(escape):
+        code = escape[1]
+        if code[0] in "xuU":
+            value = chr(min(int(code[1:], 16), 0x10FFFF))
+        elif code[0] in "01234567":
+            value = chr(int(code, 8) & 0xFF)
+        elif code[0] == "c" and len(code) == 2:
+            value = chr(ord(code[1]) & 0x1F)
+        else:
+            value = ANSI_C_NAMED.get(code, code)
+        return value
+    return shlex.quote(ANSI_C_ESCAPE.sub(decode, match[1]))
+
+
 def unquote(raw):
-    """Return the value of one shell word; $'…' and $"…" lose their quoting prefix."""
-    raw = re.sub(r"""(?<!\\)\$(?=['"])""", "", raw)
+    """Return the value of one shell word; $'…' is decoded and $"…" loses its prefix."""
+    raw = ANSI_C.sub(ansi_c, raw)
+    raw = re.sub(r"""(?<!\\)\$(?=["])""", "", raw)
     try:
         return "".join(shlex.split(raw, comments=False))
     except ValueError:
         return re.sub(r"""[\\'"]""", "", raw)
 
 
-def name(value):
-    """Return the command name a word spells, also after an option's or assignment's =."""
-    names = {posixpath.basename(value), posixpath.basename(value.rpartition("=")[2])}
-    return next((n for n in ESCALATION + ("git",) if n in names), None)
+def names(value):
+    """Return the command names a word spells, also inside braces or after = or !."""
+    return {posixpath.basename(part) for part in [value, *NAME_PARTS.split(value)]}
 
 
-def git_mention(rest):
-    action = git_action(rest)
-    if action in ("commit", "push"):
-        return f"git {action}"
-    if action == "...":
-        # An expansion hides the subcommand; a later literal commit or push counts.
-        for word in rest:
-            if word in ("commit", "push"):
-                return f"git {word}"
+def git_mention(run):
+    """Return the git action that a git word in one command's words runs."""
+    later, action = [None] * (len(run) + 1), None
+    for index in range(len(run) - 1, -1, -1):
+        action = f"git {run[index]}" if run[index] in ("commit", "push") else action
+        later[index] = action
+    for index, word in enumerate(run):
+        if word is not None and "git" in names(word):
+            action = git_action(run, index + 1)
+            if action in ("commit", "push"):
+                return f"git {action}"
+            if action == "...":
+                # An expansion hides the subcommand; a later literal commit or push counts.
+                return later[index + 1]
     return None
 
 
 def mention(text, gates):
     """Return the first gated command the text names anywhere, in any position."""
-    pending = [text]
+    pending = collections.deque([text])
     while pending:
-        current = pending.pop(0)
+        current = pending.popleft()
         run = []
         offset = 0
         while offset <= len(current):
@@ -120,11 +150,9 @@ def mention(text, gates):
             raw = token[0] if token else ""
             if token is None or raw.isspace() and "\n" in raw or raw[0] in ";&|\n#":
                 # The end of a command's words: name a git subcommand in them.
-                for index, word in enumerate(run):
-                    if "git" in gates and word is not None and name(word) == "git":
-                        found = git_mention(run[index + 1:])
-                        if found:
-                            return found
+                found = "git" in gates and git_mention(run)
+                if found:
+                    return found
                 run = []
                 if token is None:
                     offset += 1
@@ -137,8 +165,15 @@ def mention(text, gates):
                 run.append(None)
             else:
                 value = unquote(raw)
-                if "sudo" in gates and name(value) in ESCALATION:
-                    return name(value)
+                spelled = names(value)
+                found = "sudo" in gates and next((n for n in ESCALATION if n in spelled), None)
+                if found:
+                    return found
+                # Git runs git-commit and git-push from its exec path.
+                found = "git" in gates and next((f"git {n[4:]}" for n in ("git-commit", "git-push")
+                                                 if n in spelled), None)
+                if found:
+                    return found
                 if len(value) < len(raw) and RESCAN.search(value):
                     pending.append(value)
                 run.append(value)
@@ -146,11 +181,11 @@ def mention(text, gates):
     return None
 
 
-def native(segment, gates):
-    """Return the gated command a segment starts with literally, as the client's rules match it."""
-    names = (ESCALATION if "sudo" in gates else ()) + (GIT_ACTIONS if "git" in gates else ())
-    for name in names:
-        if segment == name or segment.startswith(name) and segment[len(name)] in " ;&|\n":
+def native(text, gates, start=0):
+    """Return the gated command text[start:] starts with literally, as the client's rules match it."""
+    for name in (ESCALATION if "sudo" in gates else ()) + (GIT_ACTIONS if "git" in gates else ()):
+        end = start + len(name)
+        if text.startswith(name, start) and (end == len(text) or text[end] in " ;&|\n"):
             return name
     return None
 
@@ -171,7 +206,7 @@ def pipelines(command, gates, claude):
         while command.startswith((" ", "\t"), offset):
             offset += 1
         start = offset
-        if claude and native(command[start:], gates):
+        if claude and native(command, gates, start):
             return result + [pipeline + [(command[start:], True)]]
         words, separator = [], None
         while offset < len(command):
@@ -199,8 +234,6 @@ def pipelines(command, gates, claude):
         pipeline.append((segment, bool(native(segment, gates))))
         if separator is None:
             return result + [pipeline]
-        if claude and pipeline[-1][1]:
-            return result + [pipeline]
         offset += len(separator)
         if separator != "|":
             result.append(pipeline)
@@ -216,9 +249,11 @@ def refused(command, gates, claude):
     if split is None:
         return first, False
     for pipeline in split:
+        # A mention is text only when no command of its pipeline can run it.
+        inert_pipeline = all(d or inert(s) for s, d in pipeline)
         for segment, direct in pipeline:
             found = not direct and mention(segment, gates)
-            if found and not (inert(segment) and all(d or inert(s) for s, d in pipeline)):
+            if found and not (inert_pipeline and inert(segment)):
                 return found, True
     return None, True
 
@@ -227,6 +262,10 @@ def main():
     gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
     codex = "--plain" in sys.argv[1:]
     command = json.load(sys.stdin)["tool_input"]["command"]
+    if len(command.encode(errors="surrogatepass")) > MAX_COMMAND_BYTES:
+        print(f"Approval refuses a command longer than {MAX_COMMAND_BYTES // 1024} KiB; "
+              f"write long scripts to a file first.", file=sys.stderr)
+        return 2
     action, plain = refused(command, gates, claude=not codex)
     if not action:
         return 0
