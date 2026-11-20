@@ -74,22 +74,13 @@ upgrade removes the recorded token and keeps the private one. Subsequent telemet
 and disable operations leave home documents alone. Policy files that still contain the
 bearer are rewritten without it; the helper is installed before a policy names it.
 
-Rollback to v0.28–v0.30 is refused while telemetry is installed in a local yard, including
-after it is disabled with its data retained. Those releases put the collector token into home
-documents, where an older template writer can publish it with mode `0644`. The telemetry
-runtime's activation identity changed at this boundary. `yard update --rollback` and
-`yard update --version VERSION`, including its `--check`, report `rollback-incompatible`
-without naming telemetry, whether the target is retained or downloaded. The message is either
-that the retained release cannot verify installed runtime activation, or that the selected
-release's migration registry differs from the active release's registry. Absence must be
-observed in a running yard: a stopped yard, or one that init never provisioned, is refused even
-if telemetry was never enabled there. Start or initialize it, then retry. This release cannot
-check a downgrade performed by an older release's own installer or engine, such as the tagged
-v0.30.0 installer or `runtime/previous/bin/yard update`. Do not run one in a yard where
-telemetry is installed, including after `profile disable`, which retains the telemetry runtime
-and its data. Process environment
-settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy.
-Claude ignores local drop-ins when server-managed settings apply.
+Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
+Those releases can also reintroduce the collector token into home documents, where an
+older template writer can publish it with mode `0644`. If an upgrade stopped while it was
+replacing collector assets, finish it before rolling back: those releases refuse a collector
+asset that the inventory does not record. Process environment settings such
+as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
+local drop-ins when server-managed settings apply.
 
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
