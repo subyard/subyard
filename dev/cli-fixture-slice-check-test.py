@@ -169,6 +169,18 @@ class SliceCheckTest(unittest.TestCase):
         self.assertIn("FAIL changed test file internal/cli/b_test.go has no mutant", output)
         self.assertIn("internal/cli/a_test.go\0^TestA$\0", output)
 
+    def test_coverage_counts_a_block_covered_only_by_a_rerun_and_reports_it(self):
+        header = "mode: set\n"
+        base = self.write("base.cover", header + "pkg/a.go:1.1,2.2 1 1\npkg/a.go:3.1,4.2 1 1\npkg/a_test.go:1.1,2.2 1 1\n")
+        first = self.write("first.cover", header + "pkg/a.go:1.1,2.2 1 1\npkg/a.go:3.1,4.2 1 0\n")
+        rerun = self.write("rerun.cover", header + "pkg/a.go:1.1,2.2 1 0\npkg/a.go:3.1,4.2 1 1\n")
+        ok, output = self.run_tool(tool.coverage, base, first)
+        self.assertFalse(ok)
+        self.assertIn("FAIL lost pkg/a.go:3.1,4.2", output)
+        ok, output = self.run_tool(tool.coverage, base, first, rerun)
+        self.assertTrue(ok, output)
+        self.assertIn("covered only by a candidate rerun: pkg/a.go:3.1,4.2", output)
+
     def test_verdict_separates_build_failures_from_failing_tests(self):
         for content, want in (
             ('{"Action":"fail","Test":"TestA"}\n', "failed"),

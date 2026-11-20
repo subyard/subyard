@@ -4,7 +4,8 @@
 #      and allowed added tests pass;
 #   2. every base assertion survives unchanged, renamed by a reviewed rule, as an error
 #      check replaced by its named helper, or under a reviewed waiver bound to its replacement;
-#   3. the coverprofile blocks of non-test code covered on the base stay covered;
+#   3. the coverprofile blocks of non-test code covered on the base stay covered in some
+#      candidate run (a rerun absorbs blocks behind a lost race, and is reported);
 #   4. every listed mutant of a changed test file fails tests that pass without it.
 # Both sides run from exports in /tmp without Git metadata: the base from git archive,
 # the candidate from the current tracked and untracked, non-ignored files.
@@ -29,6 +30,8 @@ Usage: dev/cli-fixture-slice-check.sh [options]
                              (repeatable; default New=fixture.New()
   --without-coverage TEST    run top-level TEST without coverage on both sides (repeatable;
                              default: tests that re-execute the instrumented test binary)
+  --coverage-reruns N        rerun the candidate up to N times while proof 3 loses blocks,
+                             counting blocks covered in any run (default: 1)
   --keep                     keep the work directory
 Source admission tests need a normal runtime: SUBYARD_SOURCE_QUERY_TOOLING_ROOT, or
 .build/runtime/current from `make build VERSION=0.29.0-test`.
@@ -46,7 +49,7 @@ EOF
 base=origin/master package=./internal/cli
 mutants="$ROOT/dev/cli-fixture-mutants.tsv" renames="$ROOT/dev/cli-fixture-renames.tsv"
 waivers="$ROOT/dev/cli-fixture-waivers.tsv"
-all_mutants=0 skip_mutants=0 keep=0
+all_mutants=0 skip_mutants=0 keep=0 coverage_reruns=1
 allowed_tests=() replacements=("New=fixture.New(")
 # This test's owner-protocol subtest re-executes the test binary and parses its
 # output, which an instrumented binary extends with a coverage warning.
@@ -65,6 +68,9 @@ while [ "$#" -gt 0 ]; do
       case "${2:?}" in *=?*) ;; *) printf 'FAIL: --allow-error-check takes CALLEE=TEXT\n' >&2; exit 2 ;; esac
       replacements+=("$2"); shift 2 ;;
     --without-coverage) without_coverage+=("${2:?}"); shift 2 ;;
+    --coverage-reruns)
+      case "${2:?}" in *[!0-9]*) printf 'FAIL: --coverage-reruns takes a count\n' >&2; exit 2 ;; esac
+      coverage_reruns="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -135,7 +141,22 @@ if check asserts "$work/base/$package" "$work/candidate/$package" "$renames" "$w
 else status=1; printf 'FAIL\n'; fi
 
 printf '\n== proof 3: covered non-test blocks are equal or a superset\n'
-if check coverage "$work/base.cover" "$work/candidate.cover"; then
+profiles=("$work/candidate.cover")
+for rerun in $(seq 0 "$coverage_reruns"); do
+  if [ "$rerun" -gt 0 ]; then
+    printf 'rerunning candidate %s with coverage (%d of %d)\n' "$package" "$rerun" "$coverage_reruns"
+    go -C "$work/candidate" test -count=1 -timeout=30m -json -coverpkg=./... \
+      -coverprofile="$work/candidate.$rerun.cover" "$package" > "$work/candidate.$rerun.json" || true
+    [ -s "$work/candidate.$rerun.cover" ] || { printf 'FAIL: candidate rerun produced no coverprofile\n' >&2; exit 1; }
+    profiles+=("$work/candidate.$rerun.cover")
+  fi
+  if check coverage "$work/base.cover" "${profiles[@]}" > "$work/coverage.out"; then
+    coverage_ok=1
+  else coverage_ok=0; fi
+  [ "$coverage_ok" = 1 ] && break
+done
+cat "$work/coverage.out"
+if [ "$coverage_ok" = 1 ]; then
   printf 'PASS\n'
 else status=1; printf 'FAIL\n'; fi
 

@@ -244,8 +244,12 @@ def asserts(base_dir, candidate_dir, renames_path, waivers_path, replacements):
     return ok
 
 
-def coverage(base_profile, candidate_profile):
-    """Proof 3: the non-test blocks covered on the base stay covered."""
+def coverage(base_profile, *candidate_profiles):
+    """Proof 3: the non-test blocks covered on the base stay covered.
+
+    Blocks behind a lost race are covered only in some runs, so a candidate
+    rerun counts; every block that only a rerun covered is printed.
+    """
     def covered(path):
         blocks = {}
         for line in Path(path).read_text().splitlines()[1:]:
@@ -255,9 +259,15 @@ def coverage(base_profile, candidate_profile):
                 continue
             blocks[block] = max(blocks.get(block, 0), int(count))
         return {block for block, count in blocks.items() if count > 0}, len(blocks)
-    (before, total_before), (after, total_after) = covered(base_profile), covered(candidate_profile)
+    before, total_before = covered(base_profile)
+    runs = [covered(path) for path in candidate_profiles]
+    first, total_after = runs[0]
+    after = set().union(*(blocks for blocks, _ in runs))
     lost = sorted(before - after)
-    print(f"covered blocks: base {len(before)}/{total_before}, candidate {len(after)}/{total_after}, lost {len(lost)}, gained {len(after - before)}")
+    print(f"covered blocks: base {len(before)}/{total_before}, candidate {len(first)}/{total_after} "
+          f"in {len(runs)} run(s), lost {len(lost)}, gained {len(after - before)}")
+    for block in sorted((before - first) & after):
+        print(f"  covered only by a candidate rerun: {block}")
     for block in lost[:100]:
         print(f"  FAIL lost {block}")
     return not lost
@@ -333,7 +343,7 @@ def main(arguments):
     if command == "asserts":
         return 0 if asserts(rest[0], rest[1], rest[2], rest[3], rest[4:]) else 1
     if command == "coverage":
-        return 0 if coverage(rest[0], rest[1]) else 1
+        return 0 if coverage(*rest) else 1
     if command == "mutants":
         return 0 if mutants(rest[0], rest[1], set(rest[3:]), rest[2] == "all") else 1
     if command == "apply":
