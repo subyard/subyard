@@ -448,7 +448,10 @@ against it and runs `connectedDebugAndroidTest` through `run` without `--no-daem
 Gradle daemon survives. It checks that the relay port refuses another local account and that
 repeated provisioning keeps the added package. It downloads the pinned Gradle distribution, and Maven
 dependencies from Google and Google's Maven Central mirror, because Maven Central answers shared CI
-addresses with HTTP 429.
+addresses with HTTP 429. It reports every relay refusal with its total. During the connected stage it
+keeps the newest logcat (main, system, crash, events and kernel) and guest memory samples in bounded
+files and, on failure, prints redacted, bounded sections of them with a meminfo snapshot taken before
+Gradle starts.
 
 ```sh
 bash config/profiles/android/tests/e2e/acceptance.sh --slot "$slot" --lane gradle
