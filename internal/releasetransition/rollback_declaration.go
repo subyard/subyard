@@ -1,21 +1,43 @@
 package releasetransition
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 const (
 	RollbackDeclarationSchemaV1 = 1
 	MaxRollbackDeclarationBytes = 64 << 10
 )
 
+// RegistryFeatureRetiredPrefixDependencies means the release parses a registry
+// whose live migrations depend on definitions retired into a proved prefix.
+const RegistryFeatureRetiredPrefixDependencies = "retired-prefix-dependencies"
+
+// RegistryReaderFeatures lists, sorted, the registry forms this release's
+// compiled parser reads beyond the v0.30.0 form. The sealed declaration must
+// list exactly these, so a newer release can ask a retained target what it reads.
+func RegistryReaderFeatures() []string {
+	return []string{RegistryFeatureRetiredPrefixDependencies}
+}
+
 // RollbackDeclaration is a release's sealed config/release-rollback.json. It
 // names the one predecessor registry the release prepares rollback to, by
 // canonical digest. Schema 1 defines no migration or profile-format entries yet,
-// so both lists must be present and empty.
+// so both lists must be present and empty. RegistryFeatures names the registry
+// forms the release reads; an absent list, or a release without a declaration,
+// reads only the v0.30.0 form.
 type RollbackDeclaration struct {
 	SchemaVersion             int               `json:"schemaVersion"`
 	PredecessorRegistryDigest Fingerprint       `json:"predecessorRegistryDigest"`
 	Migrations                []json.RawMessage `json:"migrations"`
 	ProfileFormats            []json.RawMessage `json:"profileFormats"`
+	RegistryFeatures          []string          `json:"registryFeatures,omitempty"`
+}
+
+// ReadsRegistryFeature reports whether the declaring release reads that registry form.
+func (declaration RollbackDeclaration) ReadsRegistryFeature(feature string) bool {
+	return slices.Contains(declaration.RegistryFeatures, feature)
 }
 
 func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
@@ -34,6 +56,12 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 	}
 	if len(declaration.Migrations) != 0 || len(declaration.ProfileFormats) != 0 {
 		return RollbackDeclaration{}, invalid("rollback declaration schema 1 defines no migration or profile-format entries")
+	}
+	known := []string{RegistryFeatureRetiredPrefixDependencies}
+	for index, feature := range declaration.RegistryFeatures {
+		if !slices.Contains(known, feature) || (index > 0 && declaration.RegistryFeatures[index-1] >= feature) {
+			return RollbackDeclaration{}, invalid("rollback declaration registry features must be known, sorted and unique")
+		}
 	}
 	return declaration, nil
 }
