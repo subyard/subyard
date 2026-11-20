@@ -572,7 +572,7 @@ guest_dev() {
 # init modes wait for.
 verify_symlinked_instruction_file() { # <update command...>
   local guest=/home/dev/.codex/AGENTS.md output rc=0
-  local step='replace it with a regular file or remove it, then run yard -Y default config apply'
+  local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
   local preserve="'mv' '-T' '--backup=numbered' '--' '$guest'"
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'p0 source-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null

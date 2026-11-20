@@ -34,6 +34,9 @@ type guestConfigFile struct {
 	previewInstructions bool
 	previewSource       string
 	ownedFormat         string
+	// initOnly is an instruction file: config status and config apply do
+	// not cover it, so its refusals name init --configs.
+	initOnly bool
 }
 
 // PreparedConfigs retains the exact component source/payload/destination set.
@@ -273,7 +276,7 @@ func (runtime Runtime) observeConfigFiles(ctx context.Context, files []guestConf
 			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 			continue
 		}
-		desired = append(desired, configmaterial.Desired{Label: file.label, Destination: file.destination, Format: file.ownedFormat, Payload: payload})
+		desired = append(desired, configmaterial.Desired{Label: file.label, Destination: file.destination, Format: file.ownedFormat, Payload: payload, InitOnly: file.initOnly})
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil || len(desired) == 0 {
 		return nil, err
@@ -326,14 +329,15 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			continue
 		}
 		guest := observed[file.destination]
-		guest.Label = file.label
+		guest.Label, guest.InitOnly = file.label, file.initOnly
 		if state := guest.State(); state == "unreadable" || state == "unknown" {
 			err = configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: guest}
 		} else {
 			err = runtime.applyGuestConfig(ctx, file, payload, guest.Token)
 		}
-		if errors.As(err, new(configmaterial.FileRefusal)) {
-			refusals = append(refusals, err)
+		if refusal := new(configmaterial.FileRefusal); errors.As(err, refusal) {
+			refusal.File.InitOnly = file.initOnly
+			refusals = append(refusals, *refusal)
 			continue
 		}
 		if err != nil {
@@ -507,7 +511,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat, initOnly: source.PreviewInstructions}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}

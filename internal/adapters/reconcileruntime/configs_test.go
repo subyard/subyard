@@ -177,6 +177,19 @@ func TestRefreshConfigsWritesOverConsentOrItsOwnObservation(t *testing.T) {
 		len(incus.TokenObservations) != 1 || !slices.Equal(incus.TokenObservations[0].Request.Command[6:], []string{"/home/dev/.config/opencode/AGENTS.md"}) {
 		t.Fatalf("writes %v, observations %v", written, incus.TokenObservations)
 	}
+	// An unreadable instruction file is outside the config set that config
+	// apply refreshes: its step is init --configs, the config file's stays
+	// config apply.
+	incus = runningIncus(8)
+	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
+	incus.GuestTokens["/home/dev/.config/opencode/AGENTS.md"] = configmaterial.TokenUnreadable
+	err = newRuntime(incus).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-a", Files: []ports.ConfigFileConsent{
+		{Destination: "/home/dev/.config/opencode/opencode.jsonc", Token: stale},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "/home/dev/.config/opencode/AGENTS.md is not a readable regular file; it was kept; next: replace it with a regular file or remove it, then run yard -Y named init --configs") ||
+		!strings.Contains(err.Error(), "opencode.jsonc changed after its refresh was planned; the guest's file was kept; next: run yard -Y named config apply") {
+		t.Fatalf("refusal steps per file class: %v", err)
+	}
 }
 
 // The compatibility fixture allows only this exact command, including its program.

@@ -51,6 +51,10 @@ func PayloadToken(payload []byte) string {
 type Desired struct {
 	Label, Destination, Format string
 	Payload                    []byte
+	// InitOnly is a file outside the config set that config status and
+	// config apply cover, such as an instruction file: only init --configs
+	// refreshes it.
+	InitOnly bool
 }
 
 // File is the one observation of a guest config file, and after a refused
@@ -65,6 +69,8 @@ type File struct {
 	// Problem is ProblemChanged, or the fixed reason a completed guest
 	// observation could not assess the file.
 	Problem string
+	// InitOnly is the desired file's: its refusals name init --configs.
+	InitOnly bool
 }
 
 // State is the file's one state: converged, drift, unreadable, changed or unknown.
@@ -125,7 +131,7 @@ func Observe(ctx context.Context, executor ports.InstanceExecutor, yard domain.C
 	command := []string{"python3", "-B", "-c", CompareWriteProgram(), "observe", "/home/" + yard.DevUser}
 	var raw []int
 	for index, item := range desired {
-		files[index] = File{Label: item.Label, Destination: item.Destination}
+		files[index] = File{Label: item.Label, Destination: item.Destination, InitOnly: item.InitOnly}
 		if err := validDestination(yard.DevUser, item.Destination); err != nil {
 			return nil, err
 		}
@@ -266,15 +272,19 @@ func (refusal FileRefusal) ActivationDiagnostic() (string, string) {
 }
 
 func (refusal FileRefusal) describe() (string, string) {
-	file, step := refusal.File, func(verb domain.Verb) string {
-		return domain.RenderAction(domain.Action{Verb: verb, Yard: refusal.Yard})
+	file := refusal.File
+	// The step is the command that refreshes this file: config apply for the
+	// config set, init --configs for a file only the runtime refreshes.
+	step := domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: refusal.Yard})
+	if file.InitOnly {
+		step = domain.RenderAction(domain.Action{Verb: domain.VerbInit, Yard: refusal.Yard}) + " --configs"
 	}
 	switch file.State() {
 	case "unreadable":
 		return file.Destination + " is not a readable regular file; it was kept",
-			"replace it with a regular file or remove it, then run " + step(domain.VerbConfigApply)
+			"replace it with a regular file or remove it, then run " + step
 	case "changed":
-		return file.Destination + " changed after its refresh was planned; the guest's file was kept", "run " + step(domain.VerbConfigApply)
+		return file.Destination + " changed after its refresh was planned; the guest's file was kept", "run " + step
 	}
-	return file.Destination + " could not be assessed: " + file.Problem, "run " + step(domain.VerbConfigStatus)
+	return file.Destination + " could not be assessed: " + file.Problem, "correct or remove it in the yard, then run " + step
 }

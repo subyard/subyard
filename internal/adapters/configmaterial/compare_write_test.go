@@ -104,7 +104,9 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 	desired := map[string][]byte{"": []byte("desired\n"), "json": []byte(`{"managed":true}`), "toml": []byte("sandbox_mode = 'danger-full-access'\n")}
 	other := map[string]string{"": "old\n", "json": `{"other":1}`, "toml": "other = 1\n"}
 	invalid := map[string]string{"": "not a document {", "json": "{invalid", "toml": "= invalid"}
-	apply := "run yard -Y named config apply"
+	// A step names %s: config apply for the config set, init --configs for
+	// a file only the runtime refreshes.
+	replace := "replace it with a regular file or remove it, then run %s"
 	for _, format := range []string{"", "json", "toml"} {
 		for _, test := range []struct {
 			kind, state, step, write string
@@ -112,12 +114,12 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 			{kind: "absent", state: "drift", write: "written"},
 			{kind: "match", state: "converged", write: "converged"},
 			{kind: "differ", state: "drift", write: "written"},
-			{kind: "symlink", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
-			{kind: "directory", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
-			{kind: "fifo", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
-			{kind: "symlinked parent", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
+			{kind: "symlink", state: "unreadable", step: replace, write: "unreadable"},
+			{kind: "directory", state: "unreadable", step: replace, write: "unreadable"},
+			{kind: "fifo", state: "unreadable", step: replace, write: "unreadable"},
+			{kind: "symlinked parent", state: "unreadable", step: replace, write: "unreadable"},
 			{kind: "invalid document", state: "drift", write: "failed"},
-			{kind: "broken baseline", state: "unknown", step: "run yard -Y named config status", write: "failed"},
+			{kind: "broken baseline", state: "unknown", step: "correct or remove it in the yard, then run %s", write: "failed"},
 		} {
 			if format == "" && (test.kind == "invalid document" || test.kind == "broken baseline") {
 				// Raw bytes have no document or baseline: an invalid one is drift.
@@ -169,14 +171,18 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := entry(local)
-				observed := guest.observe(t, file)
-				if observed.State() != test.state {
-					t.Fatalf("state %s (%#v), want %s", observed.State(), observed, test.state)
-				}
-				refusals := Refusals("named", []File{observed})
-				if test.step == "" && len(refusals) != 0 || test.step != "" && (len(refusals) != 1 ||
-					!strings.Contains(refusals[0].Error(), file.Destination) || !strings.HasSuffix(refusals[0].Error(), "; next: "+test.step)) {
-					t.Fatalf("refusals %v, want step %q", refusals, test.step)
+				var observed File
+				for command, initOnly := range map[string]bool{"yard -Y named config apply": false, "yard -Y named init --configs": true} {
+					file.InitOnly = initOnly
+					observed = guest.observe(t, file)
+					if observed.State() != test.state || observed.InitOnly != initOnly {
+						t.Fatalf("state %s (%#v), want %s", observed.State(), observed, test.state)
+					}
+					refusals := Refusals("named", []File{observed})
+					if test.step == "" && len(refusals) != 0 || test.step != "" && (len(refusals) != 1 ||
+						!strings.Contains(refusals[0].Error(), file.Destination) || !strings.HasSuffix(refusals[0].Error(), "; next: "+fmt.Sprintf(test.step, command))) {
+						t.Fatalf("refusals %v, want step %q for %s", refusals, test.step, command)
+					}
 				}
 				token := observed.Token
 				if !ValidToken(token) {
@@ -201,6 +207,7 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 						t.Fatalf("failed write: %v, guest %s", err, entry(local))
 					}
 				}
+
 			})
 		}
 	}
