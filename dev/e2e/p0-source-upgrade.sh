@@ -954,7 +954,7 @@ prepare() {
   fi
   grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
-  operator_yard config show DEV_SUDO | grep -Fxq 'effective: yes' \
+  grep -Fxq 'effective: yes' <<<"$(operator_yard config show DEV_SUDO)" \
     || die 'updated runtime does not default DEV_SUDO to yes'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
