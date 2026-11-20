@@ -150,6 +150,9 @@ coordinator, and do not create or close shared task files or start another full 
 - For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
   Repair with targeted checks, then freeze the final candidate. Run the original regression
   before the remaining required gates; a blocked check is incomplete, never passed.
+- Release acceptance has priority on local slots and CI: while a release `accept` or Release VM
+  checks run is active, start no new non-release physical lanes or long hosted dispatches such as
+  Periodic E2E, and stop non-release lanes on slots it needs at their next safe point.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)

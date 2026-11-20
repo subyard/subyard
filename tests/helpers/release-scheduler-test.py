@@ -67,6 +67,19 @@ class FakeControllers:
         return self.broker(self.now)
 
 
+class TimedRequests(acceptance.RetryRequests):
+    """Submits each scheduled live retry once the fake clock reaches it."""
+    def __init__(self, controllers, schedule):
+        super().__init__()
+        self.controllers, self.schedule, self.replies = controllers, list(schedule), []
+
+    def take(self, close=False):
+        while self.schedule and self.schedule[0][0] <= self.controllers.now:
+            _, name = self.schedule.pop(0)
+            self.replies.append((self.controllers.now, name, self.submit(name)))
+        return super().take(close)
+
+
 class SchedulerTests(unittest.TestCase):
     @contextmanager
     def controller_patches(self, controllers):
@@ -78,12 +91,14 @@ class SchedulerTests(unittest.TestCase):
         ):
             yield
 
-    def dispatch(self, slots, attempts, broker=None, recovery_wait_seconds=None):
+    def dispatch(self, slots, attempts, broker=None, recovery_wait_seconds=None, requests=(), retryable=lambda _: None):
         controllers = FakeControllers(attempts, broker)
         env = {"SUBYARD_E2E_CAPACITY_WAIT": acceptance.LIVE_CAPACITY_WAIT}
+        controllers.requests = TimedRequests(controllers, requests) if requests else None
         with self.controller_patches(controllers):
             acceptance.dispatch_live(attempts, slots, env, lambda name, slot: controllers.result,
-                                     recovery_wait_seconds=recovery_wait_seconds)
+                                     recovery_wait_seconds=recovery_wait_seconds,
+                                     requests=controllers.requests, retryable=retryable)
         return controllers
 
     @contextmanager
@@ -244,6 +259,46 @@ class SchedulerTests(unittest.TestCase):
                     (0, "a", 1), (0, "unclean", 2), (0, "b", 3), (2, "c", 1),
                     (4, "a", 1), (4, "b", 3), (when, "c", slot),
                 ])
+
+    def test_live_retry_takes_the_next_free_slot_while_a_sibling_runs(self):
+        controllers = self.dispatch((1, 2), {
+            "killed": [(2, FAILED), (1, PASSED)], "long": [(30, PASSED)],
+        }, requests=[(3, "killed")])
+        # Noticed at the next poll, within SLOT_POLL_SECONDS of the request.
+        self.assertEqual(controllers.started, [(0, "killed", 1), (0, "long", 2), (7, "killed", 1)])
+        self.assertLessEqual(7 - 3, acceptance.SLOT_POLL_SECONDS)
+        self.assertEqual([(now, name, reply.result()) for now, name, reply in controllers.requests.replies],
+                         [(7, "killed", None)])
+
+    def test_live_retry_refusals_name_their_reason(self):
+        controllers = self.dispatch((1,), {
+            "failed": [(1, FAILED), (1, PASSED)], "passed": [(1, PASSED)], "long": [(20, PASSED)], "queued": [(1, PASSED)],
+        }, requests=[(5, "long"), (5, "queued"), (5, "other"), (5, "passed"), (5, "failed")],
+            retryable=lambda name: "status is passed" if name == "passed" else None)
+        replies = {name: reply.result() for _, name, reply in controllers.requests.replies}
+        self.assertEqual(replies, {
+            "long": "running on slot-1", "queued": "already queued",
+            "other": "not selected by the running collector; retry after it finishes (hosted checks: wait or use retry-hosted)",
+            "passed": "status is passed", "failed": None,
+        })
+        self.assertEqual([name for _, name, _ in controllers.started], ["failed", "passed", "long", "failed", "queued"])
+
+    def test_live_retry_after_dispatch_or_while_stopping_is_refused(self):
+        requests = acceptance.RetryRequests()
+        with patch.object(acceptance, "broker_slots", return_value={1: "available"}), \
+             patch.object(acceptance.STOP, "is_set", return_value=True):
+            reply = requests.submit("lane")
+            acceptance.dispatch_live(["lane"], (1,), {"SUBYARD_E2E_CAPACITY_WAIT": "0s"},
+                                     lambda *_: self.fail("started while stopping"), requests=requests, retryable=lambda _: None)
+        self.assertEqual(reply.result(), "the collector is stopping")
+        requests.take(close=True)
+        self.assertEqual(requests.submit("lane").result(), "no live dispatch in progress")
+
+    def test_retried_lane_blocked_on_capacity_uses_the_ordinary_retry(self):
+        controllers = self.dispatch((1, 2), {
+            "lane": [(2, FAILED), (1, BLOCKED), (1, PASSED)], "long": [(30, PASSED)],
+        }, requests=[(3, "lane")])
+        self.assertEqual(controllers.started, [(0, "lane", 1), (0, "long", 2), (7, "lane", 1), (30, "lane", 1)])
 
     def test_slot_arguments(self):
         parser = argparse.ArgumentParser(exit_on_error=False)

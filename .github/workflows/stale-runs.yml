@@ -2,7 +2,9 @@ name: Stale runs
 
 # GitHub can leave a run queued or in progress after every job has finished. Such a run holds its
 # concurrency group, so later runs of that workflow wait forever. No run here legitimately takes
-# a day: hosted jobs stop after their timeouts, and no workflow waits for an approval.
+# a day: hosted jobs stop after their timeouts, and no workflow waits for an approval. A rerun
+# restarts the clock: its age counts from the latest attempt's start, not the run's creation
+# (creation only while GitHub reports no start).
 on:
   schedule:
     - cron: '41 * * * *'
@@ -32,21 +34,21 @@ jobs:
         run: |
           found=0 failed=0
           for status in requested waiting pending queued in_progress; do
-            while IFS=$'\t' read -r id name branch created; do
+            while IFS=$'\t' read -r id name branch started; do
               [ -n "$id" ] || continue
               found=1
               printf '::warning title=Cancelled a stale run::%s run %s on %s, %s since %s\n' \
-                "$name" "$id" "$branch" "$status" "$created"
+                "$name" "$id" "$branch" "$status" "$started"
               # A run that ignored an earlier cancel needs the forced one.
-              if [ "$(( $(date +%s) - $(date -d "$created" +%s) ))" -gt $((25 * 3600)) ]; then
+              if [ "$(( $(date +%s) - $(date -d "$started" +%s) ))" -gt $((25 * 3600)) ]; then
                 gh api -X POST "repos/$GH_REPO/actions/runs/$id/force-cancel" >/dev/null || failed=1
               else
                 gh run cancel "$id" || failed=1
               fi
             done < <(gh run list --status "$status" --limit 100 \
-              --json databaseId,workflowName,headBranch,createdAt \
-              --jq '.[] | select(now - (.createdAt | fromdateiso8601) > 24 * 3600)
-                | [.databaseId, .workflowName, .headBranch, .createdAt] | @tsv')
+              --json databaseId,workflowName,headBranch,createdAt,startedAt \
+              --jq '.[] | select(now - (.startedAt // .createdAt | fromdateiso8601) > 24 * 3600)
+                | [.databaseId, .workflowName, .headBranch, .startedAt // .createdAt] | @tsv')
           done
           [ "$found" = 1 ] || printf 'No run is older than a day.\n' >> "$GITHUB_STEP_SUMMARY"
           [ "$failed" = 0 ] || { printf '::error::Some stale runs could not be cancelled\n'; exit 1; }
