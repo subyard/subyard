@@ -202,7 +202,7 @@ run_create() {
   local rc=0
   : > "$MOCK_INCUS_LOG"
   : > "$MOCK_CAPTURE_FILE"
-  bash "$ROOT/scripts/03-create-subyard.sh" "$@" --yes >"$TMP/output" 2>&1 || rc=$?
+  bash "$ROOT/scripts/03-create-subyard.sh" --yes >"$TMP/output" 2>&1 || rc=$?
   if [ -s "$MOCK_CAPTURE_FILE" ]; then
     [ ! -e "$(cat "$MOCK_CAPTURE_FILE")" ] || fail 'private image metadata capture survived the operation'
   fi
