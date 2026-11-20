@@ -1184,7 +1184,7 @@ PYBASELINE
     # The next forward update recreates it again for the candidate.
     rolled_owner="$after_owner"
     env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
-      runtime_yard update --version "$P0_OWNER_VERSION" --offline --yes
+      "$SUBYARD_HOME/runtime/current/bin/yard" update --version "$P0_OWNER_VERSION" --offline --yes
     [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not reactivated'
     name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
     [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'
