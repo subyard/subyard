@@ -390,6 +390,14 @@ BASELINE_CONFIG
   incus stop "$INSTANCE" --project "$PROJECT"
   operator_env jq -e '.schemaVersion == 1 and (.files | length) > 0' \
     "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
+  # No DEV_SUDO value is valid on both runtimes. As the release notes ask, the operator
+  # removes the assignment with the old engine (absent means sudo on for both) and updates.
+  # The hop runtime saves no local settings before the Git settings migration, so the
+  # removal uses the creation runtime.
+  operator_yard config unset DEV_SUDO --scope host --yes
+  if operator_env grep -q '^DEV_SUDO=' "$OPERATOR_HOME/.config/subyard/config.env"; then
+    die 'baseline DEV_SUDO assignment was not removed'
+  fi
   manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
   # A below-anchor install follows the printed route through the hop release.
   IFS=$'\t' read -r hop_version _ hop_sha _ < <(published_hop)
@@ -939,12 +947,6 @@ prepare() {
   seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
-  # No DEV_SUDO value is valid on both runtimes. As the release notes ask, the operator
-  # removes the assignment with the old engine (absent means sudo on for both) and updates.
-  operator_yard config unset DEV_SUDO --scope host --yes
-  if operator_env grep -q '^DEV_SUDO=' "$OPERATOR_HOME/.config/subyard/config.env"; then
-    die 'baseline DEV_SUDO assignment was not removed'
-  fi
   if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
