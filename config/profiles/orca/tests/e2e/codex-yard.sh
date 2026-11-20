@@ -74,7 +74,13 @@ guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 \
   bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
   || die 'native Claude installed policy acceptance failed'
 
+stage 'removing the sudo grant before enabling DEV_SUDO=prompt'
+yard config set DEV_SUDO no --scope yard --yes >/dev/null || die 'DEV_SUDO=no was refused'
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=no'
+if guest_root runuser -u dev -- sudo -n true 2>/dev/null; then die 'DEV_SUDO=no kept the passwordless grant'; fi
+
 stage 'running native Claude sudo approval with installed DEV_SUDO=prompt'
+# From no, init publishes the new grant only after the agent approval policies.
 yard config set DEV_SUDO prompt --scope yard --yes >/dev/null || die 'DEV_SUDO=prompt was refused'
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
 sudo_status="$(yard status 2>&1 || true)"

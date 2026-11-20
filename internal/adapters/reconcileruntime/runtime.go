@@ -325,11 +325,13 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		if err := runtime.applyProfileRuntimes(ctx); err != nil {
 			return err
 		}
-		plan, err := runtime.IntegrationPlan(ctx)
-		if err != nil {
-			return err
-		}
-		return runtime.ApplyIntegrations(ctx, plan)
+		return runtime.withPromptSudoGrant(ctx, func() error {
+			plan, err := runtime.IntegrationPlan(ctx)
+			if err != nil {
+				return err
+			}
+			return runtime.ApplyIntegrations(ctx, plan)
+		})
 	case ports.ReconcileStageIncus:
 		return runtime.installIncus(ctx)
 	case ports.ReconcileStageExtras:
