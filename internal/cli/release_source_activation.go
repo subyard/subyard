@@ -18,13 +18,12 @@ import (
 )
 
 type sourceActivationDraft struct {
-	cli        *CLI
-	home       string
-	view       releasetransition.V2SettingsSnapshotView
-	projection testyardmigration.ActivationProjection
-	inputs     *config.ProspectiveFiles
-	overrides  map[string]string
-	names      []string
+	cli       *CLI
+	home      string
+	view      releasetransition.V2SettingsSnapshotView
+	inputs    *config.ProspectiveFiles
+	overrides map[string]string
+	names     []string
 }
 
 func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition.V2SourceActivationView) (*sourceActivationDraft, error) {
@@ -50,21 +49,6 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 	}
 	names = append(names, actual...)
 	names = append(names, "default")
-	if view.OwnerRegistration != nil {
-		options, err := cli.releaseTransitionTestYardOptions(releasetransition.ProcessRequest{ConfigHome: home})
-		if err != nil {
-			return nil, err
-		}
-		before := view.OwnerRegistration
-		draft.projection, err = testyardmigration.PrepareActivationProjection(options, testyardmigration.Prepared{State: testyardmigration.State(before.State), RegistrationDigest: string(before.Registration), OverridesDigest: string(before.Overrides), ControllerDigest: string(before.Controller), SharedImages: before.SharedImages}, view.Settings.ReadSnapshot)
-		if err != nil {
-			return nil, err
-		}
-		if len(draft.projection.Sources) != 0 {
-			names = slices.DeleteFunc(names, func(name string) bool { return name == testyardmigration.LegacyYard })
-			names = append(names, testyardmigration.CurrentYard)
-		}
-	}
 	slices.Sort(names)
 	names = slices.Compact(names)
 	draft.names = names
@@ -73,10 +57,6 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 			return nil, errors.New("prospective yard name is invalid")
 		}
 	}
-	for path := range draft.projection.Sources {
-		paths = append(paths, path)
-	}
-	paths = append(paths, draft.projection.Removed...)
 	for _, path := range paths {
 		if !filepath.IsAbs(path) || !strings.HasPrefix(path, home+string(filepath.Separator)) {
 			return nil, errors.New("prospective activation input path escapes configuration home")
@@ -84,34 +64,15 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 		// Preserve logical layer presence without copying or reading its bytes.
 		draft.overrides[path] = path
 	}
-	for _, path := range draft.projection.Removed {
-		draft.overrides[path] = ""
-	}
 	draft.inputs = &config.ProspectiveFiles{Root: home, Yards: names, ReadSnapshot: view.Settings.ReadSnapshot, ReadPreparedInput: draft.readPreparedInput}
 	return draft, nil
 }
 func (draft *sourceActivationDraft) readPreparedInput(path string) (config.PersistentFileSnapshot, bool, error) {
-	if slices.Contains(draft.projection.Removed, path) {
-		return config.PersistentFileSnapshot{}, true, nil
-	}
-	source := path
-	alias, aliased := draft.projection.Sources[path]
-	if aliased {
-		source = alias
-	}
 	if reader, ok := draft.view.(releasetransition.V2PreparedInputReader); ok {
-		snapshot, matched, err := reader.ReadPreparedInput(source)
+		snapshot, matched, err := reader.ReadPreparedInput(path)
 		if matched || err != nil {
-			if aliased {
-				snapshot.Identity = config.PersistentFileIdentity{}
-			}
 			return snapshot, matched, err
 		}
-	}
-	if aliased {
-		snapshot, err := draft.view.ReadSnapshot(source)
-		snapshot.Identity = config.PersistentFileIdentity{}
-		return snapshot, true, err
 	}
 	// Older prospective views cover the whole settings root. Prepared views
 	// explicitly leave uncaptured inputs on the native reader.
@@ -158,9 +119,6 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 		if name == "" {
 			name = "default"
 		}
-		if name == testyardmigration.LegacyYard && len(draft.projection.Sources) != 0 {
-			name = testyardmigration.CurrentYard
-		}
 		names = []string{name}
 	}
 	targets := []config.MaterializationActivationTarget{}
@@ -204,24 +162,6 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 				return releasetransition.V2SourceActivationPlan{}, inspectErr
 			}
 			proof := projectedIntegrationUnavailable{yard: loaded.Context, absent: absent, instance: instance}
-			// Only registration work can change a stopped target's native
-			// ownership. Disk-/tmp work never temporarily boots or restores it.
-			if !absent && instance.Config["user.subyard.desired_power"] == "stopped" {
-				if expected := view.RegisteredYards["yard."+name]; expected != "" {
-					owner := reconciler.operation().registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: reconciler.configHome}, false, name)
-					observed, err := owner.(releasetransition.V2ProspectiveActivationObserver).ObserveProspective(ctx, releases, releasetransition.ReleaseLinks{}, view.Settings)
-					if err != nil {
-						return releasetransition.V2SourceActivationPlan{}, err
-					}
-					if observed.Desired != expected {
-						return releasetransition.V2SourceActivationPlan{}, domain.ErrPlanStale
-					}
-					if !observed.Converged {
-						proof.owner, proof.desired = owner, expected
-					}
-				}
-			}
-
 			if absent || !strings.EqualFold(instance.Status, "running") {
 				unavailable[name] = proof
 			} else {
@@ -262,14 +202,9 @@ func (cli *CLI) projectedOwnerApplicability(ctx context.Context, request release
 	if warning != "" {
 		return testyardmigration.BrokerRuntimeAbsent, testyardmigration.StateAbsent, nil
 	}
-	var before testyardmigration.Prepared
-	if bound := view.OwnerRegistration; bound != nil {
-		before = testyardmigration.Prepared{State: testyardmigration.State(bound.State), RegistrationDigest: string(bound.Registration), OverridesDigest: string(bound.Overrides), ControllerDigest: string(bound.Controller), SharedImages: bound.SharedImages}
-	} else {
-		before, err = testyardmigration.PrepareProspective(ctx, options, view.Settings.ReadSnapshot)
-		if err != nil {
-			return "", "", err
-		}
+	before, err := testyardmigration.PrepareProspective(ctx, options, view.Settings.ReadSnapshot)
+	if err != nil {
+		return "", "", err
 	}
 	if before.State == testyardmigration.StateAbsent {
 		return testyardmigration.BrokerRuntimeAbsent, testyardmigration.StateAbsent, nil
@@ -332,8 +267,6 @@ type projectedIntegrationUnavailable struct {
 	yard     domain.Context
 	absent   bool
 	instance ports.InstanceInfo
-	owner    releasetransition.V2ActivationReconciler
-	desired  releasetransition.Fingerprint
 }
 
 func (reconciler *materializedConfigActivationReconciler) verifyProjectedUnavailable(ctx context.Context) error {
@@ -354,15 +287,6 @@ func (reconciler *materializedConfigActivationReconciler) verifyProjectedUnavail
 			original, _ := activationStageFingerprint(before.instance)
 			current, _ := activationStageFingerprint(fresh)
 			if original != current {
-				if before.owner != nil && fresh.Config["volatile.uuid"] == before.instance.Config["volatile.uuid"] && fresh.Config["user.subyard.desired_power"] == "stopped" && strings.EqualFold(fresh.Status, "stopped") {
-					observed, err := before.owner.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-					if err != nil {
-						return err
-					}
-					if observed.Converged && observed.Desired == before.desired {
-						continue
-					}
-				}
 				return fmt.Errorf("%w: yard %s unavailable integration backend changed", domain.ErrPlanStale, name)
 			}
 		}

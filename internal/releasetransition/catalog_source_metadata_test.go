@@ -1,8 +1,6 @@
 package releasetransition
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -52,7 +50,7 @@ func TestSourceMetadataCatalogPreservesPublishedSemantics(t *testing.T) {
 	if changed.SupportsSourceMetadata(historical.Digest(), registry) {
 		t.Fatal("changed compiled semantics admitted an earlier catalog")
 	}
-	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload := historyV028Payload
 	if err != nil {
 		t.Fatal(err)
 	}

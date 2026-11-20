@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,10 +66,11 @@ func (native *stoppedActivationNative) AdoptRegisteredInstance(ctx context.Conte
 }
 
 func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *testing.T) {
-	for _, mode := range []string{"tmp-stopped", "native-stopped", "combined-stopped"} {
+	// Registered-yard migration work is retired; only disk-/tmp maintenance can
+	// run against a stopped yard while its prepared integrations are unavailable.
+	for _, mode := range []string{"tmp-stopped"} {
 		t.Run(mode, func(t *testing.T) {
 			initial := "stopped"
-			nativePending := mode == "native-stopped" || mode == "combined-stopped"
 			program, execution, fixture := adoptionFixture(t)
 			root := program.options.RepositoryRoot
 			for _, path := range []string{"scripts/lib/project-config.sh", "scripts/guest-disk-tmp.sh", "config/projects-changed.sh"} {
@@ -83,19 +83,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			testkit.WriteFile(t, status, []byte(initial), 0600)
 			instance := fixture.Reconcile.Instance
 			instance.Config["user.subyard.desired_power"], instance.LocalConfig["user.subyard.desired_power"] = "stopped", "stopped"
-			if mode == "native-stopped" {
-				instance.Config["user.subyard.disk_tmp"], instance.LocalConfig["user.subyard.disk_tmp"] = "v1", "v1"
-			}
-			if nativePending {
-				device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:32000", "connect": "tcp:127.0.0.1:9119"}
-				instance.LocalDevices["sample-server"], instance.Devices["sample-server"] = device, device
-				resourceDir := filepath.Join(root, "config/profiles/sample/resources/proxy")
-				if err := os.MkdirAll(resourceDir, 0700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, resourceDir+".res", []byte("COMMAND=sample-server\nHANDLER=resources/proxy/handler.sh\nTITLE=sample\nPROXY=\"sample-server SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 owner-metadata-v1 loopback-or-tailscale\"\nACTION=\"up up security-change reversible\"\nACTION=\"down down security-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"), 0600)
-				testkit.WriteFile(t, filepath.Join(resourceDir, "handler.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
-			}
 			native := &stoppedActivationNative{adoptionIncus: fixture, statusPath: status}
 			native.Instances = map[string]ports.InstanceInfo{instance.Project + "/" + instance.Name: instance}
 			native.Reconcile.Instance = instance
@@ -120,9 +107,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			}
 			testkit.WriteFile(t, profilePath, []byte("ALLOWS_CODING_TOOLS=true\n"), 0600)
 			selection := ""
-			if nativePending {
-				selection = "sample"
-			}
 			integrations := ""
 			for key, value := range map[string]string{"YARD_TEMPLATE": "migration-tools", "CODING_TOOL_INTEGRATIONS": integrations, "ENVIRONMENT_PROFILES": selection} {
 				body, err = config.EditPersistentAssignmentContent(settingsPath, body, key, &value)
@@ -137,27 +121,20 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			program.openTerminal = func() (*os.File, error) { return nil, errors.New("test uses explicit prompt") }
 			request := releasetransition.ProcessRequest{ConfigHome: execution.loaded.Context.Paths.ConfigHome}
 			register := program.registeredYardMigration(request, false, "default")
-			registration, err := register.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-			if err != nil {
+			if _, err := register.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
 				t.Fatal(err)
 			}
-			if !nativePending {
-				if err := register.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
-					t.Fatal(err)
-				}
+			if err := register.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
 			}
 			reconciler := &materializedConfigActivationReconciler{cli: program, configHome: request.ConfigHome, yard: "default"}
 			releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
 			view := preparedActivationSnapshotFixture{home: request.ConfigHome}
 			owner := program.registeredYardMigration(request, true, "default").(*migration.RegisteredYardMigration)
-			_, err = owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
-			if err != nil {
+			if _, err := owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil {
 				t.Fatal(err)
 			}
-			sourceView := releasetransition.V2SourceActivationView{Settings: view, RegisteredYards: map[string]releasetransition.Fingerprint{}, GuestDiskTmp: map[string]releasetransition.Fingerprint{}}
-			if nativePending {
-				sourceView.RegisteredYards[register.ID()] = registration.Desired
-			}
+			sourceView := releasetransition.V2SourceActivationView{Settings: view}
 			_, err = reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, sourceView)
 			if err != nil {
 				t.Fatal("prepare", err)
@@ -165,18 +142,11 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			if !reconciler.projectedUnavailable["default"].absent && len(reconciler.projectedUnavailable) == 0 {
 				t.Fatal("fixture did not capture unavailable integrations")
 			}
-			if nativePending {
-				if err := register.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if _, err := owner.Observe(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil {
 				t.Fatal(err)
 			}
-			if mode != "native-stopped" {
-				if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
-					t.Fatal(err)
-				}
+			if err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
 			}
 			if native.markerPower != "" {
 				t.Fatal("stopped yard was booted or falsely marked", native.markerPower)
@@ -186,10 +156,7 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 			if err != nil {
 				t.Fatal("completed owned migration invalidated prepared availability", err)
 			}
-			for _, change := range []string{"uuid", "config", "device", "intent", "power", "missing", "private-input"} {
-				if change == "private-input" && !nativePending {
-					continue
-				}
+			for _, change := range []string{"uuid", "config", "device", "intent", "power", "missing"} {
 				current, err := native.Instance(context.Background(), instance.Project, instance.Name)
 				if err != nil {
 					t.Fatal(err)
@@ -206,8 +173,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 					current.Config["user.subyard.desired_power"], current.LocalConfig["user.subyard.desired_power"] = "running", "running"
 				case "power":
 					testkit.WriteFile(t, status, []byte("running"), 0600)
-				case "private-input":
-					testkit.WriteFile(t, filepath.Join(request.ConfigHome, "host-id"), []byte("different-owner\n"), 0600)
 				}
 				native.Instances[instance.Project+"/"+instance.Name] = current
 				if change == "missing" {
@@ -220,51 +185,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				if change == "power" {
 					testkit.WriteFile(t, status, []byte("stopped"), 0600)
 				}
-			}
-		})
-	}
-}
-
-func TestPreparedActivationRejectsWrongBoundOwnerRegistrationAndOverrides(t *testing.T) {
-	for _, field := range []string{"registration", "overrides"} {
-		t.Run(field, func(t *testing.T) {
-			fixture := newSourceScopeFixture(t)
-			registration := filepath.Join(fixture.configHome, "yards", "e2e-yard", "config.env")
-			if err := os.MkdirAll(filepath.Dir(registration), 0700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, registration, []byte("YARD_TEMPLATE=test-vms\n"), 0600)
-			final := []byte("YARD_TEMPLATE='test-vms'\n")
-			view := preparedActivationSnapshotFixture{home: fixture.configHome, names: []string{"e2e-yard"}, snapshots: map[string]config.PersistentFileSnapshot{registration: {Exists: true, Content: final}}}
-			owner := newInterruptedRenameOwner(t, fixture.root, fixture.configHome)
-			before, err := owner.Prepare(context.Background(), view)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if before.Registration != releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(final))) {
-				t.Fatal("owner did not bind final prepared settings")
-			}
-			if field == "registration" {
-				before.Registration = releasetransition.Fingerprint(strings.Repeat("1", 64))
-			} else {
-				before.Overrides = releasetransition.Fingerprint(strings.Repeat("2", 64))
-			}
-			draft, err := fixture.program.prepareSourceActivationDraft(fixture.configHome, releasetransition.V2SourceActivationView{Settings: view, OwnerRegistration: &before})
-			if draft != nil {
-				t.Fatal("invalid owner binding returned a draft")
-			}
-			if err == nil {
-				t.Fatal("wrong prepared owner binding was accepted")
-			}
-			if _, err := os.Stat(owner.current); !os.IsNotExist(err) {
-				t.Fatal("invalid owner binding published registration", err)
-			}
-			if len(fixture.boundary.applied) != 0 {
-				t.Fatal("invalid owner binding reached activation writes")
-			}
-			journal, err := fixture.store.ReadCurrentJournal()
-			if err != nil || journal.Exists {
-				t.Fatal("invalid owner binding published checkpoint", err)
 			}
 		})
 	}

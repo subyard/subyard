@@ -105,6 +105,7 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 			authorizations++
 			return false
 		}}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	stateBefore := nativeTreeSnapshot(t, root)
 	transition, err := releasetransition.NewV2Transition(options)
 	if err != nil {
@@ -695,6 +696,20 @@ func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsCom
 	}
 }
 
+// An installed synthetic owner has real ledger authority even with no migrations.
+func seedRegistryLedgerFixture(t *testing.T, configHome string, payload []byte) {
+	t.Helper()
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), ledger, 0600)
+}
+
 func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
 	t.Helper()
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
@@ -711,7 +726,7 @@ func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		ledger, err = ledger.Advance(registry, migration)
 		if err != nil {
@@ -770,7 +785,7 @@ func TestCandidateProcessRejectsUnsafeSourceIngressDescriptor(t *testing.T) {
 				SourceIngress:  &descriptor,
 			}
 			_, err := executeReleaseTransitionRequest(
-				context.Background(), t.TempDir(), request, nil, nil, nil, nil,
+				context.Background(), t.TempDir(), request, nil, nil, nil,
 			)
 			if err == nil || !strings.Contains(err.Error(), "source ingress") {
 				t.Fatalf("unsafe source descriptor error = %v", err)
@@ -842,7 +857,7 @@ func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
 	)
 
 	_, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, nil, nil, nil, nil,
+		context.Background(), repositoryRoot, request, nil, nil, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "verified release manifest") {
 		t.Fatalf("registry binding error = %v", err)
@@ -1048,6 +1063,8 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	configHome := filepath.Join(t.TempDir(), "config")
+	seedCurrentReleaseLedger(t, repositoryRoot, configHome)
+
 	settingsPath := filepath.Join(configHome, "yards", "hermes", "config.env")
 	writeReleaseTransitionTestFile(t, settingsPath,
 		[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600,
@@ -1063,29 +1080,23 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	verify := func(_ releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 		return authorization == grant
 	}
-	owner := releaseTransitionOwnerFixture{}
 	inspected, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
+		context.Background(), repositoryRoot, request, verify, nil, nil,
 	)
 	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed ||
-		len(inspected.Inspection.Decisions) != 4 {
+		len(inspected.Inspection.Decisions) != 0 {
 		t.Fatalf("inspection = %#v, err=%v", inspected, err)
 	}
-	if inspected.ActivationReconciliationOwned || inspected.Inspection.Decisions[2] != (releasetransition.RedactedDecision{
-		Resource: "power-metadata", Scope: "power-metadata", Decision: releasetransition.DecisionTransform,
-		Result: "optional-publication-reader-v1",
-	}) || inspected.Inspection.Decisions[3] != (releasetransition.RedactedDecision{
-		Resource: "power-metadata", Scope: "power-metadata", Decision: releasetransition.DecisionTransform,
-		Result: "nm-device-guard-reader-v1",
-	}) {
-		t.Fatalf("candidate protocol ownership or power decision changed: %#v", inspected)
+	if inspected.ActivationReconciliationOwned {
+		t.Fatalf("candidate protocol ownership changed: %#v", inspected)
 	}
+
 	request.Mode = releasetransition.ProcessConverge
 	request.Execution = &releasetransition.Execution{
 		Plan: inspected.Inspection.Plan, Authorization: grant,
 	}
 	converged, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
+		context.Background(), repositoryRoot, request, verify, nil, nil,
 	)
 	if err != nil || converged.Outcome == nil ||
 		converged.Outcome.Status != releasetransition.StatusReady {
@@ -1103,7 +1114,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	request.Mode = releasetransition.ProcessInspect
 	request.Execution = nil
 	repeated, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
+		context.Background(), repositoryRoot, request, verify, nil, nil,
 	)
 	if err != nil || repeated.Inspection == nil || repeated.Inspection.Outcome == nil ||
 		repeated.Inspection.Outcome.Status != releasetransition.StatusReady ||
@@ -1124,8 +1135,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 			repeatedTransaction, convergedTransaction, err)
 	}
 	settings, err := os.ReadFile(settingsPath)
-	if err != nil || !strings.Contains(string(settings), "YARD_TEMPLATE='test-vms'") ||
-		strings.Contains(string(settings), "NESTED_E2E_VMS") {
+	if err != nil || string(settings) != "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n" {
 		t.Fatalf("settings = %q, err=%v", settings, err)
 	}
 
@@ -1145,7 +1155,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	reconciler := &processDriftReconciler{failOnce: true}
 	reconcilers := []releasetransition.V2ActivationReconciler{reconciler}
 	inspected, err = executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, reconcilers, owner, nil,
+		context.Background(), repositoryRoot, request, verify, reconcilers, nil,
 	)
 	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed {
 		t.Fatalf("rollback inspection = %#v, err=%v", inspected, err)
@@ -1155,7 +1165,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		Plan: inspected.Inspection.Plan, Authorization: grant,
 	}
 	converged, err = executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, reconcilers, owner, nil,
+		context.Background(), repositoryRoot, request, verify, reconcilers, nil,
 	)
 	if err != nil || converged.Outcome == nil || converged.Outcome.Status != releasetransition.StatusRecovering {
 		t.Fatalf("interrupted rollback outcome = %#v, err=%v", converged, err)
@@ -1190,7 +1200,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := executeReleaseTransitionRequest(context.Background(), repositoryRoot, request,
-			verify, reconcilers, owner, nil); err == nil {
+			verify, reconcilers, nil); err == nil {
 			t.Fatalf("pending rollback accepted %s sealed target", mutation)
 		}
 		afterJournal, journalErr := store.ReadCurrentJournal()
@@ -1206,7 +1216,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	resume, err := executeReleaseTransitionRequest(context.Background(), repositoryRoot, request, verify, reconcilers, owner, nil)
+	resume, err := executeReleaseTransitionRequest(context.Background(), repositoryRoot, request, verify, reconcilers, nil)
 	if err != nil || resume.Inspection == nil || resume.Inspection.Resume == nil ||
 		transaction == nil || *resume.Inspection.Resume != *transaction {
 		t.Fatalf("rollback resume = %#v, err=%v", resume, err)
@@ -1224,7 +1234,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool {
 			t.Fatal("rollback resume requested fresh authorization")
 			return false
-		}, reconcilers, owner, nil)
+		}, reconcilers, nil)
 	if err != nil || converged.Outcome == nil || converged.Outcome.Status != releasetransition.StatusReady ||
 		converged.Outcome.Transaction == nil || *converged.Outcome.Transaction != *transaction {
 		t.Fatalf("rollback outcome = %#v, err=%v", converged, err)
@@ -1255,7 +1265,7 @@ func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) 
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		ledger, err = ledger.Advance(registry, migration)
 		if err != nil {
@@ -1306,7 +1316,7 @@ func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) 
 			return true
 		},
 		[]releasetransition.V2ActivationReconciler{reconciler},
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || response.Inspection != nil || response.Outcome == nil ||
 		response.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
@@ -1354,7 +1364,7 @@ func TestCandidateProcessCannotRollbackWithoutSealedTarget(t *testing.T) {
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool {
 			t.Fatal("missing sealed target reached authorization")
 			return false
-		}, nil, nil, nil,
+		}, nil, nil,
 	); err == nil || !strings.Contains(err.Error(), "rollback target") {
 		t.Fatalf("missing sealed rollback target error = %v", err)
 	}
@@ -1372,267 +1382,6 @@ func writeSealedRollbackTarget(t *testing.T, runtimeRoot, target, version string
 	}
 	writeReleaseTransitionTestFile(t, filepath.Join(root, "runtime-files.sha256"), []byte(manifest), 0o600)
 	return releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256([]byte(manifest))))
-}
-
-func TestOwnerOverrideDriftBetweenInspectAndConvergeIsPlanStale(t *testing.T) {
-	repositoryRoot := t.TempDir()
-	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeReleaseTransitionTestFile(t,
-		filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600,
-	)
-	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
-	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-a"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
-		t.Fatal(err)
-	}
-	root := t.TempDir()
-	configHome := filepath.Join(root, "config")
-	legacyRegistration := filepath.Join(configHome, "yards", testyardmigration.LegacyYard, "config.env")
-	legacyOverride := filepath.Join(
-		configHome, "yards", testyardmigration.LegacyYard, "overrides", "runtime.env",
-	)
-	writeReleaseTransitionTestFile(t, legacyRegistration, []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
-	writeReleaseTransitionTestFile(t, legacyOverride, []byte("NESTED_E2E_VMS=0\n"), 0o600)
-	incus := filepath.Join(root, "incus")
-	writeReleaseTransitionTestFile(t, incus, []byte(`#!/bin/sh
-set -eu
-case "$*" in
-  "project list --format=json") printf '[{"name":"subyard-e2e-yard"}]\n' ;;
-  "project get subyard-e2e-yard features.images") printf 'false\n' ;;
-  "list yard-e2e-yard --project subyard-e2e-yard --format=json")
-    printf '[{"name":"yard-e2e-yard","status":"RUNNING"}]\n' ;;
-  *) exit 2 ;;
-esac
-`), 0o700)
-	realOwner := &ownerRegistrationTransition{options: func() (testyardmigration.Options, error) {
-		return testyardmigration.Options{
-			Executable: filepath.Join(root, "yard"), Incus: incus,
-			ConfigHome: configHome, DataHome: filepath.Join(root, "data"),
-			Environment: os.Environ(),
-			RunYard: func(
-				_ context.Context,
-				yard string,
-				output io.Writer,
-				arguments ...string,
-			) error {
-				if yard != testyardmigration.LegacyYard {
-					return errors.New("unexpected owner mutation")
-				}
-				switch strings.Join(arguments, " ") {
-				case "check":
-					return nil
-				case "test-vms status":
-					_, err := io.WriteString(output, "ttl_remaining_seconds\t0\n")
-					return err
-				default:
-					return errors.New("unexpected owner mutation")
-				}
-			},
-		}, nil
-	}}
-	owner := &trackedOwnerRegistration{delegate: realOwner}
-	request := releasetransition.ProcessRequest{
-		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-		Mode:          releasetransition.ProcessInspect,
-		RuntimeRoot:   runtimeRoot, ConfigHome: configHome,
-		Target: "release-a", Direction: releasetransition.DirectionActivateTarget,
-		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
-	}
-	verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
-	inspected, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
-	)
-	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed {
-		t.Fatalf("owner inspection = %#v, err=%v", inspected, err)
-	}
-	writeReleaseTransitionTestFile(t, legacyOverride, []byte("NESTED_E2E_VMS=1\n"), 0o600)
-
-	request.Mode = releasetransition.ProcessConverge
-	request.Execution = &releasetransition.Execution{
-		Plan: inspected.Inspection.Plan, Authorization: "confirmed",
-	}
-	converged, err := executeReleaseTransitionRequest(
-		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
-	)
-	if err != nil || converged.Outcome == nil ||
-		converged.Outcome.Status != releasetransition.StatusOperatorActionRequired ||
-		converged.Outcome.Code != releasetransition.CodePlanStale || owner.commits != 0 {
-		t.Fatalf("override drift outcome = %#v owner=%#v err=%v", converged, owner, err)
-	}
-	currentRegistration := filepath.Join(
-		configHome, "yards", testyardmigration.CurrentYard, "config.env",
-	)
-	if _, err := os.Lstat(currentRegistration); !os.IsNotExist(err) {
-		t.Fatalf("override drift published canonical registration: %v", err)
-	}
-}
-
-func TestOwnerRegistrationTransitionPreparesProspectiveSourceRegistration(t *testing.T) {
-	root := t.TempDir()
-	configHome := filepath.Join(root, "config")
-	writeReleaseTransitionTestFile(t, filepath.Join(
-		configHome, "yards", testyardmigration.LegacyYard, "projects", ".lock",
-	), []byte{}, 0o600)
-	incus := filepath.Join(root, "incus")
-	writeReleaseTransitionTestFile(t, incus, []byte(`#!/bin/sh
-set -eu
-case "$*" in
-  "project list --format=json") printf '[{"name":"subyard-e2e-yard"}]\n' ;;
-  "project get subyard-e2e-yard features.images") printf 'false\n' ;;
-  "list yard-e2e-yard --project subyard-e2e-yard --format=json")
-    printf '[{"name":"yard-e2e-yard","status":"STOPPED"}]\n' ;;
-  "config get yard-e2e-yard user.subyard.desired_power --project subyard-e2e-yard")
-    printf 'running\n' ;;
-  *) exit 2 ;;
-esac
-`), 0o700)
-	registrationPath := filepath.Join(
-		configHome, "yards", testyardmigration.LegacyYard, "config.env",
-	)
-	view := prospectiveOwnerSettingsView{snapshots: map[string]config.PersistentFileSnapshot{
-		registrationPath: {Exists: true, Content: []byte("YARD_TEMPLATE=test-vms\n")},
-	}}
-	owner := &ownerRegistrationTransition{options: func() (testyardmigration.Options, error) {
-		return testyardmigration.Options{
-			Executable: filepath.Join(root, "yard"), Incus: incus,
-			ConfigHome: configHome, DataHome: filepath.Join(root, "data"),
-			Environment: os.Environ(),
-			RunYard: func(context.Context, string, io.Writer, ...string) error {
-				return errors.New("stopped prospective yard unexpectedly executed")
-			},
-		}, nil
-	}}
-
-	observation, err := owner.Prepare(context.Background(), view)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if observation.State != releasetransition.OwnerRegistrationLegacyDirectoryProjects ||
-		observation.Registration == "" || observation.Overrides == "" ||
-		observation.Controller == "" || !observation.SharedImages {
-		t.Fatalf("prospective owner observation = %#v", observation)
-	}
-	if _, err := os.Lstat(registrationPath); !os.IsNotExist(err) {
-		t.Fatalf("prospective owner inspection wrote registration: %v", err)
-	}
-	original := []byte("YARD_TEMPLATE=test-vms\nNESTED_E2E_VMS=0\n")
-	desired := []byte("YARD_TEMPLATE='test-vms'\n")
-	writeReleaseTransitionTestFile(t, registrationPath, original, 0o600)
-	view.snapshots[registrationPath] = config.PersistentFileSnapshot{Exists: true, Content: desired}
-	observation, err = owner.Prepare(context.Background(), view)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(desired)
-	if observation.Registration != releasetransition.Fingerprint(fmt.Sprintf("%x", digest[:])) {
-		t.Fatalf("post-settings owner identity = %#v", observation)
-	}
-	if payload, readErr := os.ReadFile(registrationPath); readErr != nil || !bytes.Equal(payload, original) {
-		t.Fatalf("prospective owner changed live registration to %q: %v", payload, readErr)
-	}
-}
-
-func TestForwardMaterializedConfigResumeKeepsScopeAcrossLegacyRename(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	installCanonicalOwnerInventory(t, root)
-	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
-	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeReleaseTransitionTestFile(t,
-		filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
-	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev",
-		"SSH_PORT=2222", "STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
-		"HOST_BASE=" + filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
-	}, "\n")+"\n", 0o600)
-	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	legacy := filepath.Join(configHome, "yards", testyardmigration.LegacyYard)
-	writeReleaseTransitionTestFile(t, filepath.Join(legacy, "config.env"),
-		[]byte("YARD_TEMPLATE=test-vms\n"), 0o600)
-	runtimeRoot := filepath.Join(root, "runtime-legacy-config-resume")
-	for _, release := range []string{"release-a", "release-b"} {
-		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
-		t.Fatal(err)
-	}
-	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
-	program, err := New(Options{
-		RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake,
-		Config: &recordingConfigApplier{}, Stdout: io.Discard, Stderr: io.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := releasetransition.ProcessRequest{
-		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-		Mode:          releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome,
-		Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
-		ArtifactDigest:      releasetransition.Fingerprint(strings.Repeat("a", 64)),
-		InheritedSettingIDs: program.releaseTransitionInheritedSettingIDs(),
-	}
-	reconciler := func() *materializedConfigActivationReconciler {
-		return &materializedConfigActivationReconciler{
-			cli: program, configHome: configHome,
-			goal:           releasetransition.Goal{Target: request.Target, Direction: request.Direction},
-			artifactDigest: request.ArtifactDigest,
-		}
-	}
-	owner := newInterruptedRenameOwner(t, root, configHome)
-	verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
-	first, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
-		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
-			materializedConfigActivationReconciler: reconciler(),
-		}}, owner, nil)
-	if err != nil || first.Inspection == nil {
-		t.Fatalf("inspect forward transition = %#v, err=%v", first, err)
-	}
-	request.Mode = releasetransition.ProcessConverge
-	request.Execution = &releasetransition.Execution{Plan: first.Inspection.Plan, Authorization: "confirmed"}
-	interrupting := &observeOnlyMaterialized{materializedConfigActivationReconciler: reconciler(), fail: true}
-	interrupted, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
-		[]releasetransition.V2ActivationReconciler{interrupting}, owner, nil)
-	if err != nil || interrupted.Outcome == nil ||
-		interrupted.Outcome.Status != releasetransition.StatusRecovering {
-		t.Fatalf("interrupted activation = %#v, outcome=%+v err=%v",
-			interrupted, interrupted.Outcome, err)
-	}
-	store, err := releasetransition.NewPOSIXV2Store(configHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	complete, err := releaseSourceMigrationsComplete(root, store)
-	if err != nil || !complete {
-		t.Fatalf("source migrations complete=%t err=%v", complete, err)
-	}
-	request.Mode, request.Execution = releasetransition.ProcessInspect, nil
-	fresh := reconciler()
-	resume, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
-		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
-			materializedConfigActivationReconciler: fresh,
-		}}, owner, nil)
-	if err != nil || resume.Inspection == nil || resume.Inspection.Resume == nil || fresh.allLocal {
-		t.Fatalf("fresh selected-scope resume = %#v, allLocal=%t err=%v", resume, fresh.allLocal, err)
-	}
-	request.Mode = releasetransition.ProcessConverge
-	request.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan}
-	settled, err := executeReleaseTransitionRequest(context.Background(), root, request, verify,
-		[]releasetransition.V2ActivationReconciler{&observeOnlyMaterialized{
-			materializedConfigActivationReconciler: fresh,
-		}}, owner, nil)
-	if err != nil || settled.Outcome == nil || settled.Outcome.Status != releasetransition.StatusReady {
-		t.Fatalf("resumed forward transition = %#v, outcome=%+v err=%v",
-			settled, settled.Outcome, err)
-	}
 }
 
 func TestCandidateReleaseTransitionProtocolReportsInvalidRegistry(t *testing.T) {
@@ -1666,7 +1415,7 @@ func TestCandidateReleaseTransitionProtocolReportsInvalidRegistry(t *testing.T) 
 	response, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return false },
-		nil, nil, nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1737,6 +1486,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	configHome := filepath.Join(t.TempDir(), "config")
+	seedCurrentReleaseLedger(t, repositoryRoot, configHome)
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(configHome, "yards", "hermes", "config.env"),
 		[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600,
@@ -1760,7 +1510,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	reconcilers := []releasetransition.V2ActivationReconciler{reconciler}
 	inspected, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || inspected.Inspection == nil {
 		t.Fatalf("initial inspection=%#v err=%v", inspected, err)
@@ -1771,7 +1521,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	}
 	completed, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || completed.Outcome == nil ||
 		completed.Outcome.Status != releasetransition.StatusReady ||
@@ -1785,7 +1535,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	request.Execution = nil
 	noDrift, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || noDrift.Inspection == nil || noDrift.Inspection.Outcome == nil ||
 		noDrift.Inspection.Outcome.Status != releasetransition.StatusReady ||
@@ -1800,7 +1550,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	reconciler.failOnce = true
 	repeat, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	goal := releasetransition.Goal{
 		Target: request.Target, Direction: releasetransition.DirectionActivateTarget,
@@ -1824,7 +1574,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	request.Execution = &releasetransition.Execution{Plan: repeat.Inspection.Plan}
 	unconfirmed, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || unconfirmed.Outcome == nil ||
 		unconfirmed.Outcome.Code != releasetransition.CodeConfirmationRequired ||
@@ -1836,7 +1586,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	}
 	interrupted, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || interrupted.Outcome == nil ||
 		interrupted.Outcome.Status != releasetransition.StatusRecovering ||
@@ -1850,7 +1600,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	request.Execution = nil
 	resume, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || resume.Inspection == nil || resume.Inspection.Resume == nil ||
 		*resume.Inspection.Resume != *interrupted.Outcome.Transaction ||
@@ -1863,7 +1613,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	request.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan}
 	settled, err := executeReleaseTransitionRequest(
 		context.Background(), repositoryRoot, request, verify, reconcilers,
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || settled.Outcome == nil ||
 		settled.Outcome.Status != releasetransition.StatusReady ||
@@ -2306,98 +2056,6 @@ func TestReleaseTransitionRejectsTrailingRequestJSON(t *testing.T) {
 	}
 }
 
-type releaseTransitionOwnerFixture struct{}
-
-// These release/config fixtures model no registered native migration targets.
-// Actual native ownership and guest-policy effects have concrete owner tests.
-func (releaseTransitionOwnerFixture) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
-	return []releasetransition.V2ActivationReconciler{}, []releasetransition.V2ActivationReconciler{}, nil
-}
-
-type interruptedRenameOwner struct {
-	releaseTransitionOwnerFixture
-	legacy, current string
-	preparer        releasetransition.V2OwnerRegistration
-	before          *releasetransition.OwnerRegistrationObservation
-}
-
-func newInterruptedRenameOwner(t *testing.T, root, configHome string) *interruptedRenameOwner {
-	t.Helper()
-	incus := filepath.Join(root, "owner-prepare-incus")
-	writeReleaseTransitionTestFile(t, incus, []byte(`#!/bin/sh
-set -eu
-case "$*" in
-  "project list --format=json") printf '[{"name":"subyard-e2e-yard"}]\n' ;;
-  "project get subyard-e2e-yard features.images") printf 'false\n' ;;
-  "list yard-e2e-yard --project subyard-e2e-yard --format=json")
-    printf '[{"name":"yard-e2e-yard","status":"STOPPED"}]\n' ;;
-  "config get yard-e2e-yard user.subyard.desired_power --project subyard-e2e-yard")
-    printf 'running\n' ;;
-  *) exit 2 ;;
-esac
-`), 0o700)
-	return &interruptedRenameOwner{
-		legacy:  filepath.Join(configHome, "yards", testyardmigration.LegacyYard),
-		current: filepath.Join(configHome, "yards", testyardmigration.CurrentYard),
-		preparer: &ownerRegistrationTransition{options: func() (testyardmigration.Options, error) {
-			return testyardmigration.Options{
-				Executable: filepath.Join(root, "yard"), Incus: incus,
-				ConfigHome: configHome, DataHome: filepath.Join(root, "data"),
-				Environment: os.Environ(),
-				RunYard: func(context.Context, string, io.Writer, ...string) error {
-					return errors.New("stopped fixture owner unexpectedly executed")
-				},
-			}, nil
-		}},
-	}
-}
-
-type observeOnlyMaterialized struct {
-	*materializedConfigActivationReconciler
-	fail bool
-}
-
-func (reconciler *observeOnlyMaterialized) Reconcile(
-	context.Context, releasetransition.ReleaseLinks,
-) error {
-	if reconciler.fail {
-		reconciler.fail = false
-		return errors.New("injected interruption before materialized config reconciliation")
-	}
-	return nil
-}
-
-func (owner *interruptedRenameOwner) Prepare(
-	ctx context.Context, settings releasetransition.V2SettingsSnapshotView,
-) (releasetransition.OwnerRegistrationObservation, error) {
-	if _, err := os.Stat(owner.current); err == nil && owner.before != nil {
-		return *owner.before, nil
-	}
-	before, err := owner.preparer.Prepare(ctx, settings)
-	if err == nil {
-		owner.before = &before
-	}
-	return before, err
-}
-
-func (owner *interruptedRenameOwner) Observe(
-	_ context.Context, _ releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	if _, err := os.Stat(owner.current); err == nil {
-		return releasetransition.OwnerRegistrationDesired, nil
-	}
-	return releasetransition.OwnerRegistrationExpected, nil
-}
-
-func (owner *interruptedRenameOwner) Commit(
-	_ context.Context, before releasetransition.OwnerRegistrationObservation,
-) error {
-	if before.TerminalCleanup {
-		return nil
-	}
-	return os.Rename(owner.legacy, owner.current)
-}
-
 type prospectiveOwnerSettingsView struct {
 	snapshots map[string]config.PersistentFileSnapshot
 }
@@ -2410,60 +2068,6 @@ func (view prospectiveOwnerSettingsView) ReadSnapshot(
 	path string,
 ) (config.PersistentFileSnapshot, error) {
 	return view.snapshots[path], nil
-}
-
-type trackedOwnerRegistration struct {
-	releaseTransitionOwnerFixture
-	delegate releasetransition.V2OwnerRegistration
-	commits  int
-}
-
-func (owner *trackedOwnerRegistration) Prepare(
-	ctx context.Context,
-	settings releasetransition.V2SettingsSnapshotView,
-) (releasetransition.OwnerRegistrationObservation, error) {
-	return owner.delegate.Prepare(ctx, settings)
-}
-
-func (owner *trackedOwnerRegistration) Observe(
-	ctx context.Context,
-	before releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	return owner.delegate.Observe(ctx, before)
-}
-
-func (owner *trackedOwnerRegistration) Commit(
-	context.Context,
-	releasetransition.OwnerRegistrationObservation,
-) error {
-	owner.commits++
-	return errors.New("owner commit reached after stale inspection")
-}
-
-func (releaseTransitionOwnerFixture) Prepare(
-	context.Context,
-	releasetransition.V2SettingsSnapshotView,
-) (
-	releasetransition.OwnerRegistrationObservation,
-	error,
-) {
-	return releasetransition.OwnerRegistrationObservation{
-		State: releasetransition.OwnerRegistrationAbsent,
-	}, nil
-}
-
-func (releaseTransitionOwnerFixture) Observe(
-	context.Context,
-	releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	return releasetransition.OwnerRegistrationExpected, nil
-}
-
-func (releaseTransitionOwnerFixture) Commit(
-	context.Context,
-	releasetransition.OwnerRegistrationObservation,
-) error {
-	return nil
 }
 
 func TestActivationStageReconcilerPreservesInapplicableRuntime(t *testing.T) {
@@ -2600,6 +2204,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
+			seedRegistryLedgerFixture(t, configHome, registry)
 			writeSealedRollbackTarget(t, runtimeRoot, "release-a", "0.19.0", registry)
 			releaseRoot := filepath.Join(runtimeRoot, "releases", "release-a")
 			capability, err := os.ReadFile(filepath.Join(root, "config", "release-checkpoint.json"))
@@ -2646,8 +2251,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 				materialized := reconcilers[slices.IndexFunc(reconcilers, func(owner releasetransition.V2ActivationReconciler) bool { return owner.ID() == "materialized-config" })]
 				response, err := executeReleaseTransitionRequest(context.Background(), root, request,
 					func(releasetransition.PlanToken, releasetransition.Authorization) bool { grants++; return true },
-					[]releasetransition.V2ActivationReconciler{materialized}, nil,
-					func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error) { return source, nil })
+					[]releasetransition.V2ActivationReconciler{materialized}, func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error) { return source, nil })
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2752,6 +2356,16 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		"AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 	}, "\n")+"\n", 0o600)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	parsed, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLedgerPayload, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(parsed), parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), seedLedgerPayload, 0600)
+
 	if err := os.MkdirAll(filepath.Join(configHome, "yards", testyardmigration.CurrentYard), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2761,7 +2375,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(configHome, "yards", "hermes", "config.env"),
-		"YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n", 0o600)
+		"YARD_TEMPLATE=test-vms\nSSH_PORT=2224\n", 0o600)
 	runtimeRoot := filepath.Join(root, "runtime")
 	for _, release := range []string{"release-a", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
@@ -2786,7 +2400,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		context.Background(), root, request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
 		[]releasetransition.V2ActivationReconciler{completedReconciler},
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || inspected.Inspection == nil {
 		t.Fatalf("inspect complete fixture transition = %#v, err=%v", inspected, err)
@@ -2799,7 +2413,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		context.Background(), root, request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
 		[]releasetransition.V2ActivationReconciler{completedReconciler},
-		releaseTransitionOwnerFixture{}, nil,
+		nil,
 	)
 	if err != nil || completed.Outcome == nil ||
 		completed.Outcome.Status != releasetransition.StatusReady {
@@ -2984,7 +2598,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	activationInspection, err := executeReleaseTransitionRequest(
 		context.Background(), root, activationRequest,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-		[]releasetransition.V2ActivationReconciler{drift}, releaseTransitionOwnerFixture{}, nil,
+		[]releasetransition.V2ActivationReconciler{drift}, nil,
 	)
 	if err != nil || activationInspection.Inspection == nil {
 		t.Fatalf("inspect activation-only transition: %#v err=%v", activationInspection, err)
@@ -2996,7 +2610,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	interrupted, err := executeReleaseTransitionRequest(
 		context.Background(), root, activationRequest,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-		[]releasetransition.V2ActivationReconciler{drift}, releaseTransitionOwnerFixture{}, nil,
+		[]releasetransition.V2ActivationReconciler{drift}, nil,
 	)
 	if err != nil || interrupted.Outcome == nil ||
 		interrupted.Outcome.Status != releasetransition.StatusRecovering {
@@ -3665,11 +3279,12 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(target), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))}
 	actor := &processDriftReconciler{}
 	invoke := func() releasetransition.ProcessResponse {
 		t.Helper()
-		response, err := executeReleaseTransitionRequest(context.Background(), repository, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{actor}, nil, nil)
+		response, err := executeReleaseTransitionRequest(context.Background(), repository, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{actor}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3691,7 +3306,7 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(parsedRegistry), parsedRegistry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3761,5 +3376,99 @@ func TestRouteConsumerActivationKeepsUncertainFailuresBlocking(t *testing.T) {
 		if !errors.Is(err, cause) || port.commits != 0 {
 			t.Fatalf("uncertain owner failure was suppressed: %v", err)
 		}
+	}
+}
+
+func TestReleaseTransitionRetainsRegisteredEndpointRecoveryVocabulary(t *testing.T) {
+	root := repositoryRoot(t)
+	payload, err := os.ReadFile(filepath.Join(root, "internal", "releasetransition", "testdata", "v0.28.1-completed-install-plain.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files map[string]string
+	if err := json.Unmarshal(payload, &files); err != nil {
+		t.Fatal(err)
+	}
+	configHome := filepath.Join(testkit.TempDir(t), "config")
+	for name, content := range files {
+		path := filepath.Join(configHome, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, []byte(content), 0o600)
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const transaction releasetransition.TransactionID = "tx-endpoint-001"
+	const migrationID = "register-existing-local-yards-v3"
+	releases := releasetransition.ReleasePair{From: "0.27.0-cccccccccccc", Target: "0.28.0-cccccccccccc"}
+	yardExpected := releasetransition.Fingerprint(strings.Repeat("1", 64))
+	yardDesired := releasetransition.Fingerprint(strings.Repeat("2", 64))
+	// The exact canonical bytes of the frozen typed recovery grammar.
+	recovery := []byte(fmt.Sprintf(`{"schemaVersion":2,"kind":"registered-yards-v2-to-v3","transaction":%q,"step":%q,"migration":%q,"yard":"orca","expectedFingerprint":%q,"before":[{"setting":"ORCA_HOST_PORT","present":false}]}`+"\n",
+		transaction, migrationID+".orca", migrationID, yardExpected))
+	if err := store.CreateRecovery(transaction, migrationID+".orca", recovery); err != nil {
+		t.Fatal(err)
+	}
+	recoveryDigest := sha256.Sum256(recovery)
+	for _, step := range []struct {
+		id                         string
+		expected, desired, recover releasetransition.Fingerprint
+	}{
+		{migrationID + ".orca", yardExpected, yardDesired, releasetransition.Fingerprint(fmt.Sprintf("%x", recoveryDigest))},
+		{migrationID + ".ledger", releasetransition.Fingerprint(strings.Repeat("3", 64)), releasetransition.Fingerprint(strings.Repeat("4", 64)), ""},
+	} {
+		for _, checkpoint := range []releasetransition.EvidenceCheckpoint{releasetransition.EvidenceCaptured, releasetransition.EvidenceApplied, releasetransition.EvidenceVerified} {
+			observed := step.desired
+			if checkpoint == releasetransition.EvidenceCaptured {
+				observed = step.expected
+			}
+			evidence, err := releasetransition.MarshalEvidence(releasetransition.EvidenceRecord{
+				SchemaVersion: releasetransition.JournalSchemaV2, Transaction: transaction, Releases: releases, Step: step.id,
+				Expected: step.expected, Desired: step.desired, Observed: observed, Recovery: step.recover, Checkpoint: checkpoint,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateCheckpointEvidence(transaction, step.id, checkpoint, evidence); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime")
+	for _, release := range []string{"0.28.1-aaaaaaaaaaaa", "release-b"} {
+		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/0.28.1-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+		RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: "release-b",
+		Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+	}
+	grant := releasetransition.Authorization("confirmed-operation-grant")
+	verify := func(_ releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
+		return authorization == grant
+	}
+	inspected, err := executeReleaseTransitionRequest(context.Background(), root, request, verify, nil, nil)
+	if err != nil || inspected.Inspection == nil {
+		t.Fatalf("inspection = %#v, err=%v", inspected, err)
+	}
+	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: grant}
+	converged, err := executeReleaseTransitionRequest(context.Background(), root, request, verify, nil, nil)
+	if err != nil || converged.Outcome == nil {
+		t.Fatalf("completed v0.28.1 update with endpoint recovery = %#v, err=%v", converged, err)
+	}
+	if converged.Outcome.Status != releasetransition.StatusReady || len(converged.Outcome.Warnings) != 0 {
+		t.Fatalf("completed v0.28.1 update with endpoint recovery = %#v", *converged.Outcome)
+	}
+	if _, err := os.Stat(filepath.Join(configHome, "release-transition", "v2", "transactions", string(transaction))); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced closed endpoint recovery was not collected: %v", err)
 	}
 }

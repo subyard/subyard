@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"bytes"
+	"slices"
 
 	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
@@ -29,6 +30,10 @@ func ledgerTrace(registry RegistryV2, observed LedgerV2, steps []JournalStep) (m
 // canonicalLedgerTrace preserves closed retained records whose endpoint predates
 // today's authority. It uses the same semantic trace owner and exact byte pins.
 func canonicalLedgerTrace(registry RegistryV2, steps []JournalStep) (map[string]sourceLedgerEdge, error) {
+	// An initial bootstrap continues live migrations from its floor baseline.
+	if slices.ContainsFunc(steps, func(step JournalStep) bool { return step.ID == baselineLedgerStep }) {
+		return freshBootstrapLedgerTrace(registry, steps)
+	}
 	owner, err := registry.historyRegistry()
 	if err != nil {
 		return nil, err
@@ -37,8 +42,9 @@ func canonicalLedgerTrace(registry RegistryV2, steps []JournalStep) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(registry.Migrations))
-	for i, migration := range registry.Migrations {
+	history := registry.historyData()
+	ids := make([]string, len(history.Migrations))
+	for i, migration := range history.Migrations {
 		ids[i] = migration.ID
 	}
 	trace, err := owner.TraceFrom(baseline, ids)
@@ -70,7 +76,7 @@ func encodeLedgerTrace(registry RegistryV2, trace migrationhistory.Trace, steps 
 		if !ok {
 			return nil, invalid("journaled ledger edge is missing")
 		}
-		initialAbsent := sameLedgerV2(ledgerFromAuthority(edge.witness.Before()), BaselineLedgerV2(registry)) && step.Expected == absentProtectedSnapshot().Fingerprint
+		initialAbsent := sameLedgerV2(ledgerFromAuthority(edge.witness.Before()), FrozenHistoryBaselineV2(registry)) && step.Expected == absentProtectedSnapshot().Fingerprint
 		if step.Desired != edge.after || step.Expected != edge.before && !initialAbsent {
 			return nil, invalid("journaled ledger transition does not bind its historical frontier")
 		}
@@ -101,7 +107,9 @@ func (transition *V2Transition) validateLedgerWork(work v2Work, step JournalStep
 	if work.kind() != v2LedgerWork {
 		return invalid("ledger work recipe is missing or typed nil")
 	}
-	owner, err := transition.registry.historyRegistry()
+	// A floor ledger binds the declared registry; a completed historical ledger
+	// binds the frozen history it was written with.
+	owner, _, err := transition.registry.historyAuthority(ledgerFromAuthority(work.ledgerRecipe().edge.Before()))
 	if err != nil {
 		return err
 	}
@@ -133,7 +141,7 @@ func (transition *V2Transition) validateLedgerWork(work v2Work, step JournalStep
 		if !bytes.Equal(work.ledgerRecipe().from.snapshot.Payload, beforeBytes) {
 			return invalid("ledger work before-image differs from its edge")
 		}
-	} else if !sameLedgerV2(before, BaselineLedgerV2(transition.registry)) {
+	} else if !sameLedgerV2(before, FrozenHistoryBaselineV2(transition.registry)) {
 		return invalid("absent ledger work is not a baseline frontier")
 	}
 	return nil

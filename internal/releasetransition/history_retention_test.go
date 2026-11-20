@@ -154,7 +154,7 @@ func TestMigrationHistoryCleanupDoesNotRetainIntermediateProjectionPin(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := BaselineLedgerV2(transition.registry)
+	baseline := FrozenHistoryBaselineV2(transition.registry)
 	path, err := transition.registry.PendingPath(baseline)
 	if err != nil {
 		t.Fatal(err)

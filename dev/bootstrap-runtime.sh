@@ -744,6 +744,48 @@ installation() {
   env YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
     SUBYARD_REPOSITORY_ROOT="$candidate" "$candidate/bin/yard-engine" _installation "$@"
 }
+# A first install interrupted before its authority was published leaves current
+# without ledger and checkpoint. A retry with another version first runs that
+# supported release's own migrate: it resumes its unfinished initial journal and
+# refuses a journal whose history was lost. With no journal, ledger, checkpoint
+# or previous link at all, the installation is fresh and is initialized.
+uninitialized_current=0
+if [ "$run_transition" = 1 ] && [ -z "$SOURCE_INGRESS_ROOT" ] &&
+   [ ! -e "$RUNTIME_ROOT/previous" ] && [ ! -L "$RUNTIME_ROOT/previous" ]; then
+  current_release="$(readlink -- "$RUNTIME_ROOT/current")" || current_release=''
+  # The publisher names each release <version>-<first 12 hex digits of its digest>.
+  # A prerelease identifier is numeric without leading zeros or contains a non-digit.
+  # Numbers are limited to nine digits so shell arithmetic cannot overflow; longer
+  # versions skip this step and keep the engine's own refusal.
+  number='(0|[1-9][0-9]{0,8})'
+  prerelease_identifier="($number|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+  release_pattern="^releases/($number\\.$number\\.$number(-$prerelease_identifier(\\.$prerelease_identifier)*)?)-[0-9a-f]{12}\$"
+  if [[ "$current_release" =~ $release_pattern ]]; then
+    current_version="${BASH_REMATCH[1]}" current_major="${BASH_REMATCH[2]}"
+    current_minor="${BASH_REMATCH[3]}" current_patch="${BASH_REMATCH[4]}" current_prerelease="${BASH_REMATCH[5]}"
+    # Supported installations start at v0.28.0; its prereleases precede it.
+    if [ "$current_version" != "$VERSION" ] &&
+       { [ "$current_major" -gt 0 ] || [ "$current_minor" -gt 28 ] ||
+         { [ "$current_minor" -eq 28 ] && { [ "$current_patch" -gt 0 ] || [ -z "$current_prerelease" ]; }; }; }; then
+      uninitialized_current=1
+      for protected_record in ledger.json history-checkpoint.json; do
+        if [ -e "$CONFIG_HOME/release-transition/v2/$protected_record" ] ||
+           [ -L "$CONFIG_HOME/release-transition/v2/$protected_record" ]; then
+          uninitialized_current=0
+        fi
+      done
+    fi
+  fi
+fi
+if [ "$uninitialized_current" = 1 ]; then
+  initial_arguments=(migrate)
+  if [ "$ASSUME_YES" = 1 ]; then
+    initial_arguments+=(--yes)
+  fi
+  # The installed release gets no installer entrypoint request of the candidate.
+  env -u SUBYARD_INSTALL_ENTRYPOINTS -u SUBYARD_INSTALL_VERIFIED_HELPER "YARD_RUNTIME_ROOT=$RUNTIME_ROOT" \
+    "$RUNTIME_ROOT/current/bin/yard" "${initial_arguments[@]}"
+fi
 if [ "$run_transition" = 1 ]; then
   transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
   transition_environment=(

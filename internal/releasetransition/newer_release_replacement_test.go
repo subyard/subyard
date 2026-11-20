@@ -276,12 +276,11 @@ func newerReleaseCandidate(
 			*links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
 			return *links, nil
 		},
-		RegistryPayload:   v2RegistryPayload(t),
-		ArtifactDigest:    artifact,
-		OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
-		NewTransactionID:  func() TransactionID { return transaction },
-		CandidateVersion:  version,
-		Replacement:       replacement,
+		RegistryPayload:  v2RegistryPayload(t),
+		ArtifactDigest:   artifact,
+		NewTransactionID: func() TransactionID { return transaction },
+		CandidateVersion: version,
+		Replacement:      replacement,
 		VerifyAuthorization: func(plan PlanToken, authorization Authorization) bool {
 			return authorization == v2TestAuthorization(plan)
 		},
@@ -331,8 +330,7 @@ func stuckAt(t *testing.T, point string) (string, *ReleaseLinks, *JournalReplace
 
 func TestNewerReleaseLeavesNoCleanupDebtAfterPartialJournal(t *testing.T) {
 	for _, point := range []string{
-		"after-journal-authorized", "after-recovery", "after-step-evidence", "after-settings-cas",
-		"after-step-applied", "after-step-verified", "after-ledger-cas", "after-ledger-verified",
+		"after-journal-authorized",
 		"after-activation-intent", "after-target-active", "after-reconciling",
 	} {
 		t.Run(point, func(t *testing.T) {
@@ -390,7 +388,7 @@ func TestNewerReleaseLeavesNoCleanupDebtAfterPartialJournal(t *testing.T) {
 }
 
 func TestNewerReleaseFailureAfterReplacementReportsItsOwnJournal(t *testing.T) {
-	for _, point := range []string{"after-replacement-journal-cas", "after-settings-cas", "before-journal-complete"} {
+	for _, point := range []string{"after-replacement-journal-cas", "after-reconciling", "before-journal-complete"} {
 		t.Run(point, func(t *testing.T) {
 			configHome, links, replacement := stuckAt(t, "after-journal-authorized")
 			candidate := newerReleaseCandidate(t, configHome, links, newerReleaseFix, "0.11.6", replacement, digestB, "tx-fix")
@@ -427,26 +425,39 @@ func TestNewerReleaseFailureAfterReplacementReportsItsOwnJournal(t *testing.T) {
 
 func TestNewerReleaseRefusesJournalThatSupersededAnother(t *testing.T) {
 	fixture := newV2PostActivationRecoveryFixture(t)
-	fixture.transition.options.fault = func(point string) error {
-		if point == "after-replacement-journal-cas" {
-			return errors.New("stop")
-		}
-		return nil
-	}
-	inspection, err := fixture.transition.Inspect(context.Background(), fixture.goal)
+	// Seed the published archive and its successor directly; this engine no longer
+	// creates the historical post-activation replacement.
+	journal := validJournal(fixture.transition.options.Releases)
+	journal.Transaction = "tx-recovery-v0112"
+	journal.Goal = fixture.goal
+	journal.ArtifactDigest = fixture.transition.options.ArtifactDigest
+	journal.RegistryDigest = fixture.transition.registryDigest
+	journal.CatalogDigest = fixture.transition.catalog.Digest()
+	journal.Checkpoint = JournalAuthorized
+	journal.Steps = nil
+	journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
+	archive, err := MarshalSupersededJournal(SupersededJournalRecord{
+		SchemaVersion: SupersededJournalSchemaV1, AuthorizationPlan: journal.AuthorizationPlan,
+		Replacement: *fixture.transition.options.Replacement, Journal: fixture.sourceJournal,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	}); err == nil {
-		t.Log("interrupted transition returned an operator outcome")
+	if err := fixture.transition.store.seedSupersededJournal(journal.Transaction, archive); err != nil {
+		t.Fatal(err)
+	}
+	current, err := fixture.transition.store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.transition.store.CompareAndSwapCurrentJournal(current, mustJournalPayload(t, journal)); err != nil {
+		t.Fatal(err)
 	}
 	snapshot, err := fixture.transition.store.ReadCurrentJournal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal, err := ParseJournal(snapshot.Payload)
+	journal, err = ParseJournal(snapshot.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,27 +558,12 @@ func TestNewerReleaseRefusesReservedJournal(t *testing.T) {
 }
 
 func TestJournalIsReservedByLiveMigrationOwnerReceipt(t *testing.T) {
-	candidate, request, _ := migrationOwnerFixture(t)
-	ctx := context.Background()
-	inspection, err := candidate.Inspect(ctx, Goal{Target: "release-c", Direction: DirectionActivateTarget})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reserved, err := candidate.store.journalIsReserved(request.Transaction); err != nil || reserved {
+	candidate, receipt, _ := migrationOwnerReaderFixture(t, false)
+	if reserved, err := candidate.store.journalIsReserved(receipt.Predecessor.Transaction); err != nil || reserved {
 		t.Fatalf("before receipt reserved = %v, err=%v", reserved, err)
 	}
-	candidate.options.fault = func(point string) error {
-		if point == "after-migration-owner-receipt" {
-			return errors.New("stop")
-		}
-		return nil
-	}
-	if _, err := candidate.Converge(ctx, Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	}); err == nil {
-		t.Log("interrupted transition returned an operator outcome")
-	}
-	if reserved, err := candidate.store.journalIsReserved(request.Transaction); err != nil || !reserved {
+	seedMigrationOwnerReceipt(t, candidate, receipt)
+	if reserved, err := candidate.store.journalIsReserved(receipt.Predecessor.Transaction); err != nil || !reserved {
 		t.Fatalf("after receipt reserved = %v, err=%v", reserved, err)
 	}
 }

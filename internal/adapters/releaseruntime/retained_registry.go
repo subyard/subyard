@@ -307,6 +307,9 @@ func (runtime *Runtime) matchesReleaseDraft(selection *releaseSelection, target 
 
 func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
 	state, err := releasetransition.ParseMigrationLedger(ledger, checkpoint, registry, target.registryDigest)
+	if errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
+		return "the authoritative active migration history is missing", nil
+	}
 	if err != nil {
 		return "the selected release cannot verify the authoritative active migration history", err
 	}

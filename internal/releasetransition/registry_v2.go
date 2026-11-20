@@ -60,6 +60,13 @@ func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fin
 // historyRegistry validates semantics independently of the adapter's compiled
 // capability policy. Every public DTO boundary reconstructs a checked owner.
 func (registry RegistryV2) historyRegistry() (migrationhistory.Registry, error) {
+	if _, err := registry.declaredHistoryRegistry(); err != nil {
+		return migrationhistory.Registry{}, err
+	}
+	return registry.historyData().declaredHistoryRegistry()
+}
+
+func (registry RegistryV2) declaredHistoryRegistry() (migrationhistory.Registry, error) {
 	if registry.SchemaVersion != RegistrySchemaV2 {
 		return migrationhistory.Registry{}, invalid("unsupported registry schema %d", registry.SchemaVersion)
 	}
@@ -76,7 +83,7 @@ func (registry RegistryV2) historyRegistry() (migrationhistory.Registry, error) 
 	for domain, prefix := range registry.RetiredPrefixes {
 		retired[domain] = string(prefix.Digest)
 	}
-	owner, err := migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired)
+	owner, err := migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired, registry.retiredMigrationIDs()...)
 	if err != nil {
 		return migrationhistory.Registry{}, invalid("%v", err)
 	}
@@ -98,6 +105,7 @@ func (registry RegistryV2) Validate(catalog CapabilityCatalog) error {
 // through an epoch. Previously retired history is represented by its digest,
 // so repeated retirement does not retain an ever-growing definition list.
 func (registry RegistryV2) MigrationPrefixDigest(domain string, throughEpoch int) (Fingerprint, error) {
+	registry = registry.historyData()
 	if _, err := registry.historyRegistry(); err != nil {
 		return "", err
 	}

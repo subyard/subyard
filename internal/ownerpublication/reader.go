@@ -1,6 +1,7 @@
 package ownerpublication
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,15 +25,16 @@ func RequireReader(root, configHome string) error {
 		return err
 	}
 	state, err := store.ReadMigrationLedger(registry, digest)
-	if err != nil {
+	if err != nil && !errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
 		return err
 	}
 	// Epoch 3 adds guest temporary-policy migration and epoch 4 the NetworkManager device
 	// guard reader boundary, preserving this reader.
-	switch state.Ledger.Domains["power-metadata"].Epoch {
-	case 2, 3, 4:
-		return nil
-	default:
-		return fmt.Errorf("optional publication requires committed supported power-metadata epoch 2, 3 or 4; complete the supported release transition")
+	if err == nil {
+		switch state.Ledger.Domains["power-metadata"].Epoch {
+		case 2, 3, 4:
+			return nil
+		}
 	}
+	return fmt.Errorf("optional publication requires committed supported power-metadata epoch 2, 3 or 4; complete the supported release transition")
 }

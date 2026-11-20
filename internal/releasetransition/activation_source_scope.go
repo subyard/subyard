@@ -38,23 +38,7 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 		}
 	}
 	for _, work := range observation.work {
-		if work.kind() == v2LedgerWork {
-			continue
-		}
-		if work.kind() != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
-			!transition.localSSHPortScopeStable(work.intent) {
-			return false
-		}
-		if work.settingsFile() != nil {
-			if !work.settingsFile().LocalSSHPort || work.settingsFile().validate() != nil || settingsIntent(work.migration, *work.settingsFile()) != work.intent {
-				return false
-			}
-		} else if observation.journal == nil || !slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool {
-			return step.ID == work.intent.ID && step.Migration == work.intent.Migration && step.Resource == work.intent.Resource &&
-				step.Decision == work.intent.Decision && step.Expected == work.intent.Expected && step.Desired == work.intent.Desired
-		}) {
-			// Completed CAS work may no longer have a fresh file plan. Its exact
-			// durable step was already checked by protected recovery observation.
+		if work.kind() != v2BaselineWork && work.kind() != v2LedgerWork {
 			return false
 		}
 	}

@@ -116,16 +116,15 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		}
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
+		return Prepared{}, refusal
+	}
 	if protected != nil && yard == "default" && protected.journal.Checkpoint != releasetransition.JournalComplete &&
 		protected.journal.Goal.Target == current && currentScopeBlocker(protected.inspection) {
 		protected, err = runtime.recoverCurrentScope(ctx, parsed.root, configHome, before, protected)
 		if err != nil {
 			return Prepared{}, err
 		}
-	}
-	var delegate *candidateVerification
-	if protected != nil {
-		protected, delegate = runtime.inspectV0173ActivationOnlyRecovery(ctx, parsed.root, before, protected)
 	}
 	var owner, target candidateVerification
 	var request releasetransition.ProcessRequest
@@ -262,7 +261,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	if protected != nil {
 		recoveryRequest = protected.recoveryRequest
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate, recoveryRequest)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -275,7 +274,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		inspection.Outcome.Status == releasetransition.StatusReady &&
 		!inspection.Assessment.Changed && inspection.Resume == nil &&
 		request.SourceIngress == nil && request.Replacement == nil &&
-		request.MigrationOwnerReplacement == nil && recoveryRequest == nil && delegate == nil
+		request.MigrationOwnerReplacement == nil && recoveryRequest == nil
 	execute := prepared.run
 	prepared.run = func(ctx context.Context) error {
 		actual, err := runtime.readCurrentSnapshot(parsed.root, configHome)
@@ -283,6 +282,11 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 			return fmt.Errorf("%w: current release or protected metadata changed after inspection; run yard migrate --check again", domain.ErrPlanStale)
 		}
 		if err := execute(ctx); err != nil {
+			if inspection.Outcome.Status == releasetransition.StatusReady && !inspection.Assessment.Changed {
+				if stale := runtime.revalidateCurrentSnapshot(parsed.root, configHome, before); stale != nil {
+					return stale
+				}
+			}
 			return err
 		}
 		var outcome releasetransition.Outcome
@@ -382,6 +386,9 @@ func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner c
 		return nil, err
 	}
 	state, err := releasetransition.ParseMigrationLedger(snapshot.ledger, snapshot.checkpoint, registry, digest)
+	if errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

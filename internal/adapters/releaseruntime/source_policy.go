@@ -253,13 +253,23 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	if err != nil || registryDigest != verified.registryDigest {
 		return errors.New("source release has invalid or foreign V2 registry provenance")
 	}
+	if activeErr == nil && active.GTE(semver.MustParse(UpdateAnchorVersion)) {
+		if err := store.RequireRetiredMigrationCompletion(registry, registryDigest); err != nil {
+			if errors.Is(err, releasetransition.ErrRetiredMigrationRepair) || !activatedTakeover {
+				return err
+			}
+		}
+	}
 	if activatedTakeover {
 		history, historyErr := store.ReadMigrationLedger(registry, registryDigest)
 		var pending []releasetransition.MigrationDefinitionV2
 		if historyErr == nil {
 			pending, historyErr = registry.PendingPath(history.Ledger)
 		}
-		if historyErr != nil || !history.AuthoritySnapshot.Exists || len(pending) != 0 {
+		if historyErr != nil && !errors.Is(historyErr, releasetransition.ErrMigrationLedgerAbsent) {
+			return historyErr
+		}
+		if errors.Is(historyErr, releasetransition.ErrMigrationLedgerAbsent) || len(pending) != 0 {
 			return errors.New("replacement-authority-required: the activated release's migration history is missing, inconsistent, or incomplete; this release cannot replace its unfinished transition. Restore the exact protected history from a known-good backup, or use a fix release of the activated series; do not uninstall")
 		}
 	}
@@ -292,4 +302,74 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		}
 	}
 	return admissionErr
+}
+
+// unfinishedSourceAnchorError gives explicit selections the child's existing
+// refusal before outer routing can select another release. An unreadable journal
+// or unverified source stays with the ordinary protected inspection diagnostics.
+func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtimeRoot, configHome string) error {
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return nil
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return nil
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint == releasetransition.JournalComplete {
+		return nil
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+	if err != nil {
+		return nil
+	}
+	observed, err := links.Observe()
+	if err != nil {
+		return nil
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{
+		release: observed.Active, root: filepath.Join(runtimeRoot, "releases", string(observed.Active)),
+	}, runtimeRoot, nil)
+	if err != nil {
+		return nil
+	}
+	defer verified.Close()
+	version, err := semver.Parse(verified.version)
+	if err == nil && strings.HasPrefix(string(observed.Active), verified.version+"-") &&
+		version.GTE(semver.MustParse(MinimumSourceVersion)) && version.LT(semver.MustParse(UpdateAnchorVersion)) {
+		return unfinishedBelowAnchorError(journal)
+	}
+	return nil
+}
+
+// The current caller must refuse retired source work even when the ordinary
+// protected route would delegate inspection/resume to an installed older owner.
+func (runtime *Runtime) retiredSourceWorkError(ctx context.Context, root, configHome string) error {
+	links, err := releasetransition.NewRuntimeLinkStore(root)
+	if err != nil {
+		return nil
+	}
+	observed, err := links.Observe()
+	if err != nil {
+		return nil
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: observed.Active, root: filepath.Join(root, "releases", string(observed.Active))}, root, nil)
+	if err != nil {
+		return nil
+	}
+	defer verified.Close()
+	version, err := semver.Parse(verified.version)
+	if err != nil || version.LT(semver.MustParse(UpdateAnchorVersion)) || !strings.HasPrefix(string(observed.Active), verified.version+"-") {
+		return nil
+	}
+	registry, _, err := readVerifiedTransitionRegistry(verified)
+	if err != nil {
+		return err
+	}
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return err
+	}
+	return store.RequireRetiredMigrationCompletion(registry, verified.registryDigest)
 }

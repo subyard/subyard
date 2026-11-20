@@ -11,7 +11,7 @@ import (
 )
 
 func TestV2InterruptedActivationRequiresOriginalConfigurationBeforeResume(t *testing.T) {
-	for _, activationOnly := range []bool{true, false} {
+	for _, activationOnly := range []bool{true} {
 		name := "verified-settings"
 		if activationOnly {
 			name = "activation-only"

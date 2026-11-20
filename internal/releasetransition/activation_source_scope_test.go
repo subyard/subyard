@@ -4,12 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -115,13 +111,8 @@ func sourceScopeJournal(t *testing.T, transition *V2Transition) JournalRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(journal.Steps) == 0 {
-		t.Fatal("fixture did not prepare pending ledger work")
-	}
-	for _, step := range journal.Steps {
-		if !strings.HasPrefix(step.Resource, "ledger.") {
-			t.Fatalf("fixture prepared non-ledger source work: %s", step.Resource)
-		}
+	if len(journal.Steps) != 0 {
+		t.Fatal("retired migrations were planned")
 	}
 	return journal
 }
@@ -175,147 +166,6 @@ func TestSourceStableActivationScopeIncludedBeforeGrant(t *testing.T) {
 	final, err := transition.Inspect(context.Background(), goal)
 	if err != nil || final.Outcome.Status != StatusReady {
 		t.Fatalf("wide final readiness: outcome=%#v err=%v", final.Outcome, err)
-	}
-}
-
-func TestSourceStableActivationScopeExcludesActualSourceMutations(t *testing.T) {
-	for _, kind := range []v2WorkKind{v2SettingsWork, v2OwnerWork, v2IngressWork} {
-		for _, durable := range []bool{false, true} {
-			name := string(kind) + "/prepared"
-			if durable {
-				name = string(kind) + "/durable"
-			}
-			t.Run(name, func(t *testing.T) {
-				owner := &sourceScopeReconciler{}
-				transition := sourceScopeTransitionFixture(t, owner)
-				observation := v2Observation{work: []v2Work{{recipe: &ledgerWorkRecipe{}}, {recipe: testWorkRecipe(kind)}}}
-				if durable {
-					observation.work = nil
-					observation.journal = &JournalRecord{
-						Checkpoint: JournalReconciling, ObservationScope: digestD,
-						Steps: []JournalStep{{Resource: "source." + string(kind), Checkpoint: StepVerified}},
-					}
-				}
-				if err := transition.observeActivationScope(context.Background(), &observation); err != nil {
-					t.Fatal(err)
-				}
-				if owner.hooks != 0 || owner.wide || observation.activationScope[0].Desired != digestA {
-					t.Fatalf("source mutation expanded authorization: hooks=%d wide=%t scope=%v", owner.hooks, owner.wide, observation.activationScope)
-				}
-			})
-		}
-	}
-}
-
-func TestSSHPinSourceStabilityRequiresCompiledTypedWork(t *testing.T) {
-	for _, scenario := range []string{"pin", "non-pin", "invalid-file", "unknown-migration", "wrong-epoch", "unsupported-catalog", "resource-spelling", "fresh-without-file", "mixed-settings", "mixed-owner", "mixed-ingress", "source-ingress"} {
-		t.Run(scenario, func(t *testing.T) {
-			transition := sourceScopeTransitionFixture(t, &sourceScopeReconciler{})
-			root, err := filepath.Abs(filepath.Join("..", ".."))
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			transition.registry, _, err = ParseRegistryV2(payload, transition.catalog)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var migration MigrationDefinitionV2
-			for _, candidate := range transition.registry.Migrations {
-				if candidate.Kind == localSSHPortMigration {
-					migration = candidate
-				}
-			}
-			file := settingsV2FilePlan{LocalSSHPort: true, Yard: "default", Path: filepath.Join(transition.options.ConfigHome, "yards/default/config.env"),
-				Expected: config.PersistentFileSnapshot{Exists: true}, Desired: []byte("SSH_PORT=2224\n"), Inheritance: digestC,
-				ExpectedFingerprint: digestA, DesiredFingerprint: digestB, Decision: DecisionCanonicalize}
-			work := settingsMigrationWork(settingsIntent(migration, file), migration, file)
-			observation := v2Observation{work: []v2Work{{recipe: &ledgerWorkRecipe{}}, work}}
-			switch scenario {
-			case "non-pin":
-				observation.work[1].settingsFile().LocalSSHPort = false
-			case "invalid-file":
-				observation.work[1].settingsFile().Desired = nil
-			case "unknown-migration":
-				observation.work[1].intent.Migration = "uncompiled-pin"
-			case "wrong-epoch":
-				for i := range transition.registry.Migrations {
-					if transition.registry.Migrations[i].Kind == localSSHPortMigration {
-						transition.registry.Migrations[i].FromEpoch = 7
-					}
-				}
-			case "unsupported-catalog":
-				transition.catalog = PreviousBuiltinCapabilityCatalog()
-			case "resource-spelling":
-				observation.work[1].intent.Resource = "ledger.settings"
-			case "fresh-without-file":
-				observation.work[1].recipe = &recordedSettingsWork{}
-			case "mixed-settings":
-				observation.work = append(observation.work, v2Work{recipe: &settingsWorkRecipe{}})
-			case "mixed-owner":
-				observation.work = append(observation.work, v2Work{recipe: &ownerWorkRecipe{}})
-			case "mixed-ingress":
-				observation.work = append(observation.work, v2Work{recipe: &ingressWorkRecipe{}})
-			case "source-ingress":
-				transition.options.SourceIngress = &SourceIngressRequest{}
-			}
-			if stable := transition.sourceWorkStable(observation); stable != (scenario == "pin") {
-				t.Fatalf("scope stability accepted unsupported work: scenario=%s stable=%t", scenario, stable)
-			}
-		})
-	}
-}
-
-func TestCheckpointPublicationPreservesMigratingSourceScope(t *testing.T) {
-	for _, interrupt := range []bool{false, true} {
-		t.Run(map[bool]string{false: "complete", true: "resume"}[interrupt], func(t *testing.T) {
-			owner := &sourceScopeReconciler{}
-			transition := sourceScopeTransitionFixture(t, owner)
-			testkit.WriteFile(t, filepath.Join(transition.options.ConfigHome, "yards", "hermes", "config.env"),
-				[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600)
-			transition.options.MigrationCheckpoint = true
-			if interrupt {
-				transition.options.fault = func(point string) error {
-					if point == "before-checkpoint-publication" {
-						return errors.New("interrupt terminal checkpoint")
-					}
-					return nil
-				}
-			}
-			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil || len(inspection.Blockers) != 0 || owner.wide {
-				t.Fatalf("source migration assessment: %#v wide=%t err=%v", inspection, owner.wide, err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{
-				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-			})
-			if interrupt {
-				if err != nil || outcome.Status != StatusRecovering {
-					t.Fatalf("checkpoint interruption: %#v err=%v", outcome, err)
-				}
-				transition = freshSourceScopeOwner(t, transition, &sourceScopeReconciler{converged: true})
-				inspection, err = transition.Inspect(context.Background(), goal)
-				if err != nil || inspection.Resume == nil || len(inspection.Blockers) != 0 {
-					t.Fatalf("checkpoint resume: %#v err=%v", inspection, err)
-				}
-				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
-			}
-			if err != nil || outcome.Status != StatusReady {
-				t.Fatalf("checkpoint completion: %#v err=%v", outcome, err)
-			}
-			checkpoint, err := transition.store.ReadMigrationCheckpoint()
-			if err != nil || !checkpoint.Exists {
-				t.Fatalf("authorized checkpoint missing: %#v err=%v", checkpoint, err)
-			}
-			final, err := transition.Inspect(context.Background(), goal)
-			if err != nil || final.Outcome.Status != StatusReady || final.Assessment.Changed {
-				t.Fatalf("completed release-wide fixed point: %#v err=%v", final, err)
-			}
-		})
 	}
 }
 
@@ -385,19 +235,6 @@ func TestSourceStableActivationScopeRejectsChangedWideDesired(t *testing.T) {
 	}
 }
 
-func testWorkRecipe(kind v2WorkKind) v2WorkRecipe {
-	switch kind {
-	case v2SettingsWork:
-		return &settingsWorkRecipe{}
-	case v2OwnerWork:
-		return &ownerWorkRecipe{}
-	case v2IngressWork:
-		return &ingressWorkRecipe{}
-	default:
-		return &ledgerWorkRecipe{}
-	}
-}
-
 // A new grant after an unrelated completed transaction binds today's source
 // frontier. Reusing the old transaction's first before-pin makes the new grant
 // disagree with itself immediately after its first ledger CAS.
@@ -409,7 +246,6 @@ func TestNewMigrationGrantUsesCurrentSourceAfterCompletedHistory(t *testing.T) {
 		ledgerSnapshot: ProtectedSnapshot{Fingerprint: digestB},
 		journal: &JournalRecord{Checkpoint: JournalComplete, ObservationScope: digestD,
 			Steps: []JournalStep{{Resource: "ledger.settings", Expected: digestA}}},
-		work: []v2Work{{recipe: &ledgerWorkRecipe{}}},
 	}
 	if err := transition.observeActivationScope(context.Background(), &observation); err != nil {
 		t.Fatal(err)

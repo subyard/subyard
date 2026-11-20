@@ -235,6 +235,7 @@ func retainedFixtureAtVersion(t *testing.T, version string) (*Runtime, published
 		t.Fatal(err)
 	}
 	writeMigrationRollbackSource(t, candidate, request, []byte(migrationRollbackSettingsRegistry))
+	writeRollbackFixtureLedger(t, request.ConfigHome, []byte(migrationRollbackSettingsRegistry))
 	request.Target = candidate.release
 	installer := filepath.Join(root, "installer")
 	testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nset -eu\nmkdir -p \"$2/releases\"\ncp -a %q \"$2/%s\"\nprintf '%%s\\n' %q\n", destination, target, target)), 0o700)
@@ -831,15 +832,6 @@ func TestTransitionLaunchRefusesNonActiveEngineWithoutSelection(t *testing.T) {
 	defer verified.Close()
 	request.ArtifactDigest = verified.manifestDigest
 	_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
-	assertReleaseSelectionStale(t, err)
-
-	active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
-	assets, err := runtime.verifyPublishedCandidate(ctx, active, request.RuntimeRoot, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer assets.Close()
-	_, err = runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, "")
 	assertReleaseSelectionStale(t, err)
 	assertMigrationRollbackUnchanged(t, request, called)
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -267,7 +268,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 			}
 		}},
 		{name: "pending", mutate: func(t *testing.T, path string) {
-			registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+			registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "internal/releasetransition/history_v028.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -278,7 +279,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload, _, err := releasetransition.MarshalLedgerV2(
-				releasetransition.BaselineLedgerV2(registry), registry,
+				releasetransition.FreshBootstrapLedgerV2(registry), registry,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -295,7 +296,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 			permit, err := fixture.cli.prepareConfigApplyRepair(
 				context.Background(), "default", false, fixture.outcome,
 			)
-			if err != nil || permit != nil {
+			if permit != nil || test.name == "missing" && err != nil || test.name != "missing" && !errors.Is(err, releasetransition.ErrInvalid) {
 				t.Fatalf("unsafe ledger permit=%#v err=%v", permit, err)
 			}
 		})
@@ -530,7 +531,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(parsedRegistry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(parsedRegistry)
 	for _, migration := range parsedRegistry.Migrations {
 		ledger, err = ledger.Advance(parsedRegistry, migration)
 		if err != nil {

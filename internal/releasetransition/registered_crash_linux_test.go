@@ -24,15 +24,13 @@ import (
 
 const (
 	crashFamilyRegistered = "registered"
-	// A yard whose revision is rewritten by activation after every row is Verified.
+	// A release-owned metadata write during ordinary zero-step activation.
 	crashFamilyRegisteredRevision = crashFamilyRegistered + "-revision"
 	// A VM yard, whose guest restart leaves the Incus lifecycle outputs seen on real hosts.
 	crashFamilyRegisteredVM = crashFamilyRegistered + "-vm"
 )
 
 const activationRevisionKey = "user.subyard.sample_revision"
-
-const registeredCrashRegistry = `{"schemaVersion":2,"minimumEpochs":{"owner-registration":2,"power-metadata":2,"settings":2,"project-state":1},"currentEpochs":{"owner-registration":3,"power-metadata":3,"settings":3,"project-state":1},"migrations":[{"id":"local-ssh-v3","domain":"settings","fromEpoch":2,"toEpoch":3,"kind":"local-ssh-port-settings-v2-to-v3"},{"id":"registered-v3","domain":"owner-registration","fromEpoch":2,"toEpoch":3,"kind":"registered-yards-v2-to-v3","dependsOn":["local-ssh-v3"]},{"id":"guest-tmp-v3","domain":"power-metadata","fromEpoch":2,"toEpoch":3,"kind":"registered-guest-disk-tmp-v2-to-v3","dependsOn":["registered-v3"]}]}`
 
 const registeredCrashProfile = `{"schema_version":1,"settings":[{"name":"SAMPLE_HOST","type":"string","scopes":["yard","shipped"],"application":"next-command","syncable":true},{"name":"SAMPLE_PORT","type":"port","minimum":1,"maximum":65535,"scopes":["yard","shipped"],"application":"next-command","syncable":true}]}`
 
@@ -185,22 +183,22 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 	if err != nil {
 		t.Fatal(err)
 	}
-	trace := &crashTrace{store: store, cuts: map[string]bool{}}
+	trace := &crashTrace{store: store, cuts: map[string]bool{}, counts: map[string]int{}}
 	native := &registeredCrashNative{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{}, Reconcile: ports.ReconcileState{ProjectFound: true, InstanceFound: true, ProjectConfig: map[string]string{"user.subyard.installation": "1", "user.subyard.operator_uid": strconv.Itoa(os.Getuid()), "user.subyard.config_home": home, "user.subyard.data_home": home + "/data"}}}, path: statePath, trace: trace, vm: family == crashFamilyRegisteredVM}
 	if initialize {
-		for _, path := range []string{filepath.Dir(settings), filepath.Join(home, ".sync/settings"), filepath.Join(runtimeRoot, "releases/release-a"), filepath.Join(root, "scripts")} {
+		for _, path := range []string{filepath.Dir(settings), filepath.Join(home, ".sync/settings"), filepath.Join(runtimeRoot, "releases/0.28.1-aaaaaaaaaaaa"), filepath.Join(runtimeRoot, "releases/0.30.0-bbbbbbbbbbbb"), filepath.Join(root, "scripts")} {
 			if err := os.MkdirAll(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}
 		registeredCrashConfig(t, candidate)
-		testkit.WriteFile(t, settings, []byte("ENVIRONMENT_PROFILES=sample\n"), 0o600)
+		testkit.WriteFile(t, settings, []byte("ENVIRONMENT_PROFILES=sample\nSSH_PORT=2240\n"), 0o600)
 		testkit.WriteFile(t, filepath.Join(home, ".sync/settings/config.env"), []byte("SSH_PORT=2240\n"), 0o600)
 		testkit.WriteFile(t, filepath.Join(root, "scripts/guest-disk-tmp.sh"), []byte("policy source\n"), 0o600)
 		for _, script := range []string{"06-network.sh", "lifecycle-guard.sh"} {
 			testkit.WriteFile(t, filepath.Join(root, "scripts", script), []byte("#!/bin/sh\nexit 0\n"), 0o700)
 		}
-		if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+		if err := os.Symlink("releases/0.28.1-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
 			t.Fatal(err)
 		}
 		values := map[string]string{"volatile.uuid": "uuid-original", "user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.name": "default", "user.subyard.bridge": "fixture-br", "user.subyard.desired_power": "running"}
@@ -215,6 +213,7 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 		if native.vm {
 			instance.Type = domain.YardVM
 		}
+		rt.SeedProcessCrashHistoryForTest(t, home, "0.28.1", false)
 		if err := native.write(registeredCrashState{Instance: instance}); err != nil {
 			t.Fatal(err)
 		}
@@ -280,15 +279,34 @@ func registeredCrashFixtureAt(t *testing.T, root string, initialize bool, family
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := rt.V2Options{CandidateConfigDir: candidate, ConfigHome: home, RegistryPayload: []byte(registeredCrashRegistry), ArtifactDigest: crashPin("artifact"), Releases: rt.ReleasePair{From: "release-a", Target: "release-a"}, Direction: rt.DirectionActivateTarget,
-		ObserveLinks:               func(context.Context) (rt.ReleaseLinks, error) { return rt.ReleaseLinks{Active: "release-a"}, nil },
-		RegisteredEndpointSettings: resources.EndpointSettingNames(), RegisteredYards: []rt.V2ActivationReconciler{owner}, GuestDiskTmp: []rt.V2ActivationReconciler{tmp},
-		VerifyAuthorization: func(plan rt.PlanToken, grant rt.Authorization) bool { return string(grant) == "grant:"+string(plan) }}
+	payload, err := os.ReadFile("../../config/release-transition.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := rt.V2Options{CandidateConfigDir: candidate, ConfigHome: home, RegistryPayload: payload, ArtifactDigest: crashPin("artifact"),
+		Releases: rt.ReleasePair{From: "0.28.1-aaaaaaaaaaaa", Target: "0.30.0-bbbbbbbbbbbb"}, Direction: rt.DirectionActivateTarget,
+		MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
+		ObserveLinks:        func(context.Context) (rt.ReleaseLinks, error) { return links.Observe() },
+		ActivateLinks:       func(_ context.Context, pair rt.ReleasePair) (rt.ReleaseLinks, error) { return links.Activate(pair) },
+		Reconcilers:         []rt.V2ActivationReconciler{&namedRegisteredCrashActor{owner, "registered"}, &namedRegisteredCrashActor{tmp, "guest-tmp"}},
+		VerifyAuthorization: func(plan rt.PlanToken, grant rt.Authorization) bool { return string(grant) == "grant:"+string(plan) },
+	}
 	if family == crashFamilyRegisteredRevision {
+		// The old fixture closed registry rows before this write. Those rows
+		// no longer exist; exercise the still-live activation write itself.
 		options.Reconcilers = []rt.V2ActivationReconciler{&revisionActivation{native: native, trace: trace}}
 	}
-	return &crashFixture{family: family, target: "release-a", home: home, root: root, registry: []byte(registeredCrashRegistry), options: options, links: links, trace: trace, signature: registeredCrashSignature}
+	return &crashFixture{family: family, target: "0.30.0-bbbbbbbbbbbb", home: home, root: root, registry: payload, options: options, links: links, trace: trace, signature: registeredCrashSignature}
+
 }
+
+// Distinct live maintenance owners share the registered-yard implementation.
+type namedRegisteredCrashActor struct {
+	*migration.RegisteredYardMigration
+	id string
+}
+
+func (actor *namedRegisteredCrashActor) ID() string { return actor.id }
 
 func mustMkdirAll(t *testing.T, path string, create bool) string {
 	t.Helper()
@@ -302,13 +320,13 @@ func mustMkdirAll(t *testing.T, path string, create bool) string {
 
 func registeredCrashSignature(t *testing.T, root string) map[string]string {
 	t.Helper()
-	result := map[string]string{}
+	result := crashDomainSignature(t, root)
 	for _, relative := range []string{"config/yards/default/config.env", "config/.sync/settings/config.env", "native.json"} {
 		body, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {
 			t.Fatal(err)
 		}
-		result[relative] = string(body)
+		result[relative] = strings.ReplaceAll(string(body), root, "$ROOT")
 	}
 	var ledger struct {
 		Domains json.RawMessage `json:"domains"`
@@ -334,7 +352,7 @@ func TestProcessCrashRegisteredRowsResumeFresh(t *testing.T) {
 	})
 }
 
-// revisionActivation rewrites release-owned metadata after every native row is verified.
+// revisionActivation durably rewrites release-owned metadata during activation.
 type revisionActivation struct {
 	native *registeredCrashNative
 	trace  *crashTrace
@@ -369,11 +387,11 @@ func (actor *revisionActivation) Reconcile(context.Context, rt.ReleaseLinks) err
 	return actor.trace.hit("native/activation/revision")
 }
 
-// Activation rewrites what a finished row bound, then fails before Complete. The
-// resume must finish the same transaction instead of ending in a terminal refusal.
+// A process kill after the metadata write must retain the same transaction and
+// grant, including a repeat after Complete.
 func TestProcessCrashRegisteredActivationWriteResumes(t *testing.T) {
 	runCrashMatrix(t, registeredCrashFamily(crashFamilyRegisteredRevision), func(t *testing.T, cuts map[string]bool) {
-		for _, cut := range []string{"native/activation/revision", "global/before-journal-complete"} {
+		for _, cut := range []string{"native/activation/revision", "transition/before-journal-complete/001"} {
 			if !cuts[cut] {
 				t.Fatalf("control did not reach %s: %v", cut, cuts)
 			}
@@ -381,8 +399,7 @@ func TestProcessCrashRegisteredActivationWriteResumes(t *testing.T) {
 	})
 }
 
-// Every cut of a VM yard resumes across its restart outputs, including the last
-// row, which is still fingerprinted.
+// Every cut of live VM maintenance resumes across its guest restart outputs.
 func TestProcessCrashRegisteredVMRowsResumeFresh(t *testing.T) {
 	runCrashMatrix(t, registeredCrashFamily(crashFamilyRegisteredVM), func(t *testing.T, cuts map[string]bool) {
 		if !cuts["native/guest-tmp/apply"] {
@@ -390,90 +407,3 @@ func TestProcessCrashRegisteredVMRowsResumeFresh(t *testing.T) {
 		}
 	})
 }
-
-// Migration pins refuse identity and configuration drift, including finished rows.
-// After activation, the released completion boundary keeps finished rows closed.
-func TestProcessCrashRegisteredIdentityBoundary(t *testing.T) {
-	for _, test := range []struct{ name, family, cut, key, value string }{
-		{"unchanged yard passes", crashFamilyRegistered, "row/guest-tmp-v3.yard.default/verified", "", ""},
-		{"replaced after activation", crashFamilyRegistered, "global/after-target-active", "volatile.uuid", "replaced"},
-		{"replaced at first row", crashFamilyRegistered, "row/registered-v3.yard.default/verified", "volatile.uuid", "replaced"},
-		{"replaced at last row", crashFamilyRegistered, "row/guest-tmp-v3.yard.default/verified", "volatile.uuid", "replaced"},
-		{"limits changed at first row", crashFamilyRegistered, "row/registered-v3.yard.default/verified", "limits.cpu", "4"},
-		{"limits changed at last row", crashFamilyRegistered, "row/guest-tmp-v3.yard.default/verified", "limits.cpu", "4"},
-		{"foreign disk tmp marker at last row", crashFamilyRegistered, "row/guest-tmp-v3.yard.default/verified", "user.subyard.disk_tmp", "v2"},
-		{"VM replaced at last row", crashFamilyRegisteredVM, "row/guest-tmp-v3.yard.default/verified", "volatile.uuid", "replaced"},
-		{"VM foreign reset value at last row", crashFamilyRegisteredVM, "row/guest-tmp-v3.yard.default/verified", "volatile.vm.needs_reset", "false"},
-		{"VM foreign clock at last row", crashFamilyRegisteredVM, "row/guest-tmp-v3.yard.default/verified", "volatile.vm.rtc_adjustment", "01"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			// Each case owns its root and writer processes.
-			t.Parallel()
-			f := registeredCrashFamily(test.family)(t)
-			crashChild(t, f, test.cut, false, true)
-			original := registeredCrashFixtureAt(t, f.root, false, test.family)
-			originalTransition, err := rt.NewV2Transition(original.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			old, err := originalTransition.Inspect(context.Background(), rt.Goal{Target: rt.ReleaseID(f.target), Direction: rt.DirectionActivateTarget})
-			if err != nil {
-				t.Fatal(err)
-			}
-			statePath := filepath.Join(f.root, "native.json")
-			body, err := os.ReadFile(statePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var state registeredCrashState
-			if err := json.Unmarshal(body, &state); err != nil {
-				t.Fatal(err)
-			}
-			if test.key != "" {
-				state.Instance.Config[test.key] = test.value
-				state.Instance.LocalConfig[test.key] = test.value
-			}
-			if body, err = json.Marshal(state); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, statePath, body, 0o600)
-			fresh := registeredCrashFixtureAt(t, f.root, false, test.family)
-			if test.cut == "global/after-target-active" {
-				if outcome := crashConverge(t, fresh, true); outcome.Status != rt.StatusReady || len(outcome.Warnings) != 0 {
-					t.Fatalf("post-activation replacement did not complete: %+v", outcome)
-				}
-				return
-			}
-			transition, err := rt.NewV2Transition(fresh.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			inspection, err := transition.Inspect(context.Background(), rt.Goal{Target: rt.ReleaseID(fresh.target), Direction: rt.DirectionActivateTarget})
-			if test.key == "volatile.uuid" {
-				if err != nil || len(inspection.Blockers) != 0 || inspection.Plan == old.Plan {
-					t.Fatalf("recreated pre-activation yard has no fresh exit: %+v %v", inspection, err)
-				}
-				denied, err := transition.Converge(context.Background(), rt.Execution{Plan: old.Plan, Authorization: rt.Authorization("grant:" + string(old.Plan))})
-				if err != nil || denied.Code != rt.CodePlanStale {
-					t.Fatalf("old authorization survived replacement: %+v %v", denied, err)
-				}
-				if outcome := crashConverge(t, registeredCrashFixtureAt(t, f.root, false, test.family), false); outcome.Status != rt.StatusReady {
-					t.Fatalf("fresh consent could not finish replacement: %+v", outcome)
-				}
-				return
-			}
-			if test.key == "" {
-				if err != nil || len(inspection.Blockers) != 0 {
-					t.Fatalf("unchanged yard refused: %+v %v", inspection, err)
-				}
-				return
-			}
-			if err == nil && len(inspection.Blockers) == 0 {
-				t.Fatalf("drifted yard passed as a finished row: %+v", inspection.Outcome)
-			}
-		})
-	}
-}
-
-// These cuts use the existing fresh-process runner and real protected store.
-// The record is the only additional durable effect; no journal shape changes.

@@ -190,7 +190,9 @@ func TestPendingDiskTmpReadyWireAndStatus(t *testing.T) {
 		}
 	}
 	links := releasetransition.ReleaseLinks{Active: "release-current"}
-	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: testkit.TempDir(t), Releases: releasetransition.ReleasePair{From: "release-current", Target: "release-current"}, RegistryPayload: []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`), ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("d", 64)), Reconcilers: []releasetransition.V2ActivationReconciler{owner}, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links, nil }})
+	home := testkit.TempDir(t)
+	seedRegistryLedgerFixture(t, home, []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`))
+	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home, Releases: releasetransition.ReleasePair{From: "release-current", Target: "release-current"}, RegistryPayload: []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`), ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("d", 64)), Reconcilers: []releasetransition.V2ActivationReconciler{owner}, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

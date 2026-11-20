@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -294,7 +293,7 @@ func TestBuiltinCapabilityCatalogContainsPublishedV2Kinds(t *testing.T) {
 }
 
 func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
-	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	payload, err := os.ReadFile("../../config/release-transition.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,25 +301,23 @@ func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if registry.MinimumEpochs["settings"] != 1 || registry.CurrentEpochs["settings"] != 3 ||
-		registry.MinimumEpochs["owner-registration"] != 1 ||
-		registry.CurrentEpochs["owner-registration"] != 3 || len(registry.Migrations) != 7 ||
-		registry.Migrations[0].ID != "canonicalize-test-vms-settings-v2" ||
-		registry.Migrations[2].ID != "canonicalize-test-yard-owner-v2" || registry.Migrations[3].Kind != localSSHPortMigration ||
-		registry.Migrations[4].Kind != registeredYardsMigration || registry.Migrations[5].Kind != guestDiskTmpMigration ||
-		registry.Migrations[6].Kind != nmDeviceGuardMigration {
-		t.Fatalf("published registry = %#v", registry)
+	if len(registry.Migrations) != 1 || registry.Migrations[0].Kind != nmDeviceGuardMigration || digest == historyV028Digest {
+		t.Fatalf("live registry = %#v", registry.Migrations)
 	}
-	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 4 || registry.Migrations[1].Kind != "owner-publication-state-v1" {
-		t.Fatalf("published power reader boundary = %#v", registry)
+	if registry.CurrentEpochs["power-metadata"] != 4 {
+		t.Fatalf("published power reader boundary = %#v", registry.CurrentEpochs)
 	}
-	for _, domain := range []string{"project-state"} {
-		if registry.MinimumEpochs[domain] != 1 || registry.CurrentEpochs[domain] != 1 {
-			t.Fatalf("published registry omitted stable baseline domain %q: %#v", domain, registry)
+	for domain, top := range historyV028.CurrentEpochs {
+		if registry.MinimumEpochs[domain] != top || domain != "power-metadata" && registry.CurrentEpochs[domain] != top {
+			t.Fatalf("wrong floor: %s", domain)
 		}
-	}
-	if !validFingerprint(digest) {
-		t.Fatalf("published registry digest = %q", digest)
+		if top == 1 {
+			continue
+		}
+		prefix, err := historyV028.MigrationPrefixDigest(domain, top)
+		if err != nil || registry.RetiredPrefixes[domain].ThroughEpoch != top || registry.RetiredPrefixes[domain].Digest != prefix {
+			t.Fatalf("changed historical prefix: %s %v", domain, err)
+		}
 	}
 }
 

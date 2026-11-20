@@ -395,7 +395,7 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   && [ -L "$standalone_bin/sy" ] && [ ! -e "$TMP/standalone-go-invoked" ] \
   || fail 'standalone installer did not publish a usable runtime without a checkout'
 standalone_ledger="$standalone_home/.config/subyard/release-transition/v2/ledger.json"
-jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
+jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' \
   "$standalone_ledger" >/dev/null \
   || fail 'fresh bootstrap published entrypoints before the optional publication reader boundary'
 standalone_ledger_before="$(sha256sum "$standalone_ledger")"
@@ -698,12 +698,16 @@ cp "$TMP/full-inventory.before" "$full_inventory"
   "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
     --bundle "$bundle_one" --checksum "$bundle_one.sha256" --manifest "$bundle_one.manifest.json" \
     --provenance "$bundle_one.provenance.json" > "$TMP/bootstrap-no-config-stage.log"
-  [ -L "$YARD_RUNTIME_ROOT/current" ] && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
+  [ -L "$YARD_RUNTIME_ROOT/current" ] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
     || fail 'missing-config retry precondition was not established'
   "$release/subyard-install.sh" --yes > "$TMP/bootstrap-no-config-retry.log" 2>&1 \
     || { cat "$TMP/bootstrap-no-config-retry.log" >&2; fail 'bootstrap could not resume without config directory'; }
-  [ -f "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" ] && [ -x "$YARD_BIN_DIR/yard" ] \
-    || fail 'missing-config retry omitted protected transition or entrypoints'
+  grep -Fq 'Status: ready' "$TMP/bootstrap-no-config-retry.log" \
+    && jq -e '.checkpoint == "complete"' "$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json" >/dev/null \
+    && jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null \
+    && [ -x "$YARD_BIN_DIR/yard" ] && [ -x "$YARD_BIN_DIR/sy" ] \
+    || fail 'missing-config retry omitted readiness, protected transition or entrypoints'
 )
 # A rejected first transition keeps its installed owner, withholds entrypoints,
 # and remains recoverable through the existing-runtime supported transition.
@@ -722,7 +726,7 @@ cp "$TMP/full-inventory.before" "$full_inventory"
     || fail 'failed first transition published entrypoints or discarded its owner'
   : > "$SUBYARD_CONFIG_HOME/config.env"
   "$release/subyard-install.sh" --yes > "$TMP/bootstrap-retry.log" 2>&1
-  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
+  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'supported bootstrap retry did not publish entrypoints'
 )
@@ -741,7 +745,7 @@ cp "$TMP/full-inventory.before" "$full_inventory"
   done
   export PATH="$native_tools"
   "$release/subyard-install.sh" --yes > "$TMP/bootstrap-cold.log" 2>&1
-  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
+  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap did not publish entrypoints'
 )
@@ -953,6 +957,141 @@ jq -e '.version == "1.1.0-test" and .rpc.min == 1 and .rpc.max == 1 and
   "$artifact_two.manifest.json" >/dev/null
 rpc_negotiate "$artifact_two" 1.1.0-test 1 compatible artifact-two-v1
 
+# An interrupted first install retried with another version first finishes the
+# published release's own initial activation, then updates to the new target.
+(
+  export HOME="$TMP/bootstrap-other-version-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-other-version-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  mkdir -m 0700 "$HOME"
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$bundle_one" --checksum "$bundle_one.sha256" --manifest "$bundle_one.manifest.json" \
+    --provenance "$bundle_one.provenance.json" > "$TMP/bootstrap-other-version-stage.log"
+  first_target="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  [[ "$first_target" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
+    || fail 'other-version retry precondition was not established'
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-other-version-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-other-version-retry.log" >&2; fail 'interrupted first install did not resume with another version'; }
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  grep -Fq 'Status: ready' "$TMP/bootstrap-other-version-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && [ "$(readlink "$YARD_RUNTIME_ROOT/previous")" = "$first_target" ] \
+    && jq -e '.checkpoint == "complete" and (.steps | length) == 0' "$protected/journal.json" >/dev/null \
+    && jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' "$protected/ledger.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] \
+    && [ -x "$YARD_BIN_DIR/yard" ] && [ -x "$YARD_BIN_DIR/sy" ] \
+    || fail 'other-version retry omitted readiness, protected history or entrypoints'
+)
+# Retry fixtures for an installation whose first runtime link has no previous release.
+retry_environment() { # <home>
+  export HOME="$1" SUBYARD_OPERATOR_HOME="$1"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  mkdir -m 0700 "$HOME"
+}
+publish_first() { # <bundle>
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$1" --checksum "$1.sha256" --manifest "$1.manifest.json" \
+    --provenance "$1.provenance.json" >/dev/null
+}
+installation_state() {
+  find "$SUBYARD_CONFIG_HOME" "$YARD_BIN_DIR" -type f -exec sha256sum {} + 2>/dev/null | sort
+  readlink "$YARD_RUNTIME_ROOT/current"
+  readlink "$YARD_RUNTIME_ROOT/previous" || true
+}
+# A completed first install that keeps its journal but lost ledger and checkpoint
+# is refused by its own engine. With every protected record and previous absent
+# it is a fresh installation and is initialized; no user data is deleted.
+(
+  retry_environment "$TMP/bootstrap-damaged-home"
+  export YARD_RELEASE_BASE_URL="file://$release"
+  YARD_RELEASE_VERSION=1.0.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-install.log" 2>&1 \
+    || { cat "$TMP/bootstrap-damaged-install.log" >&2; fail 'damaged-history fixture install failed'; }
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  [ ! -e "$YARD_RUNTIME_ROOT/previous" ] && jq -e '.checkpoint == "complete"' "$protected/journal.json" >/dev/null \
+    || fail 'damaged-history precondition was not established'
+  rm -f -- "$protected/ledger.json" "$protected/history-checkpoint.json"
+  damaged_state="$(installation_state)"
+  if YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-retry.log" 2>&1; then
+    fail 'installer accepted a completed journal without protected history'
+  fi
+  grep -Fq 'protected migration history is absent' "$TMP/bootstrap-damaged-retry.log" \
+    && [ "$(installation_state)" = "$damaged_state" ] \
+    || { cat "$TMP/bootstrap-damaged-retry.log" >&2; fail 'completed journal without history was not refused unchanged'; }
+  rm -f -- "$protected/journal.json"
+  YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-fresh-again.log" 2>&1 \
+    || { cat "$TMP/bootstrap-fresh-again.log" >&2; fail 'installation without any protected record was not initialized'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-fresh-again.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-nm-device-guard-v4"]}' "$protected/ledger.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] \
+    || fail 'fresh initialization of an installation without protected records was incomplete'
+)
+# The installed release's own migrate resumes its initial journal after an
+# interruption; a retry with another version must not hand that journal to the
+# newer release. A non-directory transactions entry stops the first run right
+# after the authorized journal and before baseline evidence or ledger publication.
+(
+  retry_environment "$TMP/bootstrap-killed-home"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  publish_first "$bundle_one"
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME" "$SUBYARD_CONFIG_HOME/release-transition" "$protected"
+  : > "$protected/transactions"
+  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed.log" 2>&1; then
+    fail 'interrupted initial activation fixture unexpectedly completed'
+  fi
+  rm -f -- "$protected/transactions"
+  [ "$(find "$SUBYARD_CONFIG_HOME" -mindepth 1 -not -type d -printf '%P\n' | sort)" = $'migrations/update.lock\nrelease-transition/v2/journal.json' ] \
+    && jq -e '.checkpoint == "authorized" and ([.steps[] | .id + ":" + .checkpoint] == ["initialize-ledger-v2.initialize:intent", "introduce-nm-device-guard-v4.ledger:intent"])' \
+      "$protected/journal.json" >/dev/null \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    || { cat "$TMP/bootstrap-killed.log" >&2; fail 'interrupted initial activation precondition was not established'; }
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-killed-retry.log" >&2; fail 'interrupted initial activation did not resume through its installed owner'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-killed-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/previous")" == releases/1.0.0-test-* ]] \
+    && [ -f "$protected/ledger.json" ] && [ -f "$protected/history-checkpoint.json" ] \
+    && [ -x "$YARD_BIN_DIR/yard" ] \
+    || fail 'resumed initial activation omitted readiness, history or entrypoints'
+)
+# The exact release version decides: a prerelease current is not its release.
+final_release="$TMP/final-release"
+"$ROOT/dev/package-engine.sh" --output-dir "$final_release" --version 1.0.0 \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
+(
+  retry_environment "$TMP/bootstrap-prerelease-home"
+  export YARD_RELEASE_BASE_URL="file://$final_release" YARD_RELEASE_VERSION=1.0.0
+  publish_first "$bundle_one"
+  "$final_release/subyard-install.sh" --yes > "$TMP/bootstrap-prerelease.log" 2>&1 \
+    || { cat "$TMP/bootstrap-prerelease.log" >&2; fail 'prerelease current was treated as its release version'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-prerelease.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.0-[0-9a-f]* ]] \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/previous")" == releases/1.0.0-test-* ]] \
+    || fail 'prerelease current did not finish before the release update'
+)
+# An unparsable installed version never runs its migrate before the update refusal.
+for malformed_version in 1.0.bad 1.0.0-rc.01 1.0.0-rc.99999999999999999999; do
+  malformed_release="$TMP/malformed-release-$malformed_version"
+  "$ROOT/dev/package-engine.sh" --output-dir "$malformed_release" --version "$malformed_version" \
+    --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
+  (
+    retry_environment "$TMP/bootstrap-malformed-home-$malformed_version"
+    export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+    publish_first "$malformed_release/subyard-$malformed_version-linux-amd64.tar.gz"
+    if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-malformed-$malformed_version.log" 2>&1; then
+      fail "installer updated unparsable installed version $malformed_version"
+    fi
+    protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+    [ ! -e "$protected/journal.json" ] && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
+      && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/"$malformed_version"-* ]] \
+      || { cat "$TMP/bootstrap-malformed-$malformed_version.log" >&2; fail "unparsable installed version $malformed_version received protected writes"; }
+  )
+done
+
 # A verified standalone bootstrap is the one-time bridge for an active runtime
 # whose installed release installer predates immutable publish-only support.
 # The candidate must own the transition; the legacy installer is never asked
@@ -989,6 +1128,7 @@ HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
 grep -Fq 'v0.11.0' "$TMP/legacy-refusal.log" \
   && grep -Fq 'uninstall --full' "$TMP/legacy-refusal.log" \
   && [ "$(readlink "$legacy_bridge_runtime/current")" = "$legacy_bridge_initial" ] \
+  && [ -z "$(ls -A "$legacy_bridge_home/.config/subyard")" ] \
   || fail 'legacy refusal changed active state or omitted removal guidance'
 
 # Publication is intentionally separate from activation. The transition module
@@ -1196,12 +1336,12 @@ PY
   assert_no_draft
 )
 
-# Installed release ingress: bootstrap creates only the first link; every
-# subsequent activation, same-version retry, and explicit rollback is owned by
-# the candidate ReleaseTransition module.
+# Complete the fresh publisher's bootstrap before updating its installed state.
+# Later activation, same-version retry and rollback preserve this top-epoch
+# authority and run no historical settings handlers.
 runtime_root="$TMP/update-runtime"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/hermes"
-printf '%s\n' '# retained' 'YARD_TEMPLATE=e2e-vms' 'NESTED_E2E_VMS=0' 'SSH_PORT=2224' \
+printf '%s\n' '# retained' 'SSH_PORT=2224' \
   > "$SUBYARD_CONFIG_HOME/yards/hermes/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/hermes/config.env"
 "$ROOT/scripts/install-runtime-release.sh" \
@@ -1212,6 +1352,12 @@ initial_target="$(readlink "$runtime_root/current")"
 [ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.0.0-test ] \
   && [ ! -e "$runtime_root/previous" ] && [ ! -L "$runtime_root/previous" ] \
   || fail 'verified bootstrap did not create the initial runtime boundary'
+"$runtime_root/current/bin/yard" migrate --yes >/dev/null
+ledger="$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json"
+settings_before="$(sha256sum "$SUBYARD_CONFIG_HOME/yards/hermes/config.env")"
+ledger_before="$(sha256sum "$ledger")"
+jq -e '.schemaVersion == 2 and .domains.settings == {"epoch": 3, "applied": []}' "$ledger" >/dev/null \
+  || fail 'fresh publisher did not initialize top-epoch settings authority'
 
 YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
   installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
@@ -1220,16 +1366,13 @@ candidate_target="$(readlink "$runtime_root/current")"
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   && [ "$candidate_target" != "$initial_target" ] \
   || fail 'release transition did not activate and retain the exact release pair'
-grep -Fxq '# retained' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
-  && grep -Fxq "YARD_TEMPLATE='test-vms'" "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
-  && grep -Fxq 'SSH_PORT=2224' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
-  && ! grep -Fq 'NESTED_E2E_VMS' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
-  || fail 'planned v2 canonicalize/reset did not reach its declared result'
-ledger="$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json"
+[ "$(sha256sum "$SUBYARD_CONFIG_HOME/yards/hermes/config.env")" = "$settings_before" ] \
+  && [ "$(sha256sum "$ledger")" = "$ledger_before" ] \
+  || fail 'zero-step update rewrote existing settings or ledger authority'
 journal="$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json"
 jq -e '.schemaVersion == 2 and .domains.settings.epoch == 3 and
-  .domains.settings.applied == ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]' "$ledger" >/dev/null \
-  && jq -e '.schemaVersion == 2 and .checkpoint == "complete"' "$journal" >/dev/null \
+  .domains.settings.applied == []' "$ledger" >/dev/null \
+  && jq -e '.schemaVersion == 2 and .checkpoint == "complete" and (.steps | length) == 0' "$journal" >/dev/null \
   || fail 'v2 transition did not record a completed per-domain fixed point'
 [ ! -e "$SUBYARD_CONFIG_HOME/migrations/state.json" ] \
   || fail 'production release transition wrote the superseded global layout'
@@ -1263,6 +1406,9 @@ YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
 [ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'forward retry after rollback did not converge to the exact pair'
+[ "$(sha256sum "$SUBYARD_CONFIG_HOME/yards/hermes/config.env")" = "$settings_before" ] \
+  && [ "$(sha256sum "$ledger")" = "$ledger_before" ] \
+  || fail 'rollback or roll-forward rewrote fresh settings or ledger authority'
 
 YARD_RELEASE_CACHE="$TMP/cache" installed_update \
   --runtime-root "$runtime_root" --version 1.1.0-test --offline --check >/dev/null \

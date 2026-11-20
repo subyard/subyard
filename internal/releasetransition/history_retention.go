@@ -53,16 +53,18 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 			retained := journal.Releases.Target == endpoints.Active ||
 				(endpoints.Previous != nil && journal.Releases.Target == *endpoints.Previous)
 			if state.Checkpointed && state.Checkpoint.LegacyProjection.Exists {
+				// Initial publication and historical advances both pin the
+				// compatibility projection whose evidence must remain readable.
 				terminalProjection := false
 				for _, step := range journal.Steps {
-					if step.ID == step.Migration+".ledger" && step.Desired == state.ProjectionSnapshot.Fingerprint {
+					if (step.ID == step.Migration+".ledger" || step.ID == baselineLedgerStep) && step.Desired == state.ProjectionSnapshot.Fingerprint {
 						terminalProjection = true
 					}
 				}
 				// Historical independent migrations may have a different
 				// order. A terminal pin is not the before-pin of another edge.
 				for _, step := range journal.Steps {
-					if step.ID == step.Migration+".ledger" && step.Expected == state.ProjectionSnapshot.Fingerprint {
+					if (step.ID == step.Migration+".ledger" || step.ID == baselineLedgerStep) && step.Expected == state.ProjectionSnapshot.Fingerprint {
 						terminalProjection = false
 						break
 					}
@@ -94,8 +96,14 @@ func (store *POSIXV2Store) closedTransactionEvidence(transaction TransactionID, 
 		}
 	}
 	for _, step := range journal.Steps {
+		if step.ID == baselineLedgerStep {
+			if err := store.terminalStepArtifacts(journal, step, MigrationDefinitionV2{}); err != nil {
+				return journal, err
+			}
+			continue
+		}
 		var migration MigrationDefinitionV2
-		for _, definition := range registry.Migrations {
+		for _, definition := range registry.historyData().Migrations {
 			if definition.ID == step.Migration {
 				migration = definition
 				break

@@ -160,10 +160,24 @@ func configLayoutRollbackFixture(t *testing.T, metadata string) (*Runtime, optio
 
 func writeRollbackFixtureBaselineLedger(t *testing.T, configHome string) {
 	t.Helper()
+	writeRollbackFixtureLedger(t, configHome, []byte(sourceAdmissionRegistry))
+}
+
+// writeRollbackFixtureLedger writes the source registry's baseline ledger.
+func writeRollbackFixtureLedger(t *testing.T, configHome string, payload []byte) {
+	t.Helper()
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(configHome, "release-transition/v2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), []byte(`{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`), 0o600)
+	testkit.WriteFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), ledger, 0o600)
 }
 
 func writeConfigLayoutManifest(t *testing.T, root string, schema int, files bool) {

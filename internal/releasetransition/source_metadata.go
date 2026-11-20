@@ -56,14 +56,8 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		if err != nil || !bytes.Equal(canonical, snapshot.Payload) {
 			return proof, errors.New("source repair requires a canonical protected journal")
 		}
-		originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
-		if journal.RegistryDigest != digest || !supportedCatalog || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
+		if journal.RegistryDigest != digest || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
 			return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
-		}
-		for _, migration := range registry.Migrations {
-			if !originalCatalog.Supports(migration.Kind, migration.Domain) {
-				return proof, errors.New("source repair registry exceeds the original compiled catalog")
-			}
 		}
 		if journal.Checkpoint != JournalComplete && (journal.Checkpoint != JournalReconciling || journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 0 || IsRecoveryTransaction(journal.Transaction)) {
 			if strings.HasPrefix(string(journal.Transaction), RecoveryTransactionPrefixV2) &&
@@ -83,7 +77,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		proof.Journal = &journal
 	}
 	proof.Ledger, err = store.ReadMigrationLedger(registry, digest)
-	if err != nil {
+	if err != nil && !(errors.Is(err, ErrMigrationLedgerAbsent) && proof.Journal == nil) {
 		return proof, err
 	}
 	if proof.Journal != nil {
@@ -95,7 +89,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 			return proof, err
 		}
 		_, completionErr := owner.Complete(authority)
-		if completionErr != nil || !proof.Ledger.AuthoritySnapshot.Exists {
+		if completionErr != nil {
 			return proof, errors.New("source repair requires the complete original migration ledger")
 		}
 		if proof.Journal.Checkpoint == JournalComplete {
@@ -286,6 +280,16 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 		}
 	}
 	for _, step := range journal.Steps {
+		if step.ID == baselineLedgerStep {
+			if err := validateTerminalBaseline(journal, step, registry); err != nil {
+				return err
+			}
+			if err := store.terminalStepArtifacts(journal, step, MigrationDefinitionV2{}); err != nil {
+				return err
+			}
+			last = step.Desired
+			continue
+		}
 		edge, known := edges[step.Migration]
 		if !known || !advanced[step.Migration] || step.Checkpoint != StepVerified || step.Evidence == nil {
 			return errors.New("source repair requires supported terminal migration evidence")
@@ -317,7 +321,11 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 	if step.Checkpoint != StepVerified || step.Evidence == nil {
 		return errors.New("terminal step is not verified")
 	}
-	if step.ID == migration.ID+".ledger" {
+	if step.ID == baselineLedgerStep {
+		if step.Evidence.Recovery != "" {
+			return invalid("baseline ledger evidence cannot carry recovery data")
+		}
+	} else if step.ID == migration.ID+".ledger" {
 		if step.Resource != "ledger."+migration.Domain || step.Decision != DecisionTransform || step.Evidence.Recovery != "" {
 			return errors.New("terminal ledger step grammar is unsupported")
 		}
@@ -405,7 +413,20 @@ func (store *POSIXV2Store) sourceRetainedTerminalEvidence(transaction Transactio
 		}
 		verified[step] = evidence
 	}
-	path, err := registry.PendingPath(BaselineLedgerV2(registry))
+	if evidence, exists := verified[baselineLedgerStep]; exists {
+		intent, _, err := baselineLedgerIntent(registry)
+		if err != nil {
+			return bound, err
+		}
+		bound.Releases = evidence.Releases
+		step := JournalStep{ID: intent.ID, Migration: intent.Migration, Resource: intent.Resource, Decision: intent.Decision, Expected: intent.Expected, Desired: intent.Desired, Checkpoint: StepVerified, Evidence: &evidence}
+		if err := validateTerminalBaseline(bound, step, registry); err != nil {
+			return bound, err
+		}
+		bound.Steps = append(bound.Steps, step)
+		delete(verified, baselineLedgerStep)
+	}
+	path, err := registry.historyData().PendingPath(FrozenHistoryBaselineV2(registry))
 	if err != nil {
 		return bound, err
 	}
@@ -585,19 +606,6 @@ type sourceMetadataInput struct {
 // This is a bounded inventory of the existing typed store, including absence,
 // pending records, directory identities, and unrelated recovery namespaces.
 func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
-	return store.sourceMetadataInventoryWithMigrationOwner(false)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithoutMigrationOwner() (Fingerprint, error) {
-	// Publication changes this namespace, so its bytes cannot join the predecessor
-	// binding. Validate its complete typed grammar before excluding it instead.
-	if _, err := store.migrationOwnerReceipts(); err != nil {
-		return "", err
-	}
-	return store.sourceMetadataInventoryWithMigrationOwner(true)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude bool) (Fingerprint, error) {
 	inputs := map[string]sourceMetadataInput{}
 	remaining := 8192
 	remainingBytes := int64(32 << 20)
@@ -618,11 +626,6 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 			return err
 		}
 		inputs[key] = metadataInput(stat, "")
-		if exclude && len(parts) == 1 {
-			input := inputs[key]
-			input.Links = 0
-			inputs[key] = input
-		}
 		entries, _, err := store.readDirectoryEntries(parts, remaining)
 		if err != nil {
 			return err
@@ -634,16 +637,7 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 		for _, entry := range entries {
 			name := entry.Name()
 			child := append(slices.Clone(parts), name)
-			if exclude && len(child) == 2 && child[1] == "migration-owner" {
-				continue
-			}
 			if strings.HasSuffix(name, ".pending") {
-				if exclude && len(child) == 3 && child[1] == "v2" && name == ".journal.json.pending" {
-					if err := store.validateMigrationOwnerPreparedJournal(); err != nil {
-						return err
-					}
-					continue
-				}
 				return errors.New("finish the pending protected publication with its sealed owner before source repair")
 			}
 			if entry.IsDir() {

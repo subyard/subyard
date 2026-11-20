@@ -138,8 +138,11 @@ func (checkpoint LedgerCheckpointV1) Validate(
 		if !exists {
 			return invalid("migration checkpoint contains unknown domain %q", domain)
 		}
-		if state.Epoch < minimum || state.Epoch > registry.CurrentEpochs[domain] ||
-			state.CompactedThrough < minimum || state.CompactedThrough > state.Epoch {
+		if state.Epoch < minimum {
+			return retiredMigrationRepairError()
+		}
+		if state.Epoch > registry.CurrentEpochs[domain] ||
+			state.CompactedThrough < registry.historyData().MinimumEpochs[domain] || state.CompactedThrough > state.Epoch {
 			return invalid("migration checkpoint domain %q has an invalid epoch", domain)
 		}
 		legacyEpoch, exists := checkpoint.LegacyProjection.Epochs[domain]
@@ -174,16 +177,20 @@ func (checkpoint LedgerCheckpointV1) Validate(
 }
 
 func (checkpoint LedgerCheckpointV1) LedgerView(registry RegistryV2) (LedgerV2, error) {
+	return checkpoint.ledgerView(registry, registry.historyData().MinimumEpochs)
+}
+
+func (checkpoint LedgerCheckpointV1) ledgerView(registry RegistryV2, minimums map[string]int) (LedgerV2, error) {
 	if checkpoint.SchemaVersion != LedgerCheckpointSchemaV1 {
 		return LedgerV2{}, invalid("unsupported migration ledger checkpoint schema %d", checkpoint.SchemaVersion)
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := LedgerV2{SchemaVersion: LedgerSchemaV2, Domains: make(map[string]DomainLedgerV2, len(checkpoint.Domains))}
 	for domain, state := range checkpoint.Domains {
 		if _, exists := registry.MinimumEpochs[domain]; !exists {
 			return LedgerV2{}, invalid("migration checkpoint contains unknown domain %q", domain)
 		}
 		ledger.Domains[domain] = DomainLedgerV2{
-			Epoch: state.Epoch, Applied: nonNilIDs(registry.appliedPrefix(domain, state.Epoch)),
+			Epoch: state.Epoch, Applied: nonNilIDs(registry.appliedSuffix(domain, minimums[domain], state.Epoch)),
 		}
 	}
 	if err := registry.ValidateLedger(ledger); err != nil {

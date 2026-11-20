@@ -619,65 +619,6 @@ func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 	}
 }
 
-func TestV0111RecoveryPreparedActionUsesOneDefaultYesPrompt(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	countRecoveryConsequence := func(consequences []string) int {
-		count := 0
-		for _, consequence := range consequences {
-			if consequence == recoveryConsequence {
-				count++
-			}
-		}
-		return count
-	}
-	for _, assumeYes := range []bool{false, true} {
-		t.Run(fmt.Sprintf("assume yes=%v", assumeYes), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			prompt := &testkit.Prompt{Answers: []bool{true}}
-			program, err := New(Options{
-				RepositoryRoot: root, Environment: environment, Prompt: prompt,
-				Clock: testkit.NewManualClock(time.Unix(100, 0)),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := program.loadContext("default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			prepared := releaseruntime.Prepared{
-				Action: "update.activate", Changed: true,
-				Consequences: []string{
-					recoveryConsequence,
-					"apply the exact typed migration and release activation plan",
-				},
-			}
-			plan, err := program.operationOrchestrator(
-				"operation-v0111-recovery", loaded, nil, nil,
-			).PlanAction(
-				context.Background(), loaded.Context, "update", domain.RemoteOnController,
-				prepared.Action, domain.ActionDelta{
-					Changed: prepared.Changed, Consequences: prepared.Consequences,
-				}, assumeYes,
-			)
-			if err != nil || !plan.Confirmed || countRecoveryConsequence(plan.Consequences) != 1 {
-				t.Fatalf("recovery plan=%#v err=%v", plan, err)
-			}
-			if assumeYes {
-				if len(prompt.Requests) != 0 {
-					t.Fatalf("--yes prompted: %#v", prompt.Requests)
-				}
-				return
-			}
-			if len(prompt.Requests) != 1 ||
-				prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
-				countRecoveryConsequence(prompt.Requests[0].Consequences) != 1 {
-				t.Fatalf("interactive recovery prompt=%#v", prompt.Requests)
-			}
-		})
-	}
-}
-
 func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *testing.T) {
 	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
@@ -1124,6 +1065,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				if output, err := installer.CombinedOutput(); err != nil {
 					t.Fatalf("publish exact fixture candidate: %v %s", err, output)
 				}
+				seedRegistryLedgerFixture(t, environmentValue(environment, "SUBYARD_CONFIG_HOME"), mustReadConfigFixture(t, filepath.Join(runtimeRoot, "current", "config", "release-transition.json")))
 			}
 			if test.rollback {
 				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
@@ -1461,7 +1403,9 @@ func updateReleaseFixture(t *testing.T) (string, []string, string) {
 	), runtimeRoot
 }
 
-const cliUpdateFixtureRegistry = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`
+// The fixture release registry sits at the retired-prefix floor without live
+// migrations, so a supported installed source passes retired-history admission.
+const cliUpdateFixtureRegistry = `{"schemaVersion":2,"minimumEpochs":{"owner-registration":3,"power-metadata":3,"project-state":1,"settings":3},"currentEpochs":{"owner-registration":3,"power-metadata":3,"project-state":1,"settings":3},"migrations":[],"retiredPrefixes":{"owner-registration":{"throughEpoch":3,"digest":"f612c2a88cfb6a2f1f3194acf13b933d3009d8853c9f093e07e5cad491c1aab6"},"power-metadata":{"throughEpoch":3,"digest":"7692dc70c24e437966ba441be41204ec2642f3ceda004ef3492dd10c6826467d"},"settings":{"throughEpoch":3,"digest":"559acd8e21b67b9f4516f44ec2c67f655898a9094147d5686c3816990c47855e"}}}`
 
 func writeCLIUpdateFixtureHistory(t *testing.T, configHome string) {
 	t.Helper()
@@ -1469,7 +1413,7 @@ func writeCLIUpdateFixtureHistory(t *testing.T, configHome string) {
 	if err := os.MkdirAll(history, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(history, "ledger.json"), `{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`, 0o600)
+	writeCLIFile(t, filepath.Join(history, "ledger.json"), `{"schemaVersion":2,"domains":{"owner-registration":{"epoch":3,"applied":[]},"power-metadata":{"epoch":3,"applied":[]},"project-state":{"epoch":1,"applied":[]},"settings":{"epoch":3,"applied":[]}}}`, 0o600)
 }
 
 func prepareCLIOldRelease(t *testing.T, runtimeRoot, configHome string) {
@@ -3055,6 +2999,7 @@ func installUnfinishedV2MutationGateFixture(
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	capture := filepath.Join(root, "v2-candidate-inspections")
 	engine := filepath.Join(runtimeRoot, "releases", target, "bin", "yard-engine")
 	enginePayload := `#!/bin/sh

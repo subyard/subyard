@@ -678,12 +678,17 @@ func (runtime *Runtime) PrepareTransition(
 		runtime.progress(parsed, "Installed version: %s", version)
 	}
 	runtime.progress(parsed, "Inspecting the installed release...")
-	if prepared, selected, err := runtime.prepareMigrationOwnerReplacement(ctx, parsed, configHome, yard, inheritedSettingIDs); selected {
-		return prepared, err
-	}
 	protected, err := runtime.inspectProtectedTransition(
 		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
 	)
+	if parsed.versionExplicit {
+		if refusal := runtime.unfinishedSourceAnchorError(ctx, parsed.root, configHome); refusal != nil {
+			return Prepared{}, refusal
+		}
+	}
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
+		return Prepared{}, refusal
+	}
 	var completedAdmission *SourceAdmission
 	// The original inspection result stays the answer for a same-target retry.
 	originalProtected, originalErr := protected, err
@@ -713,14 +718,6 @@ func (runtime *Runtime) PrepareTransition(
 			parsed.version != "" && parsed.version == protected.target.version &&
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
 		if unfinished || exactCompletedTarget {
-			if recovery, qualified := runtime.qualifyV0111StandaloneRecovery(
-				ctx, parsed, protected,
-			); qualified {
-				defer recovery.candidate.Close()
-				return runtime.prepareVerifiedReplacementTransition(
-					ctx, parsed, recovery.candidate, recovery.request, &recovery.revalidation,
-				)
-			}
 			if unfinished {
 				newerRelease = newerReleaseReplacement(parsed, configHome)
 			}
@@ -764,7 +761,7 @@ func (runtime *Runtime) PrepareTransition(
 					ArtifactDigest:      verified.manifestDigest,
 					InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 					SourceIngress:       sourceIngress, Replacement: newerRelease,
-				}, nil)
+				})
 				if err != nil {
 					return runtime.inspectionFailure(parsed, err)
 				}
@@ -1041,19 +1038,6 @@ func (runtime *Runtime) PrepareTransition(
 	}
 }
 
-type qualifiedReplacementRecovery struct {
-	candidate    *verifiedPublishedCandidate
-	request      releasetransition.ProcessRequest
-	revalidation replacementRevalidation
-}
-
-type replacementRevalidation struct {
-	source          candidateVerification
-	journalSnapshot releasetransition.ProtectedSnapshot
-}
-
-const v0111RecoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-
 // negotiatedRecoveryRelease names published owners whose unfinished journals
 // keep their own exact recovery contracts.
 func negotiatedRecoveryRelease(target releasetransition.ReleaseID) bool {
@@ -1102,52 +1086,6 @@ func newerReleaseReplacement(parsed options, configHome string) *releasetransiti
 		Transaction: journal.Transaction, Fingerprint: snapshot.Fingerprint,
 		Reason: releasetransition.JournalReplacementNewerRelease,
 	}
-}
-
-func (runtime *Runtime) qualifyV0111StandaloneRecovery(
-	ctx context.Context,
-	parsed options,
-	protected *protectedTransitionInspection,
-) (qualifiedReplacementRecovery, bool) {
-	if !isV0111ScopeBlocker(protected) ||
-		!parsed.offline || !parsed.versionExplicit || parsed.version == "" ||
-		parsed.rollback || parsed.force ||
-		(parsed.tag != "" && parsed.tag != "v"+parsed.version) ||
-		runtime.config.RepositoryRoot == "" {
-		return qualifiedReplacementRecovery{}, false
-	}
-	verified, qualified := runtime.verifiedStandaloneCandidateRoot(ctx, parsed.root)
-	if !qualified {
-		return qualifiedReplacementRecovery{}, false
-	}
-	if verified.version != parsed.version {
-		verified.Close()
-		return qualifiedReplacementRecovery{}, false
-	}
-	request := releasetransition.ProcessRequest{
-		SchemaVersion:       releasetransition.ProcessProtocolSchemaV1,
-		Mode:                releasetransition.ProcessInspect,
-		RuntimeRoot:         parsed.root,
-		ConfigHome:          protected.request.ConfigHome,
-		Yard:                protected.request.Yard,
-		Target:              verified.candidate.release,
-		Direction:           releasetransition.DirectionActivateTarget,
-		ArtifactDigest:      verified.manifestDigest,
-		InheritedSettingIDs: slices.Clone(protected.request.InheritedSettingIDs),
-		Replacement: &releasetransition.JournalReplacement{
-			Transaction:   protected.journal.Transaction,
-			Fingerprint:   protected.journalSnapshot.Fingerprint,
-			Reason:        releasetransition.JournalReplacementPostActivationScopeV0111,
-			SourceVersion: protected.target.version,
-		},
-	}
-	return qualifiedReplacementRecovery{
-		candidate: verified,
-		request:   request,
-		revalidation: replacementRevalidation{
-			source: protected.target, journalSnapshot: protected.journalSnapshot,
-		},
-	}, true
 }
 
 func (runtime *Runtime) verifiedStandaloneCandidateRoot(
@@ -1268,10 +1206,10 @@ func (runtime *Runtime) prepareProtectedTransition(
 			protected.target.candidate.release, retry,
 		)
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(
 		parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
-		protected.activationReconciliationOwned, nil, nil, protected.recoveryRequest,
+		protected.activationReconciliationOwned, protected.recoveryRequest,
 	)
 	if err == nil && !parsed.check {
 		prepared.RepairCurrent = protected.inspection.Outcome.Active == protected.request.Target &&
@@ -1400,7 +1338,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
 			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
 	}
-	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request, nil)
+	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Prepared{}, verifiedPreparation(err)
@@ -1421,7 +1359,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 }
 
 type candidateVerification struct {
-	selection      *releaseSelection
 	candidate      publishedCandidate
 	digest         releasetransition.Fingerprint
 	version        string
@@ -1495,7 +1432,7 @@ func (runtime *Runtime) prepareVerifiedCandidateTransition(
 	verified *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
 ) (Prepared, error) {
-	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request, nil)
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request)
 }
 
 func (runtime *Runtime) prepareVerifiedReplacementTransition(
@@ -1503,7 +1440,6 @@ func (runtime *Runtime) prepareVerifiedReplacementTransition(
 	parsed options,
 	verified *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
-	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
 	if err != nil {
@@ -1514,7 +1450,7 @@ func (runtime *Runtime) prepareVerifiedReplacementTransition(
 	if err != nil {
 		return Prepared{}, err
 	}
-	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request, revalidation)
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request)
 }
 
 func (runtime *Runtime) prepareVerifiedTransition(
@@ -1523,12 +1459,11 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	owner *verifiedPublishedCandidate,
 	target *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
-	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	if err := runtime.inspectRollbackCompatibility(ctx, target, request, parsed.selection); err != nil {
 		return Prepared{}, err
 	}
-	return runtime.inspectVerifiedTransition(ctx, parsed, owner, target, request, revalidation)
+	return runtime.inspectVerifiedTransition(ctx, parsed, owner, target, request)
 }
 
 func (runtime *Runtime) inspectVerifiedTransition(
@@ -1537,7 +1472,6 @@ func (runtime *Runtime) inspectVerifiedTransition(
 	owner *verifiedPublishedCandidate,
 	target *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
-	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	ctx = selectionContext(ctx, parsed.selection)
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
@@ -1585,7 +1519,7 @@ func (runtime *Runtime) inspectVerifiedTransition(
 			registryDigest: target.registryDigest,
 		},
 		request, *response.Inspection,
-		response.ActivationReconciliationOwned, revalidation,
+		response.ActivationReconciliationOwned,
 	)
 }
 
@@ -1596,22 +1530,19 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	request releasetransition.ProcessRequest,
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
-	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	return runtime.prepareInspectedCandidateTransitionWithDelegate(
-		parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil, nil,
+	return runtime.prepareInspectedCandidateTransitionWithRecovery(
+		parsed, owner, target, request, inspection, activationReconciliationOwned, nil,
 	)
 }
 
-func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
+func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	parsed options,
 	owner candidateVerification,
 	target candidateVerification,
 	request releasetransition.ProcessRequest,
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
-	revalidation *replacementRevalidation,
-	delegate *candidateVerification,
 	recoveryRequest *releasetransition.RecoveryProcessRequest,
 ) (prepared Prepared, err error) {
 	if recoveryRequest != nil {
@@ -1627,22 +1558,13 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
-			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks, revalidation)
-			prepared.Binding = delegatedReleaseOperationBinding(prepared.Binding, delegate)
+			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks)
 			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
 		}
 	}()
 	goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
 	if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
-	}
-	if revalidation != nil {
-		inspection.Assessment.Consequences = v0111RecoveryConsequences(
-			inspection.Assessment.Consequences,
-		)
-		if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
-			return Prepared{}, fmt.Errorf("augmented recovery inspection is invalid: %w", err)
-		}
 	}
 	if parsed.check {
 		return Prepared{
@@ -1733,30 +1655,6 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 					return fmt.Errorf("%w: transition owner version changed after inspection", domain.ErrPlanStale)
 				}
 			}
-			if revalidation != nil {
-				verifiedSource, verifyErr := runtime.verifyPublishedCandidate(
-					ctx, revalidation.source.candidate, request.RuntimeRoot,
-					&revalidation.source.digest,
-				)
-				if verifyErr != nil {
-					return fmt.Errorf("reverify recovery source runtime: %w", verifyErr)
-				}
-				defer verifiedSource.Close()
-				if verifiedSource.version != revalidation.source.version {
-					return fmt.Errorf("%w: recovery source runtime version changed after inspection", domain.ErrPlanStale)
-				}
-				store, storeErr := releasetransition.NewPOSIXV2Store(request.ConfigHome)
-				if storeErr != nil {
-					return storeErr
-				}
-				journal, readErr := store.ReadCurrentJournal()
-				if readErr != nil {
-					return fmt.Errorf("revalidate recovery source journal: %w", readErr)
-				}
-				if !sameProtectedSnapshot(journal, revalidation.journalSnapshot) {
-					return fmt.Errorf("%w: recovery source journal changed after inspection", domain.ErrPlanStale)
-				}
-			}
 			if parsed.expectedLinks != nil {
 				observed, err := runtime.inspectRuntimeLinks(parsed.root)
 				if err != nil || observed != *parsed.expectedLinks {
@@ -1778,7 +1676,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			request.Execution = &releasetransition.Execution{
 				Plan: inspection.Plan, Authorization: grant,
 			}
-			converged, convergeErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, delegate, request, grant, recoveryRequest)
+			converged, convergeErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, request, grant, recoveryRequest)
 			if convergeErr != nil {
 				return convergeErr
 			}
@@ -1795,7 +1693,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 				if converged.Outcome.Code == releasetransition.CodePlanStale {
 					request.Mode = releasetransition.ProcessInspect
 					request.Execution = nil
-					rechecked, recheckErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, delegate, request, "", recoveryRequest)
+					rechecked, recheckErr := runtime.invokePreparedTransitionExecution(ctx, verifiedOwner, request, "", recoveryRequest)
 					if recheckErr != nil {
 						return recheckErr
 					}
@@ -1821,17 +1719,6 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			return nil
 		},
 	}, nil
-}
-
-func v0111RecoveryConsequences(candidate []string) []string {
-	consequences := make([]string, 0, len(candidate)+1)
-	consequences = append(consequences, v0111RecoveryConsequence)
-	for _, consequence := range candidate {
-		if consequence != v0111RecoveryConsequence {
-			consequences = append(consequences, consequence)
-		}
-	}
-	return consequences
 }
 
 func sameProtectedSnapshot(

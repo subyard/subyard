@@ -1,41 +1,26 @@
 package releasetransition
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"strings"
 )
 
-const (
-	ownerRegistrationResource    = "test-yard-owner"
-	legacyOwnerRegistrationYard  = "e2e-yard"
-	currentOwnerRegistrationYard = "test-yard"
-)
+const ownerRegistrationResource = "test-yard-owner"
 
 // OwnerRegistrationState is a closed, redacted description of the persisted
 // test-yard owner topology. It deliberately carries neither paths nor config
 // values across the release-transition boundary.
 type OwnerRegistrationState string
-type OwnerRegistrationProgress string
 
 // OwnerRegistrationObservation binds the closed topology class to the exact
-// registration bytes and project image namespace needed by Commit. Registration
-// is an opaque digest; raw configuration never crosses the port.
+// registration bytes and project image namespace of frozen typed recovery.
+// Registration is an opaque digest; raw configuration is never recorded.
 type OwnerRegistrationObservation struct {
 	State        OwnerRegistrationState `json:"state"`
 	Registration Fingerprint            `json:"registration"`
 	Overrides    Fingerprint            `json:"overrides"`
 	Controller   Fingerprint            `json:"controller"`
 	SharedImages bool                   `json:"sharedImages"`
-
-	// These fields are the closed runtime binding from the outer recovery
-	// record. They never enter a plan fingerprint or serialized observation.
-	RecoveryToken   string `json:"-"`
-	TerminalCleanup bool   `json:"-"`
 }
 
 const (
@@ -50,30 +35,6 @@ const (
 	OwnerRegistrationCurrent                     OwnerRegistrationState = "current"
 )
 
-const (
-	OwnerRegistrationExpected   OwnerRegistrationProgress = "expected"
-	OwnerRegistrationInProgress OwnerRegistrationProgress = "in-progress"
-	OwnerRegistrationDesired    OwnerRegistrationProgress = "desired"
-)
-
-// V2OwnerRegistration is the trusted mutation port for the compiled
-// owner-registration capability. Prepare is the fresh read-only assessment;
-// prospective settings let source ingress expose the exact registration it
-// will import before that import is authorized.
-// Observe accepts intermediate progress only when bound to its journaled
-// before-state. Commit is called only after that exact state was authorized.
-type V2OwnerRegistration interface {
-	Prepare(context.Context, V2SettingsSnapshotView) (OwnerRegistrationObservation, error)
-	Observe(context.Context, OwnerRegistrationObservation) (OwnerRegistrationProgress, error)
-	Commit(context.Context, OwnerRegistrationObservation) error
-}
-
-type ownerRegistrationV2Plan struct {
-	Before              OwnerRegistrationObservation
-	ExpectedFingerprint Fingerprint
-	DesiredFingerprint  Fingerprint
-}
-
 type ownerRegistrationRecoveryV1 struct {
 	SchemaVersion int                          `json:"schemaVersion"`
 	Transaction   TransactionID                `json:"transaction"`
@@ -83,33 +44,6 @@ type ownerRegistrationRecoveryV1 struct {
 	Expected      Fingerprint                  `json:"expectedFingerprint"`
 	Token         string                       `json:"token"`
 	Before        OwnerRegistrationObservation `json:"before"`
-}
-
-func inspectOwnerRegistrationV2(
-	ctx context.Context,
-	port V2OwnerRegistration,
-	prospective V2SettingsSnapshotView,
-) (*ownerRegistrationV2Plan, error) {
-	if port == nil {
-		return nil, fmt.Errorf("owner-registration capability is unavailable")
-	}
-	observation, err := port.Prepare(ctx, prospective)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateOwnerRegistrationObservation(observation); err != nil {
-		return nil, err
-	}
-	if observation.State == OwnerRegistrationAbsent || observation.State == OwnerRegistrationCurrent {
-		return nil, nil
-	}
-	desired := observation
-	desired.State = OwnerRegistrationCurrent
-	return &ownerRegistrationV2Plan{
-		Before:              observation,
-		ExpectedFingerprint: ownerRegistrationFingerprint(observation),
-		DesiredFingerprint:  ownerRegistrationFingerprint(desired),
-	}, nil
 }
 
 func validateOwnerRegistrationObservation(observation OwnerRegistrationObservation) error {
@@ -153,33 +87,8 @@ func validateOwnerRegistrationState(state OwnerRegistrationState) error {
 }
 
 func ownerRegistrationFingerprint(observation OwnerRegistrationObservation) Fingerprint {
-	observation.RecoveryToken = ""
-	observation.TerminalCleanup = false
 	payload, _ := json.Marshal(observation)
 	return fingerprintPayload(payload)
-}
-
-func desiredOwnerRegistrationObservation(
-	before OwnerRegistrationObservation,
-) OwnerRegistrationObservation {
-	desired := before
-	desired.State = OwnerRegistrationCurrent
-	return desired
-}
-
-func ownerRegistrationProgressFingerprint(
-	progress OwnerRegistrationProgress,
-	expected Fingerprint,
-	desired Fingerprint,
-) (Fingerprint, error) {
-	switch progress {
-	case OwnerRegistrationExpected, OwnerRegistrationInProgress:
-		return expected, nil
-	case OwnerRegistrationDesired:
-		return desired, nil
-	default:
-		return "", invalid("unknown owner-registration progress %q", progress)
-	}
 }
 
 func validateOwnerRegistrationRecovery(
@@ -201,14 +110,6 @@ func validateOwnerRegistrationRecovery(
 	return validateOwnerRegistrationObservation(recovery.Before)
 }
 
-func newOwnerRecoveryToken() (string, error) {
-	payload := make([]byte, 16)
-	if _, err := rand.Read(payload); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(payload), nil
-}
-
 func validateOwnerRecoveryToken(token string) error {
 	if len(token) != 32 {
 		return invalid("owner-registration recovery token is invalid")
@@ -219,23 +120,4 @@ func validateOwnerRecoveryToken(token string) error {
 		}
 	}
 	return nil
-}
-
-func ownerRegistrationDiagnosticBlocker(err error, contexts ...context.Context) (Blocker, bool) {
-	if len(contexts) > 0 {
-		recordMigrationDiagnostics(contexts[0], err)
-	}
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if !errors.As(err, &diagnostic) {
-		return Blocker{}, false
-	}
-	message, retry := publicActivationDiagnostic(err, "", "install a compatible release, then run yard update --check")
-	if message == "" {
-		return Blocker{}, false
-	}
-	code := CodeDependencyUnavailable
-	if nativeMigrationRefusal(err) {
-		code = CodePreconditionBlocked
-	}
-	return Blocker{Code: code, Resource: "owner-registration." + ownerRegistrationResource, Message: message, Retry: retry}, true
 }

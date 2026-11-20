@@ -26,6 +26,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
@@ -121,14 +122,13 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	}
 	operation := cli.releaseActivationOperation(request)
 	reconcilers := operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request))
-	ownerRegistration := operation.ownerRegistrationTransition(request)
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
 	response, err := executeReleaseTransitionRequest(
 		ctx, cli.options.RepositoryRoot, request,
 		func(plan releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 			return expectedAuthorization != "" && authorization == expectedAuthorization
-		}, reconcilers, ownerRegistration, ingressFactory, recovery,
+		}, reconcilers, ingressFactory, recovery,
 	)
 	if err != nil {
 		cli.errorf("release transition: %v", err)
@@ -188,57 +188,6 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 	}...)
 }
 
-type ownerRegistrationTransition struct {
-	registeredYards, guestDiskTmp []releasetransition.V2ActivationReconciler
-	endpointSettings              []string
-	options                       func() (testyardmigration.Options, error)
-}
-
-func (transition *ownerRegistrationTransition) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
-	return transition.registeredYards, transition.guestDiskTmp, transition.endpointSettings
-}
-
-func (transition *ownerRegistrationTransition) Prepare(
-	ctx context.Context,
-	prospective releasetransition.V2SettingsSnapshotView,
-) (releasetransition.OwnerRegistrationObservation, error) {
-	options, err := transition.options()
-	if err != nil {
-		return releasetransition.OwnerRegistrationObservation{}, err
-	}
-	var prepared testyardmigration.Prepared
-	if prospective == nil {
-		prepared, err = testyardmigration.Prepare(ctx, options)
-	} else {
-		prepared, err = testyardmigration.PrepareProspective(
-			ctx, options, prospective.ReadSnapshot,
-		)
-	}
-	return releasetransition.OwnerRegistrationObservation{
-		State:        releasetransition.OwnerRegistrationState(prepared.State),
-		Registration: releasetransition.Fingerprint(prepared.RegistrationDigest),
-		Overrides:    releasetransition.Fingerprint(prepared.OverridesDigest),
-		Controller:   releasetransition.Fingerprint(prepared.ControllerDigest),
-		SharedImages: prepared.SharedImages,
-	}, err
-}
-
-// A fresh update leaves a legacy/conflicting test owner for explicit recreation.
-func (transition *ownerRegistrationTransition) FreshWarning(ctx context.Context, view releasetransition.V2SettingsSnapshotView) (string, error) {
-	options, err := transition.options()
-	if err != nil {
-		return "", err
-	}
-	if view != nil {
-		files, err := prospectiveActivationFiles(options.ConfigHome, view)
-		if err != nil {
-			return "", err
-		}
-		options.ProspectiveFiles = files
-	}
-	return testYardRecreation(ctx, options)
-}
-
 type testYardRecreateRefusal struct{}
 
 func (err testYardRecreateRefusal) Error() string {
@@ -248,58 +197,6 @@ func (err testYardRecreateRefusal) Error() string {
 func (testYardRecreateRefusal) MigrationRefusal() bool { return true }
 func (err testYardRecreateRefusal) ActivationDiagnostic() (string, string) {
 	return "test-yard registration or routes require recreation; preserve other sessions' VMs and confirm removal explicitly", "run yard update --check for the registered-owner recreation commands"
-}
-
-func (transition *ownerRegistrationTransition) Commit(
-	ctx context.Context,
-	before releasetransition.OwnerRegistrationObservation,
-) error {
-	options, err := transition.options()
-	if err != nil {
-		return err
-	}
-	if !before.TerminalCleanup {
-		ctx = ownerMigrationChildContext(ctx)
-	}
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	return testyardmigration.Commit(ctx, options, testyardmigration.Prepared{
-		State:              testyardmigration.State(before.State),
-		RegistrationDigest: string(before.Registration),
-		OverridesDigest:    string(before.Overrides),
-		ControllerDigest:   string(before.Controller),
-		SharedImages:       before.SharedImages,
-	})
-}
-
-func (transition *ownerRegistrationTransition) Observe(
-	ctx context.Context,
-	before releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	options, err := transition.options()
-	if err != nil {
-		return "", err
-	}
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	progress, err := testyardmigration.ObserveProgress(
-		ctx, options, testyardmigration.Prepared{
-			State:              testyardmigration.State(before.State),
-			RegistrationDigest: string(before.Registration),
-			OverridesDigest:    string(before.Overrides),
-			ControllerDigest:   string(before.Controller),
-			SharedImages:       before.SharedImages,
-		},
-	)
-	return releasetransition.OwnerRegistrationProgress(progress), err
-}
-
-func (cli *CLI) ownerRegistrationTransition(
-	request releasetransition.ProcessRequest,
-) releasetransition.V2OwnerRegistration {
-	return &ownerRegistrationTransition{endpointSettings: cli.resources.EndpointSettingNames(), registeredYards: cli.registeredYardMigrations(request, false), guestDiskTmp: cli.registeredYardMigrations(request, true), options: func() (testyardmigration.Options, error) {
-		return cli.releaseTransitionTestYardOptions(request)
-	}}
 }
 
 type activationApplicability struct {
@@ -2122,7 +2019,6 @@ func executeReleaseTransitionRequest(
 	request releasetransition.ProcessRequest,
 	verifyAuthorization func(releasetransition.PlanToken, releasetransition.Authorization) bool,
 	reconcilers []releasetransition.V2ActivationReconciler,
-	ownerRegistration releasetransition.V2OwnerRegistration,
 	ingressFactory func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error),
 	recoveryRequests ...*releasetransition.ActivationOnlyRecoveryRequest,
 ) (releasetransition.ProcessResponse, error) {
@@ -2160,6 +2056,12 @@ func executeReleaseTransitionRequest(
 				errors.New("release transition registry does not match the verified release manifest")
 		}
 	}
+	// Retained registered-yard recovery names endpoint settings; retention
+	// validates those frozen records against the compiled resource vocabulary.
+	resources, err := resource.Load(repositoryRoot)
+	if err != nil {
+		return releasetransition.ProcessResponse{}, err
+	}
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
 	if err != nil {
 		return releasetransition.ProcessResponse{}, err
@@ -2193,24 +2095,14 @@ func executeReleaseTransitionRequest(
 		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
 			return links.Activate(pair)
 		},
-		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
+		Reconcilers: reconcilers, Ingress: ingress,
 		RegistryPayload:     registry,
 		ArtifactDigest:      request.ArtifactDigest,
 		RollbackTarget:      rollbackTarget,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
-	if owner, ok := ownerRegistration.(interface {
-		registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string)
-	}); ok {
-		transitionOptions.RegisteredYards, transitionOptions.GuestDiskTmp, transitionOptions.RegisteredEndpointSettings = owner.registeredMigrationOwners()
-	}
-	transitionOptions.MigrationOwnerReplacement = request.MigrationOwnerReplacement
-	if request.MigrationOwnerReplacement != nil {
-		transitionOptions.MigrationOwnerAssets = func(ctx context.Context) (releasetransition.MigrationOwnerAssetsProof, error) {
-			return releaseruntime.VerifyMigrationOwnerReplacementAssets(ctx, repositoryRoot, request)
-		}
-	}
+	transitionOptions.RegisteredEndpointSettings = resources.EndpointSettingNames()
 	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
 		runtime := releaseruntime.NewSourceInspector(repositoryRoot, io.Discard)
 		defer runtime.Close()

@@ -36,6 +36,8 @@ func (*prospectiveActivationFixture) Reconcile(context.Context, ReleaseLinks) er
 
 func TestV2ActivationUsesFinalProspectiveSettingsAndOrdinaryNilView(t *testing.T) {
 	transition, _, settingsPath := v2TransitionFixture(t, nil)
+	transition.options.Ingress = &v2IngressFixture{inspection: V2IngressInspection{Operations: []V2IngressOperation{{Kind: V2SourceImport, Decision: DecisionCanonicalize, Expected: digestB, Desired: digestC}}, Prospective: v2MemorySettingsView{yards: []string{"hermes"}, snapshots: map[string]config.PersistentFileSnapshot{settingsPath: {Exists: true, Content: []byte("YARD_TEMPLATE='test-vms'\nSSH_PORT=2224\n")}}}}}
+
 	observer := &prospectiveActivationFixture{t: t, path: settingsPath}
 	transition.options.Reconcilers = []V2ActivationReconciler{observer}
 	if _, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget}); err != nil {
@@ -225,9 +227,7 @@ func TestV2SourceWorkUsesTheJournaledImportSettingsEntrypointsOrder(t *testing.T
 	want := []string{
 		"legacy-v1.import",
 		"source-install.import",
-		"canonicalize-test-vms-settings-v2.hermes",
 		"source-install.entrypoints",
-		"canonicalize-test-vms-settings-v2.ledger",
 	}
 	if len(ids) < len(want) || !slices.Equal(ids[:len(want)], want) {
 		t.Fatalf("journaled source/settings order = %v, want prefix %v", ids, want)
@@ -268,7 +268,7 @@ func TestV2SourceDriftBeforeConvergeIsRejectedBeforeMutation(t *testing.T) {
 	if source.applies != 0 {
 		t.Fatalf("source drift was overwritten: %#v", source)
 	}
-	if _, err := os.Lstat(filepath.Join(configHome, "release-transition")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(configHome, "release-transition/v2/journal.json")); !os.IsNotExist(err) {
 		t.Fatalf("source drift created outer journal: %v", err)
 	}
 }
@@ -322,87 +322,6 @@ func TestV2SourceThirdStateRequiresOperatorActionWithoutOverwrite(t *testing.T) 
 		source.actual[V2SourceImport] != digestD {
 		t.Fatalf("source third-state outcome = %#v source=%#v err=%v", outcome, source, err)
 	}
-}
-
-func TestV2SourceProspectiveSettingsAreClassifiedBeforeAuthorization(t *testing.T) {
-	transition, configHome, settingsPath := v2TransitionFixture(t, nil)
-	if err := os.Remove(settingsPath); err != nil {
-		t.Fatal(err)
-	}
-	prospective := config.PersistentFileSnapshot{
-		Exists:  true,
-		Content: []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"),
-	}
-	source := &v2IngressFixture{inspection: V2IngressInspection{
-		Operations: []V2IngressOperation{{
-			Kind: V2SourceImport, Decision: DecisionCanonicalize,
-			Expected: digestB, Desired: digestC,
-		}},
-		Decisions: []RedactedDecision{{
-			Resource: "source-install.config", Scope: "source-install",
-			Decision: DecisionCanonicalize, Result: "imported",
-		}},
-		Prospective: v2MemorySettingsView{
-			yards: []string{"hermes"},
-			snapshots: map[string]config.PersistentFileSnapshot{
-				settingsPath: prospective,
-			},
-		},
-	}}
-	transition.options.Ingress = source
-
-	inspection, err := transition.Inspect(context.Background(), Goal{
-		Target: "release-a", Direction: DirectionActivateTarget,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasV2Decision(inspection.Decisions, "setting.YARD_TEMPLATE", "yard.hermes", DecisionCanonicalize) ||
-		!hasV2Decision(inspection.Decisions, "setting.NESTED_E2E_VMS", "yard.hermes", DecisionReset) {
-		t.Fatalf("prospective settings decisions = %#v", inspection.Decisions)
-	}
-	if source.applies != 0 || source.verifies != 0 || source.observes != 0 {
-		t.Fatalf("prospective inspection mutated source state: %#v", source)
-	}
-	if _, err := os.Lstat(settingsPath); !os.IsNotExist(err) {
-		t.Fatalf("prospective inspection created destination: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(configHome, "release-transition")); !os.IsNotExist(err) {
-		t.Fatalf("prospective inspection created transition metadata: %v", err)
-	}
-}
-
-func TestV2SourceProspectiveSettingsRespectTheExistingYardBound(t *testing.T) {
-	transition, _, _ := v2TransitionFixture(t, nil)
-	yards := make([]string, maximumSettingsV2Yards+1)
-	for index := range yards {
-		yards[index] = fmt.Sprintf("yard-%03d", index)
-	}
-	transition.options.Ingress = &v2IngressFixture{inspection: V2IngressInspection{
-		Operations: []V2IngressOperation{{
-			Kind: V2SourceImport, Decision: DecisionCanonicalize,
-			Expected: digestB, Desired: digestC,
-		}},
-		Prospective: v2MemorySettingsView{yards: yards},
-	}}
-
-	_, err := transition.Inspect(context.Background(), Goal{
-		Target: "release-a", Direction: DirectionActivateTarget,
-	})
-	if err == nil || !strings.Contains(err.Error(), "too many persistent yards") {
-		t.Fatalf("unbounded prospective view error = %v", err)
-	}
-}
-
-func hasV2Decision(
-	decisions []RedactedDecision,
-	resource string,
-	scope string,
-	decision Decision,
-) bool {
-	return slices.ContainsFunc(decisions, func(actual RedactedDecision) bool {
-		return actual.Resource == resource && actual.Scope == scope && actual.Decision == decision
-	})
 }
 
 type v2MemorySettingsView struct {
@@ -504,75 +423,7 @@ func (view v2DiskSettingsView) ReadSnapshot(path string) (config.PersistentFileS
 }
 
 type v2SettingsBoundOwnerRegistration struct {
-	configHome string
-	path       string
-	state      OwnerRegistrationState
-	commits    int
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) observation(
-	view V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	var snapshot config.PersistentFileSnapshot
-	var err error
-	if view != nil {
-		snapshot, err = view.ReadSnapshot(owner.path)
-	} else {
-		snapshot, err = config.ReadPersistentFileSnapshot(owner.configHome, owner.path)
-	}
-	if err != nil {
-		return OwnerRegistrationObservation{}, err
-	}
-	if !snapshot.Exists {
-		return OwnerRegistrationObservation{State: OwnerRegistrationAbsent}, nil
-	}
-	state := OwnerRegistrationLegacyDirectory
-	if owner.state == OwnerRegistrationCurrent {
-		state = OwnerRegistrationCurrent
-	}
-	return OwnerRegistrationObservation{
-		State: state, Registration: fingerprintPayload(snapshot.Content),
-		Overrides: digestB, Controller: digestB, SharedImages: true,
-	}, nil
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Prepare(
-	_ context.Context,
-	view V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	return owner.observation(view)
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Observe(
-	_ context.Context,
-	before OwnerRegistrationObservation,
-) (OwnerRegistrationProgress, error) {
-	actual, err := owner.observation(nil)
-	if err != nil {
-		return "", err
-	}
-	if actual.Registration != before.Registration {
-		return "", errors.New("settings-bound owner registration changed")
-	}
-	if owner.state == OwnerRegistrationCurrent {
-		return OwnerRegistrationDesired, nil
-	}
-	return OwnerRegistrationExpected, nil
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Commit(
-	ctx context.Context,
-	before OwnerRegistrationObservation,
-) error {
-	if before.TerminalCleanup {
-		return nil
-	}
-	if _, err := owner.Observe(ctx, before); err != nil {
-		return err
-	}
-	owner.commits++
-	owner.state = OwnerRegistrationCurrent
-	return nil
+	path string
 }
 
 type v2IngressFixture struct {

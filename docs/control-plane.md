@@ -851,7 +851,14 @@ The standalone installer completes the supported current-release transition afte
 the first runtime link and before publishing CLI entrypoints. Its initial installation
 consent includes this boundary. An interrupted first installation retains protected recovery
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
-publishing entrypoints. Publication-only staging leaves migration state untouched.
+publishing entrypoints. When the rerun selects another version and the v0.28.0+ release at
+`current` has no `previous` link, no `ledger.json` and no `history-checkpoint.json`, the installer
+first runs that release's own `yard migrate`, then updates. That migrate resumes an unfinished
+initial journal; with journal, ledger and checkpoint all absent the installation is fresh and is
+initialized, while a completed journal without ledger and checkpoint is refused by the engine.
+Plain `yard update` has no such step: finish an interrupted first install by rerunning the
+installer (any version) or `yard migrate --yes` before `yard update`.
+Publication-only staging leaves migration state untouched.
 
 Release activation reads Incus only for an installation that can own native yards. A cold
 installation keeps nothing in its configuration home except first-install release bookkeeping
@@ -1036,12 +1043,11 @@ read-only config or integration status command. Known integration ownership conf
 their validated path and inspection command across the release boundary; they must not send
 `migrate --check` back to itself as the only next step.
 
-Each compiled capability classifies its bounded resources as preserve, transform, canonicalize,
-reset or block before confirmation. An authorized reset is a successful, journaled one-time result;
-unknown or ambiguous state produces a structured operator-action outcome without overwriting it.
-Settings migration classifies direct yard templates against the verified candidate's configuration
-catalog and shipped template contract. Supported templates outside the migration's resource scope
-are preserved byte for byte; unknown, dynamic or duplicate template assignments still block.
+Historical capabilities classified their bounded resources as preserve, transform, canonicalize,
+reset or block before confirmation. Those journaled decisions and typed results remain readable.
+The current engine has no planner or effects for the retired settings, owner-registration and
+power-metadata migrations; below-floor or unverified historical work requires manual repair.
+Generic source ingress and activation retain their own ownership, classification and consent checks.
 
 `yard migrate --check` reports readiness of the exact installed `current` release: per-domain
 recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
@@ -1125,18 +1131,34 @@ same-version retry, source import and explicit rollback all use the candidate-ow
 `_release-transition` process contract. Rollback is a newly inspected `activate-previous` goal and
 requires an intact retained runtime within its compatibility horizon.
 
-Fresh rollback with pending settings, owner-registration or source-install changes also requires
-the retained owner to advertise safe prospective source activation. An unsupported owner refuses
-with `rollback-incompatible` before consent or mutation. Complete current-release migrations
-with `yard migrate`, then retry `yard update --rollback`; otherwise retain an owner with
-compatible rollback source planning. Retrying the unchanged retained owner cannot add that support. Compatible rollback without source work remains available. An already-authorized
-transaction continues with its original pinned owner rather than acquiring a new grant.
-Retained inspections can omit registered-yard and guest-disk work from their Decisions.
-For these opaque kinds, the caller checks the exact retained registry and authoritative
-ledger/checkpoint. Pending opaque work requires the same capability even when it may
-ultimately be a no-op; completed opaque work does not. A stopped yard with an absent disk-/tmp
-marker alone does not block rollback once these ledger epochs are complete. Unverifiable
-history refuses rollback.
+The current registry starts fresh installations at owner-registration 3, power-metadata 3,
+project-state 1 and settings 3. Its initial bootstrap records one journaled baseline-ledger step
+with empty `Applied`, then the live ledger-only `introduce-nm-device-guard-v4` step, before profile
+activation; it executes none of the historical migrations. Completed v0.28.x and v0.29.x
+installations take that one ledger step on update; a completed v0.30.0 installation takes none.
+The historical six-step vocabulary,
+original catalog identities, typed evidence and prefix digests remain frozen reader data.
+Completed v0.28.x ledgers retain their original `Applied` lists, checkpoints and pinned projection
+bytes. A fully verified unfinished v0.28.x journal can still be replaced before or after activation,
+even before checkpoint publication. Its successor does not replay historical effects.
+
+A ledger below the live floor or an unfinished unverified historical migration step refuses with
+`migration-manual-repair-required` before any write. If both `ledger.json` and
+`history-checkpoint.json` are missing, reading authority reports `protected migration history is absent:
+ledger.json and history-checkpoint.json are missing`; it does not infer a below-floor baseline.
+Only initial bootstrap or an unfinished baseline publication can admit absence for planning.
+Candidate staging may precede an engine refusal; its temporary draft is removed without changing
+protected history or runtime links.
+Manual repair must preserve the runtime, user data and protected evidence; do not uninstall.
+Ordinary installed-owner resume remains available when no retired handler is needed.
+
+Compatible rollback delegates to the verified retained target's own engine. Original `Applied`
+prefixes and checkpoint proofs remain readable by v0.28.0/v0.28.1; registry digests need not be
+identical across the update. Fresh rollback with generic source-install work still requires the
+retained owner to advertise safe prospective source activation. Native ownership, network guards,
+explicit consent and migration-independent initialization, adoption and disk-/tmp maintenance
+remain in their owning operations. A stopped yard's absent disk-/tmp marker alone does not block
+rollback once the migration epochs are complete. Unverifiable history refuses rollback.
 
 An installed runtime whose bundled installer predates immutable `--publish-only` cannot be changed
 retroactively. Re-running the verified standalone bootstrap is its one-time bridge: the downloaded
@@ -1207,23 +1229,17 @@ successor. Links and completed ledger bytes stay unchanged. Replacement chains, 
 (including verified steps), source migrations, foreign state and unproven partial apply remain
 excluded. The protocol does not reconstruct original inputs from a hash or reset settings.
 
-Migration-bearing owner defects use a separate `migration-owner-capabilities` probe and
-`migration-ledger-owner-replacement-v1` contract. Only an explicitly selected verified standalone
-candidate (`--offline` with its exact `--version`) can request it. Its candidate-native proof reads
-canonical protected records and sealed assets directly, validates the independent domain histories
-from frozen projection to checkpoint authority and all completed evidence triples, then assesses
-current candidate activation. Initial support pins the exact official Linux amd64 v0.21.0 owner;
-retained terminal artifacts may belong only to its journal's exact source or previous release.
-The previous release is independently sealed and must have the identical verified source registry.
-Receipt replay validates these identities and evidence; recorded transaction IDs remain protected
-from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
-unknown artifacts and graphs remain blocked. The candidate registry must equal the predecessor's,
-which holds through v0.25.1: a host interrupted on v0.21.0 is replaced by standalone v0.25.1 and
-then takes the v0.28.1 hop, because later candidates refuse the replacement. A fresh grant publishes immutable typed predecessor
-and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
-current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
-resume belongs to the candidate successor. This exception does not widen either activation-only
-recovery contract, change frozen V1/V2 wire meanings, or bypass retained rollback gates.
+Historical migration-bearing owner replacement used `migration-owner-capabilities` and
+`migration-ledger-owner-replacement-v1`. The current engine retains the capability probe and
+reads its immutable receipts under `release-transition/migration-owner/v1/transactions` and
+successor completion records. Receipt validation binds the exact official Linux amd64 v0.21.0
+manifest and registry, canonical predecessor and initial successor, frozen projection/checkpoint,
+completed evidence and any retained source/previous-release transactions. These references remain
+protected from cleanup; an unfinished predecessor never becomes activation-ready history.
+The current engine does not select or create that historical replacement. Its registry differs
+from the v0.21.0 registry: that recovery belongs to a verified historical standalone candidate
+through v0.25.1, followed by the v0.28.1 hop. Unknown artifacts, conflicting graphs and foreign
+state still refuse. Frozen wire meanings and retained rollback checks are unchanged.
 
 New callers first probe `lifecycle-capabilities` for `activation-only-replacement-v2`, and
 fall back to the original probe when it is unsupported. Only a successful lifecycle probe selects
@@ -1593,12 +1609,20 @@ complete counts as closed even if its journal stopped earlier: it stays under or
 journal copy remains. Full uninstall removes them. Add `--runtime-root` on a host with a custom runtime root.
 
 Below the [update boundary](reference/legacy-migration-support.md#approved-support-boundary),
-releases after v0.28.x refuse the installed source. There, `$VERSION` must be a v0.28.x release:
-v0.28.x is the last series that owns the recoveries of earlier releases described below. After
-recovery, continue with `yard update --version 0.28.1 && yard update`.
+releases after v0.28.x refuse replacement while the installed source is from v0.11.0 to below
+v0.28.0. For generic newer-release recovery described above, `$VERSION` must name a compatible
+v0.28.x fix release. This does not include the v0.11.1 and v0.17.3 defects: their older,
+matching-registry recovery releases and commands are listed below. After recovery, take the
+published v0.28.1 hop, then update normally.
 
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
-migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own contracts. The candidate refuses a journal that
+migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own historical contracts.
+An explicit `--version` with an unfinished journal and an installed release from v0.11.0 to
+below v0.28.0 returns `source-anchor-required` before selecting another candidate. Its `next:`
+first finishes the installed owner's journal, then takes the hop if needed. Plain `yard update`
+keeps exact-owner resume and its existing recovery hints. The current engine creates neither
+v0.11.1 post-activation superseded archives nor migration-owner replacements and does not delegate
+v0.17.3 activation repair. It continues to read their retained evidence. The candidate refuses a journal that
 already superseded another, a live recovery reservation, and links the journal does not allow.
 A `recovery-v2-` successor is eligible only when it is reconciling, activation-only (zero migration
 steps), forward, without source ingress, with validated recovery provenance and its target already
@@ -1637,15 +1661,13 @@ therefore a known limitation: it is left only with a later 0.28.x fix release (a
 is repaired in the anchor series). The earlier release stays active and yards and data stay
 intact. Subyard never writes `block` itself, so only a manually set value reaches this stop.
 
-A v0.11.1 runtime can stop after activation with journal checkpoint `reconciling` and blocker
-resource `transition.observation-scope`. That exact state is recovered only by the standalone
-installer from a newer supported patch release; the active v0.11.1 command remains fail-closed.
-Until that patch is published, do not delete the journal, ledger, transaction evidence, or runtime
-links, and do not retry mutating commands. Download the official HTTPS asset and let its verified
-candidate own the replacement plan, archive, compare-and-swap, reconciliation, and link update:
+Historical v0.11.1 can stop after activation at `reconciling` with
+`transition.observation-scope`. The official v0.11.2 standalone installer owns that recovery
+with the original registry. Run that historical installer, rather than asking the current
+release to select v0.11.2:
 
 ```bash
-PATCH_VERSION=0.11.2 # or a later release up to v0.28.x
+PATCH_VERSION=0.11.2
 (
   set -eu
   installer="$(mktemp)"
@@ -1657,35 +1679,31 @@ PATCH_VERSION=0.11.2 # or a later release up to v0.28.x
 )
 ```
 
-The command is interactive by default. Add `--yes` only for an intentional non-interactive run
-after reviewing the reported changes.
+The installer is interactive by default; review its replacement plan. Preserve journals,
+ledgers, transaction evidence and runtime links until recovery completes. Then take the
+published v0.28.1 hop and update normally. The current release only reads the retained
+superseded archives; with an explicit `--version` it refuses this unfinished below-anchor
+installation with `source-anchor-required`.
 
-The published v0.17.3 engine can also reopen completed settings migrations while resuming a
-same-release activation repair. Its journal has no migration steps, checkpoint `reconciling`, and
-one `yard.<name>` blocker saying the template is unsupported. A newer verified standalone
-candidate with the same registry can resume that exact transaction using its engine and the
-original owner's verified runtime assets. It preserves the original authorization, observation
-scope, settings, ledger and stable runtime links; it does not replace the journal or migrate the
-unrelated yard. Other blocked transactions retain their existing recovery rules.
-
-If the latest candidate has a different registry or catalog, publish a verified compatible bridge
-first; v0.18.6 retains the exact v0.17.3 registry and catalog. Resume through that bridge's standalone
-launcher, then separately authorize the ordinary update to the latest release. The latest caller's
-refusal does not permit editing the original journal, catalog or unrelated yard settings.
-
-After the runtime installer publishes the verified candidate without activating it, use its exact
-launcher path to inspect and resume the installed release before retrying the ordinary update:
+Published v0.17.3 can reopen completed settings inspection during a same-release activation repair:
+a zero-step `reconciling` journal reports one `yard.<name>` unsupported-template blocker.
+The verified historical v0.18.6 bridge retains the matching v0.17.3 registry and catalog and
+owns delegated recovery with the original sealed assets. After its runtime installer publishes
+v0.18.6 without activating it, use that candidate's exact printed launcher path (`<candidate-release>`
+is the verified v0.18.6 release identity):
 
 ```bash
 "<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate --check --json
 "<runtime-root>/releases/<candidate-release>/bin/yard" -Y default migrate
 yard migrate --check
-yard update
 ```
 
-The standalone candidate's blocked update reports this recovery path. The installed v0.17.3
-launcher cannot perform the delegated repair. Keep its configuration and durable transaction
-records intact until recovery completes.
+Then take the published v0.28.1 hop and run `yard update`. The installed v0.17.3 launcher cannot
+perform the delegated repair. Preserve settings, authorization and transaction evidence.
+The current caller keeps its historical retry hints, but its engine cannot delegate this repair;
+with an explicit `--version` it refuses the unfinished below-anchor installation with
+`source-anchor-required`. These two recoveries require their historical registries, which differ
+from v0.28.x and the current release.
 
 Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
 refresh materialized config, an already-active test-VM broker and an installed host power runtime;

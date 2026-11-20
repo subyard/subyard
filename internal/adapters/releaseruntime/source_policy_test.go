@@ -1,9 +1,11 @@
 package releaseruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,7 +198,7 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
+						ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -519,7 +521,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			}
 			engine := []byte("#!/bin/sh\nprintf 'yard-engine " + UpdateAnchorVersion + "\\n'\n")
 			testkit.WriteFile(t, filepath.Join(root, "bin/yard-engine"), engine, 0700)
-			registryBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "config/release-transition.json"))
+			registryBytes, err := os.ReadFile(filepath.Join("..", "..", "releasetransition", "history_v028.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -556,7 +558,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			baseline := releasetransition.BaselineLedgerV2(registry)
+			baseline := releasetransition.FreshBootstrapLedgerV2(registry)
 			complete := baseline
 			pending, err := registry.PendingPath(complete)
 			if err != nil {
@@ -614,7 +616,11 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			if (err == nil) != allowed {
 				t.Fatalf("authority %s allowed=%t: %v", state, allowed, err)
 			}
-			if !allowed {
+			if state == "contradictory" {
+				if !errors.Is(err, releasetransition.ErrInvalid) {
+					t.Fatalf("corrupt history was hidden: %v", err)
+				}
+			} else if !allowed && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) {
 				if strings.Contains(err.Error(), "uninstall --full") || strings.Contains(err.Error(), "next:") ||
 					!strings.HasPrefix(err.Error(), "replacement-authority-required: ") || !strings.Contains(err.Error(), "known-good backup") {
 					t.Fatalf("unsafe damaged-history guidance: %v", err)
@@ -625,6 +631,132 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 				if string(after) != raw {
 					t.Fatal("admission mutated authority", path)
 				}
+			}
+		})
+	}
+}
+
+func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing.T) {
+	for _, installed := range []string{"0.10.0", "0.11.0", "0.11.1", "0.17.3", "0.21.0", "0.27.0", "0.28.0", "0.28.1"} {
+		for _, target := range []string{"0.17.3-older", "1.2.3-aaaaaaaaaaaa"} {
+			for _, checkpoint := range []releasetransition.JournalCheckpoint{releasetransition.JournalAuthorized, releasetransition.JournalReconciling, releasetransition.JournalComplete} {
+				t.Run(fmt.Sprintf("%s/%s/%s", installed, target, checkpoint), func(t *testing.T) {
+					fixture := newProtectedRuntimeTransitionFixture(t, checkpoint)
+					active := writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, installed+"-installed", installed,
+						"#!/bin/sh\nprintf 'yard-engine "+installed+"\\n'\n")
+					current := filepath.Join(fixture.runtimeRoot, "current")
+					if err := os.Remove(current); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("releases/"+string(active.release), current); err != nil {
+						t.Fatal(err)
+					}
+					journal, err := releasetransition.ParseJournal(mustReadFile(t, fixture.journalPath))
+					if err != nil {
+						t.Fatal(err)
+					}
+					journal.Goal.Target = releasetransition.ReleaseID(target)
+					journal.Releases.Target = journal.Goal.Target
+					payload, err := releasetransition.MarshalJournal(journal)
+					if err != nil {
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, fixture.journalPath, payload, 0600)
+					runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+					defer runtime.Close()
+					version := semver.MustParse(installed)
+					wantRefusal := checkpoint != releasetransition.JournalComplete && version.GTE(semver.MustParse(MinimumSourceVersion)) && version.LT(semver.MustParse(UpdateAnchorVersion))
+					for _, flags := range [][]string{{}, {"--check"}, {"--offline"}} {
+						args := append([]string{"--runtime-root", fixture.runtimeRoot, "--version", "1.2.3"}, flags...)
+						_, err := runtime.PrepareTransition(context.Background(), args, fixture.configHome, "default")
+						if wantRefusal {
+							next := "yard update && yard update --version 0.28.1 && yard update"
+							if target == "1.2.3-aaaaaaaaaaaa" {
+								next = "yard update && yard update"
+							}
+							want := "source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: " + next + "\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v0.28.1 installer or use a later v0.28.x fix release. Do not uninstall."
+							if err == nil || err.Error() != want {
+								t.Fatalf("flags=%v: refusal=%v, want %q", flags, err, want)
+							}
+						} else if err != nil && strings.Contains(err.Error(), "an unfinished release transition must first") {
+							t.Fatalf("source outside unfinished anchor case was intercepted: %v", err)
+						}
+						if got := mustReadFile(t, fixture.journalPath); !bytes.Equal(payload, got) {
+							t.Fatal("refusal changed journal")
+						}
+						if got, err := os.Readlink(current); err != nil || got != "releases/"+string(active.release) {
+							t.Fatalf("refusal changed active link: %s %v", got, err)
+						}
+						if _, err := os.Stat(fixture.publicationCapture); !os.IsNotExist(err) {
+							t.Fatalf("refusal published a release: %v", err)
+						}
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("environment version without explicit option", func(t *testing.T) {
+		fixture := newV0111CandidateRoutingFixture(t)
+		environment := fixture.environment()
+		environment["YARD_RELEASE_VERSION"] = fixture.candidateVersion
+		runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment),
+			Installer: fixture.installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		defer runtime.Close()
+		before := fixture.snapshot(t)
+		_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--runtime-root", fixture.runtimeRoot}, fixture.configHome, "default")
+		want := "an unfinished or unsafe release transition permits only exact target " + fixture.sourceID + "; next: run the verified standalone release with --offline and its exact --version"
+		if err == nil || err.Error() != want {
+			t.Fatalf("environment-only version changed the ordinary retry hint: %v, want %q", err, want)
+		}
+		if !bytes.Equal(before, fixture.snapshot(t)) {
+			t.Fatal("environment-only selection changed protected history or links")
+		}
+		for _, path := range []string{fixture.publicationCapture, fixture.candidateCalls} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("environment-only selection published or invoked a replacement candidate: %s %v", path, err)
+			}
+		}
+	})
+}
+
+func TestRetiredHistoryAdmissionDistinguishesFreshRegistryBaseline(t *testing.T) {
+	for _, original := range []bool{false, true} {
+		t.Run(fmt.Sprintf("original=%t", original), func(t *testing.T) {
+			path := filepath.Join("..", "..", "..", "config", "release-transition.json")
+			if original {
+				path = filepath.Join("..", "..", "releasetransition", "history_v028.json")
+			}
+			registry, digest, err := releasetransition.ParseRegistryV2(mustReadFile(t, path), releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen, _, err := releasetransition.ParseRegistryV2(mustReadFile(t, filepath.Join("..", "..", "releasetransition", "history_v028.json")), releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A fresh baseline starts above every retired migration; live steps may remain.
+			fresh := true
+			for domain, top := range frozen.CurrentEpochs {
+				fresh = fresh && releasetransition.FreshBootstrapLedgerV2(registry).Domains[domain].Epoch >= top
+			}
+			if fresh == original {
+				t.Fatal("absent history was interpreted without its source registry")
+			}
+			home := testkit.TempDir(t)
+			store, err := releasetransition.NewPOSIXV2Store(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.RequireRetiredMigrationCompletion(registry, digest)
+			// Absence is classified by observe using the journal and bootstrap state,
+			// never inferred complete from the selected registry baseline here.
+			if err != nil {
+				t.Fatalf("baseline admission: %v", err)
+			}
+			entries, err := os.ReadDir(home)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("read-only admission wrote: %v %v", entries, err)
 			}
 		})
 	}

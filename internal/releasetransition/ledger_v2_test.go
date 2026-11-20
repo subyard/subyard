@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-func TestBaselineLedgerV2StartsEveryDomainAtItsMinimum(t *testing.T) {
+func TestFreshBootstrapLedgerV2StartsEveryDomainAtItsMinimum(t *testing.T) {
 	registry, _, err := ParseRegistryV2([]byte(validRegistryV2), registryV2TestCatalog(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	if ledger.Domains["settings"].Epoch != 1 || len(ledger.Domains["settings"].Applied) != 0 ||
 		ledger.Domains["project-state"].Epoch != 1 {
 		t.Fatalf("baseline ledger = %#v", ledger)
@@ -78,7 +78,7 @@ func TestRegistryV2PendingPathUsesAllDomainEpochsInRegistryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := registry.PendingPath(BaselineLedgerV2(registry))
+	path, err := registry.PendingPath(FreshBootstrapLedgerV2(registry))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestLedgerV2RequiresExactRegistryDomainSet(t *testing.T) {
 	); err == nil {
 		t.Fatal("partial persisted ledger was accepted")
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	state, err := ledger.DomainState(registry, "project-state")
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +164,7 @@ func TestLedgerV2AdvanceAppliesExactlyNextMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	advanced, err := ledger.Advance(registry, registry.Migrations[0])
 	if err != nil {
 		t.Fatal(err)

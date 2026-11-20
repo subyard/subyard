@@ -257,7 +257,7 @@ func TestNewerReleaseRecoveryReplacementBlockers(t *testing.T) {
 			mustRecoveryNoError(t, c.store.createImmutable(recoveryLifecycleParts, "recovery-v2-unrecognized.json", []byte("{}")))
 		}, []string{"an interrupted recovery still reserves this journal", recoveryInvalid}},
 		{"already superseded", func(c *V2Transition, o *v2Observation) {
-			mustRecoveryNoError(t, c.store.CreateSupersededJournal(o.journal.Transaction, []byte("unrecognized protected archive")))
+			mustRecoveryNoError(t, c.store.seedSupersededJournal(o.journal.Transaction, []byte("unrecognized protected archive")))
 		}, []string{"a newer release cannot replace a journal that already superseded another", recoveryInvalid}},
 		{"all independent", func(c *V2Transition, o *v2Observation) {
 			c.options.Replacement.Fingerprint = digestD

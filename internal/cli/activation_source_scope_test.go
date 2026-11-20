@@ -66,6 +66,15 @@ type sourceScopeHistoricalReconciler struct {
 	releasetransition.V2ActivationReconciler
 }
 
+// The retired engine obtained selected scope while running its six migration
+// steps. Model that actor boundary without executing those removed handlers.
+// The persisted tag journal's native scope selection is checked separately.
+func (fixture *sourceScopeFixture) historicalScope(interrupt bool) *sourceScopeMaterialized {
+	reconciler := fixture.reconciler(interrupt)
+	reconciler.allLocal, reconciler.scopeResolved = false, true
+	return reconciler
+}
+
 type sourceScopeFixture struct {
 	t          *testing.T
 	root       string
@@ -93,6 +102,9 @@ func newSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 		t.Fatal(err)
 	}
 	writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
+	// This is an update of an existing source with committed epochs.
+	seedCurrentReleaseLedger(t, root, configHome)
+
 	hostAsset := filepath.Join(configHome, "overrides", "host", "agents", "claude", "settings.json")
 	namedAsset := filepath.Join(configHome, "yards", "named", "overrides", "agents", "claude", "settings.json")
 	writeConfigCommandFile(t, hostAsset, `{"env":{"SCOPE":"default-v1"}}`)
@@ -126,8 +138,8 @@ func newSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 		t.Fatal(err)
 	}
 	ledger, err := store.ReadLedger()
-	if err != nil || ledger.Exists {
-		t.Fatalf("fresh fixture already has ledger: %#v %v", ledger, err)
+	if err != nil || !ledger.Exists {
+		t.Fatalf("existing source fixture has no ledger: %#v %v", ledger, err)
 	}
 	return &sourceScopeFixture{t: t, root: root, configHome: configHome, namedAsset: namedAsset,
 		program: program, boundary: boundary, store: store,
@@ -156,7 +168,7 @@ func (fixture *sourceScopeFixture) execute(mode releasetransition.ProcessMode, p
 	}
 	response, err := executeReleaseTransitionRequest(context.Background(), fixture.root, request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-		[]releasetransition.V2ActivationReconciler{reconciler}, releaseTransitionOwnerFixture{}, nil)
+		[]releasetransition.V2ActivationReconciler{reconciler}, nil)
 	if err != nil {
 		fixture.t.Fatal(err)
 	}
@@ -227,44 +239,10 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			writeConfigCommandFile(t, fixture.namedAsset, `{"env":{"SCOPE":"named-v1"}}`)
 			result := fixture.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, fixture.reconciler(interrupt))
 			journal := fixture.journal()
-			ledgerMigrations := map[string]string{
-				"canonicalize-test-vms-settings-v2":     "settings",
-				"canonicalize-test-yard-owner-v2":       "owner-registration",
-				"introduce-owner-publication-state-v1":  "power-metadata",
-				"localize-ssh-port-settings-v3":         "settings",
-				"register-existing-local-yards-v3":      "owner-registration",
-				"complete-registered-guest-disk-tmp-v3": "power-metadata",
-				"introduce-nm-device-guard-v4":          "power-metadata",
+			if len(journal.Steps) != 0 {
+				t.Fatalf("fresh transition replayed migrations: %#v", journal.Steps)
 			}
-			if len(journal.Steps) != len(ledgerMigrations) {
-				t.Fatalf("expected only shipped ledger steps: %#v", journal.Steps)
-			}
-			seen := map[string]bool{}
-			for _, step := range journal.Steps {
-				domain, known := ledgerMigrations[step.Migration]
-				if !known || seen[step.Migration] || step.ID != step.Migration+".ledger" || step.Resource != "ledger."+domain {
-					t.Fatalf("unexpected source mutation: %#v", step)
-				}
-				seen[step.Migration] = true
-			}
-			ledgerSnapshot, err := fixture.store.ReadLedger()
-			if err != nil {
-				t.Fatal(err)
-			}
-			var ledger releasetransition.LedgerV2
-			if err := json.Unmarshal(ledgerSnapshot.Payload, &ledger); err != nil {
-				t.Fatal(err)
-			}
-			for domain, expected := range map[string]releasetransition.DomainLedgerV2{
-				"settings":           {Epoch: 3, Applied: []string{"canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"}},
-				"owner-registration": {Epoch: 3, Applied: []string{"canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"}},
-				"power-metadata":     {Epoch: 4, Applied: []string{"introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"}},
-			} {
-				state := ledger.Domains[domain]
-				if !reflect.DeepEqual(state, expected) {
-					t.Fatalf("ledger domain %s = %#v", domain, state)
-				}
-			}
+
 			if interrupt {
 				if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusRecovering || len(fixture.boundary.applied) != 0 {
 					t.Fatalf("interruption: %#v applied=%v", result, fixture.boundary.applied)
@@ -293,7 +271,7 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 func TestLedgerOnlyHistoricalResumePreservesSelectedConfigScope(t *testing.T) {
 	fixture := newSourceScopeFixture(t)
 	historical := func(interrupt bool) releasetransition.V2ActivationReconciler {
-		return sourceScopeHistoricalReconciler{fixture.reconciler(interrupt)}
+		return sourceScopeHistoricalReconciler{fixture.historicalScope(interrupt)}
 	}
 	initial := fixture.execute(releasetransition.ProcessInspect, "", historical(false))
 	if initial.Inspection == nil {
@@ -304,11 +282,11 @@ func TestLedgerOnlyHistoricalResumePreservesSelectedConfigScope(t *testing.T) {
 		t.Fatalf("historical interruption: %#v", interrupted)
 	}
 	before := fixture.journal()
-	resume := fixture.execute(releasetransition.ProcessInspect, "", fixture.reconciler(false))
+	resume := fixture.execute(releasetransition.ProcessInspect, "", fixture.historicalScope(false))
 	if resume.Inspection == nil || resume.Inspection.Resume == nil || resume.Inspection.Plan != before.ResumePlan {
 		t.Fatalf("historical scope could not resume: %#v", resume)
 	}
-	result := fixture.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, fixture.reconciler(false))
+	result := fixture.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, fixture.historicalScope(false))
 	if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusReady || !reflect.DeepEqual(fixture.boundary.applied, []string{"default"}) || fixture.boundary.converged["subyard-named/yard-named"] {
 		t.Fatalf("historical grant expanded: %#v applied=%v", result, fixture.boundary.applied)
 	}
@@ -350,26 +328,8 @@ func newSSHPinSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 		"AGENT_claude_CONFIG='"+f.namedAsset+"'\n")
 	writeConfigCommandFile(t, filepath.Join(f.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2240\n")
 	writeConfigCommandFile(t, filepath.Join(f.configHome, config.GitSettingsRelativePath, "yards/named/config.env"), "SSH_PORT=2241\n")
-	payload := mustReadConfigFixture(t, filepath.Join(f.root, "config/release-transition.json"))
-	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
-	for _, migration := range registry.Migrations {
-		if migration.Kind == "local-ssh-port-settings-v2-to-v3" {
-			break
-		}
-		ledger, err = ledger.Advance(registry, migration)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	encoded, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeReleaseTransitionTestFile(t, filepath.Join(f.configHome, "release-transition/v2/ledger.json"), encoded, 0o600)
+	seedNativeSSHPins(t, f.configHome)
+
 	return f
 }
 
@@ -384,8 +344,8 @@ func assertNativeSSHPins(t *testing.T, f *sourceScopeFixture) {
 		}
 	}
 	journal := f.journal()
-	if len(journal.Steps) != 6 {
-		t.Fatalf("expected two actual pin CAS steps and four declared ledger CAS steps: steps=%d", len(journal.Steps))
+	if len(journal.Steps) != 0 {
+		t.Fatalf("expected no historical migration steps: steps=%d", len(journal.Steps))
 	}
 	for _, step := range journal.Steps {
 		if step.Checkpoint != releasetransition.StepVerified {
@@ -473,7 +433,7 @@ func TestSSHPinWideResumeRetainsBoundNamedInputs(t *testing.T) {
 func TestSSHPinHistoricalNarrowGrantRetainsScope(t *testing.T) {
 	f := newSSHPinSourceScopeFixture(t)
 	historical := func(interrupt bool) releasetransition.V2ActivationReconciler {
-		return sourceScopeHistoricalReconciler{f.reconciler(interrupt)}
+		return sourceScopeHistoricalReconciler{f.historicalScope(interrupt)}
 	}
 	initial := f.execute(releasetransition.ProcessInspect, "", historical(false))
 	if initial.Inspection == nil {
@@ -484,11 +444,11 @@ func TestSSHPinHistoricalNarrowGrantRetainsScope(t *testing.T) {
 		t.Fatalf("historical interruption missing: %#v", interrupted)
 	}
 	original := f.journal()
-	resume := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+	resume := f.execute(releasetransition.ProcessInspect, "", f.historicalScope(false))
 	if resume.Inspection == nil || resume.Inspection.Resume == nil || resume.Inspection.Plan != original.ResumePlan {
 		t.Fatal("historical resume grant changed")
 	}
-	result := f.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, f.reconciler(false))
+	result := f.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, f.historicalScope(false))
 	assertNativeSSHPins(t, f)
 	if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusReady || !reflect.DeepEqual(f.boundary.applied, []string{"default"}) || f.boundary.converged["subyard-named/yard-named"] {
 		t.Fatalf("historical narrow consent expanded: applied=%v outcome=%#v", f.boundary.applied, result.Outcome)
@@ -498,4 +458,48 @@ func TestSSHPinHistoricalNarrowGrantRetainsScope(t *testing.T) {
 		t.Fatal("historical sealed authorization rewritten")
 	}
 	t.Logf("historical narrow grant retained: applied=%v steps=%d scope=%s", f.boundary.applied, len(completed.Steps), strings.TrimSpace(string(completed.ObservationScope)))
+}
+
+func TestVerifiedV028JournalRetainsNativeSelectedScope(t *testing.T) {
+	fixture := newSourceScopeFixture(t)
+	payload := mustReadConfigFixture(t, "../releasetransition/testdata/v0.28.1-first-transition-verified.json")
+	var files map[string]string
+	if err := json.Unmarshal(payload, &files); err != nil {
+		t.Fatal(err)
+	}
+	var journal releasetransition.JournalRecord
+	for name, content := range files {
+		path := filepath.Join(fixture.configHome, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, []byte(content), 0o600)
+		if strings.HasSuffix(name, "/journal.json") {
+			var err error
+			journal, err = releasetransition.ParseJournal([]byte(content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Scope selection distinguishes an update from the tag fixture's
+			// initial self-activation. Preserve its six verified step shapes;
+			// this check does not execute or validate their evidence bindings.
+			journal.Releases.From = "release-a"
+			for index := range journal.Steps {
+				journal.Steps[index].Evidence.Releases = journal.Releases
+			}
+			payload, err := releasetransition.MarshalJournal(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, payload, 0o600)
+		}
+	}
+	if len(journal.Steps) != 6 || journal.Checkpoint == releasetransition.JournalComplete {
+		t.Fatal("missing unfinished tag journal")
+	}
+	actor := fixture.reconciler(false)
+	actor.goal, actor.artifactDigest, actor.registryDigest = journal.Goal, journal.ArtifactDigest, journal.RegistryDigest
+	if err := actor.resolveScope(journal.Releases); err != nil || actor.allLocal || !actor.scopeResolved {
+		t.Fatalf("verified historical journal expanded selected scope: allLocal=%v resolved=%v err=%v", actor.allLocal, actor.scopeResolved, err)
+	}
 }

@@ -56,6 +56,13 @@ func TestV2CompatibilityIngressRefusesUnfinishedImportWithoutWrites(t *testing.T
 	for _, state := range []string{"applying", "verified", "complete"} {
 		t.Run(state, func(t *testing.T) {
 			home := testkit.TempDir(t)
+			// The update has an installed predecessor, so its completed ledger exists
+			// independently of the unfinished legacy import.
+			if err := os.MkdirAll(filepath.Join(home, "release-transition", "v2"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(home, "release-transition", "v2", "ledger.json"),
+				[]byte(`{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`), 0600)
 			previous := releasetransition.ReleaseID("0.4.0-legacy")
 			links := releasetransition.ReleaseLinks{Active: "0.4.2-legacy", Previous: &previous}
 			pair := releasetransition.ReleasePair{From: links.Active, Previous: &previous, Target: "0.28.0-owner"}

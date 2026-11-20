@@ -160,7 +160,8 @@ func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) 
 			execution, err := program.prepareRelease(context.Background(), loaded,
 				[]string{"--check", "--json", "--version", "1.2.3"})
 			if err != nil {
-				if test.blocked && strings.Contains(err.Error(), "permits only exact target 1.2.2-aaaaaaaaaaaa") {
+				if test.blocked && (strings.Contains(err.Error(), "permits only exact target 1.2.2-aaaaaaaaaaaa") ||
+					err.Error() == "candidate does not bind supported completed history to a new ordinary plan; stage a compatible candidate supporting protected metadata admission") {
 					return
 				}
 				t.Fatalf("completed protected owner prevented newer release inspection: %v", err)
@@ -246,7 +247,7 @@ jq -n --arg target "$target" --arg transaction "$transaction" --arg mounts "${HO
 *) exit 64 ;;
 esac
 `
-	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+	registry := mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
 	writeCLIFile(t, filepath.Join(destination, "bin", "yard-engine"), engine, 0o700)
 	writeCLIFile(t, filepath.Join(destination, "config", "release-transition.json"), string(registry), 0o600)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
@@ -260,6 +261,7 @@ esac
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
 		ConfigHome:   configHome,
 		Releases:     releasetransition.ReleasePair{From: "release-old", Target: release},

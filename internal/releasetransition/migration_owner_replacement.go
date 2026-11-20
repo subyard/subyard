@@ -2,13 +2,9 @@ package releasetransition
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"slices"
 	"strings"
-
-	"github.com/blang/semver/v4"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -21,12 +17,6 @@ const (
 )
 
 var migrationOwnerReceiptParts = []string{"release-transition", "migration-owner", "v1", "transactions"}
-
-type MigrationOwnerAssetsProof struct {
-	Binding        Fingerprint
-	SourceRegistry []byte
-	PreviousSource *MigrationOwnerPreviousSource
-}
 
 // MigrationOwnerPreviousSource binds only the exact earlier release named by
 // the defective journal. Its independently sealed registry must equal the source
@@ -70,15 +60,6 @@ type MigrationOwnerReceiptV1 struct {
 	ProtectedInputs      Fingerprint                      `json:"protectedInputs"`
 	Assets               Fingerprint                      `json:"assets"`
 	Links                ReleaseLinks                     `json:"links"`
-}
-
-func (proof MigrationOwnerAssetsProof) cloneMigrationOwnerAssets() MigrationOwnerAssetsProof {
-	proof.SourceRegistry = slices.Clone(proof.SourceRegistry)
-	if proof.PreviousSource != nil {
-		previous := *proof.PreviousSource
-		proof.PreviousSource = &previous
-	}
-	return proof
 }
 
 func cloneMigrationOwnerJournal(journal JournalRecord) JournalRecord {
@@ -190,93 +171,6 @@ func ParseMigrationOwnerReceipt(payload []byte) (MigrationOwnerReceiptV1, error)
 		return receipt, err
 	}
 	return receipt.cloneMigrationOwnerReceipt(), receipt.Validate()
-}
-
-// The proof reads the canonical predecessor and every durable evidence triple.
-// It replays only the two completed ledger transitions from the frozen projection;
-// it never observes or reruns the historical migration's operational resources.
-func (transition *V2Transition) observeMigrationOwnerReplacement(ctx context.Context, observation *v2Observation) (bool, error) {
-	request := transition.options.MigrationOwnerReplacement
-	if request == nil {
-		return false, nil
-	}
-	if err := request.Validate(); err != nil {
-		return false, err
-	}
-	journal := observation.journal
-	if journal != nil && strings.HasPrefix(string(journal.Transaction), MigrationOwnerTransactionPrefixV1) {
-		if err := transition.store.ValidateMigrationOwnerSuccessor(*journal, *request); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	if journal == nil || journal.Transaction != request.Transaction || observation.journalSnapshot.Fingerprint != request.Fingerprint {
-		return false, invalid("migration owner predecessor changed")
-	}
-	canonical, err := MarshalJournal(*journal)
-	if err != nil || !bytes.Equal(canonical, observation.journalSnapshot.Payload) {
-		return false, invalid("migration owner predecessor is not canonical")
-	}
-	candidateVersion, err := semver.Parse(transition.options.CandidateVersion)
-	if err != nil || candidateVersion.String() != transition.options.CandidateVersion || !candidateVersion.GT(semver.MustParse("0.21.0")) ||
-		!transition.options.MigrationCheckpoint || !observation.checkpointAuthority || transition.options.Replacement != nil ||
-		transition.options.SourceIngress != nil || transition.options.Direction != DirectionActivateTarget ||
-		journal.ArtifactDigest != AffectedMigrationOwnerManifest || journal.RegistryDigest != AffectedMigrationOwnerRegistry ||
-		transition.registryDigest != journal.RegistryDigest || journal.Checkpoint != JournalReconciling || journal.SourceIngress != nil ||
-		journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 2 ||
-		transition.options.Releases.From != journal.Goal.Target || transition.options.Releases.Target == journal.Goal.Target ||
-		!activatedReleaseLinks(observation.links, journal.Releases) || !initialReleaseLinks(observation.links, transition.options.Releases) {
-		return false, invalid("unsupported migration owner replacement")
-	}
-	state, err := validateMigrationOwnerLedger(*journal, transition.options.RegistryPayload, observation.migrationLedgerSnapshot.ProjectionSnapshot.Payload, observation.checkpointSnapshot.Payload)
-	if err != nil {
-		return false, err
-	}
-	projection := state.ProjectionSnapshot
-	if err := transition.store.migrationOwnerEvidence(*journal); err != nil {
-		return false, err
-	}
-	if transition.options.MigrationOwnerAssets == nil {
-		return false, invalid("migration owner protected assets verifier is required")
-	}
-	assets, err := transition.options.MigrationOwnerAssets(ctx)
-	if err != nil {
-		return false, err
-	}
-	assets = assets.cloneMigrationOwnerAssets()
-	if err := validateFingerprint(assets.Binding, "migration owner assets"); err != nil {
-		return false, err
-	}
-	inputs, retained, err := transition.store.migrationOwnerInputs(*journal, assets.SourceRegistry, assets.PreviousSource, projection)
-	if err != nil {
-		return false, err
-	}
-	receipt := &MigrationOwnerReceiptV1{SchemaVersion: MigrationOwnerReceiptSchemaV1, Contract: MigrationOwnerReplacementContractV1,
-		Registry: transition.options.RegistryPayload, SourceRegistry: assets.SourceRegistry, ProjectionPayload: projection.Payload, CheckpointPayload: observation.checkpointSnapshot.Payload,
-		PreviousSource: assets.PreviousSource, RetainedTransactions: retained,
-		Replacement: *request, Predecessor: *journal, Projection: projection.Fingerprint, Authority: observation.migrationLedgerSnapshot.AuthoritySnapshot.Fingerprint,
-		ProtectedInputs: inputs, Assets: assets.Binding, Links: observation.links}
-	ownedReceipt := receipt.cloneMigrationOwnerReceipt()
-	receipt = &ownedReceipt
-	candidate := v2Observation{goal: observation.goal, links: observation.links, ledger: observation.ledger, ledgerSnapshot: observation.ledgerSnapshot,
-		migrationLedgerSnapshot: observation.migrationLedgerSnapshot, checkpointSnapshot: observation.checkpointSnapshot, checkpointAuthority: true,
-		journalSnapshot: observation.journalSnapshot, migrationOwnerReceipt: receipt}
-	for _, binding := range []struct {
-		resource    string
-		fingerprint Fingerprint
-	}{{"predecessor", request.Fingerprint}, {"authority", receipt.Authority}, {"projection", receipt.Projection}, {"protected-inputs", inputs}, {"assets", assets.Binding}} {
-		candidate.observations = append(candidate.observations, ResourceObservation{Resource: "migration-owner." + binding.resource, Class: MigrationOwnerReplacementContractV1, Fingerprint: binding.fingerprint})
-	}
-	if err := transition.observeActivation(ctx, &candidate); err != nil {
-		return false, err
-	}
-	candidate.activationConsequences = append(candidate.activationConsequences, "preserve the proved defective owner's unfinished activation as superseded evidence and activate the standalone candidate")
-	candidate.observationScope, candidate.checkpointConsent, err = transition.currentObservationScope(candidate.activationScope, nil, true, receipt.Authority)
-	if err != nil {
-		return false, err
-	}
-	*observation = candidate
-	return true, nil
 }
 
 func validateMigrationOwnerLedger(journal JournalRecord, registryPayload, projectionPayload, checkpointPayload []byte) (MigrationLedgerSnapshot, error) {
@@ -418,60 +312,6 @@ func migrationOwnerRetainedTarget(pair ReleasePair, previous *MigrationOwnerPrev
 	return target == pair.From || previous != nil && pair.Previous != nil && previous.Release == *pair.Previous && target == previous.Release
 }
 
-func (store *POSIXV2Store) migrationOwnerInputs(predecessor JournalRecord, sourceRegistry []byte, previous *MigrationOwnerPreviousSource, projection ProtectedSnapshot) (Fingerprint, []TransactionID, error) {
-	if err := validateMigrationOwnerPreviousSource(predecessor.Releases, sourceRegistry, previous); err != nil {
-		return "", nil, err
-	}
-	inputs, err := store.sourceMetadataInventoryWithoutMigrationOwner()
-	if err != nil {
-		return "", nil, err
-	}
-	graph, err := store.readTransactionGraph()
-	if err != nil {
-		return "", nil, err
-	}
-	if graph == nil || len(graph.pending) != 0 || len(graph.archives) != 0 {
-		return "", nil, invalid("migration owner replacement requires an original finite transaction graph")
-	}
-	if _, exists := graph.directories[predecessor.Transaction]; !exists {
-		return "", nil, invalid("migration owner predecessor artifacts are missing")
-	}
-	original, err := migrationOwnerSourceRegistry(sourceRegistry, projection)
-	if err != nil {
-		return "", nil, err
-	}
-	sourceLedger, _, err := ParseLedgerV2(projection.Payload, original)
-	if err != nil {
-		return "", nil, err
-	}
-	state := MigrationLedgerSnapshot{Ledger: sourceLedger, ProjectionSnapshot: projection}
-	retained := []TransactionID{}
-	for transaction := range graph.directories {
-		if transaction == predecessor.Transaction {
-			continue
-		}
-		bound, err := store.sourceRetainedTerminalEvidence(transaction, original)
-		if err != nil {
-			return "", nil, err
-		}
-		if !migrationOwnerRetainedTarget(predecessor.Releases, previous, bound.Releases.Target) {
-			return "", nil, invalid("retained transaction does not belong to an exact source release")
-		}
-		if err := store.sourceTerminalBindings(bound, original, projection.Fingerprint, state); err != nil {
-			return "", nil, err
-		}
-		retained = append(retained, transaction)
-	}
-	for _, parts := range [][]string{recoveryReceiptParts, recoveryLifecycleParts, recoveryArchiveParts, recoveryFrontierParts, {"release-transition", "v2", "compatibility"}} {
-		entries, _, err := store.readDirectoryEntries(parts, 0)
-		if err != nil || len(entries) != 0 {
-			return "", nil, invalid("migration owner replacement excludes foreign recovery and ingress evidence")
-		}
-	}
-	slices.Sort(retained)
-	return inputs, retained, nil
-}
-
 func (store *POSIXV2Store) migrationOwnerRetainedHistory(receipt MigrationOwnerReceiptV1) error {
 	original, err := migrationOwnerSourceRegistry(receipt.SourceRegistry, ProtectedSnapshot{Fingerprint: receipt.Projection, Payload: receipt.ProjectionPayload, Exists: true})
 	if err != nil {
@@ -599,45 +439,6 @@ func (store *POSIXV2Store) validateMigrationOwnerCurrent(current JournalRecord) 
 	return nil
 }
 
-func (transition *V2Transition) migrationOwnerNewJournal(observation v2Observation, transaction TransactionID, plan PlanToken) (TransactionID, error) {
-	receipts, err := transition.store.migrationOwnerReceipts()
-	if err != nil {
-		return "", err
-	}
-	for id, receipt := range receipts {
-		wanted := *observation.migrationOwnerReceipt
-		wanted.Successor = receipt.Successor
-		payload, _ := MarshalMigrationOwnerReceipt(wanted)
-		actual, _ := MarshalMigrationOwnerReceipt(receipt)
-		if receipt.Successor.AuthorizationPlan != plan || !bytes.Equal(payload, actual) {
-			return "", invalid("migration owner predecessor already has a different reserved successor")
-		}
-		return id, nil
-	}
-	return TransactionID(MigrationOwnerTransactionPrefixV1 + string(transaction)), nil
-}
-
-func (transition *V2Transition) publishMigrationOwnerReceipt(observation v2Observation, created *JournalRecord) error {
-	receipt := *observation.migrationOwnerReceipt
-	receipts, err := transition.store.migrationOwnerReceipts()
-	if err != nil {
-		return err
-	}
-	if existing, found := receipts[created.Transaction]; found {
-		// Resume the exact initial successor and its original durable grant after a
-		// receipt-only crash. A newly confirmed grant authorizes this same plan.
-		receipt.Successor = cloneMigrationOwnerJournal(existing.Successor)
-		*created = cloneMigrationOwnerJournal(existing.Successor)
-	} else {
-		receipt.Successor = cloneMigrationOwnerJournal(*created)
-	}
-	payload, err := MarshalMigrationOwnerReceipt(receipt)
-	if err != nil {
-		return err
-	}
-	return transition.store.createOwnerImmutable(migrationOwnerReceiptParts, string(created.Transaction)+".json", payload)
-}
-
 func migrationOwnerProtectedTransactions(receipts map[TransactionID]MigrationOwnerReceiptV1) []TransactionID {
 	ids := []TransactionID{}
 	for transaction, receipt := range receipts {
@@ -719,35 +520,4 @@ func (store *POSIXV2Store) migrationOwnerCompletion(receipt MigrationOwnerReceip
 		return JournalRecord{}, invalid("migration owner supersession has no terminal successor evidence")
 	}
 	return cloneMigrationOwnerJournal(*terminal), nil
-}
-
-func (store *POSIXV2Store) validateMigrationOwnerPreparedJournal() error {
-	receipts, err := store.migrationOwnerReceipts()
-	if err != nil || len(receipts) != 1 {
-		return invalid("unbound prepared migration owner journal")
-	}
-	parent, present, err := store.openParent([]string{"release-transition", "v2"}, false)
-	if err != nil || !present {
-		return invalid("prepared migration owner journal parent is unavailable")
-	}
-	defer unix.Close(parent)
-	pending, err := readStagingAt(parent, ".journal.json.pending")
-	if err != nil || !pending.Exists {
-		return invalid("prepared migration owner journal is unavailable")
-	}
-	current, err := store.ReadCurrentJournal()
-	if err != nil {
-		return err
-	}
-	for _, receipt := range receipts {
-		expected, _ := MarshalJournal(receipt.Successor)
-		predecessor, _ := MarshalJournal(receipt.Predecessor)
-		// Staging carries no authority. Only the immutable receipt supplies the
-		// exact intended successor; the unchanged canonical predecessor guards
-		// completing or replacing this CAS staging file under the update lock.
-		if !bytes.HasPrefix(expected, pending.Payload) || !bytes.Equal(current.Payload, predecessor) {
-			return invalid("prepared migration owner journal conflicts with its immutable receipt")
-		}
-	}
-	return nil
 }

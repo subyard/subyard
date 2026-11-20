@@ -4,263 +4,50 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
-
-	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
-	for _, boundary := range []string{"", "after-recovery", "after-settings-cas", "after-step-verified", "after-ledger-cas"} {
-		t.Run(boundary, func(t *testing.T) {
-			home := testkit.TempDir(t)
-			configHome := filepath.Join(home, "settings")
-			files := map[string]string{
-				".sync/settings/config.env":             "SSH_PORT=2240\n",
-				".sync/settings/yards/named/config.env": "SSH_PORT=2241\n",
-				"yards/named/config.env":                "# unrelated local records\nDEV_SUDO=0\n",
-				"yards/override/config.env":             "# exact winning override\nSSH_PORT=2242\n",
-			}
-			for name, content := range files {
-				path := filepath.Join(configHome, name)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, []byte(content), 0o640)
-			}
-			root, err := filepath.Abs(filepath.Join("..", ".."))
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-			registry = localSSHHistoricalRegistry(t, registry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			options := V2Options{ConfigHome: configHome, OperatorHome: home, CandidateConfigDir: filepath.Join(root, "config"), Releases: ReleasePair{From: "release-ssh", Target: "release-ssh"},
-				ObserveLinks: func(context.Context) (ReleaseLinks, error) { return ReleaseLinks{Active: "release-ssh"}, nil }, RegistryPayload: registry, ArtifactDigest: digestA,
-				OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}, VerifyAuthorization: func(plan PlanToken, a Authorization) bool { return a == v2TestAuthorization(plan) }}
-			transition, err := NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			activeBoundary := boundary
-			transition.options.fault = func(point string) error {
-				if point == activeBoundary && point != "" {
-					activeBoundary = ""
-					return errors.New("synthetic interruption")
-				}
-				return nil
-			}
-			goal := Goal{Target: "release-ssh", Direction: DirectionActivateTarget}
-			inspection, err := transition.Inspect(context.Background(), goal)
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspect: %#v %v", inspection.Blockers, err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if boundary != "" {
-				if outcome.Status != StatusRecovering {
-					t.Fatalf("interruption was not retained: %#v", outcome)
-				}
-				transition, err = NewV2Transition(options)
-				if err != nil {
-					t.Fatal(err)
-				}
-				resume, inspectErr := transition.Inspect(context.Background(), goal)
-				if inspectErr != nil || len(resume.Blockers) != 0 {
-					t.Fatalf("resume: %#v %v", resume.Blockers, inspectErr)
-				}
-				outcome, err = transition.Converge(context.Background(), Execution{Plan: resume.Plan})
-			}
-			if err != nil || outcome.Status != StatusReady {
-				t.Fatalf("converge: %#v %v", outcome, err)
-			}
-			for yard, port := range map[string]int{"default": 2240, "named": 2241, "override": 2242} {
-				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: yard, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
-				if err != nil || loaded.Context.SSHPort != port {
-					t.Fatalf("yard %s port changed: %v", yard, err)
-				}
-			}
-			for _, name := range []string{".sync/settings/config.env", ".sync/settings/yards/named/config.env", "yards/override/config.env"} {
-				content, err := os.ReadFile(filepath.Join(configHome, name))
-				if err != nil || string(content) != files[name] {
-					t.Fatalf("protected source or winning local file changed: %s", name)
-				}
-			}
-			info, err := os.Stat(filepath.Join(configHome, "yards/named/config.env"))
-			if err != nil || info.Mode().Perm() != 0o640 {
-				t.Fatal("exact local mode changed")
-			}
-		})
-	}
-}
-
-func TestLocalSSHCheckpointResumeRetainsWideAndHistoricalNarrowGrants(t *testing.T) {
-	for _, historical := range []bool{false, true} {
-		t.Run(map[bool]string{false: "wide", true: "historical-narrow"}[historical], func(t *testing.T) {
-			home := testkit.TempDir(t)
-			configHome := filepath.Join(home, "settings")
-			write := func(relative, content string) {
-				t.Helper()
-				path := filepath.Join(configHome, relative)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, []byte(content), 0o600)
-			}
-			write(".sync/settings/config.env", "SSH_PORT=2240\n")
-			write(".sync/settings/yards/named/config.env", "SSH_PORT=2241\n")
-			root, err := filepath.Abs(filepath.Join("..", ".."))
-			if err != nil {
-				t.Fatal(err)
-			}
-			registryPayload, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-			registryPayload = localSSHHistoricalRegistry(t, registryPayload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, _, err := ParseRegistryV2(registryPayload, BuiltinCapabilityCatalog())
-			if err != nil {
-				t.Fatal(err)
-			}
-			ledger := BaselineLedgerV2(registry)
-			for _, migration := range registry.Migrations {
-				if migration.Kind == localSSHPortMigration {
-					break
-				}
-				ledger, err = ledger.Advance(registry, migration)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			encoded, _, err := MarshalLedgerV2(ledger, registry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			write("release-transition/v2/ledger.json", string(encoded))
-			owner := &sourceScopeReconciler{}
-			var reconciler V2ActivationReconciler = owner
-			if historical {
-				reconciler = historicalSourceScopeReconciler{owner}
-			}
-			links := ReleaseLinks{Active: "release-a"}
-			options := V2Options{ConfigHome: configHome, OperatorHome: home, CandidateConfigDir: filepath.Join(root, "config"),
-				Releases: ReleasePair{From: "release-a", Target: "release-b"}, RegistryPayload: registryPayload, ArtifactDigest: digestA,
-				MigrationCheckpoint: true, SourceMigrationCheckpoint: true, Reconcilers: []V2ActivationReconciler{reconciler},
-				OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
-				ObserveLinks:      func(context.Context) (ReleaseLinks, error) { return links, nil },
-				ActivateLinks: func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
-					links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
-					return links, nil
-				}, VerifyAuthorization: func(plan PlanToken, grant Authorization) bool { return grant == v2TestAuthorization(plan) },
-				fault: func(point string) error {
-					if point == "before-checkpoint-publication" {
-						return errors.New("interrupt SSH pin checkpoint publication")
-					}
-					return nil
-				}}
-			transition, err := NewV2Transition(options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			readJournal := func(active *V2Transition) JournalRecord {
-				t.Helper()
-				snapshot, err := active.store.ReadCurrentJournal()
-				if err != nil || !snapshot.Exists {
-					t.Fatal("SSH checkpoint journal unavailable")
-				}
-				journal, err := ParseJournal(snapshot.Payload)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return journal
-			}
-			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
-			initial, err := transition.Inspect(context.Background(), goal)
-			if err != nil || len(initial.Blockers) != 0 || owner.wide == historical {
-				t.Fatalf("SSH original scope: wide=%t err=%v", owner.wide, err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan)})
-			if err != nil || outcome.Status != StatusRecovering {
-				t.Fatalf("SSH checkpoint interruption missing: %#v %v", outcome, err)
-			}
-			original := readJournal(transition)
-			if original.Checkpoint != JournalComplete || len(original.Steps) != 3 {
-				t.Fatal("checkpoint fixture did not retain completed two-yard SSH CAS work")
-			}
-			for yard, port := range map[string]string{"default": "2240", "named": "2241"} {
-				path := filepath.Join(configHome, "yards", yard, "config.env")
-				values, err := config.ReadAssignments(path)
-				info, modeErr := os.Stat(path)
-				if err != nil || modeErr != nil || values["SSH_PORT"] != port || info.Mode().Perm() != 0o600 {
-					t.Fatalf("actual SSH pin CAS missing for %s", yard)
-				}
-			}
-			freshOwner := &sourceScopeReconciler{converged: true}
-			fresh := freshSourceScopeOwner(t, transition, freshOwner)
-			resume, err := fresh.Inspect(context.Background(), goal)
-			if err != nil || len(resume.Blockers) != 0 || resume.Resume == nil || freshOwner.wide == historical {
-				t.Fatalf("SSH checkpoint scope changed: wide=%t inspection=%#v err=%v", freshOwner.wide, resume, err)
-			}
-			outcome, err = fresh.Converge(context.Background(), Execution{Plan: resume.Plan})
-			if err != nil || outcome.Status != StatusReady || freshOwner.applies != 0 {
-				t.Fatalf("SSH checkpoint required new activation or consent: %#v %v", outcome, err)
-			}
-			completed := readJournal(fresh)
-			if completed.Transaction != original.Transaction || completed.AuthorizationPlan != original.AuthorizationPlan || completed.ObservationScope != original.ObservationScope {
-				t.Fatal("SSH checkpoint publication rewrote historical authorization")
-			}
-		})
-	}
-}
-
 func TestLocalSSHMigrationCatalogPreservesKnownRetainedHistoryAndBlocksUnknown(t *testing.T) {
-	transition, _, _ := v2TransitionFixture(t, nil)
-	transition.catalog = PreviousBuiltinCapabilityCatalog()
-	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
-	inspection, err := transition.Inspect(context.Background(), goal)
+	transition, store := completedSourceMetadataFixture(t)
+	snapshot, err := store.ReadCurrentJournal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)}); err != nil || outcome.Status != StatusReady {
-		t.Fatalf("old owner seed: %#v %v", outcome, err)
-	}
-	transition, store := interruptSourceMetadataActivation(t, transition, transition.store)
-	before, err := store.ReadCurrentJournal()
+	journal, err := ParseJournal(snapshot.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, err := ParseJournal(before.Payload)
-	if err != nil || old.CatalogDigest != PreviousBuiltinCapabilityCatalog().Digest() {
-		t.Fatal("fixture lost original compiled identity")
-	}
-	options := transition.options
-	options.fault = nil
-	options.Reconcilers = []V2ActivationReconciler{&v2TestReconciler{converged: true}}
-	current, err := NewV2Transition(options)
+	journal.Transaction = "tx-known-catalog-activation"
+	journal.Checkpoint = JournalReconciling
+	journal.Steps = []JournalStep{}
+	journal.CatalogDigest = PreviousBuiltinCapabilityCatalog().Digest()
+	journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
+	payload, err := MarshalJournal(journal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.catalog.Digest() != old.CatalogDigest {
-		t.Fatal("new engine rebaselined the original catalog")
+	if err := store.CompareAndSwapCurrentJournal(snapshot, payload); err != nil {
+		t.Fatal(err)
 	}
+	current, err := NewV2Transition(transition.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.catalog.Digest() != journal.CatalogDigest {
+		t.Fatal("original frozen catalog changed")
+	}
+	before := snapshotStoreV2Tree(t, store.configHome)
 	if _, err := store.InspectSourceMetadata(current.registry, current.registryDigest); err != nil {
-		t.Fatalf("known owner source history refused: %v", err)
+		t.Fatal(err)
 	}
-	after, _ := store.ReadCurrentJournal()
-	if string(before.Payload) != string(after.Payload) {
-		t.Fatal("read-only admission rewrote original journal")
+	if !bytes.Equal(before, snapshotStoreV2Tree(t, store.configHome)) {
+		t.Fatal("reader rewrote history")
 	}
 	if _, known := SupportedBuiltinCatalog(digestA); known {
-		t.Fatal("arbitrary historical catalog admitted")
+		t.Fatal("unknown catalog admitted")
 	}
 }
 
@@ -274,7 +61,7 @@ func TestLocalSSHMigrationHasNoLegacyRollbackCompatibility(t *testing.T) {
 		fixture := newV2RollbackBoundaryFixtureWithLedger(t, "0.18.6", "", registryPayload, "absent")
 		if applied {
 			registry := fixture.transition.registry
-			ledger := BaselineLedgerV2(registry)
+			ledger := FrozenHistoryBaselineV2(registry)
 			for _, migration := range registry.Migrations {
 				ledger, err = ledger.Advance(registry, migration)
 				if err != nil {
@@ -303,180 +90,10 @@ func TestLocalSSHMigrationHasNoLegacyRollbackCompatibility(t *testing.T) {
 	}
 }
 
-func TestLocalSSHMigrationOverlappingSettingsResumeAndRejectDrift(t *testing.T) {
-	for _, newline := range []string{"\n", ""} {
-		name := "terminated"
-		if newline == "" {
-			name = "unterminated"
-		}
-		t.Run(name, func(t *testing.T) {
-			for _, boundary := range []string{"", "after-first-cas", "after-second-cas", "after-second-verified", "after-target-active"} {
-				for _, drift := range []string{"", "wrong-port", "unrelated-local", "unrelated-final-lf", "inherited-input"} {
-					if boundary == "" && drift != "" {
-						continue
-					}
-					t.Run(boundary+"/"+drift, func(t *testing.T) {
-						home := testkit.TempDir(t)
-						configHome := filepath.Join(home, "settings")
-						for name, content := range map[string]string{
-							".sync/settings/yards/named/config.env": "SSH_PORT=2241\n",
-							"yards/named/config.env":                "# retained local definition\nYARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n# retained tail" + newline,
-						} {
-							path := filepath.Join(configHome, name)
-							if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-								t.Fatal(err)
-							}
-							testkit.WriteFile(t, path, []byte(content), 0o640)
-						}
-						root, err := filepath.Abs(filepath.Join("..", ".."))
-						if err != nil {
-							t.Fatal(err)
-						}
-						registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-						registry = localSSHHistoricalRegistry(t, registry)
-						if err != nil {
-							t.Fatal(err)
-						}
-						options := V2Options{ConfigHome: configHome, OperatorHome: home, CandidateConfigDir: filepath.Join(root, "config"),
-							Releases:        ReleasePair{From: "release-overlap", Target: "release-overlap"},
-							ObserveLinks:    func(context.Context) (ReleaseLinks, error) { return ReleaseLinks{Active: "release-overlap"}, nil },
-							RegistryPayload: registry, ArtifactDigest: digestA,
-							OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
-							VerifyAuthorization: func(plan PlanToken, auth Authorization) bool { return auth == v2TestAuthorization(plan) },
-						}
-
-						transition, err := NewV2Transition(options)
-						if err != nil {
-							t.Fatal(err)
-						}
-						casCount, verifiedCount := 0, 0
-						interrupted := false
-						transition.options.fault = func(point string) error {
-							if point == "after-settings-cas" {
-								casCount++
-							}
-							if point == "after-step-verified" {
-								verifiedCount++
-							}
-							stop := boundary == "after-first-cas" && point == "after-settings-cas" && casCount == 1 ||
-								boundary == "after-second-cas" && point == "after-settings-cas" && casCount == 2 ||
-								boundary == "after-second-verified" && point == "after-step-verified" && verifiedCount == 2 ||
-								boundary == "after-target-active" && point == boundary
-							if stop {
-								interrupted = true
-								return errors.New("synthetic overlapping settings interruption")
-							}
-							return nil
-						}
-						goal := Goal{Target: "release-overlap", Direction: DirectionActivateTarget}
-						inspection, err := transition.Inspect(context.Background(), goal)
-						if err != nil || len(inspection.Blockers) != 0 {
-							t.Fatalf("initial: %#v %v", inspection.Blockers, err)
-						}
-						outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-						if err != nil {
-							t.Fatal(err)
-						}
-						if boundary == "" {
-							if outcome.Status != StatusReady || casCount != 2 {
-								t.Fatalf("complete: %#v CAS=%d", outcome, casCount)
-							}
-						} else if !interrupted || outcome.Status != StatusRecovering {
-							t.Fatalf("interruption: %#v CAS=%d verified=%d", outcome, casCount, verifiedCount)
-						}
-						localPath := filepath.Join(configHome, "yards/named/config.env")
-						before, err := os.ReadFile(localPath)
-						if err != nil {
-							t.Fatal(err)
-						}
-						switch drift {
-						case "wrong-port":
-							value := "2249"
-							changed, err := config.EditPersistentAssignmentContent(localPath, before, "SSH_PORT", &value)
-							if err != nil {
-								t.Fatal(err)
-							}
-							testkit.WriteFile(t, localPath, changed, 0o640)
-						case "unrelated-local":
-							testkit.WriteFile(t, localPath, append(before, []byte("# unapproved record\n")...), 0o640)
-						case "unrelated-final-lf":
-							testkit.WriteFile(t, localPath, append(before, '\n'), 0o640)
-						case "inherited-input":
-							testkit.WriteFile(t, filepath.Join(configHome, ".sync/settings/yards/named/config.env"), []byte("SSH_PORT=2249\n"), 0o640)
-						}
-						transition, err = NewV2Transition(options)
-						if err != nil {
-							t.Fatal(err)
-						}
-						resumed, err := transition.Inspect(context.Background(), goal)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if drift != "" {
-							if boundary == "after-first-cas" && drift == "inherited-input" {
-								if resumed.Plan == inspection.Plan || resumed.Resume != nil {
-									t.Fatal("changed inherited input did not require fresh consent")
-								}
-								journalBefore, err := transition.store.ReadCurrentJournal()
-								if err != nil {
-									t.Fatal(err)
-								}
-								blocked, err := transition.Converge(context.Background(), Execution{Plan: resumed.Plan})
-								if err != nil || blocked.Status != StatusOperatorActionRequired {
-									t.Fatalf("changed input executed without new consent: %#v %v", blocked, err)
-								}
-								journalAfter, err := transition.store.ReadCurrentJournal()
-								if err != nil || journalBefore.Fingerprint != journalAfter.Fingerprint {
-									t.Fatal("unapproved inherited input rewrote original journal")
-								}
-								return
-							}
-							if len(resumed.Blockers) == 0 {
-								t.Fatal("unapproved settings drift admitted")
-							}
-							blocked := false
-							for _, blocker := range resumed.Blockers {
-								if blocker.Code == CodeMigrationStale || blocker.Code == CodePlanStale {
-									blocked = true
-								}
-							}
-							if !blocked {
-								t.Fatalf("drift lost migration guard: %#v", resumed.Blockers)
-							}
-							return
-						}
-						if len(resumed.Blockers) != 0 {
-							t.Fatalf("authorized overlap resume blocked: %#v", resumed.Blockers)
-						}
-						if boundary != "" {
-							outcome, err = transition.Converge(context.Background(), Execution{Plan: resumed.Plan})
-							if err != nil || outcome.Status != StatusReady {
-								t.Fatalf("resume: %#v %v", outcome, err)
-							}
-						}
-						content, err := os.ReadFile(localPath)
-						if err != nil || string(content) != "# retained local definition\nYARD_TEMPLATE='test-vms'\n# retained tail\nSSH_PORT='2241'\n" {
-							t.Fatalf("authorized file differs: %q %v", content, err)
-						}
-						info, err := os.Stat(localPath)
-						if err != nil || info.Mode().Perm() != 0o600 {
-							t.Fatal("SSH pin did not preserve the canonical predecessor mode")
-						}
-						git, err := os.ReadFile(filepath.Join(configHome, ".sync/settings/yards/named/config.env"))
-						if err != nil || string(git) != "SSH_PORT=2241\n" {
-							t.Fatal("overlapping migration changed Git input")
-						}
-					})
-				}
-			}
-		})
-	}
-}
-
 func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
 	t.Helper()
 	var registry RegistryV2
-	if err := json.Unmarshal(payload, &registry); err != nil {
+	if err := json.Unmarshal(historyV028Payload, &registry); err != nil {
 		t.Fatal(err)
 	}
 	registry.CurrentEpochs["owner-registration"], registry.CurrentEpochs["power-metadata"] = 2, 2
@@ -491,141 +108,4 @@ func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
 	// SSH dependency array. Owner-replacement authority pins these bytes.
 	encoded = bytes.Replace(encoded, []byte("\"dependsOn\": [\n        \"canonicalize-test-vms-settings-v2\",\n        \"canonicalize-test-yard-owner-v2\"\n      ]"), []byte("\"dependsOn\": [\"canonicalize-test-vms-settings-v2\", \"canonicalize-test-yard-owner-v2\"]"), 1)
 	return append(encoded, '\n')
-}
-
-func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
-	for name, nested := range map[string]string{"flat-only": "", "flat-and-nested": "DEV_SUDO=0\n"} {
-		t.Run(name, func(t *testing.T) {
-			home := testkit.TempDir(t)
-			configHome := filepath.Join(home, "settings")
-			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n", "yards/default.env": "DEV_SUDO=0\n"}
-			if nested != "" {
-				files["yards/default/config.env"] = nested
-			}
-			for name, content := range files {
-				path := filepath.Join(configHome, name)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, []byte(content), 0o600)
-			}
-			root, err := filepath.Abs(filepath.Join("..", ".."))
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			transition, err := NewV2Transition(V2Options{ConfigHome: configHome, OperatorHome: home, CandidateConfigDir: filepath.Join(root, "config"), Releases: ReleasePair{From: "release-ssh", Target: "release-ssh"},
-				ObserveLinks: func(context.Context) (ReleaseLinks, error) { return ReleaseLinks{Active: "release-ssh"}, nil }, RegistryPayload: localSSHHistoricalRegistry(t, registry), ArtifactDigest: digestA,
-				OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}, VerifyAuthorization: func(plan PlanToken, a Authorization) bool { return a == v2TestAuthorization(plan) }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-ssh", Direction: DirectionActivateTarget})
-			if nested != "" {
-				if err == nil && len(inspection.Blockers) == 0 {
-					t.Fatal("inspection accepted duplicate default registrations")
-				}
-				return
-			}
-			if err != nil || len(inspection.Blockers) != 0 {
-				t.Fatalf("inspect: %#v %v", inspection.Blockers, err)
-			}
-			outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
-			if err != nil || outcome.Status != StatusReady {
-				t.Fatalf("converge: %#v %v", outcome, err)
-			}
-			flat, err := os.ReadFile(filepath.Join(configHome, "yards/default.env"))
-			if err != nil || string(flat) != files["yards/default.env"]+"SSH_PORT='2240'\n" {
-				t.Fatalf("flat file missing its pin: %q %v", flat, err)
-			}
-			// Without the Git value only the local pin can keep the port.
-			testkit.WriteFile(t, filepath.Join(configHome, ".sync/settings/config.env"), nil, 0o600)
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "default", Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
-			if err != nil || loaded.Context.SSHPort != 2240 {
-				t.Fatalf("default yard port = %d after Git cleanup, want the pinned 2240: %v", loaded.Context.SSHPort, err)
-			}
-		})
-	}
-}
-
-func TestRegisteredSettingsSnapshotUsesTheFileTheLoaderReads(t *testing.T) {
-	for _, test := range []struct {
-		name, yard, flat, nested string
-		want                     string
-		refused                  bool
-	}{
-		{name: "default flat only", yard: "default", flat: "A=1\n", want: "yards/default.env"},
-		{name: "default flat and nested", yard: "default", flat: "A=1\n", nested: "B=1\n", refused: true},
-		{name: "named flat only", yard: "named", flat: "A=1\n", want: "yards/named.env"},
-		{name: "named flat and nested", yard: "named", flat: "A=1\n", nested: "B=1\n", refused: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			home := testkit.TempDir(t)
-			configHome := filepath.Join(home, "settings")
-			files := map[string]string{"yards/" + test.yard + ".env": test.flat}
-			if test.nested != "" {
-				files["yards/"+test.yard+"/config.env"] = test.nested
-			}
-			for name, content := range files {
-				path := filepath.Join(configHome, name)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, []byte(content), 0o600)
-			}
-			transition := &V2Transition{options: V2Options{ConfigHome: configHome}}
-			_, path, _, err := transition.registeredSettingsSnapshot(test.yard, nil)
-			if (err != nil) != test.refused {
-				t.Fatalf("refused = %v, want %v", err, test.refused)
-			}
-			if !test.refused && path != filepath.Join(configHome, test.want) {
-				t.Fatalf("path = %s, want %s", path, test.want)
-			}
-		})
-	}
-}
-
-func TestLocalSSHMigrationSharedPortRefusalExemptsOnlyOwnerMigrationPair(t *testing.T) {
-	for _, test := range []struct {
-		left, right string
-		refused     bool
-	}{{"alpha", "beta", true}, {"beta", legacyOwnerRegistrationYard, true}, {legacyOwnerRegistrationYard, currentOwnerRegistrationYard, false}} {
-		t.Run(test.left+"-"+test.right, func(t *testing.T) {
-			home := testkit.TempDir(t)
-			configHome := filepath.Join(home, "settings")
-			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n"}
-			for _, yard := range []string{test.left, test.right} {
-				files["yards/"+yard+"/config.env"] = "DEV_SUDO=0\n"
-				files[".sync/settings/yards/"+yard+"/config.env"] = "SSH_PORT=2241\n"
-			}
-			for name, content := range files {
-				path := filepath.Join(configHome, name)
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, []byte(content), 0o600)
-			}
-			root, err := filepath.Abs(filepath.Join("..", ".."))
-			if err != nil {
-				t.Fatal(err)
-			}
-			registry, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			transition, err := NewV2Transition(V2Options{ConfigHome: configHome, OperatorHome: home, CandidateConfigDir: filepath.Join(root, "config"), Releases: ReleasePair{From: "release-ssh", Target: "release-ssh"},
-				ObserveLinks: func(context.Context) (ReleaseLinks, error) { return ReleaseLinks{Active: "release-ssh"}, nil }, RegistryPayload: localSSHHistoricalRegistry(t, registry), ArtifactDigest: digestA,
-				OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}, VerifyAuthorization: func(PlanToken, Authorization) bool { return false }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = transition.Inspect(context.Background(), Goal{Target: "release-ssh", Direction: DirectionActivateTarget})
-			if refused := err != nil && strings.Contains(err.Error(), "SSH port is used by both yard "+test.left+" and yard "+test.right); refused != test.refused {
-				t.Fatalf("refused = %v, want %v: %v", refused, test.refused, err)
-			}
-		})
-	}
 }

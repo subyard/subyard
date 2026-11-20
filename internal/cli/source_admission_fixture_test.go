@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -295,36 +294,28 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
-	for _, migration := range registry.Migrations {
-		if migrateSSH && migration.Kind == "local-ssh-port-settings-v2-to-v3" {
-			break
-		}
-		ledger, err = ledger.Advance(registry, migration)
+	if migrateSSH {
+		seedCompletedSSHCheckpoint(t, home, registry, registryDigest)
+		seedNativeSSHPins(t, home)
+	} else {
+		payload, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 		if err != nil {
 			t.Fatal(err)
 		}
+		writeProfileTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), payload, 0600)
+		store, err := releasetransition.NewPOSIXV2Store(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := store.ReadMigrationLedger(registry, registryDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = store.ConvertMigrationLedger(state, registry, registryDigest, registry, registryDigest); err != nil {
+			t.Fatal(err)
+		}
 	}
-	payload, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeProfileTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), payload, 0600)
-	store, err := releasetransition.NewPOSIXV2Store(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := store.ReadMigrationLedger(registry, registryDigest)
-	if err != nil {
-		t.Fatal("canonical seed ledger", err)
-	}
-	if err := store.ConvertMigrationLedger(state, registry, registryDigest, registry, registryDigest); err != nil {
-		t.Fatal("canonical seed checkpoint", err)
-	}
-	if migrateSSH {
-		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "config.env"), []byte("SSH_PORT=2240\n"), 0600)
-		writeProfileTestFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), []byte("SSH_PORT=2241\n"), 0600)
-	}
+
 	server, err := testkit.NewIncusServer(testkit.TempDir(t))
 	if err != nil {
 		t.Fatal(err)
@@ -595,4 +586,75 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 		result.ExitCode = 1
 	}
 	return testkit.IncusServerExecStep{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}
+}
+
+// Seed a completed historical checkpoint whose immutable projection is older.
+// No retired planner, transformation or native effect runs in this fixture.
+func seedCompletedSSHCheckpoint(t *testing.T, home string, registry releasetransition.RegistryV2, digest releasetransition.Fingerprint) {
+	t.Helper()
+	oldPayload := mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "internal/releasetransition/history_v028.json"))
+	old, _, err := releasetransition.ParseRegistryV2(oldPayload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := releasetransition.FreshBootstrapLedgerV2(old)
+	for _, m := range old.Migrations {
+		if m.Kind == "local-ssh-port-settings-v2-to-v3" {
+			break
+		}
+		before, err = before.Advance(old, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, _, err := releasetransition.MarshalLedgerV2(before, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProfileTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), payload, 0600)
+	store, err := releasetransition.NewPOSIXV2Store(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := store.ReadLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := releasetransition.LedgerCheckpointV1{SchemaVersion: 1, RegistryDigest: digest, LegacyProjection: releasetransition.LedgerProjectionBindingV1{Exists: true, Fingerprint: projection.Fingerprint, Epochs: map[string]int{}}, Domains: map[string]releasetransition.DomainCheckpointV1{}}
+	for domain, top := range registry.CurrentEpochs {
+		cp.LegacyProjection.Epochs[domain] = before.Domains[domain].Epoch
+		prefix, err := registry.MigrationPrefixDigest(domain, top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cp.Domains[domain] = releasetransition.DomainCheckpointV1{Epoch: top, CompactedThrough: top, PrefixDigest: prefix, AppliedSuffix: []string{}}
+	}
+	payload, _, err = releasetransition.MarshalLedgerCheckpointV1(cp, registry, digest, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProfileTestFile(t, filepath.Join(home, "release-transition/v2/history-checkpoint.json"), payload, 0600)
+}
+func seedNativeSSHPins(t *testing.T, home string) {
+	t.Helper()
+	for yard, port := range map[string]string{"default": "2240", "named": "2241"} {
+		gitPath := filepath.Join(home, ".sync/settings/config.env")
+		if yard != "default" {
+			gitPath = filepath.Join(home, ".sync/settings/yards", yard, "config.env")
+		}
+		writeProfileTestFile(t, gitPath, []byte("SSH_PORT="+port+"\n"), 0600)
+		path := filepath.Join(home, "yards", yard, "config.env")
+		old, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		lines := []string{}
+		for _, line := range strings.Split(string(old), "\n") {
+			if line != "" && !strings.HasPrefix(line, "SSH_PORT=") {
+				lines = append(lines, line)
+			}
+		}
+		lines = append(lines, "SSH_PORT="+port)
+		writeProfileTestFile(t, path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+	}
 }

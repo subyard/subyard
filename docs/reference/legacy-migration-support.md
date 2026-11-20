@@ -35,11 +35,18 @@ at the same epochs. Incomplete or contradictory state cannot be repaired by comp
 versions: exact unfinished transactions retain their sealed owner, artifacts and evidence.
 Any other unfinished transition while the installed release is below v0.28.0 refuses once with
 `next: yard update && yard update --version 0.28.1 && yard update`, or `yard update && yard update`
-when it already targets v0.28.0 or newer: the installed release first finishes its own journal. If
-it cannot, for example when `yard update` reports that the journal-selected release cannot provide
-a valid transition inspection (a v0.28.0 update stopped at a restarted VM yard), run the v0.28.1
-installer or use a later v0.28.x release that owns that recovery; do not uninstall.
-The anchor does not change `minimumEpochs`, persistent formats or retained history readers.
+when it already targets v0.28.0 or newer and its migration effects are complete: the installed
+release can finish its own journal, or a newer release can take over after fresh inspection and
+consent. An interrupted first transition that still needs a historical migration handler requires
+manual repair; preserve its runtime, data and protected evidence, and do not uninstall.
+The source-version anchor remains v0.28.0. The current cleanup separately raises
+`minimumEpochs` to owner-registration 3, power-metadata 3, project-state 1 and settings 3,
+and removes the six executable historical registry migrations; the ledger-only
+`introduce-nm-device-guard-v4` stays live. Frozen historical definitions, catalog
+identities, prefix digests and evidence grammars remain reader data. Persistent schemas,
+completed history and compatible rollback remain unchanged. A fresh current installation starts
+at these epochs, records an empty-`Applied` baseline through one journaled ledger step and then
+the live ledger-only step before activation, without running the six historical migrations.
 
 Sources before **v0.11.0** retain full uninstall followed by the user's separate clean installation.
 This removal route deletes owned data only after its existing explicit confirmation; an update
@@ -78,11 +85,14 @@ were deleted. Modern receipt-owned namespaces retain their existing deletion and
 
 The cutoff concerns legacy migration V1. Fresh v0.28.0+ updates, process V1, Ledger V2,
 recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
-The source-version cutoff does not raise the domain epoch floor or retire V2 checkpoint history.
+The source-version cutoff and the raised domain floor are separate policies. Raising the floor
+does not retire V2 checkpoint history or the original `Applied` IDs.
 
-Supported updates run versioned compatibility migrations for registered local yards through
-the release journal. Plain `yard init` finishes missing compatibility work before its strict
-ordinary initialization; `--adopt` remains a compatible explicit entry. Bounded registration
+The v0.28.x journal handlers completed compatibility migrations for registered local yards.
+The current engine retains their results and proof, with no planner or effects for those steps.
+Migration-independent `yard init`, explicit adoption and disk-/tmp maintenance retain their
+ordinary ownership, network, native-identity and confirmation guards; `--adopt` remains an
+explicit entry. The native safety contracts below remain in their owning operations. Bounded registration
 and native identity checks precede project and selected-resource receipt publication. This
 adoption path cannot be rolled back, so it takes existing local devices under management as they
 are, including unknown names, memory devices and unregistered or changed `ws-*` devices, and its
@@ -182,13 +192,25 @@ The boundary itself deletes no product code. A later removal (proved unreachable
 deletion) starts from these facts of the current candidate:
 
 - **Unfinished journals it no longer continues:** every unfinished transition while the installed
-  release is below v0.28.0, whoever started it: the candidate refuses before the engine, including
-  the historical owner fixes of v0.11.1, v0.17.3 and v0.21.0, so their replacement and recovery paths
-  are not reached from admission. It continues only its own exact transaction (same target,
-  direction and artifact digest); at or above the anchor the engine keeps ordinary resume,
-  newer-release replacement and the post-activation takeover of an anchor-series journal.
+  release is from v0.11.0 to below v0.28.0, whoever started it: explicit `--version` selection refuses with
+  `source-anchor-required` in the outer caller, before candidate selection. Without `--version`,
+  the installed release still finishes its own exact journal and retains its historical retry hints.
+  The current engine no longer writes the v0.11.1/v0.21.0 historical replacements or delegates
+  v0.17.3 repair; their completed-history readers and frozen capability probe remain.
+  Child admission still admits only its own exact transaction (same target, direction and artifact
+  digest) below the anchor. At or above the anchor, journals with completed migration effects
+  retain ordinary resume and newer-release replacement, including post-activation takeover.
+  A ledger below the new floor, or an unfinished journal with any unverified historical migration
+  step, requires manual repair before updating. If both `ledger.json` and `history-checkpoint.json`
+  are missing, reading authority instead reports `protected migration history is absent: ledger.json and
+  history-checkpoint.json are missing`, without inferring a below-floor baseline. A temporary
+  candidate draft may be staged and removed before the engine refuses; protected history and
+  runtime links remain unchanged. Initial bootstrap uses the engine ledger-publication step. Neither refusal replays handlers or suggests uninstall. All-verified
+  v0.28.x first transitions remain supported,
+  including a top-epoch ledger whose history checkpoint has not yet been published.
 - **Readers an install completed on the anchor still needs:** the V2 journal and runtime links, the
-  migration ledger and its history checkpoint and projection at the unchanged `minimumEpochs`, and
+  migration ledger and its history checkpoint and pinned projection, including the original
+  `Applied` prefixes below the live registry floor, and
   the recovery readers for anchor-series journals. Ordinary admission assumes supported installations
   have no V1 files and does not inspect them. Completed V2 evidence and recovery bindings with
   legacy provenance remain readable. An unfinished `legacy-v1-import` journal requires its
@@ -328,9 +350,11 @@ Retirement guidance must state the v0.11.0 source boundary, affected V1 formats,
 data loss and the user's separate clean-install step. Diagnose unsupported legacy state when
 encountered through source-version admission; ordinary commands do not inspect V1 files and
 ready operation needs no deprecation warning. Supported V2 unfinished
-transactions retain their exact sealed owners, artifacts and evidence until closure. The separately negotiated `migration-ledger-owner-replacement-v1` contract may retain an exactly proved
-defective owner as typed superseded evidence and select a freshly authorized forward candidate;
-it never manufactures old activation readiness. Compatible retained rollback within the support
+transactions retain their exact sealed owners, artifacts and evidence until closure. Historical
+`migration-ledger-owner-replacement-v1` receipts retain the exactly proved defective owner as
+superseded evidence and bind its authorized successor. The current engine reads these receipts
+and successor completion records but creates no new historical replacement; v0.11.1 superseded
+archives also remain readable. Neither history reader manufactures old activation readiness. Compatible retained rollback within the support
 boundary remains protected. Refusing an old
 upgrade never authorizes deleting its data. Only an explicitly confirmed full uninstall may
 remove its owned data without migration; ordinary evidence cleanup still requires proven closure

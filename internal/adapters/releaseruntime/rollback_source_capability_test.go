@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Subyard/Subyard/internal/testkit"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func bindRollbackFixtureRegistry(t *testing.T, candidate publishedCandidate, registry []byte) {
@@ -32,7 +32,8 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(home, "release-transition/v2"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			registryPayload := mustReadFile(t, filepath.Join("..", "..", "..", "config/release-transition.json"))
+			// A retained v0.30.0 target still declares the frozen native kinds.
+			registryPayload := mustReadFile(t, filepath.Join("..", "..", "releasetransition", "testdata", "v0.30.0-release-transition.json"))
 			registry, digest, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
 			if err != nil {
 				t.Fatal(err)
@@ -46,7 +47,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 				}
 			}
 			sourceRegistryPayload := registryPayload
-			ledger := releasetransition.BaselineLedgerV2(registry)
+			ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 			for _, migration := range registry.Migrations {
 				if migration.Kind == kind || kind == "known-old-pending" || kind == "pending-checkpoint" && migration.Kind == "registered-guest-disk-tmp-v2-to-v3" {
 					break
@@ -194,6 +195,55 @@ func TestFreshRollbackRequiresSourceActivationCapabilityBeforeConsent(t *testing
 	}
 }
 
+func TestRetiredSourceWorkRefusesBeforeRollbackTarget(t *testing.T) {
+	// The retired native handlers cannot be authorized through an older target's
+	// capability probe. Source admission refuses before target selection/effects.
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback=%t", rollback), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			home := filepath.Join(root, "config")
+			if err := os.MkdirAll(home, 0700); err != nil {
+				t.Fatal(err)
+			}
+			runtimeRoot := filepath.Join(root, "runtime")
+			candidate := writeVersionedRuntimeCandidate(t, runtimeRoot, "0.28.1-aaaaaaaaaaaa", "0.28.1", `#!/bin/sh
+case "$1" in --version) echo 'yard-engine 0.28.1';; *) exit 71;; esac
+`)
+			payload := mustReadFile(t, filepath.Join("..", "..", "releasetransition", "history_v028.json"))
+			bindRollbackFixtureRegistry(t, candidate, payload)
+			if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, "release-transition/v2/ledger.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, ledger, 0600)
+			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot}), Stdout: &bytes.Buffer{}})
+			defer runtime.Close()
+			args := []string{"--runtime-root", runtimeRoot}
+			if rollback {
+				args = append(args, "--rollback")
+			}
+			_, err = runtime.PrepareTransition(context.Background(), args, home, "default")
+			if err == nil || !strings.Contains(err.Error(), "migration-manual-repair-required:") {
+				t.Fatalf("below-floor source was admitted: %v", err)
+			}
+			if !bytes.Equal(ledger, mustReadFile(t, path)) {
+				t.Fatal("refusal rewrote source")
+			}
+		})
+	}
+}
+
 func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T) {
 	for _, scenario := range []struct {
 		name, scope, decision, probe                  string
@@ -250,7 +300,9 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 			candidate := writeRuntimeCandidatePayload(t, root, engine)
 			registryPayload := []byte(sourceAdmissionRegistry)
 			if scenario.name == "aware-opaque-owner" {
-				registryPayload = mustReadFile(t, filepath.Join("..", "..", "..", "config/release-transition.json"))
+				// A retained v0.30.0 target declares native kinds pending at its baseline.
+				registryPayload = mustReadFile(t, filepath.Join("..", "..", "releasetransition", "testdata", "v0.30.0-release-transition.json"))
+				writeRollbackFixtureLedger(t, root, registryPayload)
 			}
 			bindRollbackFixtureRegistry(t, candidate, registryPayload)
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: root, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
@@ -272,7 +324,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 				}
 				defer verifiedTarget.Close()
 				request.ArtifactDigest = verifiedTarget.manifestDigest
-				prepared, err = runtime.prepareVerifiedTransition(context.Background(), options{root: root}, verifiedOwner, verifiedTarget, request, nil)
+				prepared, err = runtime.prepareVerifiedTransition(context.Background(), options{root: root}, verifiedOwner, verifiedTarget, request)
 			} else {
 				prepared, err = prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
 			}

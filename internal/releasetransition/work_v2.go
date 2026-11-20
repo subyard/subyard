@@ -7,21 +7,16 @@ import (
 	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
 
-// Work has one closed recipe variant. A recorded settings result is explicitly
-// observation-only; it cannot supply a missing mutation recipe.
+// Only generic source ingress, live ledger-only migrations and initial baseline
+// publication carry work. Frozen historical migrations cannot construct an
+// executable recipe.
 type v2Work struct {
 	intent    PlannerStepIntent
 	migration MigrationDefinitionV2
-	recipe    v2WorkRecipe
+	recipe    *ingressWorkRecipe
+	ledger    *ledgerWorkRecipe
+	baseline  []byte
 }
-type v2WorkRecipe interface{ migrationWorkRecipe() }
-type nativeWorkRecipe struct{}
-
-func (*nativeWorkRecipe) migrationWorkRecipe() {}
-
-type settingsWorkRecipe struct{ file settingsV2FilePlan }
-type recordedSettingsWork struct{ intent PlannerStepIntent }
-type ownerWorkRecipe struct{ plan ownerRegistrationV2Plan }
 type ingressWorkRecipe struct {
 	operation V2IngressOperation
 	binding   V2IngressBinding
@@ -32,89 +27,35 @@ type ledgerWorkRecipe struct {
 	to   []byte
 }
 
-func (*settingsWorkRecipe) migrationWorkRecipe()   {}
-func (*recordedSettingsWork) migrationWorkRecipe() {}
-func (*ownerWorkRecipe) migrationWorkRecipe()      {}
-func (*ingressWorkRecipe) migrationWorkRecipe()    {}
-func (*ledgerWorkRecipe) migrationWorkRecipe()     {}
-
 // Journal edges bind the validated authoritative ledger view. A pinned legacy
 // reader projection has a separate type and cannot supply CAS work authority.
 type authorityLedgerRevision struct{ snapshot ProtectedSnapshot }
 type compatibilityProjectionRevision struct{ snapshot ProtectedSnapshot }
 
 func (work v2Work) kind() v2WorkKind {
-	switch recipe := work.recipe.(type) {
-	case *nativeWorkRecipe:
-		if recipe != nil {
-			return v2NativeWork
-		}
-	case *settingsWorkRecipe:
-		if recipe != nil {
-			return v2SettingsWork
-		}
-	case *recordedSettingsWork:
-		if recipe != nil {
-			return v2SettingsWork
-		}
-	case *ownerWorkRecipe:
-		if recipe != nil {
-			return v2OwnerWork
-		}
-	case *ingressWorkRecipe:
-		if recipe != nil {
-			return v2IngressWork
-		}
-	case *ledgerWorkRecipe:
-		if recipe != nil {
-			return v2LedgerWork
-		}
+	if work.baseline != nil {
+		return v2BaselineWork
+	}
+	if work.ledger != nil {
+		return v2LedgerWork
+	}
+	if work.recipe != nil {
+		return v2IngressWork
 	}
 	return ""
 }
-func (work v2Work) settingsFile() *settingsV2FilePlan {
-	if recipe, ok := work.recipe.(*settingsWorkRecipe); ok && recipe != nil {
-		return &recipe.file
-	}
-	return nil
-}
-func (work v2Work) ownerPlan() *ownerRegistrationV2Plan {
-	if recipe, ok := work.recipe.(*ownerWorkRecipe); ok && recipe != nil {
-		return &recipe.plan
-	}
-	return nil
-}
-func (work v2Work) ingressRecipe() *ingressWorkRecipe {
-	recipe, _ := work.recipe.(*ingressWorkRecipe)
-	return recipe
-}
-func (work v2Work) ledgerRecipe() *ledgerWorkRecipe {
-	recipe, _ := work.recipe.(*ledgerWorkRecipe)
-	return recipe
-}
-func cloneWorkMigration(migration MigrationDefinitionV2) MigrationDefinitionV2 {
+func (work v2Work) ingressRecipe() *ingressWorkRecipe { return work.recipe }
+func (work v2Work) ledgerRecipe() *ledgerWorkRecipe   { return work.ledger }
+func ledgerMigrationWork(intent PlannerStepIntent, migration MigrationDefinitionV2, edge migrationhistory.Edge, from authorityLedgerRevision, to []byte) v2Work {
+	from.snapshot.Payload = slices.Clone(from.snapshot.Payload)
 	migration.DependsOn = slices.Clone(migration.DependsOn)
-	return migration
-}
-func settingsMigrationWork(intent PlannerStepIntent, migration MigrationDefinitionV2, file settingsV2FilePlan) v2Work {
-	file.Desired = slices.Clone(file.Desired)
-	file.Before = slices.Clone(file.Before)
-	file.Expected.Content = slices.Clone(file.Expected.Content)
-	return v2Work{intent: intent, migration: cloneWorkMigration(migration), recipe: &settingsWorkRecipe{file: file}}
-}
-func ownerMigrationWork(intent PlannerStepIntent, migration MigrationDefinitionV2, plan ownerRegistrationV2Plan) v2Work {
-	return v2Work{intent: intent, migration: cloneWorkMigration(migration), recipe: &ownerWorkRecipe{plan: plan}}
+	return v2Work{intent: intent, migration: migration, ledger: &ledgerWorkRecipe{edge: edge, from: from, to: slices.Clone(to)}}
 }
 func ingressMigrationWork(intent PlannerStepIntent, operation V2IngressOperation, binding V2IngressBinding) v2Work {
 	binding.Steps = slices.Clone(binding.Steps)
 	binding.Releases.Previous = cloneReleaseID(binding.Releases.Previous)
 	return v2Work{intent: intent, recipe: &ingressWorkRecipe{operation: operation, binding: binding}}
 }
-func ledgerMigrationWork(intent PlannerStepIntent, migration MigrationDefinitionV2, edge migrationhistory.Edge, from authorityLedgerRevision, to []byte) v2Work {
-	from.snapshot.Payload = slices.Clone(from.snapshot.Payload)
-	return v2Work{intent: intent, migration: cloneWorkMigration(migration), recipe: &ledgerWorkRecipe{edge: edge, from: from, to: slices.Clone(to)}}
-}
-
 func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalRecord, step JournalStep) error {
 	if transition == nil {
 		return invalid("migration work has no transition owner")
@@ -129,48 +70,24 @@ func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalR
 	if err := validateStepEvidence(journal, step); err != nil {
 		return err
 	}
-	if work.kind() == "" || work.intent != expected {
-		return invalid("migration work recipe is absent, typed nil or differs from its journal intent")
+	if work.kind() == v2BaselineWork {
+		return transition.validateBaselineWork(work, journal, expected)
 	}
-	switch recipe := work.recipe.(type) {
-	case *ledgerWorkRecipe:
+	if work.kind() == v2LedgerWork {
+		if work.intent != expected {
+			return invalid("migration work recipe is absent or differs from its journal intent")
+		}
 		return transition.validateLedgerWork(work, step)
-	case *nativeWorkRecipe:
-		if !nativeMigration(work.migration) || transition.nativeOwner(work.migration, step.Resource) == nil || step.ID != work.migration.ID+"."+step.Resource || step.Decision != DecisionTransform {
-			return invalid("registered yard recipe differs from its journal intent")
-		}
-	case *settingsWorkRecipe:
-		if !settingsWorkMigration(work.migration) || recipe.file.LocalSSHPort != (work.migration.Kind == localSSHPortMigration) || recipe.file.RegisteredEndpoints != (work.migration.Kind == registeredYardsMigration) || recipe.file.validate() != nil || settingsIntent(work.migration, recipe.file) != expected {
-			return invalid("settings recipe differs from its journal intent")
-		}
-	case *recordedSettingsWork:
-		if !settingsWorkMigration(work.migration) || recipe.intent != expected || step.Checkpoint == StepIntent {
-			return invalid("recorded settings work has no verified reconstruction")
-		}
-		_, _, actual, err := transition.observeJournalSettingsWork(journal, step, work.migration)
-		if err != nil || actual != step.Desired {
-			return invalid("recorded settings work cannot provide a mutation recipe")
-		}
-	case *ownerWorkRecipe:
-		if work.migration.Kind != "test-yard-owner-v1-to-v2" || work.migration.Domain != "owner-registration" || step.ID != work.migration.ID+"."+ownerRegistrationResource || step.Decision != DecisionCanonicalize || transition.options.OwnerRegistration == nil || validateOwnerRegistrationObservation(recipe.plan.Before) != nil || recipe.plan.ExpectedFingerprint != step.Expected || recipe.plan.DesiredFingerprint != step.Desired || step.Resource != ownerRegistrationResource {
-			return invalid("owner recipe differs from its journal intent")
-		}
-	case *ingressWorkRecipe:
-		kind, known := ingressOperationKindForIntent(expected)
-		if !known || kind != recipe.operation.Kind || transition.options.Ingress == nil || ingressIntent(recipe.operation) != expected {
-			return invalid("ingress recipe differs from its journal intent")
-		}
-		return nil
-	default:
-		return invalid("unknown migration work recipe")
 	}
-	definition, known := transition.migration(work.migration.ID)
-	if !known || !sameMigrationDefinition(definition, work.migration) {
-		return invalid("migration work recipe has a foreign definition")
+	if work.kind() != v2IngressWork || work.intent != expected {
+		return invalid("migration work recipe is absent or differs from its journal intent")
+	}
+	kind, known := ingressOperationKindForIntent(expected)
+	if !known || kind != work.recipe.operation.Kind || transition.options.Ingress == nil || ingressIntent(work.recipe.operation) != expected {
+		return invalid("ingress recipe differs from its journal intent")
 	}
 	return nil
 }
-
 func nilV2Adapter(value any) bool {
 	if value == nil {
 		return true
@@ -229,10 +146,6 @@ func (transition *V2Transition) validateObservationWork(observation v2Observatio
 		}
 	}
 	return nil
-}
-
-func settingsWorkMigration(migration MigrationDefinitionV2) bool {
-	return nativeMigration(migration) && migration.Kind == registeredYardsMigration || migration.Domain == "settings" && (migration.Kind == localSSHPortMigration || migration.Kind == "test-vms-settings-v1-to-v2")
 }
 
 // boundWorkStep is the checked recipe/phase intersection consumed by effects.

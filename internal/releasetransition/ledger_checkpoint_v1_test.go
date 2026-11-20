@@ -181,7 +181,7 @@ func TestLedgerCheckpointV1RejectsRemovedDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	projectionPayload, _, err := MarshalLedgerV2(ledger, registry)
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestLedgerCheckpointV1CanBindAbsentLegacyProjectionBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	projection := absentProtectedSnapshot()
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	epochs := make(map[string]int, len(ledger.Domains))
 	for domain, state := range ledger.Domains {
 		epochs[domain] = state.Epoch

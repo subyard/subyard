@@ -59,7 +59,7 @@ func TestFunctionalBoundaryCallGraphsDoNotReachPhysicalAdapters(t *testing.T) {
 			}
 		}
 	}
-	roots := []string{"Decode", "DecodeIntegration", "ValidateMetadata", "BuildCatalog", "EvaluateAssignments", "EvaluateLayer", "ParseResource", "BuildRegistry", "checkObservations", "decodeProfileRuntimeObservation", "SelectMaterializationSources", "PrepareMaterializationContent", "AssessMaterializedArtifact", "AssessMaterialization", "AssessMaterializationActivation", "planSettingsV2Yard", "classifySettingsV2Inheritance", "selectSettingsV2Yard", "settingsV2AwaitSourceImport"}
+	roots := []string{"Decode", "DecodeIntegration", "ValidateMetadata", "BuildCatalog", "EvaluateAssignments", "EvaluateLayer", "ParseResource", "BuildRegistry", "checkObservations", "decodeProfileRuntimeObservation", "SelectMaterializationSources", "PrepareMaterializationContent", "AssessMaterializedArtifact", "AssessMaterialization", "AssessMaterializationActivation", "historyData", "requireMinimumLedger"}
 	for _, root := range roots {
 		t.Run(root, func(t *testing.T) {
 			visited := map[string]bool{}
@@ -114,58 +114,5 @@ func TestFunctionalBoundaryCallGraphsDoNotReachPhysicalAdapters(t *testing.T) {
 			}
 			visit(root, true)
 		})
-	}
-}
-
-// Policy extraction must remain on the production paths, including prospective
-// ingress and journal rechecks; pure helpers alone do not establish that contract.
-func TestSettingsMigrationProductionUsesFunctionalPolicy(t *testing.T) {
-	contracts := map[string]map[string][]string{
-		"settings_test_vms_v2.go": {
-			"inspectYard":              {"observeSettingsV2Yard", "planSettingsV2Yard"},
-			"observeInheritedSettings": {"classifySettingsV2Inheritance"},
-		},
-		"transition_v2.go": {
-			"observeYard":               {"observeSettingsV2Yard", "selectSettingsV2Yard"},
-			"observeSettingsWork":       {"observeYard", "observeInheritedSettings"},
-			"settingsAwaitSourceImport": {"observeSettingsV2Yard", "settingsV2AwaitSourceImport"},
-		},
-	}
-	for filename, expected := range contracts {
-		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join("..", "releasetransition", filename), nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			calls, exists := expected[function.Name.Name]
-			if !exists {
-				continue
-			}
-			seen := map[string]bool{}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok {
-					switch target := call.Fun.(type) {
-					case *ast.Ident:
-						seen[target.Name] = true
-					case *ast.SelectorExpr:
-						seen[target.Sel.Name] = true
-					}
-				}
-				return true
-			})
-			for _, call := range calls {
-				if !seen[call] {
-					t.Errorf("%s.%s no longer calls %s", filename, function.Name.Name, call)
-				}
-			}
-			delete(expected, function.Name.Name)
-		}
-		for function := range expected {
-			t.Errorf("%s missing production function %s", filename, function)
-		}
 	}
 }

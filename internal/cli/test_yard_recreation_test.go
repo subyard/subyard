@@ -99,7 +99,11 @@ func TestReleasePreservesLegacyTestOwnerAndOrdinaryTargetScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := releasetransition.ProcessRequest{ConfigHome: home}
-	warning, err := program.ownerRegistrationTransition(request).(*ownerRegistrationTransition).FreshWarning(context.Background(), nil)
+	options, err := program.releaseTransitionTestYardOptions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warning, err := testYardRecreation(context.Background(), options)
 	if err != nil || !strings.Contains(warning, "yard -Y e2e-yard teardown --reset-config, then yard service install test-vms") || strings.Contains(warning, "service remove") {
 		t.Fatalf("unexecutable legacy guidance: %q %v", warning, err)
 	}

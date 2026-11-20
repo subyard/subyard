@@ -86,11 +86,3 @@ func (binding RegisteredYardJournalBinding) Matches(journal JournalRecord, resou
 type RegisteredYardJournalRetirement interface {
 	RetiredJournalBinding(context.Context, JournalRecord) (bool, error)
 }
-
-func (t *V2Transition) retiredNativeBinding(ctx context.Context, migration MigrationDefinitionV2, resource string, journal JournalRecord) (bool, error) {
-	owner, ok := t.nativeOwner(migration, resource).(RegisteredYardJournalRetirement)
-	if !ok {
-		return false, nil
-	}
-	return owner.RetiredJournalBinding(ctx, journal)
-}
