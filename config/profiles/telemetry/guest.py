@@ -33,6 +33,8 @@ BINARY_LIMIT = 64*1024*1024
 # Inventory key for the other digest an interrupted asset update may leave on
 # disk. Path entries stay single digests, which v0.30 can still read.
 REPLACED = 'replaced'
+# Drop-in directories systemd applies to every service, such as the LXC guest's.
+TYPE_DROPINS = (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d'))
 
 
 def systemctl(*args):
@@ -41,6 +43,26 @@ def systemctl(*args):
     if result.returncode:
         raise ValueError('system manager unavailable')
     return result.stdout.decode().strip()
+
+
+def changes_startup(path):
+    """Whether a type-wide drop-in sets the command, account or environment, or cannot be read."""
+    try:
+        native.safe(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode)
+                    or any(entry.st_uid != os.getuid() or entry.st_mode & 0o022 for entry in (info, path.parent.stat()))):
+                return True
+            content = stream.read(native.CONFIG_LIMIT+1)
+        if len(content) > native.CONFIG_LIMIT:
+            return True
+        text = content.decode()
+    except (OSError, ValueError):
+        return True
+    keys = [line.split('=', 1)[0].strip() for line in text.replace('\\\n', ' ').splitlines() if '=' in line]
+    return any(key in ('Environment', 'EnvironmentFile', 'User', 'Group') or key.startswith('Exec') for key in keys)
 
 
 class Runtime:
@@ -273,38 +295,38 @@ class Runtime:
             fields['ActiveState'] = 'failed'
         if fields.get('LoadState') not in ('not-found', None):
             dropins = fields.get('DropInPaths', '').split()
-            if any(Path(path).parent not in (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d')) for path in dropins):
+            if any(Path(path).parent not in TYPE_DROPINS for path in dropins):
                 raise ValueError('foreign loaded unit')
-            expected_mode = 'process' if unit == MANAGER else 'control-group'
-            if fields.get('KillMode') != expected_mode:
+            # Apply stops the loaded unit: the workloads the manager delegates must survive it.
+            if unit == MANAGER and fields.get('KillMode') != 'process':
                 raise ValueError('foreign loaded unit stop policy')
             expected = {'FragmentPath': str(self.units/unit), 'User': self.user, 'Group': str(self.gid),
                         'Type': 'simple', 'UMask': '0077', 'LimitCORE': '0', 'AmbientCapabilities': '',
                         'ExecStartPre': '', 'ExecStartPost': '', 'ExecStop': '', 'ExecStopPost': '', 'Environment': '', 'EnvironmentFiles': ''}
             if unit == COLLECTOR:
-                expected.update(MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
+                expected.update(KillMode='control-group', MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
             else:
                 expected['Delegate'] = 'yes'
             command = self.starts[unit]
             start = fields.get('ExecStart', '')
-            if not (start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
-                    and fields.get('Environment', '') == fields.get('EnvironmentFiles', '') == ''):
-                # Any other startup is a previous one of ours, stale until apply rewrites it, only
-                # when the loaded unit is a file the inventory recorded: a previous file loaded from
-                # disk, or one an interrupted apply replaced after recording both versions. Over
-                # the loaded current file, another startup comes from a drop-in.
+            if (any(fields.get(key, '') != value for key, value in expected.items())
+                    or not start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ')
+                    or start.count('argv[]=') != 1 or fields.get('NoNewPrivileges') not in (('yes', 'no') if dropins else ('yes',))):
+                # Any other loaded unit is a previous one of ours, stale until apply rewrites it,
+                # only when it is a file the inventory recorded: a previous file loaded from disk,
+                # or one an interrupted apply replaced after recording both versions. Over the
+                # loaded current file, any difference comes from a drop-in.
                 path = self.units/unit
                 content = self.asset_snapshot(path)
                 saved = self.saved_inventory()
                 replacing = isinstance(saved.get(REPLACED), dict) and str(path) in saved[REPLACED]
-                if (content is None or hashlib.sha256(content).hexdigest() not in self.recorded_digests(saved, path)
+                if (fields.get('FragmentPath') != str(path) or content is None
+                        or hashlib.sha256(content).hexdigest() not in self.recorded_digests(saved, path)
                         or not (replacing or fields.get('NeedDaemonReload') == 'no' and content != self.assets[path][0])):
                     raise ValueError('foreign loaded unit envelope')
-                del expected['Environment'], expected['EnvironmentFiles']
-            nnp = fields.get('NoNewPrivileges')
-            if (any(fields.get(key, '') != value for key, value in expected.items())
-                    or nnp not in (('yes', 'no') if dropins else ('yes',))):
-                raise ValueError('foreign loaded unit envelope')
+                # Its own fields are ours; a type-wide drop-in must not change how it starts.
+                if any(changes_startup(Path(dropin)) for dropin in dropins):
+                    raise ValueError('foreign loaded unit drop-in')
         return fields
 
     def running_no_new_privs(self, fields):
