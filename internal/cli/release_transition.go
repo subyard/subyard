@@ -319,6 +319,9 @@ type activationStageReconciler struct {
 	authorize            func(context.Context) error
 	planned              func() []string
 	after                func(context.Context) error
+	// recreation replaces the in-place apply of a proven service runtime
+	// during a new-release transition.
+	recreation *serviceRecreation
 }
 
 type activationStageError struct {
@@ -560,6 +563,7 @@ func (reconciler *activationStageReconciler) ObserveProspective(ctx context.Cont
 	}
 	if projected != nil {
 		projected.planned = reconciler.planned
+		projected.recreation = reconciler.recreation
 	}
 	return projected.Observe(ctx, releases, links)
 }
@@ -602,6 +606,22 @@ func (reconciler *activationStageReconciler) Observe(
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
+	var consequences []string
+	if !converged && reconciler.recreation != nil {
+		recreation, err := reconciler.recreation.assess(ctx, applicability.target)
+		if err != nil {
+			return releasetransition.V2ActivationObservation{}, err
+		}
+		if recreation.refusal != nil {
+			return releasetransition.V2ActivationObservation{
+				Actual: desired, Desired: desired, Converged: true, Planned: planned,
+				Warnings: []string{reconciler.recreation.warning(applicability.target, recreation.refusal)},
+			}, nil
+		}
+		if recreation.selection != nil {
+			consequences = []string{reconciler.recreation.consequence(recreation)}
+		}
+	}
 	actual := desired
 	if !converged {
 		actual, err = activationStageFingerprint(struct {
@@ -616,7 +636,7 @@ func (reconciler *activationStageReconciler) Observe(
 		}
 	}
 	return releasetransition.V2ActivationObservation{
-		Actual: actual, Desired: desired, Converged: converged, Planned: planned,
+		Actual: actual, Desired: desired, Converged: converged, Planned: planned, Consequences: consequences,
 	}, nil
 }
 
@@ -640,6 +660,15 @@ func (reconciler *activationStageReconciler) Reconcile(
 		return reconciler.failure("pre-verify", err)
 	}
 	if !converged {
+		var recreation serviceRecreationPlan
+		if reconciler.recreation != nil {
+			if recreation, err = reconciler.recreation.assess(ctx, applicability.target); err != nil {
+				return reconciler.failure("recreation", err)
+			}
+			if recreation.refusal != nil {
+				return nil
+			}
+		}
 		if reconciler.authorize != nil {
 			if err := reconciler.authorize(ctx); err != nil {
 				return reconciler.failure("authorization", err)
@@ -649,7 +678,14 @@ func (reconciler *activationStageReconciler) Reconcile(
 				return reconciler.failure("platform", err)
 			}
 		}
-		if err := platform.ApplyStage(ctx, reconciler.stage); err != nil {
+		if recreation.selection != nil {
+			if err := reconciler.recreation.run(ctx, recreation); err != nil {
+				return reconciler.failure("recreation", err)
+			}
+			if platform, err = reconciler.platform(ctx, applicability); err != nil {
+				return reconciler.failure("platform", err)
+			}
+		} else if err := platform.ApplyStage(ctx, reconciler.stage); err != nil {
 			return reconciler.failure("apply", err)
 		}
 	}

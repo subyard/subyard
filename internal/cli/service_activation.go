@@ -16,29 +16,8 @@ import (
 // Bind only new-release activation. Readiness, same-release repair and config
 // gates retain the native owner, including every optional interface.
 func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.ProcessRequest, reconcilers []releasetransition.V2ActivationReconciler) []releasetransition.V2ActivationReconciler {
-	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
-	if err != nil {
+	if !cli.newReleaseActivation(request) {
 		return reconcilers
-	}
-	active, err := links.Observe()
-	if err != nil || request.Direction != releasetransition.DirectionActivateTarget {
-		return reconcilers
-	}
-	if active.Active == request.Target {
-		// After activation, only the exact incomplete cross-release journal
-		// proves this is a new-release resume rather than same-release repair.
-		store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
-		if err != nil {
-			return reconcilers
-		}
-		snapshot, err := store.ReadCurrentJournal()
-		if err != nil || !snapshot.Exists {
-			return reconcilers
-		}
-		journal, err := releasetransition.ParseJournal(snapshot.Payload)
-		if err != nil || journal.Checkpoint == releasetransition.JournalComplete || journal.Goal != (releasetransition.Goal{Target: request.Target, Direction: request.Direction}) || journal.Releases.From == journal.Releases.Target {
-			return reconcilers
-		}
 	}
 	for _, definition := range cli.catalog.Profiles() {
 		service := definition.InfrastructureService
