@@ -622,7 +622,7 @@ def operator_acceptances(paths, identity, root, receipt):
         if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
             or argv[:6] != prefix or len(argv) != len(prefix) + 4 + len(command) + 2):
             raise ValueError("operator acceptance original launcher differs")
-        # The launcher's lane ID selects the lane's own lease records in the log.
+        # The launcher's lane ID must equal the log header that selects the lane's own records.
         lane = a.launcher_lane(argv[6:10])
         assignments = dict(value.split("=", 1) for value in argv[6:10] if "=" in value)
         if (not lane or set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE",
@@ -640,10 +640,9 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        evidence = a.lane_leases(files["log"], lane, argv[-1])
-        issue = a.lease_issue(evidence)
-        if issue or not evidence.environments:
-            raise ValueError("operator acceptance original cleanup or release unconfirmed" + (": " + issue if issue else ""))
+        evidence = a.lane_evidence(files["log"], argv[-1], lane)
+        if issue := a.lease_issue(evidence):
+            raise ValueError("operator acceptance original cleanup or release unconfirmed: " + issue)
         environments = set(evidence.environments)
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")

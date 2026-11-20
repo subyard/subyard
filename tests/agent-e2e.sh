@@ -3895,6 +3895,7 @@ done
 # With the collector's lane ID, the lane's own client and runner record each lease event.
 lane_id=0123456789abcdef0123456789abcdef
 lane_records() { sed -n "s/^E2E_LEASE lane=$lane_id run=[0-9a-f]\{8\} slot=slot-002 event=//p" "$1"; }
+lane_grant="grant type=subyard-pair vms=2 base=$(printf 'a%.0s' {1..64})"
 for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s; do
   IFS=: read -r lane_scenario lane_mode lane_value <<<"$lane_case"
   new_runner_fixture "lane-$lane_scenario"
@@ -3904,9 +3905,9 @@ for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wa
   set -e
   case "$lane_scenario" in
     # Staging records its VM; the guest cleanup closes it before the release.
-    phase-success) lane_expected=$'request\ngrant\nwork vm=1\ncleaned vm=1 exit_code=0\nrelease exit_code=0' ;;
+    phase-success) lane_expected="request"$'\n'"$lane_grant"$'\nwork vm=1\ncleaned vm=1 exit_code=0\nrelease exit_code=0' ;;
     # A raw guest command stages nothing.
-    phase-direct-failure) lane_expected=$'request\ngrant\nrelease exit_code=0' ;;
+    phase-direct-failure) lane_expected="request"$'\n'"$lane_grant"$'\nrelease exit_code=0' ;;
     capacity) lane_expected=$'request\nrefused resource=memory' ;;
   esac
   [ "$(lane_records "$TMP/lane-$lane_scenario.log")" = "$lane_expected" ] \
@@ -3924,6 +3925,25 @@ lane_cleanup="$(GUEST_DIRS=([1]=/unsafe) LEASE_SLOT=slot-002 LEASE_RUN=0123abcd 
   cleanup_guest 1 2>&1 >/dev/null || true)"
 grep -Fxq "E2E_LEASE lane=$lane_id run=0123abcd slot=slot-002 event=cleaned vm=1 exit_code=1" <<<"$lane_cleanup" \
   || fail "unsafe guest cleanup was not recorded as failed: $lane_cleanup"
+# A second staging of the same VM before its cleanup is recorded, so the lane rule refuses it.
+lane_restage="$( (
+  GUEST_DIRS=() LEASE_SLOT=slot-002 LEASE_RUN=0123abcd SUBYARD_E2E_LANE="$lane_id"
+  restaged=0
+  guest() {
+    shift
+    case "$1" in
+      findmnt) printf 'ext4\n' ;;
+      mktemp) restaged=$((restaged + 1)); printf '/var/tmp/subyard-worktree.restage%s\n' "$restaged" ;;
+      dd) cat >/dev/null ;;
+      sha256sum) printf '%s  worktree.tar.gz\n' "$candidate_hash" ;;
+      mkdir|tar) ;;
+      *) return 97 ;;
+    esac
+  }
+  prepare_guest 1 "$candidate_bundle" "$candidate_hash" >/dev/null && prepare_guest 1 "$candidate_bundle" "$candidate_hash" >/dev/null
+) 2>&1 )" || fail "repeated guest staging failed: $lane_restage"
+[ "$(grep -c "^E2E_LEASE lane=$lane_id run=0123abcd slot=slot-002 event=work vm=1$" <<<"$lane_restage")" = 2 ] \
+  || fail "a second staging of VM1 was not recorded: $lane_restage"
 
 # Model direct guest SSH and cleanup locally.
 guest() {

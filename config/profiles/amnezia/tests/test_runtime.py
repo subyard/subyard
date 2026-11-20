@@ -405,7 +405,7 @@ guest() {
   esac
 }
 lane_record slot-001 request
-lane_record slot-001 grant
+lane_record slot-001 grant type=subyard-pair vms=2 base=$(printf %064d 0)
 bundle="$LOCAL_TEMP/worktree.tar.gz"
 : >"$bundle"
 HASH="$(sha256sum "$bundle" | cut -d' ' -f1)"
@@ -417,15 +417,16 @@ prepare_guest 2 "$bundle" "$HASH"
                 observed = subprocess.run(['bash', '-c', script], stdout=subprocess.PIPE, env=environment, timeout=30)
                 self.assertEqual(observed.returncode, 3 if failed else 0, observed.stdout.decode())
                 log = directory / 'lane.log'
-                log.write_bytes(observed.stdout)
-                evidence = acceptance.lane_leases(log, lane, 1)
+                header = f'E2E_LANE id={lane}\n'.encode()
+                log.write_bytes(header + observed.stdout)
+                evidence = acceptance.lane_evidence(log, 1)
                 if failed:
                     self.assertEqual(evidence.issue, 'guest cleanup of VM2 exited 5')
                 else:
                     self.assertEqual((evidence.issue, evidence.cleaned, evidence.completed), (None, [1, 2], 1))
                 # Without the cleanup records, the staged VMs keep the lease from counting.
-                log.write_bytes(b''.join(line for line in observed.stdout.splitlines(keepends=True) if b'event=cleaned' not in line))
-                self.assertIn('has no confirmed guest cleanup', acceptance.lane_leases(log, lane, 1).issue)
+                log.write_bytes(header + b''.join(line for line in observed.stdout.splitlines(keepends=True) if b'event=cleaned' not in line))
+                self.assertIn('has no confirmed guest cleanup', acceptance.lane_evidence(log, 1).issue)
 
     def test_native_failure_capture_is_bounded_and_never_changes_the_capture_result(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()

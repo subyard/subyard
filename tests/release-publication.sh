@@ -35,10 +35,11 @@ slot="$(printf 'slot-%03d' "${@: -1}")"
 record() { printf 'E2E_LEASE lane=%s run=0123abcd slot=%s event=%s\n' "$SUBYARD_E2E_LANE" "$slot" "$*"; }
 record request
 printf 'E2E lease: yard=sample project=p run=0123abcd purpose=t slot=%s type=subyard-pair vms=2 base=%064d\n' "$slot" 0
-record grant
+record grant type=subyard-pair vms=2 base="$(printf %064d 0)"
 record release exit_code=0
 """
 FIXTURE_LANE = "0123456789abcdef" * 2
+LANE_HEADER = f"E2E_LANE id={FIXTURE_LANE}\n"
 
 
 def lease_record(event, run="0f1c7e00", slot=2):
@@ -46,14 +47,14 @@ def lease_record(event, run="0f1c7e00", slot=2):
 
 
 # A collected lane log: the collector's lane header and the lane's own clean lease on slot 1.
-LANE_LOG = (f"E2E_LANE id={FIXTURE_LANE}\n" + "".join(lease_record(event, "0123abcd", 1) for event in ("request", "grant", "release exit_code=0"))
+LANE_LOG = (LANE_HEADER + "".join(lease_record(event, "0123abcd", 1) for event in
+            ("request", "grant type=subyard-pair vms=2 base=" + "b" * 64, "release exit_code=0"))
             + "synthetic passing evidence fixture\n")
 
 
 def clean_lease(run="0f1c7e00", staged=(1, 2), base="b" * 64, middle=""):
     """A standalone controller's own lease on slot 2 with every staged VM cleaned before release."""
-    return (lease_record("request", run) + f"E2E lease: yard=y project=p run={run} purpose=t slot=slot-002 type=subyard-pair vms=2 base={base}\n"
-            + lease_record("grant", run) + "".join(lease_record(f"work vm={vm}", run) for vm in staged) + middle
+    return (lease_record("request", run) + lease_record(f"grant type=subyard-pair vms=2 base={base}", run) + "".join(lease_record(f"work vm={vm}", run) for vm in staged) + middle
             + "".join(lease_record(f"cleaned vm={vm} exit_code=0", run) for vm in staged) + lease_record("release exit_code=0", run))
 
 
@@ -1412,7 +1413,7 @@ class Contracts(unittest.TestCase):
         for role, data in (("native", native), ("launch", launch), ("timing", timing)):
             m.write_json(files[role], data)
         files["log"] = self.directory / "failure.log"
-        files["log"].write_text(clean_lease(middle="  [fail] phase=fixture/init\n")
+        files["log"].write_text(LANE_HEADER + clean_lease(middle="  [fail] phase=fixture/init\n")
             + "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
         declaration = {"schema_version": 1, "check": name, "target": self.identity, "tested": m.a.transfer_candidate(original),
             "command": command, "decision": {"reason": "Accept this known failure for this exact release",
@@ -1590,7 +1591,7 @@ class Contracts(unittest.TestCase):
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
                 "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], "SUBYARD_E2E_LANE=" + FIXTURE_LANE,
                 *command, "--slot", "2"]}))
-        log.write_text(clean_lease() + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n")
+        log.write_text(LANE_HEADER + clean_lease() + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n")
         standalone = {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in
                       (("native", native), ("launch", launch), ("log", log))}
         request = {"schema_version": 1, "target": m.a.transfer_candidate(receipt), "checks": []}
@@ -1689,7 +1690,8 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        for change in ("nonterminal", "pass", "signal", "timeout", "kill", "timing", "transport", "cleanup", "release", "second", "second-cleanup"):
+        for change in ("nonterminal", "pass", "signal", "timeout", "kill", "timing", "transport", "cleanup", "release", "second", "second-cleanup",
+                       "no-header", "other-header"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
             if change in ("nonterminal", "pass", "signal", "timeout", "kill"):
@@ -1711,15 +1713,19 @@ class Contracts(unittest.TestCase):
                     content = content.replace("cleaned vm=2 exit_code=0", "cleaned vm=2 exit_code=1")
                 elif change == "release":
                     content = content.replace(lease_record("release exit_code=0"), "")
+                elif change in ("no-header", "other-header"):
+                    # r4: the log header must name the launcher's lane.
+                    content = content.replace(LANE_HEADER, "" if change == "no-header" else LANE_HEADER.replace(FIXTURE_LANE, "f" * 32))
                 elif change == "second":
                     # A later lease of the same lane that was never released.
-                    content += lease_record("request", "5ec0d000") + lease_record("grant", "5ec0d000")
+                    content += lease_record("request", "5ec0d000") + lease_record("grant type=subyard-pair vms=1 base=" + "c" * 64, "5ec0d000")
                 else:
                     content += clean_lease("5ec0d000", staged=(1,)).replace(lease_record("cleaned vm=1 exit_code=0", "5ec0d000"), "")
                 files["log"].write_text(content)
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
-            with self.subTest(change=change), self.assertRaises(ValueError):
+            reason = {"no-header": "no lane header", "other-header": "differs from the log header"}.get(change, "")
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, reason):
                 m.attestation(self.output, self.identity, [path])
 
     def test_operator_acceptance_counts_every_lease_and_accepts_two_clean_ones(self):
@@ -1730,7 +1736,7 @@ class Contracts(unittest.TestCase):
         # The second lease's staged VM is cleaned before its release; a nested client's lease belongs to another lane.
         second = clean_lease("5ec0d000", staged=(1,), base="c" * 64, middle=(
             "E2E lease: yard=y project=p run=0e57ed00 purpose=t slot=slot-001 type=subyard-pair vms=1 base=" + "d" * 64 + "\n"
-            + f"E2E_LEASE lane={nested} run=0e57ed00 slot=slot-001 event=grant\n"))
+            + f"E2E_LEASE lane={nested} run=0e57ed00 slot=slot-001 event=grant type=subyard-pair vms=1 base=" + "d" * 64 + "\n"))
         files["log"].write_text(log + second)
         declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
         m.write_json(path, declaration)
@@ -1747,7 +1753,7 @@ class Contracts(unittest.TestCase):
             with self.subTest(cleaned=cleaned), self.assertRaises(ValueError):
                 m.validate_operator_acceptance(invalid, "profile:sample", decision["command"], self.identity)
         # A VM without staged work has no cleanup to claim.
-        files["log"].write_text(clean_lease(staged=(1,)) + "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
+        files["log"].write_text(LANE_HEADER + clean_lease(staged=(1,)) + "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
         declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
         m.write_json(path, declaration)
         decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]

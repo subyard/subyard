@@ -476,8 +476,7 @@ def validate_hosted_binding(name, result, candidate, manifest):
         or result.get("execution_environment") != manifest["environment"]
         or result.get("status") != "passed" or result.get("capture_status") != "recorded"
         or result.get("environment_evidence") != "recorded" or not result.get("environments")
-        or result.get("cleanup_status") != "recorded" or not result.get("cleanup")
-        or any(item["exit_code"] != 0 for item in result["cleanup"].values())):
+        or result.get("cleanup_status") != "recorded" or not result.get("cleanup")):
         raise ValueError("CI hosted result identity, policy or complete cleanup changed")
 
 
@@ -892,7 +891,7 @@ def execute(name, command, root, output, env, slot=None):
     evidence = None
     if lane and not capture_error:
         try:
-            evidence = lane_leases(log, lane, slot)
+            evidence = lane_evidence(log, slot, lane)
         except OSError:
             capture_error = True
     status, reason = lane_status({"exit_code": code, "capture_status": "failed" if capture_error else "recorded",
@@ -1000,11 +999,14 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
 
 
 LANE_ID = re.compile(r"[0-9a-f]{32}")
-LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,64})\n")
+LANE_HEADER = re.compile(rb"E2E_LANE id=([0-9a-f]{32})\n")
+LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,100})\n")
 LANE_EVENTS = {event: re.compile(fields) for event, fields in (
-    (b"request", rb""), (b"grant", rb""), (b"refused", rb" resource=(memory|disk)"), (b"work", rb" vm=([12])"),
+    (b"request", rb""), (b"grant", rb" type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})"),
+    (b"refused", rb" resource=(memory|disk)"), (b"work", rb" vm=([12])"),
     (b"cleaned", rb" vm=([12]) exit_code=([0-9]{1,3})"), (b"release", rb" exit_code=([0-9]{1,3})"))}
-LEASE_GRANT = re.compile(rb"E2E lease: ([^\r\n]{0,2000}) type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n")
+# The longest well-formed record line, from its `E2E_LEASE lane=ID ` prefix to the newline.
+LANE_RECORD_BYTES = 200
 LaneEvidence = namedtuple("LaneEvidence", "issue refusal environments cleaned completed")
 
 
@@ -1013,42 +1015,43 @@ def termination(code):
             else "timeout" if code == 124 else "exit" if code is not None else "unknown")
 
 
-def log_lane(log):
-    """The lane ID from the collector's first log line, or None for a log written without one."""
-    with open(log, "rb") as stream:
-        header = re.fullmatch(rb"E2E_LANE id=([0-9a-f]{32})\n", stream.readline(64))
-    return header[1].decode() if header else None
-
-
-def lane_leases(log, lane, slot):
-    """LaneEvidence from the lane's own `E2E_LEASE lane=ID` records: the first issue, the final typed
-    capacity refusal, granted environments, cleaned VMs and the number of cleanly released leases.
+def lane_evidence(log, slot, declared=None):
+    """LaneEvidence from the lane's own `E2E_LEASE lane=ID` records, with ID from the log's
+    `E2E_LANE id=ID` header: the first issue, the final typed capacity refusal, the typed grants'
+    environments, cleaned VMs and the number of cleanly released leases.
 
     Each run's request ends in a grant or a typed refusal, and a grant in a release with exit 0
-    after every VM staged in it was cleaned with exit 0. Lines with other IDs are ignored."""
-    if not isinstance(lane, str) or not LANE_ID.fullmatch(lane) or slot is None:
-        return LaneEvidence("the lane log has no lane ID; evidence from before lane records never counts", None, [], [], 0)
-    prefix, runs, offered, issue, refusal = f"E2E_LEASE lane={lane} ".encode(), {}, {}, None, None
-    environments, cleaned, completed, carry = [], set(), 0, b""
+    after every VM staged in it was cleaned with exit 0. Lines with other IDs are ignored; a
+    declared launcher ID must equal the header."""
+    def refused(issue):
+        return LaneEvidence(issue, None, [], [], 0)
     with open(log, "rb") as stream:
+        header = LANE_HEADER.fullmatch(stream.readline(64))
+        if not header or slot is None:
+            return refused("the lane log has no lane header; evidence from before lane records never counts")
+        lane = header[1].decode()
+        if declared is not None and declared != lane:
+            return refused("the launcher lane ID differs from the log header")
+        prefix, runs, issue, refusal = f"E2E_LEASE lane={lane} ".encode(), {}, None, None
+        environments, cleaned, completed, carry = [], set(), 0, b""
         while chunk := stream.readline(4097):
             line, carry = carry + chunk, b""
             if not chunk.endswith(b"\n"):
                 # A record may follow unterminated output on the same line; keep its possible start.
-                carry = line[-160:]
-                continue
-            if grant := LEASE_GRANT.fullmatch(line):
-                fields = dict(item.split(b"=", 1) for item in grant[1].split() if b"=" in item)
-                offered[fields.get(b"run"), fields.get(b"slot")] = (grant[2].decode(), int(grant[3]), grant[4].decode())
+                if 0 <= line.find(prefix) < len(line) - LANE_RECORD_BYTES:
+                    issue = issue or "malformed lane lease record"
+                carry = line[-LANE_RECORD_BYTES:]
                 continue
             if (position := line.find(prefix)) < 0:
                 continue
             found, record = None, LANE_RECORD.fullmatch(line, position + len(prefix))
             fields = record and LANE_EVENTS.get(record[3]) and LANE_EVENTS[record[3]].fullmatch(record[4])
-            if not fields or any(value.isdigit() and int(value) > 255 for value in fields.groups()):
+            event = record and record[3].decode()
+            if (not fields or event in ("cleaned", "release") and int(fields.groups()[-1]) > 255
+                    or event == "grant" and fields[1] == b"android-test" and fields[2] != b"1"):
                 issue = issue or "malformed lane lease record"
                 continue
-            run, event, state = record[1], record[3].decode(), runs.get(record[1])
+            run, state = record[1], runs.get(record[1])
             refusal = fields[1].decode() if event == "refused" else None
             if int(record[2]) != int(slot):
                 found = f"lease record for slot-{record[2].decode()}, not the lane slot"
@@ -1062,12 +1065,13 @@ def lane_leases(log, lane, slot):
                     state["state"] = "refused"
                 else:
                     runs[run] = {"state": "granted", "staged": set()}
-                    if environment := offered.get((run, b"slot-" + record[2])):
-                        environments.append(environment)
+                    environments.append((fields[1].decode(), int(fields[2]), fields[3].decode()))
             elif not state or state["state"] != "granted":
                 found = f"lease {event} outside a held lease"
             elif event == "work":
-                state["staged"].add(int(fields[1]))
+                vm = int(fields[1])
+                found = f"VM{vm} staged again before its guest cleanup" if vm in state["staged"] else None
+                state["staged"].add(vm)
             elif event == "cleaned":
                 vm, code = int(fields[1]), int(fields[2])
                 if code:
@@ -1083,6 +1087,8 @@ def lane_leases(log, lane, slot):
                 state["state"] = "released"
                 completed += 1
             issue = issue or found
+    if prefix in carry:
+        issue = issue or "unterminated lane lease record"
     for state in runs.values():
         issue = issue or {"requested": "lease request ended without a grant or typed refusal",
                           "granted": "granted lease has no confirmed release"}.get(state["state"])
@@ -1090,24 +1096,26 @@ def lane_leases(log, lane, slot):
 
 
 def lease_issue(evidence):
-    """Why the lane's own leases did not all end cleanly, for evidence that cannot be a capacity block."""
-    return evidence.issue or evidence.refusal and f"final lease request was refused for {evidence.refusal}"
+    """Why the lane's own leases are not complete and clean; None when at least one lease completed
+    and every lease ended cleanly. Standalone and operator evidence use this predicate as is."""
+    return (evidence.issue or evidence.refusal and f"final lease request was refused for {evidence.refusal}"
+            or (None if evidence.completed else "the lane completed no lease"))
 
 
 def lane_status(result, evidence):
-    """The one PASS decision for a result: (status, reason). A slot lane passes only when its own
-    LaneEvidence shows at least one lease and every lease ended cleanly; evidence None is a check without a slot."""
+    """The one PASS decision for a result: (status, reason). A slot lane passes from its own records
+    and the native exit alone, when lease_issue finds nothing; evidence None is a check without a
+    slot, whose own cleanup phases also decide."""
     code = result.get("exit_code")
     clean = (result.get("termination", termination(code)) == "exit"
              and result.get("capture_status", "recorded") == "recorded")
     if evidence is not None and code == 4 and clean and evidence.issue is None and evidence.refusal:
         return "blocked", "capacity_" + evidence.refusal
-    issue = evidence and (lease_issue(evidence) or (None if evidence.completed else "the lane completed no lease"))
-    failed = next((f"{key} exited {item.get('exit_code')}" for key, item in (result.get("cleanup") or {}).items()
-                   if item.get("exit_code") != 0), None)
-    if not issue and failed is None and code == 0 and clean:
+    issue = lease_issue(evidence) if evidence is not None else next(
+        (f"{key} exited {item.get('exit_code')}" for key, item in (result.get("cleanup") or {}).items() if item.get("exit_code") != 0), None)
+    if not issue and code == 0 and clean:
         return "passed", None
-    return "failed", issue or failed
+    return "failed", issue
 
 
 def result_slot(result):
@@ -1129,11 +1137,8 @@ def pass_counts(directory, name, result):
     """Whether a recorded PASS still counts under lane_status, with the refusal reason when not."""
     evidence = None
     if is_live(name):
-        log, transfer = Path(directory) / result["log"], result.get("evidence_transfer")
         try:
-            standalone = isinstance(transfer, dict) and transfer.get("origin") == "standalone"
-            lane = launcher_lane(read_transfer_json(Path(directory) / result["evidence_files"]["launch"]).get("argv")) if standalone else log_lane(log)
-            evidence = lane_leases(log, lane, result_slot(result))
+            evidence = lane_evidence(Path(directory) / result["log"], result_slot(result))
         except (OSError, ValueError, KeyError, TypeError):
             return False, "lane evidence is unreadable"
     status, reason = lane_status(result, evidence)
@@ -1325,6 +1330,8 @@ def load_bound(output, entries=None, context=None):
             if result.get("inherited") and result.get("evidence_transfer", {}).get("schema_version") != 2 and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
                                             or result.get("from_log_sha256") != result["log_sha256"]):
                 raise ValueError("inherited evidence provenance is incomplete")
+            if "evidence_transfer" in result:
+                transfer_artifacts(output, result)
             counts, reason = pass_counts(output, name, result)
             if not counts:
                 # An earlier collector counted this PASS under a weaker rule: rerun it.
@@ -2032,8 +2039,7 @@ def validate_attempt(record, manifest, name, command, log_sha256=None):
                 raise ValueError("invalid attempt phase measurement")
     if facts["status"] == "passed" and (facts["exit_code"] != 0 or facts["capture_status"] != "recorded"
         or facts["termination"] != "exit" or not is_sha(facts["log_sha256"])
-        or facts["execution_environment"] is None or facts["duration_seconds"] is None
-        or facts["cleanup"] and any(item["exit_code"] != 0 for item in facts["cleanup"].values())):
+        or facts["execution_environment"] is None or facts["duration_seconds"] is None):
         raise ValueError("invalid or incomplete original attempt PASS")
 
 
@@ -2637,21 +2643,11 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
         validate_standalone_bundle(root, receipt, entries)
     # The bound source and exact launcher select a checksum-verified bundle.
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
-    cleanup_ended = False
-    with files["log"].open("rb") as stream:
-        for line in stream:
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-            # A typed capacity refusal ends its allocation with exit 4; the lane rule decides whether it recovered.
-            if stage and stage[2] != b"0" and (stage[1], stage[2]) != (b"allocation", b"4"):
-                raise ValueError("standalone controller contains a failed phase")
-            cleanup_ended |= bool(stage and stage[1] == b"cleanup/release")
-            if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
-                raise ValueError("standalone controller contains a failed phase")
-    evidence = lane_leases(files["log"], launcher_lane(assignments), actual[-1])
+    evidence = lane_evidence(files["log"], actual[-1], launcher_lane(assignments))
     status, issue = lane_status({"exit_code": native["exit_code"]}, evidence)
+    if status != "passed":
+        raise ValueError(f"standalone controller evidence incomplete: {issue}")
     environments = set(evidence.environments)
-    if not environments or status != "passed" or not cleanup_ended:
-        raise ValueError("standalone controller evidence incomplete" + (": " + issue if issue else ""))
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
@@ -2659,15 +2655,23 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
                 for kind, count, base in sorted(environments)]}
 
 
+def transfer_artifacts(output, result):
+    """The transfer's retained files, each still matching its bound hash: a changed one is a
+    provenance error, never a PASS to rerun."""
+    transfer, files = result["evidence_transfer"], result.get("evidence_files")
+    current = transfer.get("schema_version") == 2
+    if not isinstance(files, dict) or set(files) != set(transfer["artifacts"]):
+        raise ValueError("original attempt transfer artifacts missing" if current else "reviewed transfer receipt provenance changed")
+    for role, filename in files.items():
+        if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
+            raise ValueError("original attempt transfer artifact changed" if current else "reviewed transfer original artifact changed")
+    return files
+
+
 def validate_transferred_result(output, receipt, name, result, command, root):
     transfer = result["evidence_transfer"]
     if transfer.get("schema_version") == 2:
-        files = result.get("evidence_files")
-        if not isinstance(files, dict) or set(files) != set(transfer["artifacts"]):
-            raise ValueError("original attempt transfer artifacts missing")
-        for role, filename in files.items():
-            if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
-                raise ValueError("original attempt transfer artifact changed")
+        files = transfer_artifacts(output, result)
         record = read_transfer_json(output / files["attempt"])
         manifests = {transfer[key]: read_transfer_json(output / files[role]) for key, role in
                      (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest"))}
@@ -2690,9 +2694,7 @@ def validate_transferred_result(output, receipt, name, result, command, root):
         or result.get("execution_environment") != transfer["execution_environment"]
         or result.get("environments", []) != transfer["environments"]):
         raise ValueError("reviewed transfer receipt provenance changed")
-    for role, filename in files.items():
-        if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
-            raise ValueError("reviewed transfer original artifact changed")
+    transfer_artifacts(output, result)
     original = json.loads((output / files["receipt"]).read_text())
     review = read_transfer_json(output / files["review"])
     if (transfer_candidate(original) != transfer["tested"] or original["environment"] != transfer["preparation_environment"]

@@ -169,8 +169,9 @@ cleanup_default_broker() {
         : > "$LOCAL_TEMP/fixture-cleanup.log"
         chmod 0600 "$LOCAL_TEMP/fixture-cleanup.log"
         fixture_rc=0
+        # Only stdout is private: the lane's lease records on stderr stay in the lane log.
         run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --cleanup \
-          > "$LOCAL_TEMP/fixture-cleanup.log" 2>&1 || fixture_rc=$?
+          > "$LOCAL_TEMP/fixture-cleanup.log" || fixture_rc=$?
         printf 'github_e2e_fixture_cleanup exit_code=%s\n' "$fixture_rc" >&2
         [ "$fixture_rc" = 0 ] || cleanup_failed=1
         cleanup_guest 1 quiet || cleanup_failed=1

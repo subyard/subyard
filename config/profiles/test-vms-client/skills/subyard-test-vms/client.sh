@@ -950,7 +950,8 @@ acquire_lease() {
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
       printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
-      lane_record "$LEASE_SLOT" grant
+      # The typed grant carries the lane's environment; untagged lease lines never count.
+      lane_record "$LEASE_SLOT" grant "type=$ENVIRONMENT_TYPE" "vms=$VM_COUNT" "base=$BASE_FINGERPRINT"
       return 0
     fi
     if [ -n "$LEASE_ACQUIRE_PID" ]; then

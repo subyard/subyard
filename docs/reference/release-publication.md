@@ -387,8 +387,8 @@ Paths resolve relative to the declaration. Repeat `--operator-acceptance` for se
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
 commands and versions must match. Evidence must prove a terminal nonzero exit (not a signal or
 timeout such as 124, 130, 137 or 143), complete launch/timing, VM identities, and that every lease
-of the lane ended cleanly under the [lane lease rule](#lane-lease-rule). The launcher carries
-`SUBYARD_E2E_LANE` as for standalone evidence, and the cleanup summary lists the cleaned staged VMs. Interrupted, incomplete, changed
+of the lane ended cleanly under the [lane lease rule](#lane-lease-rule). The launcher and log
+header carry the same lane ID as for standalone evidence, and the cleanup summary lists the cleaned staged VMs. Interrupted, incomplete, changed
 or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
 passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
 the original exit and log hash without claiming a PASS.
@@ -644,20 +644,24 @@ Only one mutating collector may use an output directory at a time.
 
 The collector gives each slot lane a random 32-hex ID: the log's first line is `E2E_LANE id=ID`,
 and the lane process gets `SUBYARD_E2E_LANE=ID`, which guests never receive. The lane's own client
-and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`, `grant`,
-`refused resource=memory|disk`, `work vm=N` (a run directory was staged), `cleaned vm=N exit_code=N`
-and `release exit_code=N`. One rule (`lane_status`) decides PASS and capacity blocks for collection,
-reuse of a recorded PASS, import, transfer, standalone evidence, hosted collection and operator
-acceptance; it reads only records with the lane's ID. A slot lane passes with exit 0 when:
+and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`,
+`grant type=TYPE vms=N base=FINGERPRINT`, `refused resource=memory|disk`, `work vm=N` (a run
+directory was staged), `cleaned vm=N exit_code=N` and `release exit_code=N`. Records go to stderr as
+single complete lines; a controller must not discard or redirect its stderr away from the lane log.
+One rule (`lane_status`) decides PASS and capacity blocks for collection, reuse of a recorded PASS,
+import, transfer, standalone evidence, hosted collection and operator acceptance. It reads the
+header, then only records with the lane's ID, and the native exit; other phase output does not
+change the verdict, and environments come only from typed grants. A slot lane passes with exit 0 when:
 
-- every record names the lane slot and is well formed;
+- every record names the lane slot, is well formed and ends its line;
 - each run's request ends in a grant or a typed refusal, and each grant in a release with exit 0;
-- every staged VM has a `cleaned` record with exit 0 before its lease's release (`--ssh` and raw
-  guest commands stage nothing);
+- every staged VM has a `cleaned` record with exit 0 before its lease's release, and is not staged
+  again before then (`--ssh` and raw guest commands stage nothing);
 - at least one lease completed and the final record is not a refusal.
 
 Exit 4 with a final typed refusal and no other issue is `blocked/capacity_memory|disk`; otherwise
-the result is `failed` with the rule's reason. A log without the `E2E_LANE` header never counts:
+the result is `failed` with the rule's reason. A log without the `E2E_LANE` header, or whose
+header differs from a declared launcher ID, never counts:
 a recorded PASS from an earlier collector reads as `failed` and runs again (its immutable attempt
 record is kept), and such evidence is refused as an import or transfer source.
 
@@ -747,12 +751,11 @@ An uncollected physical controller PASS may instead supply `standalone` with exa
 `native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
-controller log must retain the VM base, a cleanup/release end and lane records that pass the
-[lane lease rule](#lane-lease-rule) for the launcher's lane ID.
+controller log must start with the launcher's lane header and pass the
+[lane lease rule](#lane-lease-rule); its typed grants are the VM bases.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
-for direct controllers and stays unknown; any observed failed phase rejects the transfer, except
-an allocation end with exit 4 from a typed capacity refusal that the lane rule decides.
+for direct controllers and stays unknown.
 Rich launch records contain `cwd`, `argv`, `source_fingerprint`, `runtime_sha256`, `bundle_sha256`,
 `acceptance_script_sha256` and optional `launched_at_utc`. Original raw records with `cwd`, `argv`
 and timezone-aware `started_at` are also supported. Their checksum-bound bundle must exactly match
@@ -760,9 +763,11 @@ the frozen source, executable modes, candidate metadata and complete release inv
 add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
 The command must be the exact check plus `--slot N`, in the supported
 `timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`, the three
-controller/transport assignments and `SUBYARD_E2E_LANE=ID`, a fresh random 32-hex ID per launch, for
-example `SUBYARD_E2E_LANE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"`. A launcher without it, as
-before lane records, never counts. Unmeasured duration and execution environment stay unknown;
+controller/transport assignments and `SUBYARD_E2E_LANE=ID`, a fresh random 32-hex ID per launch.
+The log starts with the matching header, for example
+`lane="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; printf 'E2E_LANE id=%s\n' "$lane" >"$LOG"`
+before the launcher appends stdout and stderr with `SUBYARD_E2E_LANE="$lane"`. A launcher or log
+without it, as before lane records, never counts. Unmeasured duration and execution environment stay unknown;
 preparation environment and final-poll duration cannot substitute for them.
 
 Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure
