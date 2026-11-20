@@ -13,6 +13,9 @@ if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
 fi
 COMPATIBLE_VERSION="$CANDIDATE_VERSION-p0.compatible.$TOKEN"
 COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+RETIRED_VERSION="$CANDIDATE_VERSION-p0.retired.$TOKEN"
+RETIRED_RELEASE_ROOT="$STATE_ROOT/retired-release"
+RETIRED_REGISTRY="$STATE_ROOT/retired-release-transition.json"
 INSTALLER="$STATE_ROOT/subyard-install-baseline.sh"
 SMOKE_PROJECT=ReleaseSmoke
 SMOKE_SOURCE="$OPERATOR_HOME/$SMOKE_PROJECT"
@@ -61,6 +64,54 @@ establish_smoke_ownership() {
   establish_registered_ownership
 }
 
+# Print the canonical registry digest the engine compares (RegistryV2.CanonicalDigest).
+canonical_registry_digest() {
+  jq -cj '{schemaVersion,
+      minimumEpochs: (.minimumEpochs | to_entries | sort_by(.key) | from_entries),
+      currentEpochs: (.currentEpochs | to_entries | sort_by(.key) | from_entries),
+      migrations: [(.migrations // [])[] | {id, domain, fromEpoch, toEpoch, kind}
+        + (if ((.dependsOn // []) | length) > 0 then {dependsOn} else {} end)]}
+    + (if ((.retiredPrefixes // {}) | length) > 0 then {retiredPrefixes: (.retiredPrefixes
+        | to_entries | sort_by(.key) | map(.value |= {throughEpoch, digest}) | from_entries)} else {} end)' "$1" \
+    | sha256sum | awk '{print $1}'
+}
+
+# The candidate registry with the project-state prefix retired, which has no
+# definitions: it differs from the candidate only in the retired-prefix form.
+write_retired_registry() {
+  local registry="$ROOT/config/release-transition.json" seed
+  [ "$(canonical_registry_digest "$registry")" = "$(jq -er .predecessorRegistryDigest "$ROOT/config/release-rollback.json")" ] \
+    || die 'release smoke retired fixture needs a candidate that declares its own registry as predecessor'
+  jq -e '.minimumEpochs["project-state"] == 1 and .currentEpochs["project-state"] == 1
+      and ((.retiredPrefixes // {}) | has("project-state") | not)' "$registry" >/dev/null \
+    || die 'release smoke retired fixture needs an unretired project-state domain at epoch 1'
+  seed="$(printf '{"domain":"project-state","epoch":1}' | sha256sum | awk '{print $1}')"
+  jq --arg digest "$seed" \
+    '.retiredPrefixes = ((.retiredPrefixes // {}) + {"project-state": {throughEpoch: 1, digest: $digest}})' \
+    "$registry" > "$RETIRED_REGISTRY"
+}
+
+# A release whose registry retires a completed prefix of its declared
+# predecessor rolls back to it without rewriting the history.
+verify_retired_prefix_rollback() {
+  local retired_target verdict
+  operator_env env YARD_RELEASE_BASE_URL="file://$RETIRED_RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$RETIRED_VERSION" --yes
+  retired_target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  assert_runtime_links "$retired_target" "$CANDIDATE_RELEASE_TARGET"
+  verify_smoke_state "$RETIRED_VERSION"
+  set +e
+  verdict="$(operator_env "$OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine" _history-compatibility \
+    "$OPERATOR_HOME/.subyard/runtime" "$OPERATOR_HOME/.config/subyard" "$(basename "$CANDIDATE_RELEASE_TARGET")")"
+  set -e
+  jq -e '.admitted == true and .kind == "equivalent" and .registry == "differs" and .declaredPredecessor == true' \
+    <<<"$verdict" >/dev/null || die "release smoke retired-prefix verdict is not a declared equivalent: $verdict"
+  operator_yard update --rollback --yes
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$retired_target"
+  verify_smoke_state "$CANDIDATE_VERSION"
+  ok 'retired-prefix release rolled back to its declared predecessor'
+}
+
 verify_predecessor_rollback_refusal() {
   local state="$STATE_ROOT/rollback-refusal" path missing=0
   for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
@@ -103,6 +154,10 @@ prepare_smoke() {
   "$ROOT/dev/package-engine.sh" --output-dir "$COMPATIBLE_RELEASE_ROOT" \
     --version "$COMPATIBLE_VERSION" >/dev/null
   chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT"
+  write_retired_registry
+  "$ROOT/dev/package-engine.sh" --output-dir "$RETIRED_RELEASE_ROOT" \
+    --version "$RETIRED_VERSION" --release-transition-registry "$RETIRED_REGISTRY" >/dev/null
+  chmod -R a+rX "$RETIRED_RELEASE_ROOT"
   info "installing published baseline $OLD_VERSION"
   curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
     "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
@@ -192,12 +247,13 @@ finish_smoke() {
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$compatible_target"
   verify_smoke_state "$CANDIDATE_VERSION"
+  verify_retired_prefix_rollback
   operator_yard remove "$SMOKE_PROJECT" --yes
   operator_yard teardown --yes
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'release smoke teardown left its project'
   [ "$(operator_yard version)" = "yard $CANDIDATE_VERSION" ] \
     || die 'last-yard teardown removed the installed runtime'
-  ok 'release smoke upgrade, reboot, data preservation, rollback refusal, compatible rollback/roll-forward and teardown passed'
+  ok 'release smoke upgrade, reboot, data preservation, rollback refusal, compatible and retired-prefix rollbacks and teardown passed'
 }
 
 for command in sudo systemctl timeout cmp curl go incus ip jq rg sha256sum; do

@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -171,5 +172,195 @@ func TestV2RollbackRegistryComparesParsedRegistries(t *testing.T) {
 	options.RollbackTargetRegistry = &reformatted
 	if _, err := NewV2Transition(options); err == nil {
 		t.Fatal("a registryless rollback target accepted a target registry")
+	}
+}
+
+func TestPlanDownPathAdmitsOnlyRetiredPrefixRepresentation(t *testing.T) {
+	v030, candidate := publishedV030Registry(t), decodeRetiringCandidate(t)
+	mutated := func(change func(*RegistryV2)) RegistryV2 {
+		registry := decodeRetiringCandidate(t)
+		change(&registry)
+		return registry
+	}
+	retiredFurther, err := v030.RetirePrefixes(map[string]int{"settings": 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name           string
+		active, target RegistryV2
+		kind           HistoryCompatibilityKind
+	}{
+		{name: "one registry", active: v030, target: v030, kind: HistoryIdentity},
+		{name: "retired prefixes of the target", active: candidate, target: v030, kind: HistoryEquivalent},
+		{name: "older target", active: v030, target: olderHistoryRegistry(v030), kind: HistoryRefuse},
+		{name: "retired digest differs", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
+			prefix := registry.RetiredPrefixes["settings"]
+			prefix.Digest = Fingerprint(strings.Repeat("d", 64))
+			registry.RetiredPrefixes["settings"] = prefix
+		})},
+		// Later definitions are chained into the prefix digests of later history.
+		{name: "later definition differs", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
+			registry.Migrations[0].DependsOn = nil
+		})},
+		{name: "later definition missing", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
+			registry.Migrations, registry.CurrentEpochs["power-metadata"] = nil, 3
+		})},
+		{name: "floor beyond the target", kind: HistoryRefuse, target: olderHistoryRegistry(v030), active: candidate},
+		{name: "target retires more", kind: HistoryRefuse, active: candidate, target: mutated(func(registry *RegistryV2) {
+			registry.RetiredPrefixes["project-state"] = RetiredMigrationPrefixV2{ThroughEpoch: 1, Digest: Fingerprint(strings.Repeat("e", 64))}
+		})},
+		{name: "unretired active", kind: HistoryRefuse, active: v030, target: retiredFurther},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, err := PlanDownPath(test.active, test.target)
+			if err != nil || path.Kind != test.kind {
+				t.Fatalf("down path = %#v, %v", path, err)
+			}
+			if want, _ := test.target.CanonicalDigest(); path.Target != want {
+				t.Fatalf("down path target %s, want %s", path.Target, want)
+			}
+		})
+	}
+}
+
+// publishedV030History is the protected history the v0.30.0 tag engine wrote for
+// a completed installation with a checkpoint
+// (testdata/v0.30.0-completed-install-checkpointed.json, sha256 8458d868...).
+func publishedV030History(t *testing.T) (ProtectedSnapshot, ProtectedSnapshot) {
+	t.Helper()
+	payload, err := os.ReadFile(filepath.Join("testdata", "v0.30.0-completed-install-checkpointed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files map[string]string
+	if err := json.Unmarshal(payload, &files); err != nil {
+		t.Fatal(err)
+	}
+	return protectedSnapshotFromPayload([]byte(files["release-transition/v2/ledger.json"])),
+		protectedSnapshotFromPayload([]byte(files["release-transition/v2/history-checkpoint.json"]))
+}
+
+// The v0.30.0 target reads history its retiring successor wrote: checkpoint
+// reading checks prefix digests and epochs, not the writer's registry digest.
+func TestHistoryCompatibilityAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
+	v030, candidate := publishedV030Registry(t), decodeRetiringCandidate(t)
+	v030Digest := fingerprintPayload(mustReadTestdata(t, "v0.30.0-release-transition.json"))
+	predecessor, err := v030.CanonicalDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, checkpoint := publishedV030History(t)
+	var written LedgerCheckpointV1
+	if err := json.Unmarshal(checkpoint.Payload, &written); err != nil {
+		t.Fatal(err)
+	}
+	written.RegistryDigest = fingerprintPayload([]byte(retiringCandidateRegistry))
+	rewritten, err := json.Marshal(written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := protectedSnapshotFromPayload(append(rewritten, '\n'))
+	evidence := func(checkpoint ProtectedSnapshot) *HistoryEvidence {
+		return &HistoryEvidence{Registry: v030, RegistryDigest: v030Digest, Ledger: ledger, Checkpoint: checkpoint, CheckpointReader: true}
+	}
+	missing := absentProtectedSnapshot()
+	corrupt := protectedSnapshotFromPayload([]byte("{}"))
+	differs := "the selected release's migration registry differs from the active release's registry"
+	for _, test := range []struct {
+		name        string
+		input       HistoryCompatibilityInput
+		kind        HistoryCompatibilityKind
+		predecessor bool
+		reason      HistoryRefusalReason
+		message     string
+	}{
+		{name: "v0.30.0 checkpoint", kind: HistoryEquivalent, predecessor: true,
+			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(checkpoint)}},
+		{name: "successor checkpoint", kind: HistoryEquivalent, predecessor: true,
+			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(successor)}},
+		{name: "legacy ledger", kind: HistoryEquivalent, predecessor: true,
+			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(missing)}},
+		{name: "undeclared skips history", kind: HistoryEquivalent, reason: HistoryRegistryDiffers, message: differs,
+			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: Fingerprint(strings.Repeat("f", 64)), History: evidence(corrupt)}},
+		{name: "no declaration", kind: HistoryEquivalent, reason: HistoryRegistryDiffers, message: differs,
+			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, History: evidence(checkpoint)}},
+		{name: "declared but unreadable history", kind: HistoryEquivalent, predecessor: true, reason: HistoryUnverifiable,
+			message: "the selected release cannot verify the authoritative active migration history",
+			input:   HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(corrupt)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verdict := HistoryCompatibility(test.input)
+			if verdict.Kind != test.kind || verdict.Registry != RegistryDiffers || verdict.DeclaredPredecessor != test.predecessor {
+				t.Fatalf("verdict = %#v", verdict)
+			}
+			message, _ := verdict.Refusal()
+			if test.reason == "" {
+				if !verdict.Admitted() || message != "" {
+					t.Fatalf("equivalent predecessor refused: %#v", verdict)
+				}
+				return
+			}
+			if verdict.Admitted() || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != test.reason || message != test.message {
+				t.Fatalf("refusal = %#v", verdict)
+			}
+		})
+	}
+	// The declared predecessor alone admits nothing when the registries are not equivalent.
+	older := olderHistoryRegistry(v030)
+	olderDigest, _ := older.CanonicalDigest()
+	verdict := HistoryCompatibility(HistoryCompatibilityInput{Active: &candidate, Target: &older, Predecessor: olderDigest})
+	if verdict.Admitted() || verdict.Kind != HistoryRefuse || !verdict.DeclaredPredecessor {
+		t.Fatalf("declared non-equivalent predecessor = %#v", verdict)
+	}
+}
+
+func mustReadTestdata(t *testing.T, name string) []byte {
+	t.Helper()
+	payload, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// An engine whose registry retires prefixes admits its declared predecessor.
+func TestV2RollbackRegistryAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
+	full := v2TestRegistry(t)
+	retired, err := full.RetirePrefixes(map[string]int{"project-state": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err := full.CanonicalDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := Fingerprint(strings.Repeat("c", 64))
+	for name, test := range map[string]struct {
+		predecessor Fingerprint
+		refused     bool
+	}{
+		"declared":   {predecessor: predecessor},
+		"undeclared": {predecessor: other, refused: true},
+		"none":       {refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newV2RollbackBoundaryFixture(t, "0.30.0", other, payload)
+			fixture.transition.options.RollbackTargetRegistry = &full
+			fixture.transition.options.RollbackPredecessor = test.predecessor
+			if refused := fixture.transition.rollbackRegistryRefused(); refused != test.refused {
+				t.Fatalf("rollback registry refused = %v", refused)
+			}
+			observation, err := fixture.transition.observe(context.Background(), Goal{Target: "release-a", Direction: DirectionActivatePrevious})
+			blocked := err == nil && len(observation.blockers) == 1 && observation.blockers[0].Code == CodeRollbackIncompatible
+			if err != nil || blocked != test.refused {
+				t.Fatalf("rollback observation blockers = %#v, err=%v", observation.blockers, err)
+			}
+			fixture.assertUnchanged(t, false)
+		})
 	}
 }

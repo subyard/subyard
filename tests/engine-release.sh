@@ -1285,4 +1285,32 @@ fi
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'failed inspection changed stable runtime links'
 
+# A release whose registry only retires the definition-free project-state
+# prefix rolls back to its declared predecessor without rewriting history.
+retired_release="$TMP/release-retired"
+jq --arg digest "$(printf '{"domain":"project-state","epoch":1}' | sha256sum | awk '{print $1}')" \
+  '.retiredPrefixes = ((.retiredPrefixes // {}) + {"project-state": {throughEpoch: 1, digest: $digest}})' \
+  "$ROOT/config/release-transition.json" > "$TMP/retired-release-transition.json"
+"$ROOT/dev/package-engine.sh" --output-dir "$retired_release" --version 1.2.0-test \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" \
+  --release-transition-registry "$TMP/retired-release-transition.json" >/dev/null
+YARD_RELEASE_BASE_URL="file://$retired_release" YARD_RELEASE_CACHE="$TMP/cache" \
+  "$runtime_root/current/bin/yard" update --yes --runtime-root "$runtime_root" --version 1.2.0-test >/dev/null
+retired_target="$(readlink "$runtime_root/current")"
+[ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.2.0-test ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$candidate_target" ] \
+  || fail 'retired-prefix release did not activate over the candidate'
+history_before="$(sha256sum "$SUBYARD_CONFIG_HOME"/release-transition/v2/{ledger,history-checkpoint}.json 2>/dev/null || true)"
+verdict="$("$runtime_root/current/bin/yard-engine" _history-compatibility "$runtime_root" "$SUBYARD_CONFIG_HOME" \
+  "${candidate_target#releases/}")" || true
+jq -e '.admitted and .kind == "equivalent" and .registry == "differs" and .declaredPredecessor' <<<"$verdict" >/dev/null \
+  || fail "retired-prefix release does not admit its declared predecessor: $verdict"
+installed_update --runtime-root "$runtime_root" --rollback >/dev/null
+[ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$retired_target" ] \
+  && [ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.1.0-test ] \
+  || fail 'retired-prefix release did not roll back to its declared predecessor'
+[ "$(sha256sum "$SUBYARD_CONFIG_HOME"/release-transition/v2/{ledger,history-checkpoint}.json 2>/dev/null || true)" = "$history_before" ] \
+  || fail 'equivalent rollback rewrote the migration history'
+
 printf 'ok: release publication and resumable v2 activation ingress are verified\n'

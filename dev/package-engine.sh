@@ -21,6 +21,7 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || { printf 'package-engine: --version needs a value\n' >&2; exit 2; }; VERSION="$2"; shift 2 ;;
     --arch) [ $# -ge 2 ] || { printf 'package-engine: --arch needs amd64 or arm64\n' >&2; exit 2; }; TARGET_ARCH="$2"; shift 2 ;;
     --migration-registry) [ $# -ge 2 ] || { printf 'package-engine: --migration-registry needs a path\n' >&2; exit 2; }; MIGRATION_REGISTRY="$2"; shift 2 ;;
+    --release-transition-registry) [ $# -ge 2 ] || { printf 'package-engine: --release-transition-registry needs a path\n' >&2; exit 2; }; RELEASE_TRANSITION_REGISTRY="$2"; shift 2 ;;
     --runtime-installer) [ $# -ge 2 ] || { printf 'package-engine: --runtime-installer needs a path\n' >&2; exit 2; }; RUNTIME_INSTALLER="$2"; shift 2 ;;
     *) printf 'package-engine: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac

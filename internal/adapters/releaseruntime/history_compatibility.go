@@ -97,15 +97,10 @@ func InspectHistoryCompatibility(runtimeRoot, configHome string, targetID releas
 		return HistoryCompatibilityReport{}, fmt.Errorf("verify target release: %w", err)
 	}
 	defer target.Close()
-	declaration, err := verifiedRollbackDeclaration(active)
-	if err != nil {
-		return HistoryCompatibilityReport{}, fmt.Errorf("the active release's rollback declaration cannot be verified: %w", err)
+	history, refusal, err := assembleHistorySelection(request, state.links, state, active, target)
+	if refusal == "" && history.declarationErr != nil {
+		refusal, err = rollbackDeclarationRefusal, history.declarationErr
 	}
-	var predecessor releasetransition.Fingerprint
-	if declaration != nil {
-		predecessor = declaration.PredecessorRegistryDigest
-	}
-	history, refusal, err := assembleHistorySelection(request, state.links, state, active, target, predecessor)
 	if refusal != "" {
 		return HistoryCompatibilityReport{}, fmt.Errorf("%s: %w", refusal, err)
 	}
@@ -132,13 +127,19 @@ type historySelection struct {
 	missingHistory                 bool
 	firstPublication               bool
 	publicationErr                 error
-	verdict                        releasetransition.HistoryCompatibilityVerdict
+	// declarationErr is a failed read of the active release's rollback
+	// declaration. Only an Equivalent relation depends on it.
+	declarationErr error
+	verdict        releasetransition.HistoryCompatibilityVerdict
 }
 
+const rollbackDeclarationRefusal = "the active release's rollback declaration cannot be verified"
+
 // assembleHistorySelection is shared by captureTransitionSelection and the
-// verb. A non-empty refusal reports a registry that cannot be verified.
+// verb. A non-empty refusal reports a registry that cannot be verified, or an
+// Equivalent relation whose rollback declaration cannot be verified.
 func assembleHistorySelection(request releasetransition.ProcessRequest, links runtimeLinkSnapshot, state currentSnapshot,
-	active, target *verifiedPublishedCandidate, predecessor releasetransition.Fingerprint,
+	active, target *verifiedPublishedCandidate,
 ) (historySelection, string, error) {
 	var history historySelection
 	var err error
@@ -152,6 +153,13 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		return history, "the selected release's sealed migration registry cannot be verified", err
 	}
 	history.targetRegistry = identity
+	var predecessor releasetransition.Fingerprint
+	declaration, err := verifiedRollbackDeclaration(active)
+	if err != nil {
+		history.declarationErr = err
+	} else if declaration != nil {
+		predecessor = declaration.PredecessorRegistryDigest
+	}
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -174,6 +182,9 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
 	}
 	history.verdict = releasetransition.HistoryCompatibility(input)
+	if history.declarationErr != nil && history.verdict.Kind == releasetransition.HistoryEquivalent {
+		return history, rollbackDeclarationRefusal, history.declarationErr
+	}
 	return history, "", nil
 }
 

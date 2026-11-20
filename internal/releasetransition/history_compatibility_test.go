@@ -203,9 +203,13 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 	}
 }
 
-func TestHistoryCompatibilityAdmitsOnlyIdentity(t *testing.T) {
-	for _, kind := range []HistoryCompatibilityKind{HistoryEquivalent, HistorySteps, HistoryRefuse} {
-		verdict := HistoryCompatibilityVerdict{Kind: kind, Registry: RegistryDiffers}.sealed()
+func TestHistoryCompatibilityAdmitsIdentityAndDeclaredEquivalent(t *testing.T) {
+	for _, verdict := range []HistoryCompatibilityVerdict{
+		{Kind: HistoryEquivalent}, {Kind: HistorySteps, DeclaredPredecessor: true}, {Kind: HistoryRefuse, DeclaredPredecessor: true},
+	} {
+		kind := verdict.Kind
+		verdict.Registry = RegistryDiffers
+		verdict = verdict.sealed()
 		message, _ := verdict.Refusal()
 		// Callers that read only the refusal text must still see a refusal.
 		if verdict.Admitted() || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != HistoryRegistryDiffers ||
@@ -215,6 +219,9 @@ func TestHistoryCompatibilityAdmitsOnlyIdentity(t *testing.T) {
 	}
 	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryIdentity, Registry: RegistryIdentical}).sealed(); !verdict.Admitted() {
 		t.Fatalf("identity gained a refusal: %#v", verdict)
+	}
+	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryEquivalent, Registry: RegistryDiffers, DeclaredPredecessor: true}).sealed(); !verdict.Admitted() {
+		t.Fatalf("declared equivalent predecessor gained a refusal: %#v", verdict)
 	}
 	first, second := errors.New("first cause"), errors.New("second cause")
 	verdict := HistoryCompatibilityVerdict{Kind: HistoryIdentity, Refusals: []HistoryRefusal{

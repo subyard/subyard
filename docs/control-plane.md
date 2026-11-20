@@ -1148,12 +1148,25 @@ transition owner, catalog and journal bindings are preserved. A marked target va
 itself; a target without a transition registry retains the existing active-owner route.
 
 `releasetransition.HistoryCompatibility` decides whether a target release may own the active
-migration history. It compares registry identities (`identical`, `differs` or `absent`), then reads
-the authoritative ledger or checkpoint through the target registry and its checkpoint-reader marker.
-It returns a kind (`identity`, `equivalent`, `steps` or `refuse`), the registry relation and the
-collected refusals; a verdict that is not admitted always carries a refusal. Only `identity` is
-admitted for now, so a differing registry refuses as before. Callers that ask whether registries
-differ read the relation, not admission. The sealed
+migration history. It compares the parsed registries by canonical digest (`identical`, `differs` or
+`absent`), and `PlanDownPath` relates them. The relation is `identity` for one registry, or
+`equivalent` when the active registry is the target with completed prefixes retired: the target
+retired through the active floors (`RegistryV2.RetirePrefixes`) has the active canonical digest, so
+the target's own `MigrationPrefixDigest` proves every retired digest and later definitions are
+unchanged. Any other relation is `refuse`; `steps` is not produced yet. For an admitted relation it
+then reads the authoritative ledger or checkpoint through the target registry and its
+checkpoint-reader marker. Checkpoint reading checks prefix digests and epochs, not the writer's
+registry digest, so the target reads history its equivalent successor wrote, and an equivalent
+admission writes nothing. The verdict carries the kind, the registry relation and the collected
+refusals; a verdict that is not admitted always carries a refusal. `identity` is admitted, and
+`equivalent` only for the active release's declared predecessor; an undeclared equivalent target,
+such as an older release, keeps the registry refusal and is not read. Callers that decide by the
+registry read `RegistryAdmitted`, so a declared equivalent target behaves like identical registries
+for source-floor advice, first-publication evidence and bootstrap publication, and an undeclared one
+like differing registries. Only an equivalent relation depends on the declaration, so one that cannot
+be verified refuses only an equivalent target. The engine applies the same verdict to its own and the
+rollback target's parsed registries and its own declaration; identical sealed bytes stand in for a
+target registry it cannot parse. The sealed
 [`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
 digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
 in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release

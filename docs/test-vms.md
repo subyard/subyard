@@ -1287,7 +1287,11 @@ guard lanes recognize these refusal paths. Release smoke compares runtime link m
 V2 state tree's metadata and file hashes across the refusal. The same-epoch cycle uses a compatible
 release built from the candidate source. A public `update --check --json` names its exact target
 with a plan and no blockers. The lane updates to it, returns to the candidate, performs a real
-rollback to it and rolls forward again.
+rollback to it and rolls forward again. A last cycle updates to a release built from the candidate
+source whose registry retires the definition-free `project-state` prefix, so it differs from the
+candidate only in the retired-prefix form and declares the candidate as its predecessor. Its
+`_history-compatibility` verdict for the candidate must be an admitted `equivalent`, and a real
+rollback returns to the candidate.
 Both passages preserve native policy and the registered ownership. Fresh sources below v0.11.0
 remain refused; accepted completed V2 history and recovery retain their separate supported
 contracts. The guest verifies checksum-pinned official anchor assets before creating the cold

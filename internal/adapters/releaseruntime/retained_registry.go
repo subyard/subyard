@@ -138,7 +138,7 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 	if freshDraft {
 		return selection, nil
 	}
-	history, refusal, err := assembleHistorySelection(request, links, selection.state, active, target, "")
+	history, refusal, err := assembleHistorySelection(request, links, selection.state, active, target)
 	selection.activeRegistry, selection.targetRegistry = history.activeRegistry, history.targetRegistry
 	if refusal != "" {
 		selection.refusal, selection.cause = refusal, err

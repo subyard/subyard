@@ -13,8 +13,9 @@ type HistoryCompatibilityKind string
 const (
 	// HistoryIdentity: the target registry is the active registry.
 	HistoryIdentity HistoryCompatibilityKind = "identity"
-	// HistoryEquivalent: the registries differ only in history the target reads
-	// unchanged. Not produced or admitted yet.
+	// HistoryEquivalent: the active registry is the target with completed
+	// prefixes retired, so the target reads the history unchanged. Admitted
+	// only for the declared predecessor, and nothing is written.
 	HistoryEquivalent HistoryCompatibilityKind = "equivalent"
 	// HistorySteps: the active release declares down steps to the target
 	// registry. Not produced or admitted yet.
@@ -78,7 +79,7 @@ type HistoryCompatibilityVerdict struct {
 	Kind     HistoryCompatibilityKind
 	Registry HistoryRegistryRelation
 	// DeclaredPredecessor reports that the target registry is the active
-	// release's declared predecessor. It does not admit the target yet.
+	// release's declared predecessor; it admits an Equivalent target.
 	DeclaredPredecessor bool
 	Refusals            []HistoryRefusal
 }
@@ -126,7 +127,11 @@ type DownPath struct {
 }
 
 // PlanDownPath decides how the active migration history reaches a target
-// registry. Identity is one registry. Every other relation refuses for now.
+// registry. Identity is one registry. Equivalent is the target retired through
+// the active registry's retired floors: the target then proves every retired
+// digest with its own MigrationPrefixDigest and chains the same later
+// definitions, so its checkpoint reader accepts the history unchanged. Every
+// other relation refuses.
 func PlanDownPath(active, target RegistryV2) (DownPath, error) {
 	activeDigest, err := active.CanonicalDigest()
 	if err != nil {
@@ -138,12 +143,32 @@ func PlanDownPath(active, target RegistryV2) (DownPath, error) {
 	}
 	if path.Target == activeDigest {
 		path.Kind = HistoryIdentity
+		return path, nil
+	}
+	if len(active.RetiredPrefixes) == 0 {
+		return path, nil
+	}
+	floors := make(map[string]int, len(active.RetiredPrefixes))
+	for domain, retired := range active.RetiredPrefixes {
+		floors[domain] = retired.ThroughEpoch
+	}
+	retired, err := target.RetirePrefixes(floors)
+	if err != nil {
+		// The target registry cannot reach these floors.
+		return path, nil
+	}
+	digest, err := retired.CanonicalDigest()
+	if err != nil {
+		return DownPath{}, err
+	}
+	if digest == activeDigest {
+		path.Kind = HistoryEquivalent
 	}
 	return path, nil
 }
 
 // sealed keeps the invariant that a verdict which is not admitted carries a
-// refusal. A relation this slice does not admit keeps the identity refusal.
+// refusal. A relation that is not admitted keeps the identity refusal.
 func (verdict HistoryCompatibilityVerdict) sealed() HistoryCompatibilityVerdict {
 	if !verdict.RegistryAdmitted() && len(verdict.Refusals) == 0 {
 		verdict.Refusals = []HistoryRefusal{{
@@ -181,9 +206,10 @@ func verifyHistoryEvidence(history HistoryEvidence) *HistoryRefusal {
 }
 
 // RegistryAdmitted reports whether the registry relation lets the target own
-// the history, before any history finding. Only identity is admitted for now.
+// the history, before any history finding: identity, or an Equivalent
+// declared predecessor. Steps are not admitted yet.
 func (verdict HistoryCompatibilityVerdict) RegistryAdmitted() bool {
-	return verdict.Kind == HistoryIdentity
+	return verdict.Kind == HistoryIdentity || verdict.Kind == HistoryEquivalent && verdict.DeclaredPredecessor
 }
 
 // Admitted reports whether the target may own the history.

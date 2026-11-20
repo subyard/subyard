@@ -2150,14 +2150,16 @@ func executeReleaseTransitionRequest(
 		if err != nil {
 			return releasetransition.ProcessResponse{}, err
 		}
-		rollbackPredecessor, err = engineRollbackPredecessor(repositoryRoot)
-		if err != nil {
-			return releasetransition.ProcessResponse{}, err
-		}
 	}
 	registry, err := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-transition.json"))
 	if err != nil {
 		return releasetransition.ProcessResponse{}, fmt.Errorf("read release transition registry: %w", err)
+	}
+	// Only a target with other registry bytes can depend on the declaration.
+	if rollbackTargetRegistry != nil && rollbackTarget.RegistryDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(registry))) {
+		if rollbackPredecessor, err = engineRollbackPredecessor(repositoryRoot); err != nil {
+			return releasetransition.ProcessResponse{}, err
+		}
 	}
 	if request.RegistryDigest != "" {
 		digest := sha256.Sum256(registry)
