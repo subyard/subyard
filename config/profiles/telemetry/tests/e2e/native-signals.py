@@ -786,6 +786,9 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
     path = codex_home/'config.toml'
     native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     environment = dict(env, HOME=str(home), CODEX_HOME=str(codex_home), TERM='xterm-256color')
+    # The collector drains run registrations once per second. A 100 ms batch can
+    # be refused before registration, and Codex does not resend those spans.
+    environment.pop('OTEL_BSP_SCHEDULE_DELAY', None)
 
     class Client(fixture.Terminal):
         def __init__(self, argv):
