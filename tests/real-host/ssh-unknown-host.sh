@@ -27,9 +27,6 @@ else
   STATE="$(mktemp -d /var/tmp/subyard-ssh-unknown.XXXXXX)"
   printf '%s\n' "$RUN_ID" >"$STATE/.marker"
 fi
-ORIGINAL_HOME="$HOME"
-PLATFORM_ROOT="$ORIGINAL_HOME/.cache/subyard-e2e-platform"
-PLATFORM_MARKER="$PLATFORM_ROOT/.subyard-e2e-platform-marker"
 OWNER_HOME="$STATE/owner-home"
 OWNER_CONFIG_HOME="$STATE/owner-config"
 OWNER_DATA_HOME="$STATE/owner-data"
@@ -37,6 +34,7 @@ CONTROLLER_HOME="$STATE/controller-home"
 CONTROLLER_CONFIG_HOME="$STATE/controller-config"
 CONTROLLER_DATA_HOME="$STATE/controller-data"
 SSHD_PID=''
+YARD_INITIALIZED=0
 REMOTE_ADDED=0
 HOST_ID=''
 cleanup() {
@@ -44,9 +42,11 @@ cleanup() {
   set +e
   if [ "$REMOTE_ADDED" = 1 ]; then "$ROOT/.build/yard" remote remove "$REMOTE_NAME" --yes >&2 || cleanup_failed=1; fi
   [ -z "$SSHD_PID" ] || { kill -TERM "$SSHD_PID" 2>/dev/null; wait "$SSHD_PID" 2>/dev/null; }
-  env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
-    SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
-    SUBYARD_NO_AUDIT=1 "$ROOT/.build/yard" -Y "$YARD_NAME" teardown --yes >&2 || cleanup_failed=1
+  if [ "$YARD_INITIALIZED" = 1 ]; then
+    env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
+      SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
+      SUBYARD_NO_AUDIT=1 "$ROOT/.build/yard" -Y "$YARD_NAME" teardown --yes >&2 || cleanup_failed=1
+  fi
   if [ "$cleanup_failed" = 1 ]; then
     printf 'ssh-unknown-host: cleanup failed; fixture retained at %s\n' "$STATE" >&2
     exit 3
@@ -57,34 +57,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -z "${SUBYARD_SSH_TRUST_RESUME:-}" ]; then
-  # Keep the shared platform root writable by the operator when the product
-  # installer creates root-owned storage ancestors on a fresh VM.
-  [ ! -L "$ORIGINAL_HOME/.cache" ] && [ ! -L "$PLATFORM_ROOT" ] \
-    || fail 'shared platform root must not be a symlink'
-  if [ -e "$PLATFORM_ROOT" ]; then
-    [ -d "$PLATFORM_ROOT" ] && [ -O "$PLATFORM_ROOT" ] \
-      || fail 'shared platform root must belong to the operator'
-    if [ -e "$PLATFORM_MARKER" ] || [ -L "$PLATFORM_MARKER" ]; then
-      [ -f "$PLATFORM_MARKER" ] && [ ! -L "$PLATFORM_MARKER" ] \
-        && [ "$(cat "$PLATFORM_MARKER")" = subyard-e2e-platform-v1 ] \
-        || fail 'unexpected shared E2E platform marker'
-    elif find "$PLATFORM_ROOT" -mindepth 1 -print -quit | grep -a >/dev/null .; then
-      fail 'refusing a non-empty unmarked shared platform root'
-    fi
-  else
-    install -d -m 0711 "$PLATFORM_ROOT"
-  fi
-  bash "$ROOT/dev/build-engine.sh" --force >/dev/null
-  install -d -m 0700 "$OWNER_HOME" "$OWNER_CONFIG_HOME/yards/$YARD_NAME" \
-    "$OWNER_DATA_HOME" "$CONTROLLER_HOME" "$CONTROLLER_CONFIG_HOME" \
-    "$CONTROLLER_DATA_HOME" "$STATE/host"
-  printf 'owner-%s\n' "$RUN_ID" >"$OWNER_CONFIG_HOME/host-id"
-  printf 'controller-%s\n' "$RUN_ID" >"$CONTROLLER_CONFIG_HOME/host-id"
-  chmod 0600 "$OWNER_CONFIG_HOME/host-id" "$CONTROLLER_CONFIG_HOME/host-id"
+# The owning platform reconciler installs Incus and enrolls this operator.
+[ -n "${SUBYARD_SSH_TRUST_RESUME:-}" ] || bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)$$"
+# Enrollment takes effect only in a new group session; resume there before init.
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
+  id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    || fail 'platform preparation did not grant Incus access'
+  printf -v resume_command 'exec env SUBYARD_SSH_TRUST_RESUME=%q bash %q' \
+    "$STATE" "$ROOT/tests/real-host/ssh-unknown-host.sh"
+  exec sg incus-admin -c "$resume_command"
+fi
+bash "$ROOT/dev/build-engine.sh" --force >/dev/null
+install -d -m 0700 "$OWNER_HOME" "$OWNER_CONFIG_HOME/yards/$YARD_NAME" \
+  "$OWNER_DATA_HOME" "$CONTROLLER_HOME" "$CONTROLLER_CONFIG_HOME" \
+  "$CONTROLLER_DATA_HOME" "$STATE/host"
+printf 'owner-%s\n' "$RUN_ID" >"$OWNER_CONFIG_HOME/host-id"
+printf 'controller-%s\n' "$RUN_ID" >"$CONTROLLER_CONFIG_HOME/host-id"
+chmod 0600 "$OWNER_CONFIG_HOME/host-id" "$CONTROLLER_CONFIG_HOME/host-id"
 
-  yard_port="$(free_port)"
-  cat >"$OWNER_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
+yard_port="$(free_port)"
+cat >"$OWNER_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 SSH_PORT=$yard_port
 CODING_TOOL_INTEGRATIONS=
 ENVIRONMENT_PROFILES=
@@ -93,48 +85,16 @@ HOST_MOUNTS=
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
 EOF
-  chmod 0600 "$OWNER_CONFIG_HOME/yards/$YARD_NAME/config.env"
-  env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
-    SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
-    STORAGE_PATH="$PLATFORM_ROOT/incus/incus/storage" \
-    SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1 \
-    "$ROOT/.build/yard" -Y "$YARD_NAME" init --yes >/dev/null
-fi
-# init can install Incus and enroll dev, but cannot change its parent shell's
-# groups. Resume the same fixture with the membership needed by owner SSH too.
-if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
-  id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
-    || fail 'product initialization did not grant Incus access'
-  printf -v resume_command 'exec env SUBYARD_SSH_TRUST_RESUME=%q bash %q' \
-    "$STATE" "$ROOT/tests/real-host/ssh-unknown-host.sh"
-  exec sg incus-admin -c "$resume_command"
-fi
-# Retain the verified shared Incus baseline for subsequent acceptance runs.
-incus info >/dev/null
-for platform_path in "$ORIGINAL_HOME" "$ORIGINAL_HOME/.cache" "$PLATFORM_ROOT" \
-  "$PLATFORM_ROOT/incus" "$PLATFORM_ROOT/incus/incus" "$PLATFORM_ROOT/incus/incus/storage"; do
-  [ -d "$platform_path" ] && [ ! -L "$platform_path" ] \
-    || fail 'shared E2E storage path must contain only plain directories'
-done
-[ "$(incus storage get default source --project default)" = "$PLATFORM_ROOT/incus/incus/storage" ] \
-  || fail 'Incus default storage is outside the shared E2E platform'
-[ "$(incus storage list --project default --format json | jq -r '.[] | select(.name == "default") | .driver')" = dir ] \
-  || fail 'unexpected shared E2E storage driver'
-incus network show incusbr0 --project default >/dev/null
-if [ -e "$PLATFORM_MARKER" ] || [ -L "$PLATFORM_MARKER" ]; then
-  [ -f "$PLATFORM_MARKER" ] && [ ! -L "$PLATFORM_MARKER" ] \
-    && [ "$(cat "$PLATFORM_MARKER")" = subyard-e2e-platform-v1 ] \
-    || fail 'unexpected shared E2E platform marker'
-else
-  platform_marker_temp="$(mktemp "$PLATFORM_ROOT/.platform-marker.XXXXXX")"
-  printf '%s\n' subyard-e2e-platform-v1 >"$platform_marker_temp"
-  chmod 0600 "$platform_marker_temp"
-  mv -f -- "$platform_marker_temp" "$PLATFORM_MARKER"
-fi
+chmod 0600 "$OWNER_CONFIG_HOME/yards/$YARD_NAME/config.env"
+YARD_INITIALIZED=1
+env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
+  SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
+  STORAGE_PATH="$(incus storage get default source)" \
+  SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1 \
+  "$ROOT/.build/yard" -Y "$YARD_NAME" init --yes >/dev/null
 env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
   SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
   SUBYARD_NO_AUDIT=1 "$ROOT/.build/yard" -Y "$YARD_NAME" start --yes >/dev/null
-command -v incus >/dev/null 2>&1 || fail 'product initialization did not install Incus'
 owner_port="$(free_port)"
 
 export HOME="$CONTROLLER_HOME"
