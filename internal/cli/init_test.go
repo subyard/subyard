@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
@@ -93,6 +95,8 @@ type initPlatformFixture struct {
 	preflightErr              error
 	applyErr                  error
 	configs                   int
+	consents                  []*ports.ConfigConsent
+	refreshErr                error
 	configsConverged          bool
 	configChecks              []bool
 	teardowns                 int
@@ -470,6 +474,111 @@ func TestInitConfigsRechecksConvergenceAfterConsent(t *testing.T) {
 	}
 }
 
+// A direct init plans its refresh itself: the runtime observes the guest
+// tokens right before it writes. Only a config apply parent's init --configs
+// child carries the parent's confirmed tokens, through its consent fd.
+func TestInitTokenSources(t *testing.T) {
+	consent := &ports.ConfigConsent{InstanceUUID: "uuid", Files: []ports.ConfigFileConsent{{Destination: "/home/dev/a", Token: "absent"}}}
+	for name, arguments := range map[string][]string{
+		"direct init --configs": {"init", "--configs", "--yes"},
+		"consented child":       {"init", "--configs", "--yes", "--config-consent-fd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+			want := (*ports.ConfigConsent)(nil)
+			if arguments[len(arguments)-1] == "--config-consent-fd" {
+				payload, _ := json.Marshal(consent)
+				file := filepath.Join(testkit.TempDir(t), "consent")
+				testkit.WriteFile(t, file, payload, 0o600)
+				handle, err := os.Open(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = handle.Close() })
+				arguments = append(slices.Clone(arguments), fmt.Sprint(handle.Fd()))
+				want = consent
+			}
+			platform := newInitPlatformFixture()
+			platform.configsConverged = false
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("init: code=%d stderr=%q", code, stderr.String())
+			}
+			if len(platform.consents) != 1 || (want == nil) != (platform.consents[0] == nil) ||
+				want != nil && !reflect.DeepEqual(*platform.consents[0], *want) {
+				t.Fatalf("refresh consents %#v, want %#v", platform.consents, want)
+			}
+		})
+	}
+}
+
+// An init --configs child reports a refresh that failed only with file
+// refusals on the descriptor its parent named and hides the name from
+// its own children; any other outcome reports nothing.
+func TestInitConfigsReportsRefusedFiles(t *testing.T) {
+	refused := domain.CollectRefusals(
+		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/a.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/b.json", Problem: configmaterial.ProblemChanged}})
+	for name, test := range map[string]struct {
+		refresh error
+		want    []byte
+	}{
+		"file refusals": {refresh: refused, want: configmaterial.EncodeRefusals(refused)},
+		"other failure": {refresh: errors.Join(refused, errors.New("apply agent: failed"))},
+		"refreshed":     {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+			report := filepath.Join(testkit.TempDir(t), "report")
+			testkit.WriteFile(t, report, nil, 0o600)
+			handle, err := os.OpenFile(report, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer handle.Close()
+			// The child owns, and closes, its own descriptor.
+			fd, err := unix.Dup(int(handle.Fd()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			platform := newInitPlatformFixture()
+			platform.configsConverged, platform.refreshErr = false, test.refresh
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--configs", "--yes"},
+				Environment: append(slices.Clone(environment), fmt.Sprintf("%s=%d", ConfigRefusalsFDVariable, fd)), WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, inherited := program.baseEnv[ConfigRefusalsFDVariable]; inherited || program.env[ConfigRefusalsFDVariable] != "" {
+				t.Fatal("children inherit the report descriptor's name")
+			}
+			if code := program.Run(context.Background()); (code == 0) != (test.refresh == nil) || platform.configs != 1 {
+				t.Fatalf("init: code=%d refreshes=%d stderr=%q", code, platform.configs, stderr.String())
+			}
+			if written, err := os.ReadFile(report); err != nil || !bytes.Equal(written, test.want) {
+				t.Fatalf("report %q, want %q (%v)", written, test.want, err)
+			}
+		})
+	}
+}
+
 func withoutCommandSetting(environment []string, name string) []string {
 	prefix := name + "="
 	return slices.DeleteFunc(slices.Clone(environment), func(value string) bool {
@@ -528,7 +637,7 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
 		{name: "capabilities", override: "YARD_CAPABILITIES=sample-device", want: "YARD_CAPABILITIES"},
 		{name: "SSH forwarding", override: "FORWARD_SSH_AGENT=1", want: "FORWARD_SSH_AGENT"},
-		{name: "sudo", override: "DEV_SUDO=1", want: "DEV_SUDO"},
+		{name: "sudo", override: "DEV_SUDO=yes", want: "DEV_SUDO"},
 		{name: "nested VMs", override: "NESTED_E2E_VMS=1", want: "NESTED_E2E_VMS"},
 		{name: "SSH port", override: "SSH_PORT=2299", want: "SSH_PORT"},
 	} {
@@ -560,7 +669,7 @@ HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 YARD_CAPABILITIES=
 FORWARD_SSH_AGENT=0
-DEV_SUDO=0
+DEV_SUDO=no
 NESTED_E2E_VMS=0
 SSH_PORT=2234
 `, 0o600)
@@ -936,9 +1045,10 @@ func (fixture *initPlatformFixture) Preflight(_ context.Context, fresh bool) err
 	return fixture.preflightErr
 }
 
-func (fixture *initPlatformFixture) RefreshConfigs(context.Context) error {
+func (fixture *initPlatformFixture) RefreshConfigs(_ context.Context, consent *ports.ConfigConsent) error {
 	fixture.configs++
-	return nil
+	fixture.consents = append(fixture.consents, consent)
+	return fixture.refreshErr
 }
 
 func (fixture *initPlatformFixture) Teardown(context.Context) error {

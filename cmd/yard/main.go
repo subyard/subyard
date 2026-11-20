@@ -15,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -52,12 +53,17 @@ func bootIncusClient(socket string) *incusclient.Client {
 }
 
 func main() {
+	cli.CloseConfigRefusalsOnExec()
 	// Bootstrap runs this probe from an already verified engine before it has a repository.
 	if len(os.Args) == 2 && os.Args[1] == "_bootstrap-draft-capability" {
 		if _, err := fmt.Fprintln(os.Stdout, "private-release-draft-v1"); err != nil {
 			os.Exit(1)
 		}
 		return
+	}
+	// Installers run this read-only verdict from a verified engine, also before it has a repository.
+	if len(os.Args) > 1 && os.Args[1] == releaseruntime.HistoryCompatibilityVerb {
+		os.Exit(releaseruntime.RunHistoryCompatibility(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -419,6 +425,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "yard: initialize engine: %v\n", err)
 		os.Exit(2)
 	}
+	// The engine holds the refusal report descriptor; no subprocess sees its name.
+	_ = os.Unsetenv(cli.ConfigRefusalsFDVariable)
 	os.Exit(program.Run(ctx))
 }
 

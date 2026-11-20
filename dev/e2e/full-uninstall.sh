@@ -469,14 +469,14 @@ chmod 644 "$HOME/.config/systemd/user/$1"' _ "$foreign_unit"
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \
       SUBYARD_OPERATOR_HOME="$home" STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host" \
       ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT="subyard-full-$token" INCUS_BRIDGE="$bridge" \
-      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
+      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
       bash "$state/runtime/current/scripts/install-ssh-relay.sh" --ensure 24226 "$relay_ip"
     operator_env bash -c 'exec 5<>/dev/tcp/127.0.0.1/24226; IFS= read -r -t 2 greeting <&5; exec 5<&-; exec 5>&-'
     # Establish the sink before a refused plan is saved: retry retains its exact inventory.
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \
       SUBYARD_OPERATOR_HOME="$home" STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host" \
       ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT="subyard-full-$token" INCUS_BRIDGE="$bridge" \
-      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
+      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
       SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE="$state/runtime/current/bin/yard-engine" \
       bash "$state/runtime/current/scripts/install-test-vms-host-sink.sh" --yes
     # Retained matching evidence is unreadable to the ordinary owner. The

@@ -145,8 +145,8 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 		handler := operationSession(t, blockedGateAdmissionFixture(t))
 		_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "gate-migrate",
 			Params: json.RawMessage(`{"command":"migrate","arguments":[]}`)}, nil)
-		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "plan_failed" || fault.Message != "inspect integration settings awaiting yard init: yard default: inspect installed configuration: invalid integration ownership observation" {
+		// migrate plans its own recovery past the gate.
+		if fault, ok := err.(*rpc.Error); err != nil && (!ok || fault.Code == "transition-required") {
 			t.Fatalf("release recovery command consulted the gate: %#v", err)
 		}
 	})

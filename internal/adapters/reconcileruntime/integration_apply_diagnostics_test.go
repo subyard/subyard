@@ -66,12 +66,22 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 			if fixture.cut != point {
 				return ports.InstanceExecResult{Stdout: []byte("{\"results\":[]}")}, nil
 			}
+		case configmaterial.CompareWriteProgram():
+			if args[4] == "observe" {
+				files := []map[string]string{}
+				for _, destination := range args[6:] {
+					files = append(files, map[string]string{"destination": destination, "token": configmaterial.TokenAbsent})
+				}
+				payload, _ := json.Marshal(map[string]any{"files": files})
+				return ports.InstanceExecResult{Stdout: payload}, nil
+			}
+			point = "configs"
 		default:
 			if args[4] == configmaterial.ModeObserve {
 				if fixture.applyStarted && fixture.cut == "structured observe" {
 					return ports.InstanceExecResult{Stdout: []byte("private-native-stdout"), Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
 				}
-				return ports.InstanceExecResult{Stdout: []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("c", 64) + `"}`)}, nil
+				return ports.InstanceExecResult{Stdout: []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("c", 64) + `","raw":"absent"}`)}, nil
 			}
 			if args[4] == configmaterial.ModeApply && fixture.cut == "structured apply" {
 				return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: unowned-invalid-destination-v1 JSON; private-native-document")}, nil
@@ -86,9 +96,6 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 	}
 	if len(args) == 4 && args[3] == "--observe" {
 		point = "hooks run"
-	}
-	if len(args) > 3 && strings.Contains(args[3], "temporary=$(mktemp") {
-		point = "configs"
 	}
 	if fixture.commits != 0 {
 		switch {

@@ -208,7 +208,7 @@ func (cli *CLI) pendingEffectiveSettings(desired, installed config.Loaded, setti
 			return false
 		}
 		return name == "INTEGRATION_HOST_LINKS" || desired.Catalog.IntegrationInitSetting(name) &&
-			name != "CODING_TOOL_INTEGRATIONS" && name != "DEV_USER" && name != "DEV_UID" && name != "HOST_LINKS" &&
+			name != "CODING_TOOL_INTEGRATIONS" && name != "DEV_USER" && name != "DEV_UID" && name != "DEV_SUDO" && name != "HOST_LINKS" &&
 			name != "ALLOWS_HOST_ACCESS" && name != "ALLOWS_CODING_TOOLS"
 	}
 	if !slices.ContainsFunc(settings, func(setting pendingInitSetting) bool { return integrationOnly(setting.Name) }) {
@@ -236,7 +236,9 @@ func pendingInitValues(loaded config.Loaded) map[string]string {
 	values := map[string]string{"ALLOWS_CODING_TOOLS": strconv.FormatBool(loaded.Integrations.AllowsCodingTools), "ENVIRONMENT_PROFILES": strings.Join(loaded.EnvironmentProfiles.Effective, " ")}
 	for name, value := range loaded.Environment {
 		owned := loaded.Catalog.IntegrationInitSetting(name) || name == "INTEGRATION_HOST_LINKS" || name == "ENVIRONMENT_PROFILES" || name == "WEB_PREVIEW_HOST_PORT"
-		if owned && name != "CODING_TOOL_INTEGRATIONS" && !config.ImplicitAppliedGitApproval(name, value) {
+		// DEV_SUDO also owns the grant, so every mode, including the implicit
+		// default prompt, is compared and shown.
+		if owned && name != "CODING_TOOL_INTEGRATIONS" && (name == "DEV_SUDO" || !config.ImplicitAppliedSetting(name, value)) {
 			switch name {
 			case "ENVIRONMENT_PROFILES":
 				value = strings.Join(loaded.EnvironmentProfiles.Effective, " ")
@@ -247,6 +249,9 @@ func pendingInitValues(loaded config.Loaded) map[string]string {
 			}
 			values[name] = value
 		}
+	}
+	if values["DEV_SUDO"] == "" {
+		values["DEV_SUDO"] = "prompt"
 	}
 	return values
 }

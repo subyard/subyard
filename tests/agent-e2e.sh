@@ -3892,6 +3892,59 @@ for phase_scenario in success guest-failure transfer-failure direct-failure rele
   assert_phase_markers "$phase_output" "$phase_expected"
 done
 
+# With the collector's lane ID, the lane's own client and runner record each lease event.
+lane_id=0123456789abcdef0123456789abcdef
+lane_records() { sed -n "s/^E2E_LEASE lane=$lane_id run=[0-9a-f]\{8\} slot=slot-002 event=//p" "$1"; }
+lane_grant="grant type=subyard-pair vms=2 base=$(printf 'a%.0s' {1..64})"
+for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s; do
+  IFS=: read -r lane_scenario lane_mode lane_value <<<"$lane_case"
+  new_runner_fixture "lane-$lane_scenario"
+  set +e
+  SUBYARD_E2E_LANE="$lane_id" SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+    run_runner_fixture "$lane_scenario" --slot 2 "$lane_mode" "$lane_value" -- true >"$TMP/lane-$lane_scenario.log" 2>&1
+  set -e
+  case "$lane_scenario" in
+    # Staging records its VM; the guest cleanup closes it before the release.
+    phase-success) lane_expected="request"$'\n'"$lane_grant"$'\nwork vm=1\ncleaned vm=1 exit_code=0\nrelease exit_code=0' ;;
+    # A raw guest command stages nothing.
+    phase-direct-failure) lane_expected="request"$'\n'"$lane_grant"$'\nrelease exit_code=0' ;;
+    capacity) lane_expected=$'request\nrefused resource=memory' ;;
+  esac
+  [ "$(lane_records "$TMP/lane-$lane_scenario.log")" = "$lane_expected" ] \
+    || fail "lane records of $lane_scenario differ: $(cat "$TMP/lane-$lane_scenario.log")"
+done
+# Without a valid lane ID nothing is recorded, and guests never receive the ID.
+new_runner_fixture lane-absent
+SUBYARD_E2E_LANE=short SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+  run_runner_fixture phase-success --slot 2 --vm 1 -- true >"$TMP/lane-absent.log" 2>&1 \
+  && ! grep -q '^E2E_LEASE ' "$TMP/lane-absent.log" || fail 'an invalid lane ID was recorded'
+SUBYARD_E2E_LANE="$lane_id" write_guest_command 1 "$command_root" true > "$TMP/lane-command.sh"
+! grep -q SUBYARD_E2E_LANE "$TMP/lane-command.sh" || fail 'the guest command forwards the lane ID'
+# A cleanup that cannot run on an unsafe run directory is recorded as failed.
+lane_cleanup="$(GUEST_DIRS=([1]=/unsafe) LEASE_SLOT=slot-002 LEASE_RUN=0123abcd SUBYARD_E2E_LANE="$lane_id"
+  cleanup_guest 1 2>&1 >/dev/null || true)"
+grep -Fxq "E2E_LEASE lane=$lane_id run=0123abcd slot=slot-002 event=cleaned vm=1 exit_code=1" <<<"$lane_cleanup" \
+  || fail "unsafe guest cleanup was not recorded as failed: $lane_cleanup"
+# A second staging of the same VM before its cleanup is recorded, so the lane rule refuses it.
+lane_restage="$( (
+  GUEST_DIRS=() LEASE_SLOT=slot-002 LEASE_RUN=0123abcd SUBYARD_E2E_LANE="$lane_id"
+  restaged=0
+  guest() {
+    shift
+    case "$1" in
+      findmnt) printf 'ext4\n' ;;
+      mktemp) restaged=$((restaged + 1)); printf '/var/tmp/subyard-worktree.restage%s\n' "$restaged" ;;
+      dd) cat >/dev/null ;;
+      sha256sum) printf '%s  worktree.tar.gz\n' "$candidate_hash" ;;
+      mkdir|tar) ;;
+      *) return 97 ;;
+    esac
+  }
+  prepare_guest 1 "$candidate_bundle" "$candidate_hash" >/dev/null && prepare_guest 1 "$candidate_bundle" "$candidate_hash" >/dev/null
+) 2>&1 )" || fail "repeated guest staging failed: $lane_restage"
+[ "$(grep -c "^E2E_LEASE lane=$lane_id run=0123abcd slot=slot-002 event=work vm=1$" <<<"$lane_restage")" = 2 ] \
+  || fail "a second staging of VM1 was not recorded: $lane_restage"
+
 # Model direct guest SSH and cleanup locally.
 guest() {
   local argument directory
@@ -5181,7 +5234,7 @@ smoke_rollback_fixture_contract() {
   (
     set -euo pipefail
     local scenario="$1" fixture="$TMP/smoke-rollback-$1"
-    for function_name in verify_smoke_state capture_smoke_release_state establish_smoke_ownership verify_predecessor_rollback_refusal finish_smoke; do
+    for function_name in verify_smoke_state capture_smoke_release_state establish_smoke_ownership verify_predecessor_rollback_refusal history_verdict verify_retired_prefix_rollback finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
     for function_name in assert_registered_ownership establish_registered_ownership; do
@@ -5190,8 +5243,10 @@ smoke_rollback_fixture_contract() {
     eval "$(sed -n '/^classify_epoch_rollback_refusal() {/,/^}/p' "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh")"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+    RETIRED_RELEASE_ROOT="$STATE_ROOT/retired-release" RETIRED_VERSION=retired
     OLD_VERSION=predecessor CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+    smoke_retired_target=releases/retired-bbbbbbbbbbbb
     OLD_RELEASE_TARGET=releases/predecessor-bbbbbbbbbbbb
     V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
     V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
@@ -5248,9 +5303,24 @@ smoke_rollback_fixture_contract() {
         stat)
           if [ "$3" = '%a:%u' ]; then printf '%s:2000\n' "$(stat -c '%a' "$4")"; else "$@"; fi ;;
         grep|jq|sha256sum|test) "$@" ;;
+        "$OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine")
+          [ "$*" = "$1 _history-compatibility $OPERATOR_HOME/.subyard/runtime $OPERATOR_HOME/.config/subyard ${5}" ] \
+            || die 'unexpected history verdict arguments'
+          local current
+          current="$(cat "$STATE_ROOT/current")"
+          if [ "$current" = "$smoke_retired_target" ] && [ "$5" = "${CANDIDATE_RELEASE_TARGET#releases/}" ]; then
+            [ "$scenario" != retired-refused ] || { printf '{"admitted":false,"kind":"equivalent","registry":"differs"}\n'; return 1; }
+            printf '{"admitted":true,"kind":"equivalent","registry":"differs","successor":false,"declaredPredecessor":true,"declaredSuccessor":false}\n'
+          elif [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$5" = "${smoke_retired_target#releases/}" ]; then
+            [ "$scenario" != retired-successor-refused ] || { printf '{"admitted":false,"kind":"equivalent","successor":true}\n'; return 1; }
+            printf '{"admitted":true,"kind":"equivalent","registry":"differs","successor":true,"declaredPredecessor":false,"declaredSuccessor":true}\n'
+          else
+            die 'unexpected history verdict target'
+          fi ;;
         env)
           [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] \
             || [ "$2" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] \
+            || [ "$2" = "YARD_RELEASE_BASE_URL=file://$RETIRED_RELEASE_ROOT" ] \
             || die 'unexpected release source'
           if [ "$3" = "$RELEASE_ROOT/subyard-install.sh" ]; then
             [ "$*" = "env YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT $RELEASE_ROOT/subyard-install.sh --version $CANDIDATE_VERSION --publish-only --yes" ] \
@@ -5331,10 +5401,15 @@ smoke_rollback_fixture_contract() {
             esac
             return 1
           fi
-          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] \
-            && [ "$previous" = releases/compatible-bbbbbbbbbbbb ] || die 'unexpected compatible rollback'
+          { [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$previous" = releases/compatible-bbbbbbbbbbbb ]; } \
+            || { [ "$current" = "$smoke_retired_target" ] && [ "$previous" = "$CANDIDATE_RELEASE_TARGET" ]; } \
+            || die 'unexpected compatible rollback'
           [ "$scenario" != rollback-fail ] || return 45
           next="$previous"
+          ;;
+        'update --version retired --yes')
+          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'retired update started from foreign runtime'
+          next="$smoke_retired_target"
           ;;
         'update --version compatible --yes')
           [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'compatible setup started from foreign runtime'
@@ -5377,8 +5452,8 @@ smoke_rollback_fixture_contract() {
     [ ! -e "$STATE_ROOT/restart" ] && [ ! -e "$STATE_ROOT/probes" ] \
       || die 'ordinary init added an unnecessary restart or probe'
     assert_registered_ownership
-    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
-    [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$smoke_retired_target"
+    [ "$(wc -l < "$STATE_ROOT/updates")" = 8 ] || die 'compatible or retired smoke cycle lost a transition'
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
   )
 }
@@ -5391,7 +5466,8 @@ for smoke_rollback_scenario in success \
   missing-history-checkpoint.json missing-ledger.json missing-journal.json \
   wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
   rollback-fail rollforward-fail other-blocker epoch-blocker registry-blocker registry-wrong-code \
-  registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change; do
+  registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change \
+  retired-refused retired-successor-refused; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
@@ -5443,9 +5519,15 @@ for smoke_rollback_scenario in success \
           || fail 'release smoke enrolled without registered ownership' ;;
     esac
     case "$smoke_rollback_scenario" in
-      unexpected-grant|installation-change|rollback-fail|rollforward-fail) ;;
+      unexpected-grant|installation-change|rollback-fail|rollforward-fail|retired-refused|retired-successor-refused) ;;
       *) [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
         || fail 'release smoke continued after invalid ownership, init, enrollment or predecessor refusal' ;;
+    esac
+    case "$smoke_rollback_scenario" in
+      retired-refused) grep -Fq 'release smoke retired-prefix verdict is not a declared predecessor' "$smoke_rollback_log" \
+        || fail 'release smoke did not stop at the retired-prefix verdict' ;;
+      retired-successor-refused) grep -Fq 'release smoke candidate does not admit its retired successor' "$smoke_rollback_log" \
+        || fail 'release smoke did not stop at the retired successor verdict' ;;
     esac
   fi
 done
@@ -6170,7 +6252,7 @@ operator_yard() {
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
-    'config set '*|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
@@ -6187,6 +6269,10 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
+# The creation runtime removes the DEV_SUDO assignment before the hop update.
+[ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
+  -e "yard update --version $HOP_VERSION --yes" "$trace")" \
+  = "yard config unset DEV_SUDO --scope host --yes"$'\n'"yard update --version $HOP_VERSION --yes" ]
 jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
 PUBLISHED_OWNER
 

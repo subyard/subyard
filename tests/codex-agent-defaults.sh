@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 
 manifest="$ROOT/config/agents/codex/integration.json"
 jq -e '.schema_version == 2 and .provision == "provision.sh" and

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -35,6 +36,9 @@ type verifiedPublishedCandidate struct {
 	registryDigest        releasetransition.Fingerprint
 	checkpointRaw         []byte
 	checkpointDigest      [sha256.Size]byte
+	rollbackRaw           []byte
+	rollbackDigest        [sha256.Size]byte
+	rollbackBound         bool
 	version               string
 	inventory             map[string]bool // true for directories
 	published             bool
@@ -184,6 +188,15 @@ func verifyOpenCandidateFiles(verified *verifiedPublishedCandidate, expectedDige
 					err = errors.New("published runtime checkpoint capability changed")
 				}
 				verified.checkpointDigest = entry.digest
+			}
+			if err == nil && entry.path == "config/release-rollback.json" {
+				verified.rollbackRaw, err = io.ReadAll(io.NewSectionReader(file, 0, releasetransition.MaxRollbackDeclarationBytes+1))
+				if err == nil && len(verified.rollbackRaw) > releasetransition.MaxRollbackDeclarationBytes {
+					err = errors.New("published runtime rollback declaration exceeds its size bound")
+				} else if err == nil && sha256.Sum256(verified.rollbackRaw) != entry.digest {
+					err = errors.New("published runtime rollback declaration changed")
+				}
+				verified.rollbackDigest, verified.rollbackBound = entry.digest, true
 			}
 		}
 		file.Close()
@@ -412,6 +425,12 @@ func verifyCandidateFile(file *os.File, expected [sha256.Size]byte) error {
 }
 
 func sealVerifiedEngine(file *os.File, expected [sha256.Size]byte) (*os.File, error) {
+	return sealVerifiedEngineWith(file, expected, unix.FcntlInt)
+}
+
+func sealVerifiedEngineWith(
+	file *os.File, expected [sha256.Size]byte, fcntl func(uintptr, int, int) (int, error),
+) (*os.File, error) {
 	fd, err := createExecutableMemfd(unix.MemfdCreate)
 	if err != nil {
 		return nil, errors.New("create verified runtime execution image")
@@ -431,10 +450,17 @@ func sealVerifiedEngine(file *os.File, expected [sha256.Size]byte) (*os.File, er
 	if err := sealed.Chmod(0o500); err != nil {
 		return fail(errors.New("make verified runtime execution image executable"))
 	}
-	if _, err := unix.FcntlInt(sealed.Fd(), unix.F_ADD_SEALS,
-		unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL,
-	); err != nil {
-		return fail(errors.New("seal verified runtime execution image"))
+	const seals = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
+	const sealAttempts = 5
+	for attempt := 1; attempt <= sealAttempts; attempt++ {
+		_, err := fcntl(sealed.Fd(), unix.F_ADD_SEALS, seals)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EBUSY) || attempt == sealAttempts {
+			return fail(fmt.Errorf("seal verified runtime execution image: %w", err))
+		}
+		time.Sleep(75 * time.Millisecond)
 	}
 	if _, err := sealed.Seek(0, io.SeekStart); err != nil {
 		return fail(errors.New("rewind verified runtime execution image"))

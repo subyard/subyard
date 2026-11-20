@@ -203,7 +203,7 @@ run_installer() (
   SHIFT_MODE=shift \
   DEV_USER=dev \
   DEV_UID=1000 \
-  DEV_SUDO=0 \
+  DEV_SUDO=no \
   FORWARD_SSH_AGENT=0 \
   NESTED_E2E_VMS=0 \
   ASSUME_YES=1

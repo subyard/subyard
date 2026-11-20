@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -42,6 +45,13 @@ type configTargetAssessment struct {
 	Differences             []domain.ConfigurationDifference
 	// StoppedInstance is the read behind a "stopped" state; it reaches no fingerprint.
 	StoppedInstance *ports.InstanceInfo
+	// Files are a running yard's observed config files; instance is its identity.
+	Files    []configmaterial.File `json:",omitempty"`
+	running  bool
+	instance string
+	// refusal is the plan's refusal of this yard alone: a file it cannot
+	// replace. The other yards of the plan are still refreshed.
+	refusal error
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1034,6 +1044,9 @@ func (cli *CLI) configStatus(
 		}
 		state, drift := assessment.State, assessment.Changed
 		fmt.Fprintf(cli.options.Stdout, "yard %s materialized-config: %s\n", target.Name, state)
+		for _, line := range configFileAttention(assessment) {
+			fmt.Fprintln(cli.options.Stdout, line)
+		}
 		if len(expectedDesired) == 0 {
 			diagnostic, err := cli.configInstalledDiagnostic(ctx, target, state)
 			for _, difference := range assessment.Differences {
@@ -1131,18 +1144,48 @@ type dispatcherConfigApplier struct {
 	applyDrift  bool
 }
 
-func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard string) error {
+// ApplyConfig runs the refresh child. A config apply child plans and confirms
+// for itself. An init --configs child receives the confirmed consent through
+// --config-consent-fd, which a binary without compare-and-write rejects as an
+// unknown option before it writes anything, and reports the files it refused
+// on the descriptor SUBYARD_CONFIG_REFUSALS_FD names, which an older child
+// ignores.
+func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard string, consent *ports.ConfigConsent) error {
 	arguments := []string{}
 	if yard != "" && yard != "default" {
 		arguments = append(arguments, "-Y", yard)
 	}
+	var consentFile, refusalsFile *os.File
 	if applier.applyDrift {
 		arguments = append(arguments, "config", "apply", "--yes")
 	} else {
 		arguments = append(arguments, "init", "--configs", "--yes")
+		if consent != nil {
+			payload, err := json.Marshal(consent)
+			if err == nil {
+				consentFile, err = unlinkedPrivateFile("subyard-config-consent-*", payload)
+			}
+			if err != nil {
+				return err
+			}
+			defer consentFile.Close()
+		}
+		// Without a report file the child still refreshes; it relays nothing.
+		if file, err := unlinkedPrivateFile("subyard-config-refusals-*", nil); err == nil {
+			refusalsFile = file
+			defer refusalsFile.Close()
+		}
 	}
 	command := exec.CommandContext(ctx, applier.path, arguments...)
-	command.Env = environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"})
+	if consentFile != nil {
+		command.Args = append(command.Args, "--config-consent-fd", fmt.Sprint(3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, consentFile)
+	}
+	if refusalsFile != nil {
+		command.Env = append(command.Env, fmt.Sprintf("%s=%d", ConfigRefusalsFDVariable, 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, refusalsFile)
+	}
+	command.Env = append(environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"}), command.Env...)
 	home := applier.environment["SUBYARD_HOME"]
 	if home == "" {
 		home = filepath.Join(firstNonempty(applier.environment["SUBYARD_OPERATOR_HOME"], applier.environment["HOME"]), ".subyard")
@@ -1160,7 +1203,102 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	command.Stdin = strings.NewReader("")
 	command.Stdout = applier.stdout
 	command.Stderr = applier.stderr
-	return command.Run()
+	err = command.Run()
+	if refusalsFile == nil || !errors.As(err, new(*exec.ExitError)) {
+		return err
+	}
+	// The child's typed file refusals replace its bare exit status; anything
+	// else it reports relays nothing.
+	if _, seekErr := refusalsFile.Seek(0, io.SeekStart); seekErr != nil {
+		return err
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(refusalsFile, configmaterial.MaxRefusalReport+1))
+	if relayed := configmaterial.DecodeRefusals(yard, payload); readErr == nil && len(relayed) != 0 {
+		return domain.CollectRefusals(relayed...)
+	}
+	return err
+}
+
+// ConfigRefusalsFDVariable names the descriptor on which an init --configs
+// child reports the files it refused to its config apply parent.
+const ConfigRefusalsFDVariable = "SUBYARD_CONFIG_REFUSALS_FD"
+
+// CloseConfigRefusalsOnExec keeps the refusal report descriptor that a config
+// apply parent passed out of every subprocess; a process calls it first.
+func CloseConfigRefusalsOnExec() {
+	if fd, err := strconv.Atoi(os.Getenv(ConfigRefusalsFDVariable)); err == nil && fd >= 3 {
+		syscall.CloseOnExec(fd)
+	}
+}
+
+// inheritedConfigRefusals is the report descriptor environment names, which
+// no child of this process inherits by name.
+func inheritedConfigRefusals(environment map[string]string) *os.File {
+	value, inherited := environment[ConfigRefusalsFDVariable]
+	delete(environment, ConfigRefusalsFDVariable)
+	if fd, err := strconv.Atoi(value); inherited && err == nil && fd >= 3 {
+		return os.NewFile(uintptr(fd), "config-refusals")
+	}
+	return nil
+}
+
+// reportConfigRefusals reports, once, the files a failed refresh refused to
+// the config apply parent. A report that is not written relays nothing.
+func (cli *CLI) reportConfigRefusals(err error) {
+	if cli.configRefusals == nil {
+		return
+	}
+	if payload := configmaterial.EncodeRefusals(err); payload != nil {
+		_, _ = cli.configRefusals.Write(payload)
+	}
+	_ = cli.configRefusals.Close()
+}
+
+// unlinkedPrivateFile is a file only its descriptor names, holding payload,
+// so no pipe buffer bounds what passes through it.
+func unlinkedPrivateFile(pattern string, payload []byte) (*os.File, error) {
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return nil, err
+	}
+	_, err = file.Write(payload)
+	err = errors.Join(os.Remove(file.Name()), err)
+	if err == nil {
+		_, err = file.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+// maxConfigConsentBytes bounds the consent an init --configs child reads.
+const maxConfigConsentBytes = 4 << 20
+
+// readConfigConsent reads the consent a config apply parent passed on fd.
+func readConfigConsent(fd int) (*ports.ConfigConsent, error) {
+	file := os.NewFile(uintptr(fd), "config-consent")
+	if file == nil {
+		return nil, errors.New("--config-consent-fd names no open file")
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, maxConfigConsentBytes+1))
+	if err != nil || len(payload) > maxConfigConsentBytes {
+		return nil, errors.New("configuration consent is unreadable or too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var consent ports.ConfigConsent
+	if err := decoder.Decode(&consent); err != nil || decoder.Decode(&struct{}{}) != io.EOF || consent.Files == nil {
+		return nil, errors.New("invalid configuration consent")
+	}
+	for _, file := range consent.Files {
+		if !configmaterial.ValidToken(file.Token) {
+			return nil, errors.New("invalid configuration consent")
+		}
+	}
+	return &consent, nil
 }
 
 func materializationDesired(target configTarget, check bool, reader func(config.MaterializedAsset) ([]byte, error)) (config.MaterializationTarget, []configAsset, [][]byte, error) {
@@ -1265,37 +1403,18 @@ func (cli *CLI) assessConfigTarget(
 		return finish("running")
 	}
 	failures := []error{prepareErr}
+	// One observation of each config file gives its convergence, its consent
+	// token and the refusals that config apply, init, sync and status report.
+	wanted := make([]configmaterial.Desired, len(assets))
 	for index, asset := range assets {
-		request := ports.InstanceExecRequest{
-			Command: []string{"sha256sum", "--", asset.Destination},
-			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
-		}
-		if asset.OwnedFormat != "" {
-			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
-			if err != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
-				continue
-			}
-		}
-		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, request)
-		if err != nil && result.ExitCode == 0 {
-			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
-			continue
-		}
-		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
-		if asset.OwnedFormat != "" {
-			if err != nil || result.ExitCode != 0 {
-				failures = append(failures, fmt.Errorf("%s: structured configuration observation failed", asset.Name))
-				continue
-			}
-			observation, err := configmaterial.ParseObservation(result.Stdout)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
-				continue
-			}
-			observed.Fingerprint, observed.OwnedConverged = observation.Fingerprint, observation.Converged
-		}
-		fact, err := config.AssessMaterializedArtifact(desired.Assets[index], observed)
+		wanted[index] = configmaterial.Desired{Label: asset.Name, Destination: asset.Destination, Format: asset.OwnedFormat, Payload: desiredPayloads[index]}
+	}
+	files, err := configmaterial.Observe(ctx, executor, target.Loaded.Context, wanted)
+	if err != nil {
+		return configTargetAssessment{NativeOwner: nativeOwner, State: "running"}, domain.CollectRefusals(prepareErr, err)
+	}
+	for index, asset := range assets {
+		fact, err := files[index].Assess(desired.Assets[index])
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 			continue
@@ -1313,7 +1432,35 @@ func (cli *CLI) assessConfigTarget(
 	if err := domain.CollectRefusals(failures...); err != nil {
 		return configTargetAssessment{NativeOwner: nativeOwner, State: "running", Differences: differences}, err
 	}
-	return finish("running")
+	assessment, err := finish("running")
+	assessment.Files, assessment.running, assessment.instance = files, true, info.Config["volatile.uuid"]
+	return assessment, err
+}
+
+// consent is the guest bytes a confirmed refresh of a running yard may
+// replace; a file without a token is the writer's to observe.
+func (assessment configTargetAssessment) consent() *ports.ConfigConsent {
+	if !assessment.running {
+		return nil
+	}
+	consent := &ports.ConfigConsent{InstanceUUID: assessment.instance, Files: []ports.ConfigFileConsent{}}
+	for _, file := range assessment.Files {
+		if configmaterial.ValidToken(file.Token) {
+			consent.Files = append(consent.Files, ports.ConfigFileConsent{Destination: file.Destination, Token: file.Token})
+		}
+	}
+	return consent
+}
+
+// configFileAttention names the files a refresh of the assessed yard
+// refuses, each with the operator's step.
+func configFileAttention(assessment configTargetAssessment) []string {
+	var lines []string
+	for _, refusal := range configmaterial.Refusals(assessment.Target.Name, assessment.Files) {
+		message, next := refusal.(configmaterial.FileRefusal).ActivationDiagnostic()
+		lines = append(lines, "attention: "+message+"; next: "+next)
+	}
+	return lines
 }
 
 func sameConfigTargetSet(

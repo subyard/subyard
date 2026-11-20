@@ -20,7 +20,7 @@ func TestLoadLazyPreparedInputPreservesNativeFallbackAndLogicalTrace(t *testing.
 		}
 	}
 	writeFixture(t, filepath.Join(shipped, "incus.project.env"), "INCUS_PROJECT=subyard\n")
-	writeFixture(t, filepath.Join(shipped, "subyard.env"), "YARD_INSTANCE_NAME=yard\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nDEV_UID=1000\nSSH_PORT=2222\n")
+	writeFixture(t, filepath.Join(shipped, "subyard.env"), "YARD_INSTANCE_NAME=yard\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nSSH_PORT=2222\n")
 	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": home, "SUBYARD_HOME": filepath.Join(root, "data"), "STORAGE_PATH": filepath.Join(root, "storage"), "HOST_BASE": root, "RESTRICTED_DISK_PATHS": root}}
 	native, err := Load(options)
 	if err != nil {

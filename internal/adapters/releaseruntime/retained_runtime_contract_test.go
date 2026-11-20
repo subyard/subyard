@@ -33,7 +33,7 @@ func retainedRuntimeFixture(t *testing.T) (*Runtime, string, string, string, str
 		}
 	}
 	installed := filepath.Join(data, "service/default")
-	inputs := CaptureCommandInputs([]string{"HOME=" + operator, "SUBYARD_OPERATOR_HOME=" + operator, "SUBYARD_HOME=" + data, "SUBYARD_CONFIG_HOME=" + home, "STORAGE_PATH=" + filepath.Join(root, "storage"), "HOST_BASE=" + filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"), "SHIFT_MODE=shift", "DEV_USER=dev", "DEV_UID=1000", "DEV_SUDO=0", "FORWARD_SSH_AGENT=0", "SSH_PORT=2222"}, nil)
+	inputs := CaptureCommandInputs([]string{"HOME=" + operator, "SUBYARD_OPERATOR_HOME=" + operator, "SUBYARD_HOME=" + data, "SUBYARD_CONFIG_HOME=" + home, "STORAGE_PATH=" + filepath.Join(root, "storage"), "HOST_BASE=" + filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"), "SHIFT_MODE=shift", "DEV_USER=dev", "DEV_UID=1000", "DEV_SUDO=no", "FORWARD_SSH_AGENT=0", "SSH_PORT=2222"}, nil)
 	return New(Config{Inputs: inputs, ProfileRuntimeObservation: func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error) {
 		return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
 	}}), active, target, home, installed

@@ -48,6 +48,53 @@ and fingerprints. Runtime provisioning, config refresh/status and release activa
 field ownership baseline; other consumers retain byte-exact behavior. See
 [File settings](configuration.md#file-settings) for the ownership and interrupted-write contract.
 
+Every guest config file write is a compare-and-write over a consent token: `absent`, or `sha256:`
+and the digest of the bytes the refresh may replace; a destination that is not a readable regular
+file has no token and always refuses. In one guest exec the writer walks the parent with
+`O_NOFOLLOW`, checks the destination's hash and stages a temporary file holding only its own
+payload. For `absent` it publishes the file with `link`, so an existing destination refuses as
+`changed`; otherwise it re-checks the destination's inode and hash and renames over it. The window
+between that last re-check and the rename is the accepted residual: a tool write inside it can be
+replaced. A crash leaves at most its own staged copy beside the destination, never guest bytes.
+Missing parent directories are created only after the write is decided, and a converged file only
+gets its owner and mode back. The skills refresh is excluded from this contract; it replaces
+Subyard-owned skill trees.
+
+Each guest config file is observed once per assessment (`configmaterial.Observe`): raw files
+together in one exec, each structured file through its own observation, which also reports the
+token of its exact bytes. The file's one state is `converged`, `drift`, `unreadable`,
+`unowned-invalid` (a structured document that is not valid and that Subyard does not own),
+`unassessed` (a completed guest observation that assessed nothing, such as one over a broken
+Subyard baseline) or, after a refused write, `changed`; guest text never selects or fills a state.
+`configmaterial.Refusals` renders the last four with their next step: replace or remove an
+unreadable file, correct or remove an unowned invalid one, or just rerun for an unassessed or a
+changed one. The step runs
+`config apply`, or `init --configs` for a file outside the config set that `config status` and
+`config apply` cover, such as an instruction file. `init`, `config status`, `config apply` and release readiness use
+this observation and these refusals.
+
+`config apply` takes the tokens it shows at confirmation and its writes compare with exactly those
+tokens. A file the confirmation did not cover, such as an instruction file that the runtime writes
+but `config status` does not compare, is written over the writer's own observation made right
+before it writes. Each refused file is reported, the yard's other files are written, and the
+inventory commit runs only when nothing was refused. The plan rechecks the target set, desired
+configuration and instance identity; drift itself may change, because each write rechecks its own
+file. An `init --configs` child receives the tokens through `--config-consent-fd N`, an inherited
+file holding JSON; a release without that option rejects it before any write. Every other refresh
+plans for itself and observes the tokens immediately before writing: a direct `init` or
+`init --configs`, an init of a stopped or uninitialized yard, an integration apply and the follow-up
+after an update. A release activation repair writes over the tokens its authorized plan read. A yard
+with a refused file, or one that cannot be assessed, is refused at plan time; every other yard of the
+plan is still refreshed, and the plan lists the refused yard instead of reporting no drift.
+
+Only the writer renders a refused file's step. An `init --configs` child of `config apply` (also
+under `config sync --apply`) reports the files it refused on an unlinked inherited file named by
+`SUBYARD_CONFIG_REFUSALS_FD`, which an older release ignores: per file only its destination, state
+and whether only `init --configs` refreshes it, never text. The parent renders those refusals for
+its own yard exactly as an in-process refresh does, in place of the child's exit status. A missing,
+empty, oversized or malformed report, or a state outside that vocabulary, relays nothing, and the
+next step reruns the child: `init --configs`.
+
 Integration selection uses the shared prepared-command boundary, the protected per-yard config
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
 by full initialization after core substrate provisioning. `scripts/reconcile-integrations.sh` is a
@@ -1147,6 +1194,57 @@ checkpoint and projection must remain unchanged through execution. The original 
 transition owner, catalog and journal bindings are preserved. A marked target validates the checkpoint
 itself; a target without a transition registry retains the existing active-owner route.
 
+`releasetransition.HistoryCompatibility` decides whether a target release may own the active
+migration history. It compares the parsed registries by canonical digest (`identical`, `differs` or
+`absent`), and `PlanDownPath` relates them. The relation is `identity` for one registry, or
+`equivalent` when one registry is the other with completed prefixes retired: the unretired registry
+retired through the other's floors (`RegistryV2.RetirePrefixes`) has the retired one's canonical
+digest, so the unretired registry's own `MigrationPrefixDigest` proves every retired digest and
+later definitions are unchanged. When the active registry is the retired one, the target must also
+parse it: a release engine validates the active registry before it serves any request, and parsers
+up to v0.30.0 require every `dependsOn` to name a migration defined earlier in the same registry.
+A surviving definition that depends on retired history therefore refuses with `registry-unreadable`,
+together with the registry refusal when the pair is also undeclared. The current registry parser
+applies the same rule, so today the runtime and the verb refuse such an active registry earlier, as
+one whose sealed registry cannot be verified, and do not reach `registry-unreadable`.
+For the v0.30.0 registry this admits only retirements that also retire the NM guard step, or the
+definition-free `project-state` prefix. Any other relation is `refuse`; `steps` is not produced
+yet. For an admitted relation it then reads the authoritative ledger or checkpoint through the
+target registry and its checkpoint-reader marker. Checkpoint reading checks prefix digests and
+epochs, not the writer's registry digest, so either release of an equivalent pair reads history
+the other wrote, and an equivalent admission writes nothing. The verdict carries the kind, the
+registry relation, whether the target is the retiring `successor`, and the collected refusals; a
+verdict that is not admitted always carries a refusal. `identity` is admitted. `equivalent` is
+admitted only within a declared pair: rollback to the predecessor the active release declares, or
+the return to a successor that declares the active release as its predecessor. An undeclared
+equivalent target, such as an older release, keeps the registry refusal and is not read. Callers
+that decide by the registry read `RegistryAdmitted`, so an admitted equivalent target behaves like
+identical registries for source-floor advice, first-publication evidence and bootstrap
+publication, and an undeclared one like differing registries. Only an equivalent relation depends
+on a declaration, the newer release's, so one that cannot be verified refuses only an equivalent
+target: the runtime selection and the verb report a verification error, and the engine treats it as
+no declared predecessor. The engine applies the same verdict to its own and the rollback target's
+parsed registries and its own declaration; identical sealed bytes stand in for a target registry it
+cannot parse. The sealed
+[`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
+digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
+in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release
+without it declares no predecessor. A release parses its own declaration strictly. Another
+release's declaration, which can come from a newer release, is read only for
+`predecessorRegistryDigest`: unknown fields, list entries and schema versions above 1 are
+tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
+well-formed digest are still required. Later schemas therefore keep that field and its meaning.
+
+`yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
+JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the
+runtime's installed-engine selection, including first publication. Run it from the active
+release's verified engine, `RUNTIME_ROOT/current/bin/yard-engine`: that engine selects rollback
+targets and owns the declaration, while older releases lack the verb. It needs no repository,
+takes no lock and writes nothing. Read `admitted`, `kind`, `registry`, `successor`,
+`declaredPredecessor`, `declaredSuccessor` and `refusals`, with their
+causes, from the JSON instead of relying on the exit code: 0 means admitted and 1 refused, while 2
+covers usage and verification errors, including a missing config home, and prints no JSON.
+
 `yard migrate` assesses and confirms the necessary work, then uses the same verified transition
 owner, authorization, lock, journal and convergence engine as `yard update`. It does not download
 or publish a release, choose a version, or rotate runtime links to another release. Completed
@@ -1571,7 +1669,7 @@ inherits the owner barrier and is admitted on its own. After `config sync` publi
 consumer refresh is decided again on the state after publication: on a ready release it runs the
 ordinary child; otherwise it runs in process only as a repair of those consumers, when each is open
 or limited to repair only by drift and the installed source is bound, with release history checked
-after the refresh; anything else is refused with `yard -Y NAME config apply` for each consumer. An
+after the refresh; otherwise each refused consumer is reported with the one next step it needs. An
 init succeeds when its own yard converged and reports the other yards' findings. The default yard's
 own invalid configuration underlies every yard, so then every yard admits only its repair commands.
 An invalid configuration of another yard is that yard's finding; host power and host key tools serve
@@ -1579,15 +1677,29 @@ the yards that load. `yard status` states the release once, as `release active a
 NAME needs attention`, and each finding under its yard; it never prints the protocol word `ready`
 for a non-ready status.
 
+Recovery advice is typed until it is printed (`internal/domain/recovery.go`): the gate and the
+installed-source prerequisite are observed once, typed as findings, and one selector picks one
+action that the gate admits and that is not the command just attempted. Status, refusals, sync and RPC
+use the same selection and one renderer, `domain.RenderNext`. A refused installed source ranks first
+and names its failed predicate, so no repair is advised behind it; its step is the command that makes
+the predicate hold: `yard migrate` finishes an unfinished transition or a pending protected
+publication with its sealed owner, `yard update` installs a fresh release whose journal, history and
+source proof verify, and `yard migrate --check` explains an unreadable store. These remedies run past
+the gate, so their step also names `yard migrate --check` for when the predicate still fails. Drift
+that `init` left is named by `config status`. A repair run with other
+tooling names the installed `yard` command instead. An owner's retry ranks next and is printed
+verbatim when it is not one of the closed commands and not the command just attempted; invalid
+configuration advises `config validate` after it is corrected. A refused config file names its
+own step through `configmaterial.Refusals`.
+
 A yard whose last init did not finish is left to that init, as described under [release
 migrations](#release-migrations); release repair of a yard holds the per-yard lock init holds, so
 release repair and init of one yard never interleave.
 
 After a failed observation or apply in a running yard, the core probes its guest agent: when Incus
 reports the yard running but a trivial command cannot run or does not finish, the yard's finding is
-`unreachable`, keeps the handler's public diagnostic and names the next steps: retry `yard migrate`,
-and if the agent stays unreachable run `yard -Y NAME stop --force`, `yard -Y NAME start` and `yard
-migrate`. A guest exit status is an answer, not agent loss. Ordinary updates still refuse before
+`unreachable`, keeps the handler's public diagnostic and names one step at a time: `yard migrate`,
+after it `yard -Y NAME stop --force`, and after that `yard -Y NAME start`. A guest exit status is an answer, not agent loss. Ordinary updates still refuse before
 activation for a yard with invalid configuration, an unreachable agent or an unknown failure; they
 proceed without a stopped, absent or uninitialized yard. The guest temporary-storage step keeps its
 own rules above. While an activation of the active release is unfinished, including when its

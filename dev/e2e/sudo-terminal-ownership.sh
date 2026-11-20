@@ -172,7 +172,7 @@ exec env -i PATH="\$PATH" LANG=C.UTF-8 TERM="\${TERM:-dumb}" \\
   SHIFT_MODE=shift \\
   FORWARD_SSH_AGENT=0 \\
   CODING_TOOL_INTEGRATIONS= \\
-  DEV_SUDO=0 \\
+  DEV_SUDO=no \\
   DEV_UID=1000 \\
   DEV_USER=dev \\
   SSH_PORT=2222 \\
@@ -406,13 +406,13 @@ HOST_MOUNTS=sudo-host:/mnt/host/sudo:rw:0700
 HOST_BASE=$fixture_home/host-real
 RESTRICTED_DISK_PATHS=$fixture_home/host-real
 FORWARD_SSH_AGENT=0
-DEV_SUDO=0
+DEV_SUDO=no
 NESTED_E2E_VMS=0
 EOF
 cat > "$real_config/yards/sudo-e2e-sentinel/config.env" <<'EOF'
 SSH_PORT=29999
 FORWARD_SSH_AGENT=0
-DEV_SUDO=0
+DEV_SUDO=no
 NESTED_E2E_VMS=0
 EOF
 chmod 0600 "$real_config"/yards/*/config.env
@@ -457,7 +457,7 @@ exec env -i \\
   HOST_OPENCODE_AGENTS_MD= \\
   SHIFT_MODE=shift \\
   FORWARD_SSH_AGENT=0 \\
-  DEV_SUDO=0 \\
+  DEV_SUDO=no \\
   DEV_UID=1001 \\
   DEV_USER=dev \\
   NESTED_E2E_VMS=0 \\

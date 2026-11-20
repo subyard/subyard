@@ -12,7 +12,7 @@ END = "# END generated Git approval hook"
 HELPERS = r'''# Publish the helper before the policy that references it.
 install_git_approval_hook() {
   local hook_stage
-  [ "$GIT_APPROVAL" = prompt ] || return 0
+  [ -n "$APPROVAL_GATES" ] || return 0
   hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
   git_approval_hook > "$hook_stage"
   chmod 0755 "$hook_stage"
@@ -21,14 +21,14 @@ install_git_approval_hook() {
 
 check_git_approval_hook() {
   local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
-  [ -x /usr/bin/python3 ] || refuse 'managed Git approval hook interpreter is missing; run yard init'
+  [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
   if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
     [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed Git approval hook permissions drifted; run yard init'
+      || refuse 'managed approval hook permissions drifted; run yard init'
     [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed Git approval hook content drifted; run yard init'
+      || refuse 'managed approval hook content drifted; run yard init'
   else
-    refuse 'managed Git approval hook is missing; run yard init'
+    refuse 'managed approval hook is missing; run yard init'
   fi
 }
 '''

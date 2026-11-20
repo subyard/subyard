@@ -52,8 +52,12 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 				}
 				declaredKinds[artifact.ID] = true
 				artifact.Source = filepath.Join(definition.Root, artifact.Source)
-				if artifact.GitApprovalOffSource != "" {
-					artifact.GitApprovalOffSource = filepath.Join(definition.Root, artifact.GitApprovalOffSource)
+				if len(artifact.ApprovalSources) != 0 {
+					variants := make(map[string]string, len(artifact.ApprovalSources))
+					for gates, source := range artifact.ApprovalSources {
+						variants[gates] = filepath.Join(definition.Root, source)
+					}
+					artifact.ApprovalSources = variants
 				}
 				artifacts = append(artifacts, artifact)
 			}
@@ -74,8 +78,8 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			if !present {
 				source = artifact.Source
 			}
-			if source == artifact.Source && artifact.GitApprovalOffSource != "" && GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"]) {
-				source = artifact.GitApprovalOffSource
+			if variant, ok := artifact.ApprovalSources[ApprovalGates(values)]; ok && source == artifact.Source {
+				source = variant
 			}
 			destination, present := values[setting+"_DEST"]
 			if !present {
@@ -180,4 +184,22 @@ func ownedDestinationFormat(destination string) string {
 // GitApprovalOff resolves the mode before any applied snapshot projection.
 func GitApprovalOff(value string) bool {
 	return value == "" || value == "off"
+}
+
+// SudoApprovalPrompt reports whether DEV_SUDO asks coding agents to prompt before
+// escalation. Unset means the default, prompt.
+func SudoApprovalPrompt(value string) bool {
+	return value == "" || value == "prompt"
+}
+
+// ApprovalGates names the active prompt gates in the order the agent packages accept.
+func ApprovalGates(values map[string]string) string {
+	var gates []string
+	if !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"]) {
+		gates = append(gates, "git")
+	}
+	if SudoApprovalPrompt(values["DEV_SUDO"]) {
+		gates = append(gates, "sudo")
+	}
+	return strings.Join(gates, " ")
 }

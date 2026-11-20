@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -39,6 +40,8 @@ type initArguments struct {
 	continueLegacy bool
 	mode           initMode
 	profile        string
+	// consentFD carries a config apply parent's consent to init --configs.
+	consentFD int
 }
 
 type initBootstrap struct {
@@ -75,6 +78,7 @@ type initExecution struct {
 	teardownResources    []ports.TeardownResource
 	resetBaseline        *resetTeardownBaseline
 	platform             ports.InitPlatform
+	configConsent        *ports.ConfigConsent
 	powerYards           []domain.Context
 	hostID               string
 	hostIDPending        bool
@@ -161,11 +165,18 @@ func (reporter initReporter) StageStarted(stage application.ReconcileStage) {
 }
 
 func parseInitArguments(arguments []string) (initArguments, error) {
-	request := initArguments{mode: initReconcile}
+	request := initArguments{mode: initReconcile, consentFD: -1}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch argument {
 		case "-y", "--yes":
+		case "--config-consent-fd":
+			fd, err := strconv.Atoi(strings.Join(arguments[index+1:min(index+2, len(arguments))], ""))
+			if err != nil || fd < 3 || request.consentFD >= 0 {
+				return initArguments{}, errors.New("--config-consent-fd needs one open descriptor")
+			}
+			request.consentFD = fd
+			index++
 		case "--adopt":
 			if request.adopt {
 				return initArguments{}, errors.New("--adopt may be specified only once")
@@ -204,6 +215,9 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 		default:
 			return initArguments{}, fmt.Errorf("unknown option %q", argument)
 		}
+	}
+	if request.consentFD >= 0 && request.mode != initConfigs {
+		return initArguments{}, errors.New("--config-consent-fd is only for init --configs")
 	}
 	if request.continueLegacy && (request.mode != initReconcile || request.profile != "") {
 		return initArguments{}, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile")
@@ -587,7 +601,12 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 	}
 	execution := &initExecution{
 		requestedProfile: request.profile, loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
-		integrationSelection: selection, integrationBaseline: baseline,
+		integrationSelection: selection, integrationBaseline: baseline, configConsent: cli.configConsent,
+	}
+	if request.consentFD >= 0 {
+		if execution.configConsent, err = readConfigConsent(request.consentFD); err != nil {
+			return nil, err
+		}
 	}
 	if mode != initConfigs {
 		execution.powerPaths, err = cli.catalog.PlanCommandPowerPathsWrite(loaded, cli.baseEnv)
@@ -1137,7 +1156,15 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		if err := execution.checkReleaseConfigOwnership(ctx, cli); err != nil {
 			return err
 		}
-		return execution.platform.RefreshConfigs(ctx)
+		// Consent comes from a config apply parent. Without one, init --configs,
+		// like full init on a running, stopped or uninitialized yard, refreshes
+		// under its own confirmation over the bytes it observes right before
+		// writing.
+		err := execution.platform.RefreshConfigs(ctx, execution.configConsent)
+		if err != nil {
+			cli.reportConfigRefusals(err)
+		}
+		return err
 	}
 	if execution.mode == initReset {
 		if execution.resetBaseline != nil {

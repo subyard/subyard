@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,12 +14,9 @@ import (
 )
 
 func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) {
-	for _, retained := range []bool{false, true} {
-		name := "current"
-		if retained {
-			name = "retained"
-		}
+	for _, name := range []string{"current", "retained", "newer replacement"} {
 		t.Run(name, func(t *testing.T) {
+			retained, replaced := name != "current", name == "newer replacement"
 			transition, home, _ := v2TransitionFixture(t, nil)
 			store, err := NewPOSIXV2Store(home)
 			if err != nil {
@@ -64,6 +62,19 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
+			successorPayload := payload
+			if replaced {
+				registry.Migrations = registry.Migrations[:len(registry.Migrations)-1]
+				registry.CurrentEpochs["power-metadata"] = 3
+				payload, err = json.Marshal(registry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				registry, digest, err = ParseRegistryV2(payload, BuiltinCapabilityCatalog())
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := store.ConvertMigrationLedger(prior, oldRegistry, oldDigest, registry, digest); err != nil {
 				t.Fatal(err)
 			}
@@ -74,11 +85,20 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			options.GuestDiskTmp = []V2ActivationReconciler{&v2TestReconciler{id: "yard.first"}, &v2TestReconciler{id: "yard.second"}}
 			options.RegistryPayload = payload
 			options.MigrationCheckpoint, options.SourceMigrationCheckpoint = true, true
+			links := ReleaseLinks{Active: "0.28.0-aaaaaaaaaaaa"}
+			if replaced {
+				options.Releases = ReleasePair{From: links.Active, Target: links.Active}
+				options.ObserveLinks = func(context.Context) (ReleaseLinks, error) { return links, nil }
+				options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
+					links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
+					return links, nil
+				}
+			}
 			transition, err = NewV2Transition(options)
 			if err != nil {
 				t.Fatal(err)
 			}
-			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			goal := Goal{Target: options.Releases.Target, Direction: DirectionActivateTarget}
 			inspection, err := transition.Inspect(context.Background(), goal)
 			if err != nil {
 				t.Fatal(err)
@@ -109,12 +129,33 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			}
 			if retained {
 				transition, store = interruptSourceMetadataActivation(t, transition, store)
+				var authorization Authorization
+				if replaced {
+					unfinished, err := store.ReadCurrentJournal()
+					if err != nil {
+						t.Fatal(err)
+					}
+					options.Replacement = &JournalReplacement{Transaction: "tx-source-reconciling", Fingerprint: unfinished.Fingerprint, Reason: JournalReplacementNewerRelease}
+					options.RegistryPayload, options.ArtifactDigest = successorPayload, digestB
+					options.NewTransactionID = func() TransactionID { return "tx-newer-release" }
+					options.CandidateVersion = "0.30.0"
+					options.Releases = ReleasePair{From: links.Active, Target: "0.30.0-bbbbbbbbbbbb"}
+					transition, err = NewV2Transition(options)
+					if err != nil {
+						t.Fatal(err)
+					}
+					registry, digest = transition.registry, transition.registryDigest
+					goal.Target = options.Releases.Target
+				}
 				transition.options.fault = nil
 				inspection, err = transition.Inspect(context.Background(), goal)
 				if err != nil {
 					t.Fatal(err)
 				}
-				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan})
+				if replaced {
+					authorization = v2TestAuthorization(inspection.Plan)
+				}
+				outcome, err = transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: authorization})
 				if err != nil || outcome.Status != StatusReady {
 					t.Fatalf("same-release follow-up: %+v %v", outcome, err)
 				}
@@ -127,12 +168,15 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			if !proof.Ledger.Checkpointed {
 				t.Fatal("fixture lost the compacted historical prefix")
 			}
+			if replaced && (proof.Journal == nil || proof.Journal.Transaction != "tx-newer-release" || proof.Journal.ArtifactDigest != digestB) {
+				t.Fatal("source proof did not bind the completed successor")
+			}
 			for index := range journal.Steps {
 				if journal.Steps[index].Resource == "ledger.power-metadata" {
 					journal.Steps[index].Expected = digestB
 				}
 			}
-			if err := store.sourceTerminalEvidence(journal, registry, proof.Ledger); err == nil {
+			if err := store.sourceTerminalBindings(journal, registry, "", proof.Ledger); err == nil {
 				t.Fatal("authenticated terminal admitted an altered historical before state")
 			}
 			if string(snapshotStoreV2Tree(t, home)) != string(before) {
@@ -141,18 +185,18 @@ func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) 
 			if retained {
 				var captured string
 				for _, step := range journal.Steps {
-					if strings.HasPrefix(step.Resource, "yard.") {
+					if replaced && step.Resource == "ledger.power-metadata" || !replaced && strings.HasPrefix(step.Resource, "yard.") {
 						captured, err = checkpointEvidenceName(journal.Transaction, step.ID, EvidenceCaptured)
 						break
 					}
 				}
 				if err != nil || captured == "" {
-					t.Fatal("native captured receipt not found", err)
+					t.Fatal("captured receipt not found", err)
 				}
 				testkit.WriteFile(t, filepath.Join(home, "release-transition/v2/transactions", string(journal.Transaction), "evidence", captured), []byte("{}\n"), 0600)
 				damaged := snapshotStoreV2Tree(t, home)
 				if _, err := store.InspectSourceMetadata(registry, digest); err == nil {
-					t.Fatal("corrupt retained native receipt accepted")
+					t.Fatal("corrupt retained receipt accepted")
 				}
 				if string(snapshotStoreV2Tree(t, home)) != string(damaged) {
 					t.Fatal("corrupt receipt refusal changed history")
@@ -258,7 +302,7 @@ func interruptSourceMetadataActivation(t *testing.T, transition *V2Transition, s
 		}
 		return nil
 	}
-	inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+	inspection, err := transition.Inspect(context.Background(), Goal{Target: transition.options.Releases.Target, Direction: DirectionActivateTarget})
 	if err != nil {
 		t.Fatal(err)
 	}

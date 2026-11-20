@@ -69,7 +69,7 @@ func TestLocalSettingsCASPreservesModeAndRefusesConcurrentFileOrSymlink(t *testi
 	}
 	root := testkit.TempDir(t)
 	path := filepath.Join(root, "config.env")
-	testkit.WriteFile(t, path, []byte("# local\nDEV_SUDO=0\n"), 0o640)
+	testkit.WriteFile(t, path, []byte("# local\nDEV_SUDO=no\n"), 0o640)
 	before, err := ReadPersistentFileSnapshot(root, path)
 	if err != nil {
 		t.Fatal(err)

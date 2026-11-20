@@ -21,7 +21,7 @@ func TestHermesYardFileClearsInheritedHostAndCapabilityWiring(t *testing.T) {
 		}
 		testkit.WriteFile(t, path, []byte(content), 0o600)
 	}
-	write(filepath.Join(configHome, "config.env"), "CODING_TOOL_INTEGRATIONS=\"claude opencode pi\"\nENVIRONMENT_PROFILES=openclaw\nHOST_CLAUDE_MD=/tmp/CLAUDE.md\nHOST_CODEX_AGENTS_MD=/tmp/CODEX.md\nHOST_OPENCODE_AGENTS_MD=/tmp/OPENCODE.md\nHOST_MOUNTS=host-cache:/mnt/cache:ro:0755\nHOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions\nYARD_CAPABILITIES=android\nFORWARD_SSH_AGENT=1\nDEV_SUDO=1\nNESTED_E2E_VMS=1\n")
+	write(filepath.Join(configHome, "config.env"), "CODING_TOOL_INTEGRATIONS=\"claude opencode pi\"\nENVIRONMENT_PROFILES=openclaw\nHOST_CLAUDE_MD=/tmp/CLAUDE.md\nHOST_CODEX_AGENTS_MD=/tmp/CODEX.md\nHOST_OPENCODE_AGENTS_MD=/tmp/OPENCODE.md\nHOST_MOUNTS=host-cache:/mnt/cache:ro:0755\nHOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions\nYARD_CAPABILITIES=android\nFORWARD_SSH_AGENT=1\nDEV_SUDO=yes\nNESTED_E2E_VMS=1\n")
 	preset, err := os.ReadFile(filepath.Join(root, "config", "profiles", "hermes", "yard.env"))
 	if err != nil {
 		t.Fatal(err)

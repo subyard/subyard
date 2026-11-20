@@ -151,10 +151,11 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		Executor: f,
 		Yard:     domain.Context{DevUser: "dev", DevUID: os.Getuid()},
 		Integrations: []profile.IntegrationDefinition{{Name: "fixture", Root: root, Artifacts: []profile.IntegrationArtifact{{
-			ID: "config", Kind: "config", Source: "prompt.jsonc", GitApprovalOffSource: "off.jsonc",
+			ID: "config", Kind: "config", Source: "off.jsonc", ApprovalSources: map[string]string{"git": "prompt.jsonc"},
 			Destination: "settings", Format: "raw",
 		}}}},
-		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + prompt, ""},
+		// The fixture declares only the Git variant, so sudo prompts stay off.
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + root + "/off.jsonc", "", "DEV_SUDO=yes"},
 	}
 	ctx := context.Background()
 	for _, step := range []struct {

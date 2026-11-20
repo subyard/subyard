@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
@@ -33,6 +34,9 @@ type guestConfigFile struct {
 	previewInstructions bool
 	previewSource       string
 	ownedFormat         string
+	// initOnly is an instruction file: config status and config apply do
+	// not cover it, so its refusals name init --configs.
+	initOnly bool
 }
 
 // PreparedConfigs retains the exact component source/payload/destination set.
@@ -76,7 +80,11 @@ func (runtime Runtime) configRuntimeBinding() string {
 	}{runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.devUser(), runtime.bindingEnvironment(runtime.Environment)})
 	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
-func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
+
+// RefreshConfigs writes each guest config file only over its consent token.
+// Agent skills keep their own receipts in refresh-agent-skills.sh and are not
+// compare-and-write files.
+func (runtime Runtime) RefreshConfigs(ctx context.Context, consent *ports.ConfigConsent) error {
 	prepared, err := runtime.PrepareConfigs(ctx)
 	if err != nil {
 		return err
@@ -92,7 +100,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 			}
 		}
 	}
-	return runtime.applyPreparedConfigs(ctx, prepared)
+	return runtime.applyPreparedConfigs(ctx, prepared, consent)
 }
 func (runtime Runtime) PrepareConfigs(ctx context.Context) (*PreparedConfigs, error) {
 	if runtime.Executor == nil {
@@ -223,7 +231,62 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
-func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
+// configFiles are the guest files a refresh compares with: each file's
+// confirmed consent token, and for a refresh that plans itself, or a file the
+// confirmation did not cover (instruction files), the bytes this writer
+// observes right before it writes.
+func (runtime Runtime) configFiles(ctx context.Context, prepared *PreparedConfigs, consent *ports.ConfigConsent) (map[string]configmaterial.File, error) {
+	files := map[string]configmaterial.File{}
+	if consent != nil {
+		if consent.InstanceUUID != prepared.instance {
+			return nil, fmt.Errorf("%w: the yard instance changed after its configuration refresh was confirmed", domain.ErrPlanStale)
+		}
+		for _, file := range consent.Files {
+			files[file.Destination] = configmaterial.File{Destination: file.Destination, Token: file.Token}
+		}
+	}
+	var unconsented []guestConfigFile
+	for _, file := range prepared.files {
+		if _, known := files[file.destination]; !known && !slices.ContainsFunc(unconsented, func(other guestConfigFile) bool { return other.destination == file.destination }) {
+			unconsented = append(unconsented, file)
+		}
+	}
+	observed, err := runtime.observeConfigFiles(ctx, unconsented, func(file guestConfigFile) ([]byte, error) {
+		if payload, exists := prepared.payloads[file.destination]; exists {
+			return payload, nil
+		}
+		return nil, os.ErrNotExist
+	})
+	for _, file := range observed {
+		files[file.Destination] = file
+	}
+	return files, err
+}
+
+// observeConfigFiles is the one guest observation of the files with a source.
+func (runtime Runtime) observeConfigFiles(ctx context.Context, files []guestConfigFile, read func(guestConfigFile) ([]byte, error)) ([]configmaterial.File, error) {
+	var refusals []error
+	var desired []configmaterial.Desired
+	for _, file := range files {
+		payload, err := read(file)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+			continue
+		}
+		desired = append(desired, configmaterial.Desired{Label: file.label, Destination: file.destination, Format: file.ownedFormat, Payload: payload, InitOnly: file.initOnly})
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil || len(desired) == 0 {
+		return nil, err
+	}
+	yard := runtime.Yard
+	yard.DevUser = runtime.devUser()
+	return configmaterial.Observe(ctx, runtime.Executor, yard, desired)
+}
+
+func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs, consent *ports.ConfigConsent) error {
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
 	}
@@ -247,11 +310,17 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if output == nil {
 		output = io.Discard
 	}
+	observed, err := runtime.configFiles(ctx, prepared, consent)
+	if err != nil {
+		return err
+	}
 	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
 			return err
 		}
 	}
+	// Each file is its own compare-and-write: a refused file keeps the others
+	// going, and only a yard whose every file converged commits the inventory.
 	copied := make(map[string]bool)
 	for _, file := range files {
 		payload, exists := payloads[file.destination]
@@ -259,12 +328,27 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
 			continue
 		}
-		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return owned(file.integration, fmt.Errorf("apply %s: %w", file.label, err))
+		guest := observed[file.destination]
+		guest.Label, guest.InitOnly = file.label, file.initOnly
+		if state := guest.State(); state != "converged" && state != "drift" {
+			err = configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: guest}
+		} else {
+			err = runtime.applyGuestConfig(ctx, file, payload, guest.Token)
+		}
+		if refusal := new(configmaterial.FileRefusal); errors.As(err, refusal) {
+			refusal.File.InitOnly = file.initOnly
+			refusals = append(refusals, *refusal)
+			continue
+		}
+		if err != nil {
+			return domain.CollectRefusals(append(refusals, owned(file.integration, fmt.Errorf("apply %s: %w", file.label, err)))...)
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, "", integrationInventoryCapture{config: evidence}); err != nil {
@@ -353,63 +437,15 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// guestConfigsConverged is the observation that config status and release
+// readiness use too: an unreadable or unassessable file is not converged, so
+// init refreshes it and its refusal names the file.
 func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestConfigFile) (bool, error) {
-	converged := true
-	var refusals []error
-	for _, file := range files {
-		payload, err := file.readSource()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-			continue
-		}
-		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
-		if file.ownedFormat != "" {
-			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
-			if err != nil {
-				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-				continue
-			}
-		}
-		result, execErr := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-		if execErr != nil && result.ExitCode == 0 {
-			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, execErr))
-			continue
-		}
-		desiredHash := fmt.Sprintf("%x", sha256.Sum256(payload))
-		if file.ownedFormat != "" {
-			desiredHash, err = configmaterial.DesiredDigestFor(file.ownedFormat, payload)
-			if err != nil {
-				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-				continue
-			}
-		}
-		desired := config.DesiredMaterializedArtifact{Name: file.label, Destination: file.destination, OwnedFormat: file.ownedFormat, DesiredHash: desiredHash}
-		observation := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
-		if file.ownedFormat != "" {
-			if execErr != nil || result.ExitCode != 0 {
-				refusals = append(refusals, fmt.Errorf("observe %s: structured configuration unavailable", file.label))
-				continue
-			}
-			observed, err := configmaterial.ParseObservation(result.Stdout)
-			if err != nil {
-				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-				continue
-			}
-			observation.Fingerprint, observation.OwnedConverged = observed.Fingerprint, observed.Converged
-		}
-		assessed, err := config.AssessMaterializedArtifact(desired, observation)
-		if err != nil {
-			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-			continue
-		}
-		converged = converged && assessed.Converged
+	observed, err := runtime.observeConfigFiles(ctx, files, guestConfigFile.readSource)
+	if err != nil {
+		return false, err
 	}
-
-	err := domain.CollectRefusals(refusals...)
-	return converged && err == nil, err
+	return !slices.ContainsFunc(observed, func(file configmaterial.File) bool { return file.State() != "converged" }), nil
 }
 
 func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
@@ -475,7 +511,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat, initOnly: source.PreviewInstructions}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
@@ -573,20 +609,23 @@ func (err unownedInvalidConfig) ActivationDiagnostic() (string, string) {
 	return err.message, err.retry
 }
 
-func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
+func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte, token string) error {
 	if file.ownedFormat == "" {
-		return runtime.writeGuestFile(ctx, file.destination, payload)
+		return runtime.writeGuestFile(ctx, file.label, file.destination, payload, token)
 	}
 	mode := configmaterial.ModeApply
 	if runtime.appliedIntegrationInspection {
 		// An installed-view repair never takes back released ownership.
 		mode = configmaterial.ModeApplyInstalled
 	}
-	request, err := configmaterial.Request(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+	request, err := configmaterial.ApplyRequest(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload, token)
 	if err != nil {
 		return err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+	if refused, ok := configmaterial.Refused(configmaterial.File{Label: file.label, Destination: file.destination, Token: token}, result, err); ok {
+		return configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: refused}
+	}
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
@@ -614,37 +653,19 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	return nil
 }
 
-func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, payload []byte) error {
-	if !domain.SafeName(runtime.devUser()) ||
-		!strings.HasPrefix(destination, "/home/"+runtime.devUser()+"/") {
-		return errors.New("guest config destination leaves the developer home")
+func (runtime Runtime) writeGuestFile(ctx context.Context, label, destination string, payload []byte, token string) error {
+	request, err := configmaterial.RawRequest(runtime.devUser(), destination, runtime.Yard.DevUID, payload, token)
+	if err != nil {
+		return err
 	}
-	uid := runtime.Yard.DevUID
-	if uid <= 0 {
-		uid = 1000
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+	if refused, ok := configmaterial.Refused(configmaterial.File{Label: label, Destination: destination, Token: token}, result, err); ok {
+		return configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: refused}
 	}
-	request := ports.InstanceExecRequest{
-		Command: []string{"sh", "-eu", "-c", `
-destination=$1
-uid=$2
-digest=$3
-directory=${destination%/*}
-install -d -m 0755 -o "$uid" -g "$uid" "$directory"
-temporary=$(mktemp "$directory/.subyard-config.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-cat > "$temporary"
-[ "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$digest" ]
-chown "$uid:$uid" "$temporary"
-chmod 0644 "$temporary"
-python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY); os.fsync(f); os.close(f)' "$temporary"
-mv -f -- "$temporary" "$destination"
-python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY); os.fsync(f); os.close(f)' "$directory"
-[ "$(sha256sum "$destination" | cut -d ' ' -f 1)" = "$digest" ]
-trap - EXIT HUP INT TERM
-`, "subyard", destination, fmt.Sprint(uid), fmt.Sprintf("%x", sha256.Sum256(payload))},
-		Stdin: payload,
+	if err == nil && result.ExitCode != 0 {
+		err = errors.New("guest config write failed")
 	}
-	return runtime.runGuest(ctx, request)
+	return err
 }
 
 func (runtime Runtime) runGuestAsDev(ctx context.Context, command []string) error {

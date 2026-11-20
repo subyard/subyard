@@ -74,6 +74,58 @@ guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 \
   bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
   || die 'native Claude installed policy acceptance failed'
 
+stage 'removing the sudo grant before restoring the default DEV_SUDO=prompt'
+yard config set DEV_SUDO no --scope yard --yes >/dev/null || die 'DEV_SUDO=no was refused'
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=no'
+if guest_root runuser -u dev -- sudo -n true 2>/dev/null; then die 'DEV_SUDO=no kept the passwordless grant'; fi
+
+stage 'running native Claude sudo approval with the default DEV_SUDO=prompt'
+# Unset DEV_SUDO is prompt. From no, init publishes the new grant only after the agent
+# approval policies.
+yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
+grep -Fxq 'effective: prompt' <<<"$(yard config show DEV_SUDO)" || die 'unset DEV_SUDO is not prompt'
+yard init --yes >/dev/null || die 'yard init did not apply the default DEV_SUDO=prompt'
+sudo_status="$(yard status 2>&1 || true)"
+grep -Fq 'sudo     prompt' <<<"$sudo_status" \
+  || { printf '%s\n' "$sudo_status" >&2; die 'yard status does not name the sudo prompt mode'; }
+sudo_ready="$(guest_root claude-policy-check)" || die 'Claude readiness failed with DEV_SUDO=prompt'
+grep -Fq 'DEV_SUDO=prompt' <<<"$sudo_ready" || die 'Claude readiness omits the sudo prompt'
+guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the passwordless grant'
+guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 PARITY_SUDO=1 \
+  bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
+  || die 'native Claude sudo approval acceptance failed'
+stage 'running native Codex sudo approval with installed DEV_SUDO=prompt'
+# A directory outside registered projects keeps the Codex fixture out of Orca's assessment.
+sudo_fixture=/home/dev/codex-sudo-fixture
+guest_root runuser -u dev -- mkdir -p "$sudo_fixture/one" "$sudo_fixture/two" \
+  "$sudo_fixture/probe-one" "$sudo_fixture/probe-two"
+incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
+codex_sudo() {
+  guest_root runuser -u dev -- env \
+    HOME=/home/dev CODEX_HOME=/home/dev/.codex \
+    PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+    python3 -B "$guest_helper" "$@"
+}
+# Record native Codex behavior on the forms the hook refuses, with the hook stubbed to pass.
+codex_hook=/etc/codex/subyard-git-approval-hook
+guest_root cp -p -- "$codex_hook" /root/codex-hook.saved
+guest_root sh -c 'printf "#!/bin/sh\nexit 0\n" > "$1"' _ "$codex_hook"
+probe_rc=0
+codex_sudo --sudo-probe "$sudo_fixture/probe-one" "$sudo_fixture/probe-two" || probe_rc=$?
+guest_root cp -p -- /root/codex-hook.saved "$codex_hook"
+guest_root rm -f -- /root/codex-hook.saved
+guest_root /usr/local/bin/codex-policy-check >/dev/null || die 'the restored Codex hook failed its check'
+[ "$probe_rc" = 0 ] || die 'native Codex sudo probe failed'
+codex_sudo --sudo "$sudo_fixture/one" "$sudo_fixture/two" || die 'native Codex sudo approval failed'
+guest_root rm -rf -- "$sudo_fixture"
+guest_root rm -f -- "$guest_helper"
+# The remaining checks run without sudo prompts.
+yard config set DEV_SUDO yes --scope yard --yes >/dev/null || die 'DEV_SUDO=yes was refused'
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=yes'
+if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'DEV_SUDO=yes kept the Claude sudo ask rules'; fi
+if guest_root grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then die 'DEV_SUDO=yes kept the Codex sudo rules'; fi
+guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=yes removed the passwordless grant'
+
 fi
 
 stage 'creating two registered workspaces for Codex policy coverage'

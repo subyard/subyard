@@ -124,7 +124,7 @@ func (cli *CLI) resetTeardownConfiguration(ctx context.Context, loaded config.Lo
 			if registration(artifact.Path) != registrations {
 				continue
 			}
-			child := exec.CommandContext(ctx, "python3", filepath.Join(cli.options.RepositoryRoot, "scripts", "lib", "teardown-plan.py"), "remove-artifact", artifact.Path)
+			child := exec.CommandContext(ctx, "python3", "-B", filepath.Join(cli.options.RepositoryRoot, "scripts", "lib", "teardown-plan.py"), "remove-artifact", artifact.Path)
 			child.Env = append(os.Environ(), "SUBYARD_TEARDOWN_ARTIFACTS="+string(payload))
 			if err := child.Run(); err != nil {
 				var exit *exec.ExitError

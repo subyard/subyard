@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -152,7 +155,7 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 	}
 	handler := &rpcHandler{cli: program, loaded: loaded}
 	defer handler.closePlans()
-	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","1","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
+	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","yes","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +175,7 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(filepath.Join(configHome, "config.env"))
-	if err != nil || string(after) != "SSH_PORT='2390'\nDEV_SUDO='1'\n" {
+	if err != nil || string(after) != "SSH_PORT='2390'\nDEV_SUDO='yes'\n" {
 		t.Fatalf("native config execution did not publish approved assignments: %v", err)
 	}
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "config set: updated") {
@@ -470,7 +473,7 @@ func TestConfigExactScalarRewritesLegacyProfileAliasWithoutConflict(t *testing.T
 func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/isolated.env"), "YARD_KIND=vm\nREQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nENVIRONMENT_PROFILES=service\nALLOWS_CODING_TOOLS=false\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
 	target := filepath.Join(configHome, "yards/named/config.env")
@@ -649,7 +652,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 			t.Run(input+"/"+change, func(t *testing.T) {
 				root, environment, _ := nativeFixture(t)
 				configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-				writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
+				writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 				target := filepath.Join(configHome, "yards/named/config.env")
 				initial := "SSH_PORT=2290\n"
 				dependency := filepath.Join(root, "config/profiles/sample/handler.sh")
@@ -1353,5 +1356,90 @@ func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
 	if code := program.Run(context.Background()); code == 0 || strings.Contains(stderr.String(), "s3cr3tvalue") || strings.Contains(stderr.String(), configHome) ||
 		!strings.Contains(stderr.String(), `developer identity: load yard "idy": unknown YARD_TEMPLATE`) {
 		t.Fatalf("identity gate load refusal: code=%d %s", code, stderr.String())
+	}
+}
+
+// syncUnreadableExecutor answers each consumer yard's guest files: drifted
+// until the applier refreshed that yard, and hermes with an unreadable first
+// raw file.
+type syncUnreadableExecutor struct {
+	applier *recordingConfigApplier
+	yards   map[string]string // instance -> yard
+	desired map[string]string // instance/destination -> desired sha256
+}
+
+func (executor syncUnreadableExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	applied := slices.Contains(executor.applier.yards, executor.yards[instance])
+	if !testkit.IsGuestTokenObservation(request.Command) {
+		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":"absent"}`, applied, strings.Repeat("0", 64)))}, nil
+	}
+	files := []map[string]string{}
+	for index, destination := range request.Command[6:] {
+		token := "sha256:" + strings.Repeat("0", 64)
+		if digest, ok := executor.desired[instance+"/"+destination]; ok && applied {
+			token = "sha256:" + digest
+		}
+		if executor.yards[instance] == "hermes" && index == 0 {
+			token = configmaterial.TokenUnreadable
+		}
+		files = append(files, map[string]string{"destination": destination, "token": token})
+	}
+	payload, _ := json.Marshal(map[string]any{"files": files})
+	return ports.InstanceExecResult{Stdout: payload}, nil
+}
+
+// One consumer's unreadable file refuses that yard alone: the sync publishes
+// its candidate and refreshes the other consumer, then reports the refused
+// yard with its file and next step.
+func TestConfigSyncApplyRefusesOnlyTheConsumerWithAnUnreadableFile(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+	source := filepath.Join(testkit.TempDir(t), "source")
+	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts", "owner-a", "yards", "hermes", "config.env"), "SSH_PORT=2391\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts", "owner-a", "overrides", "agents", "codex", "config.toml"), "model = \"approved-candidate\"\n")
+	runConfigSyncGit(t, source, "init", "-q")
+	commitConfigSource(t, source, "candidate")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	native, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded), Adopt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts, err := native.CandidateConfigs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	applier := &recordingConfigApplier{}
+	executor := syncUnreadableExecutor{applier: applier, yards: map[string]string{}, desired: map[string]string{}}
+	for _, candidate := range contexts {
+		instance := candidate.Context.YardInstanceName
+		fake.Instances[candidate.Context.IncusProject+"/"+instance] = ports.InstanceInfo{Name: instance, Project: candidate.Context.IncusProject, Status: "Running"}
+		executor.yards[instance] = candidate.Context.YardName
+		materialization, _, _, err := materializationDesired(configTarget{Name: candidate.Context.YardName, Loaded: candidate}, true, candidate.ProspectiveFiles.ReadAsset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, asset := range materialization.Assets {
+			executor.desired[instance+"/"+asset.Destination] = asset.DesiredHash
+		}
+	}
+	if !slices.Contains(slices.Collect(maps.Values(executor.yards)), "hermes") {
+		t.Fatalf("hermes is not a candidate consumer: %v", executor.yards)
+	}
+	program := configExactProgram(t, root, environment, fake, applier)
+	program.options.Executor = executor
+	prepared := configExactPlan(t, program, loaded, []string{"sync", source, "--adopt", "--apply"})
+	var output bytes.Buffer
+	_, err = prepared.Execute(context.Background(), nil, &output)
+	if err == nil || !strings.Contains(err.Error(), "yard hermes") || !strings.Contains(err.Error(), "is not a readable regular file") ||
+		!strings.Contains(err.Error(), "then run yard -Y hermes config apply") {
+		t.Fatalf("hermes refusal: %v\n%s", err, &output)
+	}
+	if !slices.Equal(applier.yards, []string{"default"}) {
+		t.Fatalf("refreshed yards %v, want only default", applier.yards)
+	}
+	if _, err := os.Stat(configsync.HostIDPath(configHome)); err != nil {
+		t.Fatalf("the candidate was not published: %v", err)
 	}
 }

@@ -199,7 +199,7 @@ func syntheticResourceRoot(t *testing.T) string {
 	testkit.WriteFile(t, filepath.Join(profile, "profile.json"), []byte(`{"schema_version":1,"settings":[{"name":"FIXTURE_ADVERTISE_HOST","type":"string","scopes":["shipped","host","yard","command"],"application":"next-command","syncable":true,"optional":true},{"name":"FIXTURE_HOST_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","syncable":true,"optional":true,"minimum":1,"maximum":65535,"host_listener":true}]}`), 0o600)
 	testkit.WriteFile(t, filepath.Join(profile, "resources", "fixture.res"), []byte("COMMAND=fixture\nTITLE=Fixture\nHANDLER=resources/fixture/handler.sh\nPROXY=\"fixture FIXTURE_ADVERTISE_HOST FIXTURE_HOST_PORT tcp:127.0.0.1:6768 loopback-or-tailscale\"\nENDPOINT_DEFAULTS=\"tailscale-self 6768\"\nBOOTSTRAP=profile\nACTION=\"up up bootstrap-change recreatable\"\nACTION=\"down down host-change reversible\"\nBRINGUP=up\nSHUTDOWN=down\n"), 0o600)
 	testkit.WriteFile(t, filepath.Join(profile, "resources", "fixture", "handler.sh"), []byte("#!/bin/sh\n"), 0o700)
-	testkit.WriteFile(t, filepath.Join(root, "config", "subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nNESTED_E2E_VMS=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "config", "subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nNESTED_E2E_VMS=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0o600)
 	return root
 }
 

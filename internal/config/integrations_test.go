@@ -55,7 +55,7 @@ func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, ".config/subyard/yards/default/config.env")
 			writeFixture(t, path, test.content)
-			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
+			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +72,7 @@ func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 		})
 	}
 	home := t.TempDir()
-	loaded, err := Load(LoadOptions{RepositoryRoot: home, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
+	loaded, err := Load(LoadOptions{RepositoryRoot: home, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
 	if err != nil {
 		t.Fatal(err)
 	}

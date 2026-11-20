@@ -18,6 +18,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -542,6 +543,14 @@ func sourceAuthoringPlatformFixture(t *testing.T, value ports.InitPlatform) *ini
 }
 
 func completedSourceNativeObservation(program *CLI, ready string, call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+	if result, ok, _ := testkit.TokensFromSHA256(call.Command, func(command []string) (ports.InstanceExecResult, error) {
+		hashed := call
+		hashed.Command = command
+		step := completedSourceNativeObservation(program, ready, hashed)
+		return ports.InstanceExecResult{Stdout: step.Stdout, ExitCode: step.ExitCode}, nil
+	}); ok {
+		return testkit.IncusServerExecStep{Stdout: result.Stdout}
+	}
 	if slices.Equal(call.Command, []string{"bash", "-s", "--", "--observe"}) {
 		payload, _ := json.Marshal(map[string]any{"projects": fmt.Sprintf("%x", sha256.Sum256(nil)), "wiring": fmt.Sprintf("%x", sha256.Sum256(nil)), "hooks": []string{}, "roots": []string{}, "facts": map[string]string{}, "resolved": map[string]string{}})
 		return testkit.IncusServerExecStep{Stdout: payload}
@@ -553,7 +562,7 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 		if !current {
 			digest = strings.Repeat("0", 64)
 		}
-		payload, _ := json.Marshal(map[string]any{"converged": current, "fingerprint": digest})
+		payload, _ := json.Marshal(map[string]any{"converged": current, "fingerprint": digest, "raw": "absent"})
 		return testkit.IncusServerExecStep{Stdout: payload}
 	}
 	if len(call.Command) == 3 && call.Command[0] == "sha256sum" && call.Command[1] == "--" {
@@ -595,4 +604,24 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 		result.ExitCode = 1
 	}
 	return testkit.IncusServerExecStep{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}
+}
+
+// The original dead end: a completed release whose yard drifted refused its
+// own repairs because the installed source proof failed. Run from the
+// installed release's own tooling, the real proof holds, so the gate admits
+// config apply and init on the drifted yard and advises one of them.
+func TestCompletedReleaseWithDriftAdmitsItsRepairs(t *testing.T) {
+	program, _, _, _ := completedRuntimeSourceAuthoringFixture(t, false, nil)
+	if _, err := program.repairSources(context.Background()); err != nil {
+		t.Fatalf("installed source refused: %v", err)
+	}
+	gate := program.withSource(context.Background(), yardGate{yards: map[string]*yardGateState{"default": {drift: true}}, order: []string{"default"}})
+	for _, action := range []domain.Action{{Verb: domain.VerbConfigApply, Yard: "default"}, {Verb: domain.VerbInit, Yard: "default"}} {
+		if gate.source != nil || !gate.admits(action) {
+			t.Fatalf("%s refused: next %s", domain.RenderAction(action), gate.step("default", domain.Action{}))
+		}
+	}
+	if step := gate.step("default", domain.Action{}); step != "yard -Y default init" && step != "yard -Y default config apply" {
+		t.Fatalf("advice %q", step)
+	}
 }

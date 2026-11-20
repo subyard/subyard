@@ -57,7 +57,7 @@ func TestRollbackSourceActivationPreservesNativeScopeBeforeEffects(t *testing.T)
 			if err != nil || beforeOwner.State != releasetransition.OwnerRegistrationAbsent {
 				t.Fatalf("native owner fixture has wrong initial state: %+v err=%v", beforeOwner, err)
 			}
-			rollback, err := releaseruntime.VerifyRollbackTarget(context.Background(), request.RuntimeRoot, request.Target, request.ArtifactDigest)
+			rollback, _, err := releaseruntime.VerifyRollbackTarget(context.Background(), request.RuntimeRoot, request.Target, request.ArtifactDigest)
 			if err != nil {
 				t.Fatal(err)
 			}

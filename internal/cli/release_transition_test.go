@@ -65,12 +65,7 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 		alias := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), pinned.Fd())
 		fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 			"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
-		}}
-		for range 8 {
-			fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-				Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"), ExitCode: 0,
-			}})
-		}
+		}, GuestTokens: map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}}
 		program, err := New(Options{RepositoryRoot: alias, Environment: environment,
 			WorkingDir: root, InitPlatform: newInitPlatformFixture(), Incus: fake, Executor: fake,
 			Stdout: io.Discard, Stderr: io.Discard})
@@ -1511,7 +1506,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	installCanonicalOwnerInventory(t, root)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
 		"STORAGE_PATH=" + filepath.Join(root, "data/storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),
 		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
@@ -2020,7 +2015,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 			if scenario.defaults {
 				source.rules = filepath.Join(configHome, "overrides", "host", "agents", "codex", "repo.rules")
 				source.rulesContent = "allow_rule()\n"
-				source.defaultsContent = "DEV_SUDO=1\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='" + source.rules + "'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n"
+				source.defaultsContent = "DEV_SUDO=yes\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='" + source.rules + "'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n"
 			}
 			request := releasetransition.ProcessRequest{
 				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
@@ -2139,7 +2134,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -2234,17 +2229,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake.ExecSteps = []testkit.IncusExecStep{{
-		Result: ports.InstanceExecResult{
-			Stdout:   []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
-			ExitCode: 0,
-		},
-	}, {
-		Result: ports.InstanceExecResult{
-			Stdout:   []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
-			ExitCode: 0,
-		},
-	}}
+	fake.GuestTokens = map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}
 	observe := func(
 		candidate *CLI,
 		yard string,
@@ -2271,9 +2256,6 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	activeRelease := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 	bootstrap := observe(updateProgram, "default", activeRelease)
 	for _, yard := range []string{"test-yard", "new-yard"} {
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-			Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
-		}})
 		nextCommand := observe(program, yard, activeRelease)
 		if !reflect.DeepEqual(bootstrap, nextCommand) || bootstrap.Converged {
 			t.Fatalf("completed readiness depends on selected yard %s: bootstrap=%#v next=%#v",
@@ -2334,10 +2316,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 		Project: freshLoaded.Context.IncusProject,
 		Status:  "Running",
 	}
-	freshFake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{
-		Stdout:   []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"),
-		ExitCode: 0,
-	}}}
+	freshFake.GuestTokens = map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}
 	frozen := &materializedConfigActivationReconciler{
 		cli: freshProgram, yard: "default", configHome: freshConfigHome,
 		goal: releasetransition.Goal{
@@ -2424,7 +2403,7 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -2455,7 +2434,7 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 	}
 	reconciler := &materializedConfigActivationReconciler{cli: program}
 	if err := reconciler.reconcileCLI().options.Config.ApplyConfig(
-		context.Background(), "default",
+		context.Background(), "default", nil,
 	); err != nil {
 		t.Fatalf("trusted config apply: %v, stderr=%q", err, stderr.String())
 	}
@@ -2473,7 +2452,7 @@ func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -2499,9 +2478,13 @@ func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
 printf '%s\n' '{"status":"migration-required","code":"transition-required"}' >&2
 exit 1
 `, 0o700)
-	platform := newInitPlatformFixture()
+	digest := sha256.Sum256([]byte("allow_rule()\n"))
+	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo), GuestTokens: map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}}
+	// The refresh writes the desired rules, which the final verification reads.
+	platform := &refreshingPlatformFixture{newInitPlatformFixture(), func() {
+		fake.GuestTokens["/home/dev/.codex/rules/repo.rules"] = testkit.HashToken(fmt.Sprintf("%x", digest))
+	}}
 	platform.configsConverged = false
-	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, DispatcherPath: dispatcher, Program: "yard",
@@ -2519,17 +2502,6 @@ exit 1
 	fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
 		Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
 	}
-	digest := sha256.Sum256([]byte("allow_rule()\n"))
-	matching := fmt.Sprintf("%x  /home/dev/.codex/rules/repo.rules\n", digest)
-	for _, output := range []string{
-		strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n",
-		strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n",
-		matching,
-	} {
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{Stdout: []byte(output), ExitCode: 0},
-		})
-	}
 	reconciler := &materializedConfigActivationReconciler{
 		cli: program, yard: "default", configHome: configHome,
 	}
@@ -2538,6 +2510,13 @@ exit 1
 	}
 	if platform.configs != 1 || strings.Contains(stderr.String(), "transition-required") {
 		t.Fatalf("materialized config activation configs=%d stderr=%q", platform.configs, stderr.String())
+	}
+	// The repair writes over the tokens its authorized plan read, so a guest
+	// edit after that reading is refused as changed rather than overwritten.
+	if consent := platform.consents[0]; consent == nil || !slices.ContainsFunc(consent.Files, func(file ports.ConfigFileConsent) bool {
+		return file.Destination == "/home/dev/.codex/rules/repo.rules" && file.Token == testkit.HashToken(strings.Repeat("0", 64))
+	}) {
+		t.Fatalf("activation repair wrote without the authorized tokens: %#v", platform.consents)
 	}
 }
 
@@ -3099,4 +3078,16 @@ esac
 // runningBrokerIncus answers the broker runtime observation for test-yard.
 func runningBrokerIncus() *testkit.Incus {
 	return &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-test-yard/yard-test-yard": {Name: "yard-test-yard", Project: "subyard-test-yard", Status: "RUNNING", Config: map[string]string{"user.subyard.desired_power": "running"}}}}
+}
+
+// refreshingPlatformFixture runs refreshed after each config refresh.
+type refreshingPlatformFixture struct {
+	*initPlatformFixture
+	refreshed func()
+}
+
+func (fixture *refreshingPlatformFixture) RefreshConfigs(ctx context.Context, consent *ports.ConfigConsent) error {
+	err := fixture.initPlatformFixture.RefreshConfigs(ctx, consent)
+	fixture.refreshed()
+	return err
 }

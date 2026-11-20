@@ -736,7 +736,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-owner-context-', dir='/tmp') as
     leaf = root/'runtime/current/scripts/context-check.sh'; leaf.parent.mkdir(parents=True)
     context = pathlib.Path(__file__).resolve().parents[2]/'scripts/lib/engine-context.sh'
     leaf.write_text(f'set -euo pipefail\n. {str(context)!r}\nsubyard_require_engine_context\n' + '''
-test "$YARD_KIND:$NESTED_E2E_VMS:$DEV_UID:$DEV_SUDO" = container:1:1001:0
+test "$YARD_KIND:$NESTED_E2E_VMS:$DEV_UID:$DEV_SUDO" = container:1:1001:no
 test "$INCUS_PROJECT:$YARD_INSTANCE_NAME" = subyard-test-yard:yard-test-yard
 test "$SRV_VOLUME_TYPE:$VM_FREE_PAGE_REPORTING:$VM_PIN_IPV4" = filesystem:0:0
 test "$SUBYARD_POWER_DESIRED:$SUBYARD_SUDO_PREAUTHORIZED" = running:1

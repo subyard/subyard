@@ -726,6 +726,10 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
+			// The default prompt adds no input, as the snapshot records only yes and no.
+			if value := runtime.environmentValue("DEV_SUDO"); !config.SudoApprovalPrompt(value) {
+				inputs = append(inputs, "DEV_SUDO="+value)
+			}
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}
@@ -1789,7 +1793,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
 		return runtime.stepFailure(stepInventoryApply, "", err)
 	}
-	if err := runtime.RefreshConfigs(ctx); err != nil {
+	if err := runtime.RefreshConfigs(ctx, nil); err != nil {
 		return runtime.stepFailure(stepConfigs, "", err)
 	}
 	if err := execution.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"); err != nil {

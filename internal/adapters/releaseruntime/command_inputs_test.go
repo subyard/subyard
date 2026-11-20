@@ -12,7 +12,7 @@ func fixtureCommandInputs(values map[string]string) CommandInputs {
 	values = maps.Clone(values)
 	for key, value := range map[string]string{
 		"DEV_UID": "1000", "SSH_PORT": "2222", "SHIFT_MODE": "shift",
-		"DEV_SUDO": "0", "FORWARD_SSH_AGENT": "0",
+		"DEV_SUDO": "no", "FORWARD_SSH_AGENT": "0",
 		"SUBYARD_HOME":          filepath.Join(values["HOME"], "data"),
 		"STORAGE_PATH":          filepath.Join(values["HOME"], "storage"),
 		"HOST_BASE":             filepath.Join(values["HOME"], "host"),

@@ -990,3 +990,25 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 		})
 	}
 }
+
+// A rollback refused by an unfinished transition of the active release names
+// yard migrate, which finishes it; a cross-release transition keeps its step.
+func TestExactTargetRefusalNamesTheCurrentReleaseStep(t *testing.T) {
+	for _, scenario := range []struct {
+		active releasetransition.ReleaseID
+		want   string
+	}{
+		{"1.2.3-aaaaaaaaaaaa", "next: run yard migrate"},
+		{"1.2.2-bbbbbbbbbbbb", "next: run yard update"},
+	} {
+		protected := &protectedTransitionInspection{
+			target: candidateVerification{version: "1.2.3", candidate: publishedCandidate{release: "1.2.3-aaaaaaaaaaaa"}},
+			inspection: releasetransition.Inspection{Outcome: &releasetransition.Outcome{
+				Active: scenario.active, Target: "1.2.3-aaaaaaaaaaaa", Retry: "run yard update"}},
+		}
+		_, err := (&Runtime{}).prepareProtectedTransition(options{rollback: true}, protected)
+		if err == nil || !strings.HasSuffix(err.Error(), scenario.want) {
+			t.Fatalf("active %s: %v, want %q", scenario.active, err, scenario.want)
+		}
+	}
+}

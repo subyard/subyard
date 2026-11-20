@@ -3,9 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 SUBYARD_OPERATOR_HOME="$TMP/operator"
 # shellcheck source=scripts/lib/engine-context.sh

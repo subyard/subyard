@@ -183,6 +183,9 @@ func cloneIntegrationMetadataData(data IntegrationMetadataData) IntegrationMetad
 	data.Native = slices.Clone(data.Native)
 	data.Settings = cloneSettings(data.Settings)
 	data.Artifacts = slices.Clone(data.Artifacts)
+	for index := range data.Artifacts {
+		data.Artifacts[index].ApprovalSources = maps.Clone(data.Artifacts[index].ApprovalSources)
+	}
 	data.Inputs = slices.Clone(data.Inputs)
 	data.Depends = slices.Clone(data.Depends)
 	if data.Lifecycle != nil {

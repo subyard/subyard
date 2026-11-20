@@ -16,14 +16,16 @@ import (
 
 func TestCodexRulesProbe(t *testing.T) {
 	for _, tc := range []struct {
-		name, protected, local, state string
-		off, cliFailure, missingRules bool
-		policyFailure, missingPolicy  bool
+		name, protected, local, state       string
+		off, sudo, cliFailure, missingRules bool
+		policyFailure, missingPolicy        bool
 	}{
 		{name: "prompt", protected: `{}`, local: `{}`, state: "rules-ok"},
 		{name: "prompt keeps operator home prompts", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok"},
 		{name: "off", protected: `{}`, local: `{}`, state: "rules-ok", off: true},
 		{name: "off keeps operator home prompts", protected: `{"decision":"prompt"}`, local: `{}`, state: "rules-ok", off: true},
+		{name: "sudo prompt", protected: `{}`, local: `{}`, state: "rules-ok", sudo: true},
+		{name: "off sudo prompt", protected: `{}`, local: `{}`, state: "rules-ok", off: true, sudo: true},
 		{name: "local gated", protected: `{}`, local: `{"decision":"prompt"}`, state: "incompatible"},
 		{name: "off local gated", protected: `{}`, local: `{"decision":"prompt"}`, state: "incompatible", off: true},
 		{name: "invalid JSON", protected: `{}`, local: `private diagnostic`, state: "incompatible"},
@@ -53,8 +55,17 @@ func TestCodexRulesProbe(t *testing.T) {
 			write("bin/codex-policy-check", "#!/bin/sh\nexit 0\n", 0o700)
 			write("protected", tc.protected, 0o600)
 			requirements := "check_for_update_on_startup = false\n"
+			if !tc.off || tc.sudo {
+				requirements += "[rules]\nprefix_rules = [\n"
+			}
 			if !tc.off {
-				requirements += "[rules]\nprefix_rules = [{ decision = \"prompt\" }]\n"
+				requirements += "  { pattern = [{ token = \"git\" }, { any_of = [\"commit\", \"push\"] }], decision = \"prompt\" },\n"
+			}
+			if tc.sudo {
+				requirements += "  { pattern = [{ token = \"sudo\" }], decision = \"prompt\" },\n"
+			}
+			if !tc.off || tc.sudo {
+				requirements += "]\n"
 			}
 			write("requirements.toml", requirements, 0o600)
 			write("local", tc.local, 0o600)
@@ -99,7 +110,8 @@ esac
 				return ports.InstanceExecResult{}, err
 			})}
 			got := runtime.codexRulesStatus(context.Background(), domain.Context{}, true)
-			if got.State != tc.state || tc.state == "rules-ok" && strings.Contains(got.Hint, "managed Git prompts off") != tc.off {
+			if got.State != tc.state || tc.state == "rules-ok" && (strings.Contains(got.Hint, "managed Git prompts off") != tc.off ||
+				strings.Contains(got.Hint, "sudo prompt") != tc.sudo) {
 				t.Fatalf("got %#v; want %s", got, tc.state)
 			}
 			if tc.state == "rules-ok" {
