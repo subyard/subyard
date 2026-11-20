@@ -8,13 +8,10 @@ type RollbackSupport struct {
 }
 
 type RollbackConsumer struct {
-	Kind     string `json:"kind"`
-	Yard     string `json:"yard"`
-	Owner    string `json:"owner"`
-	Profile  string `json:"profile,omitempty"`
-	Selected bool   `json:"selected"`
-	// Disableable reports a profile whose `profile disable` deactivates its runtime owner.
-	Disableable         bool                    `json:"disableable,omitempty"`
+	Kind                string                  `json:"kind"`
+	Yard                string                  `json:"yard"`
+	Owner               string                  `json:"owner"`
+	Selected            bool                    `json:"selected"`
 	ManagedPaths        int                     `json:"managedPaths"`
 	ManagedPathsPresent bool                    `json:"managedPathsPresent"`
 	RetainedContract    string                  `json:"retainedContract"`

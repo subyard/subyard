@@ -95,7 +95,6 @@ func CaptureRollbackSupport(ctx context.Context, configuration Config, sourceRoo
 					continue
 				}
 				consumer := ports.RollbackConsumer{Kind: "profile", Yard: name, Owner: definition.Runtime.ActivationID,
-					Profile: definition.Name, Disableable: definition.OwnerService != "",
 					Selected: definition.Selected(name, loaded.Environment), ManagedPaths: len(definition.ManagedPaths), RetainedContract: "absent", RetainedPayload: "same", RetainedSettings: "same"}
 				retained := targets[definition.Name]
 				if retained.Runtime != nil {
