@@ -457,6 +457,8 @@ printf 'evidence: one scoped source rename commit preserved exact owner tree and
 EOS
 owner_yard config sync --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
+# Rename commits without pushing; publish it before later Git setting edits.
+owner_yard config sync push --yes >/dev/null
 # Simulate the historical defective identity-only rename with deleted cache.
 phase source-mismatch-recovery
 remote_dev bash -s -- "$REMOTE" <<'EOS'
