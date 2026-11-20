@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
@@ -162,6 +163,66 @@ func TestPublishPreservesFinalSymlink(t *testing.T) {
 				t.Fatalf("target contents = %q, %v", data, err)
 			}
 		})
+	}
+}
+
+func TestPublishRejectsRetargetedStoreWithUnavailableParent(t *testing.T) {
+	for _, parent := range []string{"missing-directory", "not-a-directory"} {
+		t.Run(parent, func(t *testing.T) {
+			directory := testkit.TempDir(t)
+			store, target := filepath.Join(directory, "known_hosts"), filepath.Join(directory, "original")
+			contents := keyLine(t, "unrelated.example")
+			testkit.WriteFile(t, target, []byte(contents), 0o600)
+			testkit.WriteFile(t, filepath.Join(directory, "not-a-directory"), nil, 0o600)
+			if err := os.Symlink(target, store); err != nil {
+				t.Fatal(err)
+			}
+			request := publicationCandidate(t, store, "owner.example")
+			manager := &Manager{Environment: os.Environ(), pending: []candidate{request}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			unlock, err := LockKnownHosts(ctx, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release := sync.OnceFunc(unlock)
+			defer release()
+			result := make(chan error, 1)
+			go func() { result <- manager.publish(ctx) }()
+			if err := waitForOpenLockFiles(ctx, filepath.Join(directory, ".subyard-known-hosts.lock"), 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(directory, parent, "known_hosts"), store+".next"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(store+".next", store); err != nil {
+				t.Fatal(err)
+			}
+			release()
+			err = <-result
+			want := domain.ErrPlanStale.Error() + ": SSH trust changed after assessment"
+			if !errors.Is(err, domain.ErrPlanStale) || err.Error() != want {
+				t.Fatalf("publication after retarget = %v, want %q", err, want)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != contents {
+				t.Fatalf("original trust store changed: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestPublishWithStationaryMissingStoreParentKeepsLockError(t *testing.T) {
+	directory := testkit.TempDir(t)
+	store := filepath.Join(directory, "known_hosts")
+	target := filepath.Join(directory, "missing-directory", "known_hosts")
+	if err := os.Symlink(target, store); err != nil {
+		t.Fatal(err)
+	}
+	request := publicationCandidate(t, store, "owner.example")
+	manager := &Manager{Environment: os.Environ(), pending: []candidate{request}}
+	err := manager.publish(context.Background())
+	if !errors.Is(err, unix.ENOENT) || err.Error() != "no such file or directory" {
+		t.Fatalf("publication with missing store parent = %v", err)
 	}
 }
 

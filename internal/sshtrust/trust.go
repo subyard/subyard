@@ -388,6 +388,11 @@ func (manager *Manager) publish(ctx context.Context) error {
 		directories[filepath.Dir(path)] = true
 		entry, err := safefs.EntryIdentity(path)
 		if err != nil {
+			// Preserve the errno that opening the store's lock used to return.
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && pathErr.Op == "open" {
+				return pathErr.Err
+			}
 			return err
 		}
 		entries[index] = entry
@@ -432,14 +437,14 @@ func (manager *Manager) publish(ctx context.Context) error {
 	}
 	for index, request := range manager.pending {
 		path, err := resolveKnownHosts(request.proposal.File)
-		if err != nil {
+		var entry safefs.EntryID
+		if err == nil {
+			entry, err = safefs.EntryIdentity(path)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 			return err
 		}
-		entry, err := safefs.EntryIdentity(path)
-		if err != nil {
-			return err
-		}
-		if entry != entries[index] {
+		if err != nil || entry != entries[index] {
 			return fmt.Errorf("%w: SSH trust changed after assessment", domain.ErrPlanStale)
 		}
 	}
