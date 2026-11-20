@@ -78,9 +78,12 @@ Rolling back to v0.28–v0.30 leaves both system policy files behind if they wer
 Those releases can also reintroduce the collector token into home documents, where an
 older template writer can publish it with mode `0644`. If an upgrade stopped while it was
 replacing collector assets, finish it before rolling back: those releases refuse a collector
-asset that the inventory does not record. Process environment settings such
-as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
-local drop-ins when server-managed settings apply.
+asset that the inventory does not record. This release adds no telemetry rollback check
+of its own. While telemetry is enabled, v0.30 refuses the rollback itself: its telemetry runtime
+observation rejects the collector unit installed by later releases, the update reports
+`dependency-unavailable` for `activation.telemetry-runtime`, and the current release stays
+active. Process environment settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can
+bypass the managed policy. Claude ignores local drop-ins when server-managed settings apply.
 
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
