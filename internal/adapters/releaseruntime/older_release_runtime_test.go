@@ -246,3 +246,36 @@ func TestUpdateToAnExplicitOlderReleaseRechecksRuntimeOwnersBeforeEffects(t *tes
 	}
 	fixture.assertUnchanged(t, launches)
 }
+
+// The owner query of a selection with a differing migration registry is a
+// refused read: the update reports the registry refusal, not a lost owner.
+func TestUpdateToAnExplicitOlderReleaseReportsItsRegistryRefusal(t *testing.T) {
+	for _, check := range []bool{true, false} {
+		t.Run(fmt.Sprintf("check=%t", check), func(t *testing.T) {
+			fixture, arguments := olderUpdateFixture(t, "sample-runtime-v0", migrationRollbackSettingsRegistry)
+			if check {
+				arguments = append(arguments, "--check")
+			}
+			var stdout bytes.Buffer
+			prepared, err := fixture.runtime.PrepareTransition(context.Background(), arguments, fixture.home, "default")
+			if prepared.Close != nil {
+				defer prepared.Close()
+			}
+			report := ""
+			if check {
+				if err != nil || prepared.run == nil {
+					t.Fatalf("--check did not report the refusal: %v", err)
+				}
+				fixture.runtime.config.Stdout = &stdout
+				_ = prepared.Execute(context.Background())
+				report = stdout.String()
+			} else if err != nil {
+				report = err.Error()
+			}
+			if !strings.Contains(report, "rollback-incompatible") || !strings.Contains(report, "migration registry differs") || strings.Contains(report, olderRuntimeRefusal) {
+				t.Fatalf("registry refusal was not reported: %q (%v)", report, err)
+			}
+			fixture.assertUnchanged(t, nil)
+		})
+	}
+}

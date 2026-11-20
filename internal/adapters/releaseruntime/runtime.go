@@ -1320,6 +1320,9 @@ func (runtime *Runtime) olderReleaseRuntimeBinding(
 			}
 		} else if errors.Is(capabilityErr, domain.ErrPlanStale) || errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
 			return "", nil, false, capabilityErr
+		} else if selectionRefusedQuery(ctx, capabilityErr) {
+			// The selection's own refusal blocked the query: a failed read, not absent owners.
+			return "", nil, false, capabilityErr
 		}
 	}
 	// A failed optional query grants no activation owners. The historical path
@@ -1349,6 +1352,12 @@ func (runtime *Runtime) admitOlderRelease(
 	}
 	older := &olderReleaseRuntime{activeRoot: filepath.Join(runtimeRoot, links.current.target), targetRoot: target.candidate.root}
 	binding, owners, refused, err := runtime.olderReleaseRuntimeBinding(ctx, runtimeRoot, target, older.activeRoot, older.targetRoot, configHome)
+	if selectionRefusedQuery(ctx, err) {
+		// The owner finding depends on that refused read. The ordinary inspection
+		// reports the selection's refusal with its other independent findings, and
+		// the refusal blocks every launch for this selection.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1359,6 +1368,14 @@ func (runtime *Runtime) admitOlderRelease(
 	}
 	older.binding, older.owners = binding, owners
 	return older, nil
+}
+
+// selectionRefusedQuery reports a launch that the captured selection's own
+// refusal, such as a differing migration registry, blocked.
+func selectionRefusedQuery(ctx context.Context, err error) bool {
+	selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection)
+	var refusal publicReleaseInspectionError
+	return err != nil && selection != nil && selection.refusal != "" && errors.As(err, &refusal)
 }
 
 func (runtime *Runtime) prepareRetainedTransition(
