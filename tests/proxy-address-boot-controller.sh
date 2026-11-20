@@ -2,8 +2,10 @@
 # Host-free failure and signal cleanup of the physical reboot controller.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-proxy-controller.XXXXXXXX)"
-trap 'find "$TMP" -depth -delete' EXIT
+on_exit find "$TMP" -depth -delete
 mkdir -p "$TMP/dev/e2e" "$TMP/tests/helpers"
 cp "$ROOT/dev/e2e/proxy-address-boot.sh" "$TMP/dev/e2e/proxy-address-boot.sh"
 cp "$ROOT/tests/helpers/test-lib.sh" "$TMP/tests/helpers/"

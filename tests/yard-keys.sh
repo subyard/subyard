@@ -2,9 +2,9 @@
 # Host-free encrypted-ledger contract: trust, Git exchange, convergence, local-only and quarantine.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
+test_tmp
 
 # shellcheck source=tests/helpers/credential-context.sh
 . "$ROOT/tests/helpers/credential-context.sh"

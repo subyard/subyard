@@ -3,9 +3,9 @@
 set -euo pipefail
 umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
+test_tmp
 mkdir -p "$TMP/etc/profile.d" "$TMP/etc/ssh" "$TMP/bin" "$TMP/home/.ssh"
 sed "s|/etc/|$TMP/etc/|g" "$ROOT/scripts/ssh-agent-environment.sh" > "$TMP/setup.sh"
 cat > "$TMP/bin/chown" <<'EOF'

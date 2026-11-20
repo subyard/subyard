@@ -5,9 +5,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+TEST_LIB_DIE_STATUS=1
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
+test_tmp
 
 mkdir -p "$TMP/bin" "$TMP/scripts"
 export MOCK_LOG="$TMP/calls.log"
@@ -45,7 +46,6 @@ export PATH="$TMP/bin:$PATH"
 run_guard() {
   : > "$MOCK_LOG"
   (
-    die() { printf '%s\n' "$*" >&2; exit 1; }
     have_incus=1 INCUS_PROJECT=subyard-y8
     SCRIPT_DIR="$ROOT/scripts"
     # shellcheck source=scripts/lib/teardown-session.sh

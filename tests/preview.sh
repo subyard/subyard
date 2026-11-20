@@ -2,11 +2,11 @@
 # Actual HTTP and process contract for the foreground preview helper.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 python3 "$ROOT/tests/preview.py"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf -- "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+test_tmp
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"

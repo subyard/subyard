@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 export SUBYARD_NO_AUDIT=1
 
 rows="$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; p' "$ROOT/config/commands.registry")"

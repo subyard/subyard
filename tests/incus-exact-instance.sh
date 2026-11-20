@@ -4,9 +4,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-exact-instance.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+on_exit rm -rf "$TMP"
 
 install -d -m 0700 "$TMP/bin"
 export PATH="$TMP/bin:$PATH" MOCK_ROWS="$TMP/rows"

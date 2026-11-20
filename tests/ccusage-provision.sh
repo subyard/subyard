@@ -3,14 +3,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 HOOK="$ROOT/config/agents/ccusage/provision.sh"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; }
 for command in cc jq sha256sum tar; do need "$command"; done
 [ -x "$HOOK" ] || fail "ccusage provision hook is not executable"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+on_exit rm -rf "$tmp"
 registry="$tmp/registry"
 fake_bin="$tmp/fake-bin"
 curl_log="$tmp/curl.log"

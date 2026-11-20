@@ -3,9 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-test-vms.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+on_exit rm -rf "$TMP"
 PROVISION="$ROOT/scripts/e2e-lab/provision.sh"
 
 # Never invoke a function being tested in an if/! condition: Bash would suppress errexit

@@ -3,10 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 export SUBYARD_NO_AUDIT=1
 CLI_TMP="$(mktemp -d)"
-trap 'rm -rf "$CLI_TMP"' EXIT
+on_exit rm -rf "$CLI_TMP"
 
 commands="$($ROOT/bin/yard --list)"
 grep -qx security <<<"$commands" || fail "security command missing"

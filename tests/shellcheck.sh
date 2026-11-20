@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 fixture="$(mktemp -d /tmp/subyard-shellcheck.XXXXXX)"
-trap 'rm -rf -- "$fixture"' EXIT
+on_exit rm -rf -- "$fixture"
 cd "$fixture"
 mkdir -p bin completions scripts dev config/profiles config/agents tests
 touch bin/yard completions/yard.bash

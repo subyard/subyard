@@ -35,20 +35,20 @@ on_exit() {
 _test_lib_status() { return "$1"; }
 
 _test_lib_exit() {
-  local status=$1 index errexit=
-  [[ $- != *e* ]] || errexit=1
+  local _test_lib_rc=$1 _test_lib_index _test_lib_errexit=
+  [[ $- != *e* ]] || _test_lib_errexit=1
   set +e
-  for ((index = ${#_test_lib_exit_commands[@]} - 1; index >= 0; index--)); do
+  for ((_test_lib_index = ${#_test_lib_exit_commands[@]} - 1; _test_lib_index >= 0; _test_lib_index--)); do
     # A handler may fail or call exit. Give each one the original status and
     # shell options without letting it prevent the remaining cleanup.
     (
-      if [ -n "$errexit" ]; then set -e; fi
-      if _test_lib_status "$status"; then
-        eval "${_test_lib_exit_commands[index]}"
+      if [ -n "$_test_lib_errexit" ]; then set -e; fi
+      if _test_lib_status "$_test_lib_rc"; then
+        eval "${_test_lib_exit_commands[_test_lib_index]}"
       else
-        eval "${_test_lib_exit_commands[index]}"
+        eval "${_test_lib_exit_commands[_test_lib_index]}"
       fi
     )
   done
-  exit "$status"
+  exit "$_test_lib_rc"
 }

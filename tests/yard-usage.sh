@@ -4,10 +4,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+on_exit rm -rf "$tmp"
 mkdir -p "$tmp/bin" "$tmp/public-config" "$tmp/home"
 install -d -m 0700 "$tmp/config-home" "$tmp/config-home/yards"
 

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TEST_CACHE_ROOT="${P0_CAPACITY_TEST_ROOT:-$HOME/.cache}"
 install -d -m 0700 "$TEST_CACHE_ROOT"
 TMP="$(mktemp -d "$TEST_CACHE_ROOT/subyard-p0-capacity-test.XXXXXX")"
@@ -12,8 +14,7 @@ cleanup() {
     || find "$EXTERNAL_TEST_ROOT" -depth -delete
   rm -rf "$TMP"
 }
-trap cleanup EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+on_exit cleanup
 
 export HOME="$TMP/home"
 install -d -m 0700 "$HOME"
