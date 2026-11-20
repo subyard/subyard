@@ -478,6 +478,7 @@ owner_yard host rename owner-mismatch --source-host-id owner-b --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
 owner_yard host rename owner-b --yes >/dev/null
 owner_yard config sync --yes >/dev/null
+owner_yard config sync push --yes >/dev/null
 owner_yard config set YARD_IMAGE images:debian/13 --scope shared --git --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
 [ "$(runtime_identity)" = "$live_before" ] || fail 'rename/recovery changed live UUID, process, root volume, project registry, guest rule hash or credential actor'
