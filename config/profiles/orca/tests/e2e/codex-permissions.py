@@ -302,6 +302,51 @@ def restricted_tool_check(app, provider, workspace):
     print('ok: native Codex read-only tool read succeeded and write was denied for ' + workspace.name, flush=True)
 
 
+def observe_turn(app, provider, thread, workspace, command, decision):
+    """Run one command, answer every approval request with decision, and report the outcome."""
+    provider.workspace, provider.command = workspace, command
+    app.request('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': 'Run the fixture command.'}]})
+    approvals, result = 0, None
+    while True:
+        frame = app.read()
+        method = frame.get('method', '')
+        if method == 'item/commandExecution/requestApproval':
+            approvals += 1
+            app.send({'id': frame['id'], 'result': {'decision': decision}})
+        elif method == 'item/completed' and frame['params']['item']['type'] == 'commandExecution':
+            result = frame['params']['item']
+        elif method == 'turn/completed':
+            assert not provider.failure, provider.failure
+            return approvals, result
+
+
+def sudo_checks(app, provider, workspace):
+    """DEV_SUDO=prompt: direct escalation asks; compound forms ask or are blocked, never run."""
+    thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
+    cases = [
+        ('direct', 'sudo -n touch {m}', True),
+        ('redirect', 'sudo -n touch {m} > /dev/null', True),
+        ('pipe', 'sudo -n touch {m} | cat', True),
+        ('and-list', 'true && sudo -n touch {m}', True),
+        ('if', 'if sudo -n touch {m}; then true; fi', False),
+        ('substitution', 'echo "$(sudo -n touch {m})"', False),
+        ('path', '/usr/bin/sudo -n touch {m}', False),
+    ]
+    for name, template, direct in cases:
+        marker = workspace / ('sudo-' + name)
+        approvals, result = observe_turn(app, provider, thread, workspace, template.format(m=marker), 'decline')
+        outcome = {'case': name, 'approvals': approvals, 'ran': marker.exists(),
+                   'status': result and result.get('status'), 'exitCode': result and result.get('exitCode')}
+        print('codex-sudo: ' + json.dumps(outcome), flush=True)
+        assert not marker.exists(), 'declined or blocked sudo ran: ' + name
+        if direct:
+            assert approvals == 1, 'direct sudo did not ask for approval: ' + name
+    marker = workspace / 'sudo-accepted'
+    approvals, result = observe_turn(app, provider, thread, workspace, f'sudo -n touch {marker}', 'accept')
+    assert approvals == 1 and marker.exists(), 'approved sudo did not run: ' + repr(result)
+    print('ok: native Codex sudo prompts asked, declined compound forms did not run, approval ran', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workspace', nargs=2, type=Path)
@@ -311,6 +356,7 @@ def main():
     parser.add_argument('--codex', default='codex')
     parser.add_argument('--template', type=Path, default=Path('/home/dev/.codex/config.toml'))
     parser.add_argument('--home-rules', type=Path)
+    parser.add_argument('--sudo', action='store_true', help='check DEV_SUDO=prompt only')
     args = parser.parse_args()
     executable = shutil.which(args.codex)
     assert executable, 'native Codex unavailable'
@@ -348,6 +394,13 @@ def main():
                 if args.terminal or args.orca:
                     terminal_checks(executable, env, provider, workspace, args.orca)
                     continue
+                if args.sudo:
+                    app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
+                    try:
+                        sudo_checks(app, provider, workspace)
+                    finally:
+                        app.close()
+                    break
                 app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
                 try:
                     started = app.request('thread/start', {'cwd': str(workspace)})
@@ -398,6 +451,8 @@ def main():
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)
                 finally:
                     app.close()
+            if args.sudo:
+                return
             # Keep the managed-only Git checks above independent of home rules.
             # A fresh process then checks the delivered local-cleanup allow rule.
             (codex_home / 'rules').mkdir(exist_ok=True)
