@@ -17,14 +17,14 @@ export TMPDIR=/tmp
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
+mkdir -p "$ROOT/.build/test-runs"
+RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
 # Tests keep disposable state outside the checkout; see tests/helpers/checkout-guard.sh.
 CHECKOUT_TRACKED=0
 if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
   CHECKOUT_TRACKED=1
-  CHECKOUT_BEFORE="$(bash "$ROOT/tests/helpers/checkout-guard.sh" snapshot "$ROOT")"
+  bash "$ROOT/tests/helpers/checkout-guard.sh" start "$ROOT" "$RUN_DIR"
 fi
-mkdir -p "$ROOT/.build/test-runs"
-RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
 SUMMARY="$RUN_DIR/summary.tsv"
 printf 'kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog\n' > "$SUMMARY"
 printf 'RESULTS %s\n' "$SUMMARY"
@@ -61,7 +61,7 @@ finish() {
   [ "$rc" -eq 0 ] || status=failed
   # A failed run still reports its leaks, which the next run's snapshot would accept.
   if [ "$rc" -ne 0 ] && [ "$CHECKOUT_TRACKED" = 1 ] && [ "$failed_check" != checkout-unchanged ]; then
-    bash "$ROOT/tests/helpers/checkout-guard.sh" compare "$ROOT" <(printf '%s\n' "$CHECKOUT_BEFORE")
+    bash "$ROOT/tests/helpers/checkout-guard.sh" check "$ROOT" "$RUN_DIR"
   fi
   printf 'run\t%s\tall\t%s\t%s\t%s\t-\n' \
     "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
@@ -151,7 +151,7 @@ check_go_race() {
 
 check_checkout_unchanged() {
   [ "$CHECKOUT_TRACKED" = 1 ] || { printf 'checkout is not a Git work tree root; skipped\n'; return 0; }
-  bash "$ROOT/tests/helpers/checkout-guard.sh" compare "$ROOT" <(printf '%s\n' "$CHECKOUT_BEFORE")
+  bash "$ROOT/tests/helpers/checkout-guard.sh" check "$ROOT" "$RUN_DIR"
 }
 
 if [ "$selection" != go ]; then

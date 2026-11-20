@@ -667,10 +667,11 @@ When the checkout is a Git work-tree root, `./tests/run.sh` ends with `checkout-
 It fails when the run added or removed a path outside `.build/`, in the checkout or in an
 optional `private/` clone. It compares path lists from `git ls-files`, with ignored directories
 collapsed, so content edits and Git status changes of existing paths during the run pass. In
-`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`, and it
-also fails when the run rewrote any other untracked file there: such a file has no concurrent
-writer, and a leak left by an earlier run is otherwise part of the starting state. A run that
-fails earlier still prints these changes. Outside a Git work-tree root the check is skipped.
+`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`. It also
+fails when the run rewrote an untracked file of the retired `private/` config overlay
+(`yards/`, `agents/`, `config.env`), which tests seed as checkout fixtures: a leak left by an
+earlier run is otherwise part of the starting state. A run that fails earlier still prints these
+changes. Outside a Git work-tree root the check is skipped.
 The runner also sets `PYTHONDONTWRITEBYTECODE=1`.
 
 `make test`, `./tests/run.sh`, the host-free profile runners and `dev/process-coverage.sh`

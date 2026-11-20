@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Checkout state for tests/run.sh: tests keep disposable state outside the checkout.
-#   snapshot ROOT          print the state of ROOT and its optional private/ clone
-#   compare ROOT SNAPSHOT  fail when ROOT differs from SNAPSHOT
+# Checkout guard for tests/run.sh: tests keep disposable state outside the checkout.
+#   start ROOT RUN_DIR  record the state of ROOT and its optional private/ clone
+#   check ROOT RUN_DIR  fail when the run changed that state
 # No path outside .build/ may appear or disappear. Content and Git status changes of
-# existing paths are concurrent edits, except for untracked private/ files outside the
-# coordinator- and operator-owned documents: they have no concurrent writer, so a rewrite
-# is a test leak even when an earlier run left the file behind.
+# existing paths are concurrent edits. Untracked files of the retired private/ config
+# overlay, which tests seed as checkout fixtures, must also not be rewritten: a leak
+# left by an earlier run is otherwise part of the starting state.
 set -euo pipefail
 
 PRIVATE_DOCUMENTS='^(tasks|questions|reference|spec)/|^[^/]*\.md$'
+PRIVATE_CONFIG=(yards agents config.env)
 
 checkout_paths() {
   { git -C "$1" ls-files --cached --others --exclude-standard
@@ -16,25 +17,33 @@ checkout_paths() {
   } | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(git -C "$1" ls-files --deleted | LC_ALL=C sort -u)
 }
 
-snapshot() {
-  local root="$1"
-  checkout_paths "$root" | { grep -vx '\.build/' || true; } | sed 's|^|path\t|'
-  [ -e "$root/private/.git" ] || return 0
-  checkout_paths "$root/private" | { grep -vE "$PRIVATE_DOCUMENTS" || true; } | sed 's|^|path\tprivate/|'
-  # Inode, size and modification time; a file removed meanwhile is reported as a path.
-  git -C "$root/private" ls-files -z --others | { grep -zvE "$PRIVATE_DOCUMENTS" || true; } \
-    | (cd "$root/private" || exit 0; xargs -0r stat --printf 'file\tprivate/%n\t%i %s %.9Y\n' -- 2>/dev/null || true)
+checkout_state() {
+  checkout_paths "$1" | { grep -vx '\.build/' || true; }
+  [ -e "$1/private/.git" ] || return 0
+  checkout_paths "$1/private" | { grep -vE "$PRIVATE_DOCUMENTS" || true; } | sed 's|^|private/|'
 }
 
-compare() {
-  local root="$1" before="$2" after changes
-  after="$(snapshot "$root" | LC_ALL=C sort)"
-  changes="$(
-    LC_ALL=C comm -3 <(sed -n 's/^path\t//p' "$before" | LC_ALL=C sort) <(printf '%s\n' "$after" | sed -n 's/^path\t//p') \
-      | sed -e 's/^\t/+ /' -e '/^+ /!s/^/- /'
-    LC_ALL=C join -t $'\t' <(sed -n 's/^file\t//p' "$before" | LC_ALL=C sort) <(printf '%s\n' "$after" | sed -n 's/^file\t//p') \
-      | awk -F '\t' '$2 != $3 { print "~ " $1 }'
-  )"
+private_config_files() {
+  [ ! -e "$1/private/.git" ] || git -C "$1/private" ls-files -z --others -- "${PRIVATE_CONFIG[@]}"
+}
+
+# The snapshot's modification time marks the start of the run.
+start() {
+  private_config_files "$1" > "$2/checkout-private-config"
+  checkout_state "$1" | LC_ALL=C sort > "$2/checkout-before"
+}
+
+check() {
+  local root="$1" before="$2/checkout-before" changes file
+  changes="$(LC_ALL=C comm -3 "$before" <(checkout_state "$root" | LC_ALL=C sort) \
+    | sed -e 's/^\t/+ /' -e '/^+ /!s/^/- /')"
+  local -A existing=()
+  while IFS= read -r -d '' file; do existing["$file"]=1; done < "$2/checkout-private-config"
+  while IFS= read -r -d '' file; do
+    if [ -n "${existing["$file"]:-}" ] && [ "$root/private/$file" -nt "$before" ]; then
+      changes+="${changes:+$'\n'}~ private/$file"
+    fi
+  done < <(private_config_files "$root")
   [ -z "$changes" ] || {
     printf 'FAIL: tests added (+), removed (-) or rewrote (~) checkout paths outside .build/:\n%s\n' "$changes" >&2
     exit 1
@@ -42,7 +51,7 @@ compare() {
 }
 
 case "$#:${1:-}" in
-  2:snapshot) snapshot "$2" ;;
-  3:compare) compare "$2" "$3" ;;
-  *) printf 'Usage: %s snapshot ROOT | compare ROOT SNAPSHOT\n' "$0" >&2; exit 2 ;;
+  3:start) start "$2" "$3" ;;
+  3:check) check "$2" "$3" ;;
+  *) printf 'Usage: %s start|check ROOT RUN_DIR\n' "$0" >&2; exit 2 ;;
 esac
