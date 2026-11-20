@@ -30,6 +30,12 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
+def direct_staging(mode, failed=""):
+    """The real staging (stage) or guest cleanup (cleanup) lines of a direct controller for VMs 1 and 2."""
+    return subprocess.run(["bash", str(ROOT / "tests/helpers/direct-staging.sh"), str(ROOT), mode, failed],
+                          check=True, capture_output=True, text=True).stdout
+
+
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
             manifest_sources=False, split_catalog=False):
     root = directory / "source"
@@ -1734,6 +1740,29 @@ class Contracts(unittest.TestCase):
         m.write_json(path, declaration)
         decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
         self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}])
+
+    def test_operator_acceptance_needs_cleanup_of_every_directly_staged_vm(self):
+        path, files, _ = self.operator_failure()
+        declaration = json.loads(path.read_text())
+        grant = "E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
+        release = ("E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+                   "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+                   "E2E lease released: slot=2 run=fixture\n")
+        result = "SAMPLE_RESULT original_exit_code=1 capture_exit_code=0 cleanup_exit_code={} duration_seconds=1 evidence=x\n"
+        staged = direct_staging("stage")
+        def attest(log):
+            files["log"].write_text(log)
+            declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
+            m.write_json(path, declaration)
+            return m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
+        decision = attest(grant + staged + "  [fail] phase=fixture/init\n" + direct_staging("cleanup") + release + result.format(0))
+        self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}, {"vm": 2, "exit_code": 0}])
+        for label, log in (("failed guest cleanup", grant + staged + direct_staging("cleanup", "2") + release + result.format(3)),
+                           ("staged VM without cleanup", grant + staged + release + result.format(0)),
+                           # An older direct controller printed no staging or cleanup markers, only its result.
+                           ("explicit failed controller cleanup", grant + "  [ .. ] VM1: streaming current worktree\n" + release + result.format(3))):
+            with self.subTest(label), self.assertRaisesRegex(ValueError, "cleanup or release unconfirmed"):
+                attest(log)
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()

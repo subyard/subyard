@@ -3,7 +3,7 @@
 import argparse
 import ast
 import copy
-from collections import deque
+from collections import deque, namedtuple
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, ExitStack, suppress
 from datetime import datetime, timezone
@@ -883,20 +883,18 @@ def execute(name, command, root, output, env, slot=None):
         log_sha256 = digest(log)
     except OSError:
         log_sha256, capture_error = None, True
-    status, reason = ("interrupted", None) if interrupted else ("failed", None)
-    if not interrupted and not capture_error:
+    status, reason, evidence = ("interrupted" if interrupted else "failed"), None, None
+    if not capture_error:
+        # One read decides the verdict and the lane's own environments together.
         try:
-            status, reason = lane_status({"exit_code": code, "termination": termination(code),
-                                          "cleanup": phases.get("cleanup")}, log, slot)
+            evidence = lane_leases(log, slot)
         except OSError:
             capture_error = True
-    environments = []
-    if slot:
-        # Only the lane's own grants are its environments; nested guest clients lease their own.
-        try:
-            environments = sorted(set(lane_leases(log, slot)[2]))
-        except OSError:
-            capture_error = True
+    if not interrupted and evidence is not None:
+        status, reason = lane_status({"exit_code": code, "termination": termination(code),
+                                      "cleanup": phases.get("cleanup")}, evidence)
+    # Only the lane's own grants are its environments; nested guest clients lease their own.
+    environments = sorted(set(evidence.environments)) if slot and evidence is not None else []
     blocked = reason[len("capacity_"):] if status == "blocked" else None
     result = {"status": status, "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
@@ -958,20 +956,15 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
                     seen.add(key)
                     event(output, "phase", check=name, phase=marker[2].decode(),
                           state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-            if (stage and int(stage[4]) <= 255
-                and (stage[2] != b"start" or (stage[3] == b"0" and stage[4] == b"0"))
-                and bool(stage[5]) == (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
+            if stage := controller_stage(line):
                 event(output, "controller-phase", check=name, phase=stage[1].decode(),
                       state=stage[2].decode(), duration_seconds=int(stage[3]),
                       exit_code=int(stage[4]), **({"vm": int(stage[5])} if stage[5] else {}))
                 if phases is not None and stage[2] == b"end":
-                    phase = stage[1].decode()
-                    if phase == "cleanup/release" or "cleanup" in phase:
-                        key = phase + ("/vm" + stage[5].decode() if stage[5] else "")
-                        phases.setdefault("cleanup", {})[key] = {"exit_code": int(stage[4]), "duration_seconds": int(stage[3])}
+                    if entry := cleanup_entry(stage):
+                        phases.setdefault("cleanup", {})[entry[0]] = entry[1]
                     elif stage[4] == b"0":
-                        phases["last_completed_phase"] = phase
+                        phases["last_completed_phase"] = stage[1].decode()
             failure = re.fullmatch(rb"E2E_FAILURE class=(product|fixture|environment|timeout|unknown)\n", line)
             if failure and phases is not None:
                 phases["failure_class"] = failure[1].decode()
@@ -979,14 +972,13 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
             if budget and phases is not None and bool(budget[4]) == (budget[1] == b"guest-cleanup"):
                 key = budget[1].decode() + ("/vm" + budget[4].decode() if budget[4] else "")
                 phases.setdefault("budgets", {})[key] = {"budget_seconds": int(budget[2]), "grace_seconds": int(budget[3])}
-            release = re.fullmatch(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
-            if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
+            if release := controller_release(line):
                 event(output, "lease-release", check=name, state=release[1].decode(), duration_seconds=int(release[2]),
                       budget_seconds=180, grace_seconds=5, exit_code=int(release[3]))
                 if phases is not None:
                     phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
-                    if release[1] == b"end":
-                        phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
+                    if entry := cleanup_entry(release=release):
+                        phases.setdefault("cleanup", {})[entry[0]] = entry[1]
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
             if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
@@ -996,13 +988,43 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
     return offset, discard
 
 
-LEASE_STAGE = re.compile(rb"E2E_PHASE phase=(allocation|transport|guest|guest-cleanup|cleanup/release) state=(start|end) duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n")
+CONTROLLER_STAGE = re.compile(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n")
+CONTROLLER_RELEASE = re.compile(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
 LEASE_GRANT = re.compile(rb"E2E lease: ([^\r\n]{0,2000}) type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n")
 LEASE_REQUEST = re.compile(rb"E2E lease request: slot=((?:slot-)?[0-9]{1,3}) run=([0-9A-Za-z_-]{1,64})\n")
 LEASE_RELEASED = re.compile(rb"E2E lease released: (?:slot=((?:slot-)?[0-9]{1,3}) run=([0-9A-Za-z_-]{1,64})|handle=([0-9A-Za-z_-]{1,64}) slot=((?:slot-)?[0-9]{1,3}) reason=[a-z-]{1,32})\n")
-LEASE_RELEASE_END = re.compile(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
 CAPACITY_REFUSAL = re.compile(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for ((?:slot-)?[0-9]{1,3}): resource=(memory|disk); retry after resources become available\n")
 UNCONFIRMED_LEASE = re.compile(rb"(?:agent-e2e|subyard-test-vms): (?:(?:interrupted )?acquire cleanup remains unconfirmed|lease acquire unknown-outcome|broker capability probe failed|broker does not support)[^\r\n]*\n")
+# A direct controller's own result line, such as `NAME_RESULT original_exit_code=… cleanup_exit_code=…`.
+CONTROLLER_RESULT = re.compile(rb"[A-Za-z][A-Za-z0-9_]{0,63}_(?:RESULT|result) (?:[^\r\n]* )?cleanup_exit_code=([0-9]{1,3})(?: [^\r\n]*)?\n")
+LaneEvidence = namedtuple("LaneEvidence", "issue refusal environments cleaned cleanup")
+
+
+def controller_stage(line):
+    """A well-formed controller phase marker: groups phase, state, duration, exit code, VM."""
+    stage = CONTROLLER_STAGE.fullmatch(line)
+    if (stage and int(stage[4]) <= 255 and (stage[2] != b"start" or (stage[3] == b"0" and stage[4] == b"0"))
+            and bool(stage[5]) == (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
+        return stage
+    return None
+
+
+def controller_release(line):
+    """A well-formed lease release marker: groups state, duration, exit code."""
+    release = CONTROLLER_RELEASE.fullmatch(line)
+    if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
+        return release
+    return None
+
+
+def cleanup_entry(stage=None, release=None):
+    """The result's cleanup key and value for an end marker, or None."""
+    if release is not None:
+        return ("lease-release", {"exit_code": int(release[3]), "duration_seconds": int(release[2])}) if release[1] == b"end" else None
+    phase = stage[1].decode()
+    if stage[2] != b"end" or not (phase == "cleanup/release" or "cleanup" in phase):
+        return None
+    return phase + ("/vm" + stage[5].decode() if stage[5] else ""), {"exit_code": int(stage[4]), "duration_seconds": int(stage[3])}
 
 
 def termination(code):
@@ -1011,13 +1033,15 @@ def termination(code):
 
 
 def lane_leases(log, slot=None):
-    """Read the lane's own leases from its log: (first issue or None, final capacity refusal or None,
-    the lane's own granted environments, VMs with a clean guest cleanup inside a held lease).
+    """One ordered read of the lane's log: LaneEvidence(first issue or None, final capacity refusal or None,
+    the lane's own granted environments, VMs with a clean guest cleanup inside a held lease, cleanup ends).
 
     Only lines outside guest windows belong to the lane; lease clients nested in a guest print
-    into the same log. Guest cleanup lines of concurrent VMs can sit inside another VM's window."""
+    into the same log. Guest cleanup lines of concurrent VMs can sit inside another VM's window,
+    but a VM's cleanup counts only once its own transport and guest windows have ended."""
     lane_slot = int(slot) if slot is not None else None
-    depth, held, requested, refusal, issue, environments, cleaned = 0, None, None, None, None, [], set()
+    depth, held, requested, refusal, issue, environments, cleaned, cleanup = 0, None, None, None, None, [], set(), {}
+    open_work = {}
 
     def number(value):
         return int(value.decode().removeprefix("slot-"))
@@ -1032,30 +1056,36 @@ def lane_leases(log, slot=None):
                 discard = not line.endswith(b"\n")
                 continue
             found = None
-            stage = LEASE_STAGE.fullmatch(line)
-            if stage and int(stage[3]) <= 255 and bool(stage[4]) == (stage[1] != b"allocation" and stage[1] != b"cleanup/release"):
-                phase, state, code, vm = stage[1], stage[2], int(stage[3]), stage[4]
+            stage, release = controller_stage(line), controller_release(line)
+            entry = cleanup_entry(stage, release) if stage or release else None
+            if entry:
+                cleanup[entry[0]] = entry[1]
+            if stage and stage[1] in (b"allocation", b"transport", b"guest", b"guest-cleanup", b"cleanup/release"):
+                phase, state, code, vm = stage[1], stage[2], int(stage[4]), stage[5] and int(stage[5])
                 if depth == 0 and state == b"start" and phase in (b"transport", b"guest") and refusal:
                     # A refused request leaves no lease for this work: neither a block nor a PASS.
                     found = "guest work started after a capacity refusal"
                 if phase == b"guest":
                     depth = depth + 1 if state == b"start" else max(depth - 1, 0)
+                if phase in (b"transport", b"guest"):
+                    open_work[vm] = open_work.get(vm, 0) + 1 if state == b"start" else max(open_work.get(vm, 0) - 1, 0)
                 if held is not None and vm and state == b"start" and phase in (b"transport", b"guest"):
-                    held["dirty"].add(int(vm))
+                    held["dirty"].add(vm)
                 if phase == b"guest-cleanup" and state == b"end":
                     if code:
-                        found = f"guest cleanup of VM{vm.decode()} exited {code}"
-                    elif held is not None:
-                        held["dirty"].discard(int(vm))
-                        if 1 <= int(vm) <= held["vms"]:
+                        found = f"guest cleanup of VM{vm} exited {code}"
+                    elif held is not None and not open_work.get(vm):
+                        # A cleanup inside the VM's own window is a nested client's, not this lane's.
+                        held["dirty"].discard(vm)
+                        if 1 <= vm <= held["vms"]:
                             # Nested clients may clean up higher-numbered VMs of their own leases.
-                            cleaned.add(int(vm))
+                            cleaned.add(vm)
                 elif depth == 0 and state == b"end" and code and phase in (b"allocation", b"cleanup/release"):
                     # A typed capacity refusal ends its allocation with exit 4.
                     if not (phase == b"allocation" and code == 4 and refusal):
                         found = f"{phase.decode()} exited {code}"
-            elif depth:
-                continue
+            elif stage or depth:
+                pass
             elif grant := LEASE_GRANT.fullmatch(line):
                 fields = dict(item.split(b"=", 1) for item in grant[1].split() if b"=" in item)
                 run, granted = fields.get(b"run", b""), fields.get(b"slot", b"")
@@ -1065,6 +1095,8 @@ def lane_leases(log, slot=None):
                     found = f"second lease granted while slot-{held['slot']:03d} is held"
                 elif lane_slot is not None and number(granted) != lane_slot:
                     found = f"lease granted for slot-{number(granted):03d}, not the lane slot"
+                elif requested is not None and (number(granted), run) != (requested["slot"], requested["run"]):
+                    found = "lease grant does not answer the lane's request"
                 else:
                     held = {"slot": number(granted), "run": run, "vms": int(grant[3]), "dirty": set()}
                     environments.append((grant[2].decode(), int(grant[3]), grant[4].decode()))
@@ -1072,9 +1104,11 @@ def lane_leases(log, slot=None):
             elif line.startswith(b"E2E lease: "):
                 found = "unreadable lease grant"
             elif request := LEASE_REQUEST.fullmatch(line):
-                if requested is not None:
+                if requested is not None and not requested["answered"]:
                     found = "lease request ended without a grant or typed refusal"
-                requested, refusal = request[1], None
+                elif lane_slot is not None and number(request[1]) != lane_slot:
+                    found = f"lease requested for slot-{number(request[1]):03d}, not the lane slot"
+                requested, refusal = {"slot": number(request[1]), "run": request[2], "answered": False}, None
             elif released := LEASE_RELEASED.fullmatch(line):
                 run, freed = (released[2], released[1]) if released[1] else (released[3], released[4])
                 if held is None or (number(freed), run) != (held["slot"], held["run"]):
@@ -1084,36 +1118,49 @@ def lane_leases(log, slot=None):
                 else:
                     held = None
                 refusal = None
-            elif (end := LEASE_RELEASE_END.fullmatch(line)) and end[1] != b"0":
-                found = f"lease release exited {int(end[1])}"
+            elif release:
+                if release[1] == b"end" and release[3] != b"0":
+                    found = f"lease release exited {int(release[3])}"
             elif capacity := CAPACITY_REFUSAL.fullmatch(line):
-                requested = None
                 refused = number(capacity[1])
-                refusal = capacity[2].decode() if lane_slot is None or refused == lane_slot else None
+                # Only a refusal of the outstanding request (or, in older logs, of the lane slot) answers it.
+                if refused == (requested["slot"] if requested is not None else lane_slot if lane_slot is not None else refused):
+                    if requested is not None:
+                        requested["answered"] = True
+                    refusal = capacity[2].decode()
             elif UNCONFIRMED_LEASE.fullmatch(line):
                 found = "lease outcome or cleanup is unconfirmed"
+            elif (result := CONTROLLER_RESULT.fullmatch(line)) and result[1] != b"0":
+                found = f"controller cleanup exited {int(result[1])}"
             if found and issue is None:
                 issue = found
     if issue is None and held is not None:
         issue = f"lease slot-{held['slot']:03d} has no confirmed release"
-    if issue is None and requested is not None:
+    if issue is None and requested is not None and not requested["answered"]:
         issue = "lease request ended without a grant or typed refusal"
-    return issue, None if issue else refusal, environments, sorted(cleaned)
+    return LaneEvidence(issue, None if issue else refusal, environments, sorted(cleaned), cleanup)
+
+
+def lease_issue(evidence):
+    """Why the lane's own leases did not all end cleanly, for evidence that cannot be a capacity block."""
+    return evidence.issue or evidence.refusal and f"final lease request was refused for {evidence.refusal}"
 
 
 def lane_status(result, log, slot=None):
-    """The one PASS decision for a live or local check result and its bound log: (status, reason)."""
-    issue, refusal, _, _ = lane_leases(log, slot)
+    """The one PASS decision for a live or local check result and its bound log, or the
+    LaneEvidence already read from it: (status, reason)."""
+    evidence = log if isinstance(log, LaneEvidence) else lane_leases(log, slot)
     code = result.get("exit_code")
-    if refusal and code != 4:
-        issue = f"final lease request was refused for {refusal}"
-    if issue is None and code == 0 and result.get("termination", "exit") == "exit" \
-            and result.get("capture_status", "recorded") == "recorded" \
-            and all(item.get("exit_code") == 0 for item in (result.get("cleanup") or {}).values()):
+    clean = result.get("termination", "exit") == "exit" and result.get("capture_status", "recorded") == "recorded"
+    if code == 4 and clean and evidence.issue is None and evidence.refusal:
+        return "blocked", "capacity_" + evidence.refusal
+    issue = lease_issue(evidence)
+    # Cleanup phases recorded with the result or read from the log (standalone) must all succeed.
+    failed = next((f"{key} exited {item.get('exit_code')}" for cleanup in (result.get("cleanup") or {}, evidence.cleanup)
+                   for key, item in cleanup.items() if item.get("exit_code") != 0), None)
+    if issue is None and failed is None and code == 0 and clean:
         return "passed", None
-    if issue is None and code == 4 and result.get("termination", "exit") == "exit" and refusal:
-        return "blocked", "capacity_" + refusal
-    return "failed", issue
+    return "failed", issue or failed
 
 
 def result_slot(result):
@@ -1129,6 +1176,15 @@ def pass_counts(directory, result):
     """Whether a recorded PASS still counts under lane_status, with the refusal reason when not."""
     status, reason = lane_status(result, Path(directory) / result["log"], result_slot(result))
     return status == "passed", reason or "lane evidence is not a complete PASS"
+
+
+class LegacyLaneEvidence(ValueError):
+    """Recorded evidence an older collector derived under a weaker lane rule; it is rerun, not refused."""
+
+
+def downgraded(result, reason):
+    return {"status": "failed", "reason": reason, **{key: result[key] for key in
+            ("command", "log", "log_sha256", "exit_code", "slot") if key in result}}
 
 
 def prepare(output, version, prepared=None):
@@ -1312,17 +1368,20 @@ def load_bound(output, entries=None, context=None):
                                             or result.get("from_log_sha256") != result["log_sha256"]):
                 raise ValueError("inherited evidence provenance is incomplete")
             counts, reason = pass_counts(output, result)
-            if not counts:
-                # An earlier collector counted this PASS under a weaker rule: rerun it.
-                receipt["checks"][name] = {"status": "failed", "reason": reason, **{key: result[key] for key in
-                    ("command", "log", "log_sha256", "exit_code", "slot") if key in result}}
-                if context is not None:
-                    context["attempts"].pop(name, None)
-                continue
-            if "evidence_transfer" in result:
+            if counts and "evidence_transfer" in result:
                 if not result.get("inherited"):
                     raise ValueError("reviewed transfer must remain inherited coverage")
-                validate_transferred_result(output, receipt, name, result, required_commands[name], root)
+                try:
+                    validate_transferred_result(output, receipt, name, result, required_commands[name], root)
+                except LegacyLaneEvidence as error:
+                    counts, reason = False, str(error)
+                else:
+                    continue
+            if not counts:
+                # An earlier collector counted this PASS under a weaker rule: rerun it.
+                receipt["checks"][name] = downgraded(result, reason)
+                if context is not None:
+                    context["attempts"].pop(name, None)
                 continue
             if result.get("inherited"):
                 binding = result.get("inherited_from", {})
@@ -2722,16 +2781,19 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
         for line in stream:
             stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if stage:
-                if stage[2] != b"0" and not (historical_p0 and stage.groups() == (b"guest", b"23", b"1")):
+                # Allocation, guest cleanup and release ends are judged by the lane lease rule below,
+                # so a recovered capacity refusal counts as it does for a collected result.
+                if (stage[2] != b"0" and stage[1] not in (b"allocation", b"guest-cleanup", b"cleanup/release")
+                        and not (historical_p0 and stage.groups() == (b"guest", b"23", b"1"))):
                     raise ValueError("standalone controller contains a failed phase")
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
             if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
                 raise ValueError("standalone controller contains a failed phase")
     # Only the lane's own grants are its environments; nested guest clients lease their own.
-    issue, refusal, leased, _ = lane_leases(files["log"], actual[-1])
-    environments = set(leased)
-    issue = issue or refusal and f"final lease request was refused for {refusal}"
-    if not environments or issue or not historical_p0 and ("cleanup/release", None) not in stages:
+    evidence = lane_leases(files["log"], actual[-1])
+    environments = set(evidence.environments)
+    status, issue = lane_status({"exit_code": native["exit_code"]}, evidence)
+    if not environments or status != "passed" or not historical_p0 and ("cleanup/release", None) not in stages:
         raise ValueError("standalone controller evidence incomplete" + (": " + issue if issue else ""))
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
@@ -2799,7 +2861,11 @@ def validate_transferred_result(output, receipt, name, result, command, root):
         facts = standalone_result(Path(launch["cwd"]), original, name, transfer["command"], paths, verify_source=False)
         if any(review["standalone"][role]["sha256"] != transfer["artifacts"][role] for role in ("native", "launch", "log")):
             raise ValueError("standalone original declaration changed")
-    if any(transfer[key] != value for key, value in facts.items()):
+    changed = sorted(key for key, value in facts.items() if transfer[key] != value)
+    if changed == ["environments"] and transfer["origin"] != "receipt":
+        # An older collector also recorded grants of clients nested in the guest.
+        raise LegacyLaneEvidence("standalone transfer environments differ under the lane lease rule")
+    if changed:
         raise ValueError("reviewed transfer original execution provenance changed")
 
 

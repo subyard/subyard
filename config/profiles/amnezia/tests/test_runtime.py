@@ -329,6 +329,7 @@ GUEST_DIRS[1]=/var/tmp/subyard-worktree.synthetic
 LEASE_KEEPER_PID=''
 CLIENT_CONFIG=synthetic-config
 quote_ssh_command() { printf '%q ' "$@"; }
+phase_marker() { :; }
 release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 100; return "$CLEANUP_FAILURE"; }
 ''' + functions + f'\ntrap cleanup_acceptance EXIT\nexit {original}\n'
                 started = time.monotonic()
@@ -368,6 +369,62 @@ release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 10
                         self.assertEqual(result['probes']['observe']['exit_code'], 255)
                         self.assertEqual(result['probes']['state']['stdout_bytes'], 22)
                         self.assertTrue(all(item.isfile() and item.mode == 0o600 for item in archive.getmembers()))
+
+    def test_acceptance_log_proves_cleanup_of_every_staged_vm_to_release_acceptance(self):
+        # The controller's own staging, guest cleanup, release and result lines, read by the core lane rule.
+        acceptance = load_module('release_acceptance_rule', PROFILE.parents[2] / 'dev/release-acceptance.py')
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        functions = 'diagnose_failure() {' + source.split('diagnose_failure() {', 1)[1].split('trap cleanup_acceptance EXIT', 1)[0]
+        for failed in ('', '2'):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                directory = Path(temporary)
+                binary = directory / 'bin'
+                binary.mkdir()
+                (binary / 'ssh').write_text('#!/bin/sh\ncase "$*" in *"e2e-vm-$FAILED_VM "*) exit 5 ;; esac\n')
+                (binary / 'ssh').chmod(0o700)
+                script = '''set -euo pipefail
+exec 2>&1
+. "$REPOSITORY/dev/agent-e2e.sh"
+ROOT="$REPOSITORY"
+OUTPUT="$TEMP_ROOT/output"
+LOCAL_TEMP="$TEMP_ROOT/local"
+mkdir -m 0700 "$OUTPUT" "$LOCAL_TEMP"
+CLIENT_CONFIG=synthetic-config LEASE_ID=lease LEASE_SLOT=slot-001 LEASE_RUN=0123abcd LEASE_EPOCH=1 LEASE_CAPABILITY=c
+facade_request() { printf '{"status":"ok"}\\n'; }
+guest() {
+  local vm="$1"; shift
+  case "$1" in
+    findmnt) printf 'ext4\\n' ;;
+    mktemp) printf '/var/tmp/subyard-worktree.vm%s\\n' "$vm" ;;
+    dd) cat >/dev/null ;;
+    sha256sum) printf '%s  worktree.tar.gz\\n' "$HASH" ;;
+    mkdir|tar) ;;
+    *) return 97 ;;
+  esac
+}
+printf 'E2E lease request: slot=slot-001 run=0123abcd\\n'
+printf 'E2E lease: yard=y project=p run=0123abcd purpose=amnezia-acceptance slot=slot-001 type=subyard-pair vms=2 base=%064d\\n' 0
+bundle="$LOCAL_TEMP/worktree.tar.gz"
+: >"$bundle"
+HASH="$(sha256sum "$bundle" | cut -d' ' -f1)"
+prepare_guest 1 "$bundle" "$HASH"
+prepare_guest 2 "$bundle" "$HASH"
+''' + functions + '\ntrap cleanup_acceptance EXIT\nexit 0\n'
+                environment = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'], REPOSITORY=str(PROFILE.parents[2]),
+                                   TEMP_ROOT=str(directory), FAILED_VM=failed)
+                observed = subprocess.run(['bash', '-c', script], stdout=subprocess.PIPE, env=environment, timeout=30)
+                log = directory / 'lane.log'
+                log.write_bytes(observed.stdout)
+                evidence = acceptance.lane_leases(log, 1)
+                self.assertEqual(observed.returncode, 3 if failed else 0, observed.stdout.decode())
+                self.assertIn(b'AMNEZIA_RESULT original_exit_code=0 capture_exit_code=0 cleanup_exit_code=' + (b'3' if failed else b'0'), observed.stdout)
+                if failed:
+                    self.assertEqual(evidence.issue, 'guest cleanup of VM2 exited 5')
+                else:
+                    self.assertEqual(evidence[:4], (None, None, [('subyard-pair', 2, '0' * 64)], [1, 2]))
+                # Without the guest cleanup lines, staged VMs keep the lease from counting.
+                log.write_bytes(b''.join(line for line in observed.stdout.splitlines(keepends=True) if b'phase=guest-cleanup' not in line))
+                self.assertIsNotNone(acceptance.lane_leases(log, 1).issue)
 
     def test_native_failure_capture_is_bounded_and_never_changes_the_capture_result(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()

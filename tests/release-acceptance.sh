@@ -25,6 +25,12 @@ from unittest.mock import patch
 
 root = Path(sys.argv[1])
 
+def direct_staging(mode, failed=""):
+    """The real staging (stage) or guest cleanup (cleanup) lines of a direct controller for VMs 1 and 2."""
+    return subprocess.run(["bash", str(root / "tests/helpers/direct-staging.sh"), str(root), mode, str(failed)],
+                          check=True, capture_output=True, text=True).stdout
+
+
 def published_baseline_refusals(source, catalog, previous=None):
     errors, pins, unique = [], {}, {"anchor": [], "hop": []}
     path = source / "dev/e2e/published-upgrade-baselines.tsv"
@@ -1520,16 +1526,19 @@ exit "$COLLECTOR_EXIT"
             old_receipt = (first / "receipt.json").read_bytes()
             before = (second / "receipt.json").read_bytes()
             log = Path(review["standalone"]["log"]["path"])
-            direct = ("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
-                + "sample_source_bundle_sha256=" + review["tested"]["candidate_bundle_sha256"] + " base_fingerprint=" + "a" * 64 + " lane=one\n"
-                + "".join(f"E2E_PHASE phase=transport state=start duration_seconds=0 exit_code=0 vm={vm}\n" for vm in (1, 2))
-                + "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+            # The shared staging and cleanup helpers print these lines for a direct controller.
+            staged, cleaned = (direct_staging(mode) for mode in ("stage", "cleanup"))
+            grant = "E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
+            direct = (grant + "sample_source_bundle_sha256=" + review["tested"]["candidate_bundle_sha256"] + " base_fingerprint=" + "a" * 64 + " lane=one\n"
+                + staged + "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
                 + "E2E lease: yard=nested slot=slot-003 run=nested type=android-test vms=1 base=" + "b" * 64 + "\n"
-                + "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1\n"
-                + "".join(f"E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm={vm}\n" for vm in (1, 2))
+                + "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1\n" + cleaned
                 + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
                 + "E2E lease released: slot=slot-002 run=sample\n")
-            for invalid in (direct.replace("E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n", ""),
+            self.assertIn("phase=transport state=end duration_seconds=0 exit_code=0 vm=2\n", staged)
+            for invalid in (direct.replace("E2E_PHASE phase=guest-cleanup state=end duration_seconds=0 exit_code=0 vm=2\n", ""),
+                            direct.replace(cleaned, direct_staging("cleanup", 2)),
+                            direct + "SAMPLE_RESULT original_exit_code=0 capture_exit_code=0 cleanup_exit_code=3\n",
                             direct.replace("E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n", ""),
                             direct.replace("E2E lease released: slot=slot-002 run=sample\n", ""),
                             direct + "E2E_PHASE phase=fixture/sample state=end duration_seconds=1 exit_code=1\n",
@@ -1546,9 +1555,15 @@ exit "$COLLECTOR_EXIT"
                 with self.assertRaises(ValueError):
                     m.transfer_evidence(second, first, name, declaration)
                 self.assertEqual((second / "receipt.json").read_bytes(), before)
-            log.write_text(direct)
+            # A typed capacity refusal before the lease is recovered, as it is for a collected result.
+            log.write_text("E2E_PHASE phase=allocation state=start duration_seconds=0 exit_code=0\n"
+                "E2E lease request: slot=slot-002 run=sample\n"
+                "agent-e2e: retryable capacity refusal for slot-002: resource=memory; retry after resources become available\n"
+                "E2E_PHASE phase=allocation state=end duration_seconds=1 exit_code=4\n"
+                "E2E_PHASE phase=cleanup/release state=end duration_seconds=0 exit_code=0\n" + direct)
             review["standalone"]["log"]["sha256"] = m.digest(log)
             declaration.write_text(json.dumps(review))
+            self.assertEqual(m.lane_status({"exit_code": 0}, log, 2), ("passed", None))
             self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
             _, target = m.load_bound(second)
             result = target["checks"][name]
@@ -1557,6 +1572,23 @@ exit "$COLLECTOR_EXIT"
             self.assertIsNone(result["duration_seconds"])
             self.assertNotIn("phases", result)
             self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
+            # An older collector also recorded the nested grant: reload reads it as failed and runs it again.
+            _, receipt = m.load_bound(second)
+            nested = {"type": "android-test", "vm_count": 1, "base_fingerprint": "b" * 64}
+            for record in (receipt["checks"][name], receipt["checks"][name]["evidence_transfer"]):
+                record["environments"] = sorted(record["environments"] + [nested], key=lambda item: item["type"])
+            m.save(second, receipt)
+            context = {}
+            _, loaded = m.load_bound(second, context=context)
+            self.assertEqual(loaded["checks"][name], {"status": "failed", "reason": "standalone transfer environments differ under the lane lease rule",
+                **{key: receipt["checks"][name][key] for key in ("command", "log", "log_sha256", "exit_code")}})
+            with redirect_stdout(io.StringIO()):
+                self.assertIn(name, m.preflight(second)["pending"])
+            # Any other provenance change stays a refusal.
+            receipt["checks"][name]["evidence_transfer"]["launched_at_utc"] = "2026-01-02T00:00:00+00:00"
+            m.save(second, receipt)
+            with self.assertRaises(ValueError):
+                m.load_bound(second)
 
     def test_known_p0_parser_requires_asserted_negative_and_final_cleanup(self):
         self.assertEqual(m.HISTORICAL_P0_SHA256, "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5")
@@ -2403,6 +2435,15 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["environments"], [{"type": "subyard-pair", "vm_count": 1, "base_fingerprint": "a" * 64}])
             self.assertEqual(result["environment_evidence"], "recorded")
+            # One read decides the verdict and the environments: a read failure fails both, never a PASS.
+            with patch.object(m, "lane_leases", side_effect=OSError("log read failed")) as read:
+                result = m.execute("profile:sample/two", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual((result["status"], result["capture_status"], result["environments"]), ("failed", "failed", []))
+            read = patch.object(m, "lane_leases", wraps=m.lane_leases)
+            with read as counted:
+                self.assertEqual(m.execute("profile:sample/three", ["bash", str(script)], output, output, m.clean_environment(), 1)["status"], "passed")
+            self.assertEqual(counted.call_count, 1)
 
     def test_client_handle_release_evidence_records_cleanup_after_a_lane_failure(self):
         # The standalone client's acquire line and handle-release markers, then a lane failure.
@@ -2443,8 +2484,15 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
         cases = (
             ("single clean lease", clean, None, None),
             ("legacy log without request lines", grant() + work(1) + release(), None, None),
-            ("nested clients stay inside the guest window", request + grant() + stage("transport", "start", vm=1) + nested
-                + stage("guest-cleanup", "end", vm=1) + release(), None, None),
+            ("nested clients stay inside the guest window", request + grant() + stage("transport", "start", vm=1)
+                + stage("transport", "end", vm=1) + nested + stage("guest-cleanup", "end", vm=1) + release(), None, None),
+            # A VM's cleanup inside its own guest window is a nested client's; it never clears the lane's work.
+            ("cleanup inside the VM's own guest window", request + grant() + stage("transport", "start", vm=1) + stage("transport", "end", vm=1)
+                + stage("guest", "start", vm=1) + stage("guest-cleanup", "end", vm=1) + stage("guest", "end", vm=1) + release(),
+                "VM1 guest work has no confirmed guest cleanup before release", None),
+            ("cleanup inside the VM's own transport window", request + grant() + stage("transport", "start", vm=1)
+                + stage("guest-cleanup", "end", vm=1) + stage("transport", "end", vm=1) + release(),
+                "VM1 guest work has no confirmed guest cleanup before release", None),
             ("concurrent VMs clean up inside each other's windows", request + grant(vms=2) + stage("guest", "start", vm=1) + stage("guest", "start", vm=2)
                 + stage("guest", "end", vm=2) + stage("guest-cleanup", "end", vm=2) + stage("guest", "end", vm=1)
                 + stage("guest-cleanup", "end", vm=1) + release(), None, None),
@@ -2474,7 +2522,21 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 "lease outcome or cleanup is unconfirmed", None),
             ("request without grant or refusal", clean + request, "lease request ended without a grant or typed refusal", None),
             ("failed allocation", request + stage("allocation", "end", 2), "allocation exited 2", None),
-            ("refusal for another slot", request + refusal.replace("slot-001", "slot-002"), None, None),
+            # Only an answer to the lane's own request resolves it.
+            ("refusal for another slot", request + refusal.replace("slot-001", "slot-002"),
+                "lease request ended without a grant or typed refusal", None),
+            ("refusal for another slot after a clean lease", clean + request + refusal.replace("slot-001", "slot-003"),
+                "lease request ended without a grant or typed refusal", None),
+            ("grant for another run", request + grant(run="0123abce") + work(1) + release(run="0123abce"),
+                "lease grant does not answer the lane's request", None),
+            ("request for another slot", request.replace("slot-001", "slot-002") + refusal.replace("slot-001", "slot-002"),
+                "lease requested for slot-002, not the lane slot", None),
+            # A direct controller's own result line reports its explicit cleanup outcome.
+            ("explicit failed controller cleanup", clean + "SAMPLE_RESULT original_exit_code=1 cleanup_exit_code=3 evidence=x\n",
+                "controller cleanup exited 3", None),
+            ("clean controller result", clean + "SAMPLE_RESULT original_exit_code=1 cleanup_exit_code=0\n", None, None),
+            ("nested controller result", request + grant() + stage("guest", "start", vm=1) + "SAMPLE_RESULT cleanup_exit_code=3\n"
+                + stage("guest", "end", vm=1) + stage("guest-cleanup", "end", vm=1) + release(), None, None),
             ("unbalanced nested guest output hides the release", request + grant() + stage("guest", "start", vm=1) + release(),
                 "lease slot-001 has no confirmed release", None),
         )
@@ -2485,18 +2547,23 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                     log.write_text(text)
                     self.assertEqual(m.lane_leases(log, 1)[:2], (issue, refused))
             log.write_text(clean + "x" * 5000 + "\n" + grant(run="0123abce")[:-1])
-            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
+            self.assertEqual(m.lane_leases(log, 1)[:4], (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
             # Cleanup reports only VMs cleaned inside the lane's own leases.
             log.write_text(stage("guest-cleanup", "end", vm=2) + request + grant(vms=2) + work(1) + release())
-            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 2, "a" * 64)], [1]))
-            log.write_text(request + grant() + stage("transport", "start", vm=1) + stage("guest", "start", vm=1)
+            self.assertEqual(m.lane_leases(log, 1)[:4], (None, None, [("subyard-pair", 2, "a" * 64)], [1]))
+            log.write_text(request + grant() + stage("transport", "start", vm=1) + stage("transport", "end", vm=1) + stage("guest", "start", vm=1)
                            + stage("guest-cleanup", "end", vm=2) + stage("guest", "end", vm=1) + stage("guest-cleanup", "end", vm=1) + release())
-            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
+            self.assertEqual(m.lane_leases(log, 1)[:4], (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
             # One decision for PASS, capacity block and failure, including results recorded elsewhere.
             log.write_text(clean)
             self.assertEqual(m.lane_status({"exit_code": 0}, log, 1), ("passed", None))
             self.assertEqual(m.lane_status({"exit_code": 0, "capture_status": "failed"}, log, 1), ("failed", None))
-            self.assertEqual(m.lane_status({"exit_code": 0, "cleanup": {"lease-release": {"exit_code": 1}}}, log, 1), ("failed", None))
+            self.assertEqual(m.lane_status({"exit_code": 0, "cleanup": {"lease-release": {"exit_code": 1}}}, log, 1), ("failed", "lease-release exited 1"))
+            # Evidence already read from the log gives the same decision without reading it again.
+            evidence = m.lane_leases(log, 1)
+            log.unlink()
+            self.assertEqual(m.lane_status({"exit_code": 0}, evidence), ("passed", None))
+            log.write_text(clean)
             self.assertEqual(m.lane_status({"exit_code": 4}, log, 1), ("failed", None))
             log.write_text(clean + request + refusal)
             self.assertEqual(m.lane_status({"exit_code": 4}, log, 1), ("blocked", "capacity_memory"))
@@ -2528,11 +2595,11 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                                     values=("y", "p", "0123abcd", "t", "slot-001", "subyard-pair", "2", "a" * 64))),
             (m.LEASE_RELEASED, printed(client, "E2E lease released: slot=%s run=%s\\n", values=("slot-001", "0123abcd"))),
             (m.LEASE_RELEASED, printed(client, "E2E lease released: handle=%s slot=%s reason=%s\\n", values=("0123abcd", "slot-001", "explicit"))),
-            (m.LEASE_RELEASE_END, printed(client, "E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\\n",
+            (m.CONTROLLER_RELEASE, printed(client, "E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\\n",
                                           values=("3", "1"))),
-            (m.LEASE_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", " vm=%s", "\\n",
+            (m.CONTROLLER_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", " vm=%s", "\\n",
                                     values=("guest-cleanup", "end", "1", "0", "2"))),
-            (m.LEASE_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", "\\n",
+            (m.CONTROLLER_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", "\\n",
                                     values=("cleanup/release", "end", "1", "0"))),
         ]
         for program in ("agent-e2e", "subyard-test-vms"):

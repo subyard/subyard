@@ -314,7 +314,18 @@ write_guest_command() {
 	printf '\n'
 }
 
+# Direct controllers stage without run_guest; the transport phase then records which VM has
+# a run directory that needs guest cleanup.
 prepare_guest() {
+  local rc=0
+  [ -z "$E2E_ACTIVE_PHASE" ] || { stage_guest "$@"; return; }
+  phase_start transport "$1"
+  stage_guest "$@" || rc=$?
+  phase_end "$rc"
+  return "$rc"
+}
+
+stage_guest() {
   local vm="$1" bundle="$2" expected_hash="$3" directory actual_hash fstype
   # Release assets and native build outputs must not consume the guest's RAM reserve.
   fstype="$(guest "$vm" findmnt -n -o FSTYPE -T /var/tmp </dev/null)" \

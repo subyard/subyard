@@ -72,20 +72,25 @@ capture_native_failure() {
     "${codes[0]}" "$(stat -c %s "$OUTPUT/native-failure.tar")" >>"$OUTPUT/capture-result"
 }
 cleanup_acceptance_resources() {
-  local cleanup_rc=0 vm command
+  local cleanup_rc=0 vm command rc started
   if [ -n "$LEASE_KEEPER_PID" ]; then
     kill "$LEASE_KEEPER_PID" >/dev/null 2>&1
     timeout --foreground --signal=KILL 2 tail --pid="$LEASE_KEEPER_PID" -f /dev/null >/dev/null 2>&1
     kill -KILL "$LEASE_KEEPER_PID" >/dev/null 2>&1
   fi
   for vm in "${!GUEST_DIRS[@]}"; do
+    # Release acceptance counts the lease only after each staged VM's guest cleanup succeeded.
+    rc=0 started=$SECONDS
+    phase_marker guest-cleanup start 0 0 "$vm"
     command="$(quote_ssh_command sudo -n find "${GUEST_DIRS[$vm]}" -depth -delete)"
     case "${GUEST_DIRS[$vm]}" in
       /var/tmp/subyard-worktree.*)
         timeout --foreground --signal=TERM --kill-after=2 8 ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command" \
-          </dev/null >/dev/null 2>&1 || cleanup_rc=3 ;;
-      *) cleanup_rc=3 ;;
+          </dev/null >/dev/null 2>&1 || rc=$? ;;
+      *) rc=1 ;;
     esac
+    phase_marker guest-cleanup end "$((SECONDS - started))" "$rc" "$vm"
+    [ "$rc" = 0 ] || cleanup_rc=3
   done
   # The original facade retains release authentication and response handling.
   # shellcheck disable=SC2317

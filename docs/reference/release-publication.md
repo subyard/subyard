@@ -640,18 +640,23 @@ Use `supersede --output DIR` to retire an idle candidate while preserving its or
 Only one mutating collector may use an output directory at a time.
 
 **Lane lease rule.** One rule (`lane_status`) decides whether a result counts as PASS or a capacity block. The
-collector, reuse of a recorded PASS, import, transfer, hosted collection and operator acceptance
-all apply it to the bound log. Only the lane's own lines count: lines inside a guest window
-(`E2E_PHASE phase=guest` start to end) come from clients nested in the guest, except guest
-cleanup ends of concurrent VMs. A PASS needs exit 0 and every lease of the lane closed cleanly:
+collector, reuse of a recorded PASS, import, transfer, standalone evidence, hosted collection and
+operator acceptance all apply it to one ordered read of the bound log. Only the lane's own lines
+count: lines inside a guest window (`E2E_PHASE phase=guest` start to end) come from clients nested
+in the guest, except guest cleanup ends of concurrent VMs. A PASS needs exit 0 and every lease of
+the lane closed cleanly:
 
-- each `E2E lease request: slot=… run=…` ends in a grant or a typed capacity refusal;
+- each `E2E lease request: slot=… run=…` is for the lane slot and ends in a grant for the same
+  slot and run or a typed capacity refusal for that slot;
 - each grant is for the lane slot and is released for the same slot and run before the next
   grant; `E2E lease had already ended` does not count as a release;
 - each VM with transport or guest work has a successful guest cleanup after its last work and
-  before the release;
+  before the release. A VM's cleanup counts only after its own transport and guest windows
+  ended; one inside them belongs to a nested client. Direct controllers that stage through
+  `prepare_guest` record that staging as a transport phase;
 - no nonzero lease release, allocation, cleanup/release or guest cleanup end, no explicit
-  unconfirmed acquire or cleanup diagnostic, and no final capacity refusal.
+  unconfirmed acquire or cleanup diagnostic, no direct controller result line
+  (`NAME_RESULT … cleanup_exit_code=N`) with a nonzero cleanup exit, and no final capacity refusal.
 
 Exit 4 is `blocked/capacity_memory|disk` only when the last lease event is the typed refusal for
 the lane slot and every earlier lease closed cleanly; otherwise it is `failed`. A recorded PASS
@@ -746,10 +751,11 @@ Relative paths resolve beside the review declaration. The original collector ent
 pending. The native terminal object must have a final integer exit zero, and the complete
 controller log must retain the VM base, successful cleanup of every VM and lease release.
 Only the lane's own grants are its environments, so a standalone transfer committed earlier
-whose log has a nested grant fails reload as a provenance change; re-create that transfer.
+whose log has a nested grant is read as `failed` on reload and runs again.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
-for direct controllers and stays unknown; any observed failed phase rejects the transfer.
+for direct controllers and stays unknown; any observed failed phase rejects the transfer, except
+allocation, guest cleanup and release ends, which the lane lease rule decides.
 Rich launch records contain `cwd`, `argv`, `source_fingerprint`, `runtime_sha256`, `bundle_sha256`,
 `acceptance_script_sha256` and optional `launched_at_utc`. Original raw records with `cwd`, `argv`
 and timezone-aware `started_at` are also supported. Their checksum-bound bundle must exactly match

@@ -637,11 +637,11 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        issue, refusal, leased, cleaned = a.lane_leases(files["log"], argv[-1])
-        issue = issue or refusal and f"final lease request was refused for {refusal}"
-        if issue or not leased:
+        evidence = a.lane_leases(files["log"], argv[-1])
+        issue = a.lease_issue(evidence)
+        if issue or not evidence.environments:
             raise ValueError("operator acceptance original cleanup or release unconfirmed" + (": " + issue if issue else ""))
-        environments = set(leased)
+        environments, cleaned = set(evidence.environments), evidence.cleaned
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
