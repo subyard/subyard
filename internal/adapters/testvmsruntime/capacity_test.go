@@ -17,16 +17,14 @@ import (
 
 func memoryFixture(t *testing.T) (string, string, func(string, string)) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	proc, group := filepath.Join(root, "proc"), filepath.Join(root, "cgroup")
 	write := func(path, value string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte(value), 0600)
 	}
 	write(filepath.Join(proc, "meminfo"), "MemAvailable: 16384 kB\n")
 	write(filepath.Join(proc, "self/cgroup"), "0::/\n")
@@ -227,7 +225,7 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 }
 
 func TestConcurrentMixedAdmissionAndRetryAfterReady(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
 	grants := make([]LeaseGrant, 2)
@@ -429,7 +427,7 @@ func TestAdmissionReservesRequestedPairDisk(t *testing.T) {
 }
 
 func TestAdmissionCreditsOnlyConfirmedExistingDisk(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	cfg := fixtureConfig(t)
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
 	for i, name := range []string{EnvironmentPair, EnvironmentAndroid} {
@@ -502,7 +500,7 @@ func TestAdmissionBoundsChangingHostCapacityAndDiskCredit(t *testing.T) {
 			cfg := fixtureConfig(t)
 			cfg.DiskBudget = "160GiB"
 			cfg.Memory, cfg.Disk = "4GiB", "20GiB"
-			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 			pair, _ := cfg.EnvironmentSpec(EnvironmentPair)
 			first, err := store.AcquireV3Slot(pair, "client", "SHA256:key", "yard", "Project", "first", "capacity", "slot-001")
 			if err != nil {
@@ -574,7 +572,7 @@ func TestAdmissionBoundsChangingHostCapacityAndDiskCredit(t *testing.T) {
 }
 
 func TestDiskUsageRequiresAllocatedBlocks(t *testing.T) {
-	volume := filepath.Join(t.TempDir(), "volume")
+	volume := filepath.Join(testkit.TempDir(t), "volume")
 	if err := os.Mkdir(volume, 0700); err != nil {
 		t.Fatal(err)
 	}

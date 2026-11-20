@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func syntheticBrokerMemory() (BrokerMemoryCapacity, error) {
@@ -183,10 +185,8 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 
 func TestRefreshFailurePreservesPreviousBaseAndLeasePool(t *testing.T) {
 	cfg := fixtureConfig(t)
-	cfg.RecipeRoot = t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("fixture recipe"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	cfg.RecipeRoot = testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("fixture recipe"), 0600)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	rt := Runtime{Config: cfg, Now: func() time.Time { return now }, Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		if len(args) > 1 && args[0] == "image" && args[1] == "list" {

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -262,18 +264,11 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 			}
 			eventDirectory := filepath.Join(root, ".test-vms-broker-events")
 			incidentDirectory := filepath.Join(root, "test-vms-broker-incidents")
-			for _, directory := range []string{eventDirectory, incidentDirectory} {
-				if err := os.MkdirAll(directory, 0o750); err != nil {
-					return err
-				}
-			}
-			if err := os.Chmod(eventDirectory, 0o700); err != nil {
+			owner := sink.operatorOwnership()
+			if err := safefs.EnsurePrivateDir(eventDirectory); err != nil {
 				return err
 			}
-			if err := os.Chmod(incidentDirectory, 0o750); err != nil {
-				return err
-			}
-			if err := sink.setOperatorGroup(incidentDirectory); err != nil {
+			if err := safefs.EnsureDir(incidentDirectory, safefs.DirOptions{Mode: 0o750, Owner: owner}); err != nil {
 				return err
 			}
 			for _, event := range batch.Events {
@@ -283,10 +278,7 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 				}
 				payload = append(payload, '\n')
 				path := filepath.Join(eventDirectory, event.EventID+".json")
-				if err := writeImmutableDurable(path, payload, 0o640); err != nil {
-					return err
-				}
-				if err := sink.setOperatorGroup(path); err != nil {
+				if err := writeImmutableOwned(path, payload, 0o640, owner); err != nil {
 					return err
 				}
 			}
@@ -300,10 +292,7 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 					return errors.New("broker incident exceeds the size limit")
 				}
 				path := filepath.Join(incidentDirectory, incident.IncidentID+".json")
-				if err := writeImmutableDurable(path, payload, 0o640); err != nil {
-					return err
-				}
-				if err := sink.setOperatorGroup(path); err != nil {
+				if err := writeImmutableOwned(path, payload, 0o640, owner); err != nil {
 					return err
 				}
 			}
@@ -333,10 +322,10 @@ func (sink *HostSink) materialize(root string, events []BrokerEvent) error {
 		}
 	}
 	path := filepath.Join(root, HostEventLogName)
-	if err := writeAtomicDurable(path, payload.Bytes(), 0o640); err != nil {
-		return err
-	}
-	return sink.setOperatorGroup(path)
+	return safefs.WriteFile(path, payload.Bytes(), safefs.Options{
+		Mode: 0o640, Owner: sink.operatorOwnership(), ParentMode: 0o700,
+		TempPattern: "." + filepath.Base(path) + ".*",
+	})
 }
 
 func (sink *HostSink) rotateIncidents(
@@ -456,7 +445,7 @@ func (sink *HostSink) rotateIncidents(
 		}
 		closedBytes -= incident.size
 	}
-	return syncDirectory(directory)
+	return safefs.SyncDir(directory)
 }
 
 func (sink *HostSink) rotateEvents(
@@ -546,7 +535,7 @@ func (sink *HostSink) rotateEvents(
 		kept = append(kept, item.event)
 	}
 	if len(kept) != len(stored) {
-		if err := syncDirectory(eventDirectory); err != nil {
+		if err := safefs.SyncDir(eventDirectory); err != nil {
 			return nil, err
 		}
 	}
@@ -557,38 +546,30 @@ func eventGenerationKey(source, slotID string, generation uint64) string {
 	return source + "\x00" + slotID + "\x00" + strconv.FormatUint(generation, 10)
 }
 
-func (sink *HostSink) setOperatorGroup(path string) error {
+func (sink *HostSink) operatorOwnership() *safefs.Ownership {
 	if os.Geteuid() == 0 && sink.OperatorGID >= 0 {
-		return os.Chown(path, 0, sink.OperatorGID)
+		return &safefs.Ownership{UID: 0, GID: sink.OperatorGID}
 	}
 	return nil
 }
 
 func (sink *HostSink) ensureLogRoot(root string) error {
-	info, statErr := os.Stat(root)
-	if statErr == nil {
+	owner := sink.operatorOwnership()
+	info, err := os.Stat(root)
+	if err == nil {
 		stat, isSystemStat := info.Sys().(*syscall.Stat_t)
-		if os.Geteuid() == 0 && sink.OperatorGID >= 0 &&
-			isSystemStat && stat.Uid == 0 {
-			if err := os.Chown(root, 0, sink.OperatorGID); err != nil {
-				return err
-			}
-			return os.Chmod(root, info.Mode().Perm()|0o070)
+		if owner != nil && isSystemStat && stat.Uid == 0 {
+			// The shared logs directory can have other consumers and modes.
+			return safefs.EnsureDir(root, safefs.DirOptions{
+				Mode: info.Mode().Perm() | 0o070, Owner: owner, Existing: safefs.Repair,
+			})
 		}
 		return nil
 	}
-	if !os.IsNotExist(statErr) {
-		return statErr
-	}
-	if err := os.MkdirAll(root, 0o770); err != nil {
+	if !os.IsNotExist(err) {
 		return err
 	}
-	if os.Geteuid() == 0 && sink.OperatorGID >= 0 {
-		if err := os.Chown(root, 0, sink.OperatorGID); err != nil {
-			return err
-		}
-	}
-	return os.Chmod(root, 0o770)
+	return safefs.EnsureDir(root, safefs.DirOptions{Mode: 0o770, ParentMode: 0o770, Owner: owner})
 }
 
 func readEventDirectory(directory string) ([]BrokerEvent, error) {
@@ -706,32 +687,7 @@ func ParseOperatorGID(value string) (int, error) {
 }
 
 func writeAtomicDurable(path string, payload []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	temp := file.Name()
-	defer os.Remove(temp)
-	if err := file.Chmod(mode); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err := file.Write(payload); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temp, path); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
+	return safefs.WriteFile(path, payload, safefs.Options{
+		Mode: mode, ParentMode: 0o700, TempPattern: "." + filepath.Base(path) + ".*",
+	})
 }
