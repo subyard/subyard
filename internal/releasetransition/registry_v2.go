@@ -76,7 +76,7 @@ func (registry RegistryV2) historyRegistry() (migrationhistory.Registry, error) 
 	for domain, prefix := range registry.RetiredPrefixes {
 		retired[domain] = string(prefix.Digest)
 	}
-	owner, err := migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired)
+	owner, err := migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired, registry.retiredMigrationIDs()...)
 	if err != nil {
 		return migrationhistory.Registry{}, invalid("%v", err)
 	}
