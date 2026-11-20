@@ -263,8 +263,12 @@ ok 'update reached Ready with the same instance and guest data'
 
 # A published release that ships the candidate's exact registry stays its rollback target.
 runtime="$OPERATOR_HOME/.subyard/runtime"
-if operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json" \
-  "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json"; then
+registry_relation=0
+operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json" \
+  "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" || registry_relation=$?
+# cmp exits 1 for different registries and 2 when either cannot be read.
+[ "$registry_relation" -le 1 ] || die 'cannot compare the published and candidate registries'
+if [ "$registry_relation" = 0 ]; then
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
   operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \
