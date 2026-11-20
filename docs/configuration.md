@@ -256,7 +256,9 @@ quoted command word, an assignment prefix, a wrapper, `xargs`, `find -exec`, `ev
 compound-command keyword, a subshell or function body, a `$(…)` or backtick substitution, and
 literal shell `-c` commands such as `bash -c 'sudo …'`. Use the bare command, such as
 `sudo apt-get install …`, to reach the approval prompt; a direct command after `&&`, `;` or `|`
-also prompts. The Git approval limits apply here too. In addition:
+also prompts. For Codex the whole command must be plain, as for Git: a redirect such as
+`> /dev/null`, a variable, a newline or a comment makes the hook refuse it, because Codex would
+otherwise run it without asking. The Git approval limits apply here too. In addition:
 
 - Claude blocks a Bash call if the hook fails or times out. Codex continues its normal
   permission flow on hook failures and timeouts, so only its direct sudo prompt rules remain.
@@ -866,8 +868,10 @@ words, executable paths, assignment prefixes, and literal shell `-c` commands. I
 behind a wrapper (`env`, `command`, `exec`, `nohup`, `nice`, `time`, `timeout`, `setsid`,
 `stdbuf`, `xargs`), as a `find -exec`, `-execdir`, `-ok` or `-okdir` command, in `eval`, after a
 compound-command keyword such as `if`, `then`, `do`, `{` or `!`, in a subshell or function body,
-and inside `$(…)` or backtick substitutions. Use a direct `git commit` or `git push`
-to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
+and inside `$(…)` or backtick substitutions. Codex matches its prompt rules only against plain
+commands: words joined by `&&`, `||`, `;` or `|`. Its hook therefore also rejects `git commit`
+and `git push` in any command with a redirect such as `2>&1`, a variable, a newline or a
+comment. Use a direct `git commit` or `git push` to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
 or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
 and `git rebase` continue through the normal permission flow.
 

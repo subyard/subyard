@@ -31,6 +31,8 @@ git_approval_hook() {
 """Recognize literal gated command words without executing or expanding shell input.
 
 Arguments name the gates: git (commit and push) and sudo (privilege escalation).
+--plain also requires the whole command to be words joined by &&, ||, ; or |, which is the
+only shell a client such as Codex matches its approval rules against.
 """
 
 import json
@@ -334,6 +336,40 @@ def gated(executable, args, gates):
     return None
 
 
+def plain(command):
+    """Return whether the command is only words joined by &&, ||, ; or |."""
+    command = command.replace("\\\n", "")
+    offset = 0
+    while offset < len(command):
+        token = TOKEN.match(command, offset)
+        if token is None:
+            return False
+        offset, raw = token.end(), token[0]
+        if raw.isspace():
+            if "\n" in raw:
+                return False
+        elif raw[0] in ";&|\n":
+            if raw not in {";", "|", "&&", "||"}:
+                return False
+        elif raw[0] in "#()<>" or any(c in re.sub(r"'[^']*'", "", raw) for c in "$`"):
+            # Single-quoted text is literal; anything else with $ or ` expands.
+            return False
+    return True
+
+
+def direct_action(command, gates):
+    """Return the first gated command that runs directly in a top-level simple command."""
+    for tokens, _ in simple_commands(split_substitutions(command.replace("\\\n", ""))[0]):
+        try:
+            words = [shlex.split(raw, comments=False)[0] for raw, _, _ in tokens]
+        except (IndexError, ValueError):
+            continue
+        action = words and gated(posixpath.basename(words[0]), words[1:], gates)
+        if action:
+            return action
+    return None
+
+
 def nested_words(words, gates, depth):
     """Check words that another program runs as a command; none of them is direct."""
     return denied_action(shlex.join(words), gates, nested=True, depth=depth + 1) if words else None
@@ -402,9 +438,17 @@ def denied_action(command, gates=("git",), nested=False, depth=0):
 
 
 def main():
-    gates = set(sys.argv[1:]) or {"git"}
+    gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
     payload = json.load(sys.stdin)
-    action = denied_action(payload["tool_input"]["command"], gates)
+    command = payload["tool_input"]["command"]
+    action = denied_action(command, gates)
+    if not action and "--plain" in sys.argv[1:] and not plain(command):
+        action = direct_action(command, gates)
+        if action:
+            print(f"Approval requires `{action}` in a plain command: words joined only by "
+                  f"&&, ||, ; or |, without redirects, variables, substitutions or grouping.",
+                  file=sys.stderr)
+            return 2
     if action and action.startswith("git "):
         print(f"Git approval requires a direct `{action}` command. "
               f"For another directory, use `cd <directory> && {action}`.",
@@ -480,8 +524,8 @@ matcher = "Bash"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = $(jq -n --arg path "$git_hook" --arg gates "$APPROVAL_GATES" \
-  'if $gates == "git" then $path | @sh else ($path | @sh) + " " + $gates end')
+# Codex matches its prompt rules only against plain command sequences; the hook refuses the rest.
+command = $(jq -n --arg path "$git_hook" --arg gates "$APPROVAL_GATES" '($path | @sh) + " --plain " + $gates')
 timeout = 3
 REQUIREMENTS
 }

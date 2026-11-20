@@ -12,7 +12,9 @@
 - With `CODING_TOOL_GIT_APPROVAL=prompt`, the Claude and Codex hook now also rejects
   `git commit` and `git push` behind a wrapper such as `env`, `command`, `exec`, `nohup`,
   `nice`, `time` or `timeout`, in `xargs`, `find -exec` or `eval`, after a compound-command
-  keyword, in a subshell, and inside a substitution. Run the direct command instead.
+  keyword, in a subshell, and inside a substitution. Codex also refuses them in a command with a
+  redirect, variable, newline or comment, which its prompt rules do not match. Run the direct
+  command instead.
 - Claude, Codex, and OpenCode now default to running Git commits and pushes
   without a managed approval prompt. Existing yards keep their installed policy
   until the next `yard init`. Set `CODING_TOOL_GIT_APPROVAL=prompt` to keep or

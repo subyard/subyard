@@ -200,3 +200,15 @@ for gates in (["sudo"], ["git", "sudo"]):
     for command in ("sudo id && echo ok", "echo x | sudo tee /tmp/x > /dev/null",
                     "cat > f <<'EOF'\ndata\nEOF\nsudo install -m 0644 f /etc/f", "sudo $(which id)"):
         allowed(gates, command)
+
+# --plain (Codex): a gated command needs a command of words joined by &&, ||, ; or |.
+for gates, name, call in ((["--plain", "sudo"], "sudo", "sudo id"), (["--plain", "git", "sudo"], "sudo", "sudo id"),
+                          (["--plain", "git"], "git push", "git push"), (["--plain", "git", "sudo"], "git push", "git push")):
+    for command in (f"{call} > /dev/null", f"{call} 2>&1", f"echo x | {call} > out", f"{call}\necho done",
+                    f"{call} $HOME", f"{call} # note", f"{call} &", f"{call} < /dev/null"):
+        denied(gates, command, name)
+    for command in (call, f"{call} | cat", f"true && {call}", f"{call}; echo ok", f"{call} || true",
+                    f"{call} 'quoted $text'", "echo hi > f", "cat f > /dev/null && echo $HOME"):
+        allowed(gates, command)
+    for command in (f"{call} > /dev/null", f"{call}\necho done"):
+        allowed([gate for gate in gates if gate != "--plain"], command)

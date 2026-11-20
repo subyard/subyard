@@ -325,7 +325,8 @@ def sudo_checks(app, provider, workspace):
     thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
     cases = [
         ('direct', 'sudo -n touch {m}', True),
-        ('redirect', 'sudo -n touch {m} > /dev/null', True),
+        # Codex rules match only plain command sequences, so the managed hook refuses redirects.
+        ('redirect', 'sudo -n touch {m} > /dev/null', False),
         ('pipe', 'sudo -n touch {m} | cat', True),
         ('and-list', 'true && sudo -n touch {m}', True),
         ('if', 'if sudo -n touch {m}; then true; fi', False),

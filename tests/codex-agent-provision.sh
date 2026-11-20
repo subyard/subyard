@@ -245,7 +245,7 @@ group, = policy['hooks']['PreToolUse']
 assert group['matcher'] == 'Bash'
 hook, = group['hooks']
 assert hook['type'] == 'command' and hook['timeout'] == 3
-assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook')]
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), '--plain', 'git']
 assert policy['allowed_approval_policies'] == ['on-request']
 assert policy['allowed_approvals_reviewers'] == ['user']
 rule, = policy['rules']['prefix_rules']
@@ -324,7 +324,7 @@ assert [rule['pattern'] for rule in rules] == git + sudo, rules
 assert {rule['decision'] for rule in rules} == {'prompt'}, rules
 hook, = policy['hooks']['PreToolUse'][0]['hooks']
 gates = ['git', 'sudo'] if git else ['sudo']
-assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), *gates], hook
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), '--plain', *gates], hook
 PY
   CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "sudo prompt readiness failed with Git $git_mode"
 done
