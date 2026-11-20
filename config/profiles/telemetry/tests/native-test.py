@@ -50,6 +50,7 @@ class NativeTest(unittest.TestCase):
         for path in (claude, codex):
             self.assertNotIn(self.token.encode(), path.read_bytes())
         self.assertFalse(otel['log_user_prompt'])
+        self.assertIs(otel['log_agent_responses'], True)
         self.assertNotIn('analytics', native.parse('codex', codex.read_bytes()))
         for path in (claude, codex):
             info = path.stat()

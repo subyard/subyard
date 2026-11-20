@@ -30,7 +30,8 @@ if [ "$lane" != full-uninstall ] && [ "$lane" != memory-boundary ]; then
     || { printf 'test-vms frozen candidate checksum mismatch\n' >&2; exit 2; }
 fi
 if [ "$lane" = all ] || [ "$lane" = broker-cold-upgrade ]; then
-  bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --type android-test --purpose broker-cold-upgrade --vm 1 -- \
+  # Three 10GiB builder disks plus the 4GiB reserve leave a 40GiB guest too little OS headroom.
+  bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --type android-test --purpose broker-cold-upgrade --vm 1 --disk 50GiB -- \
     timeout --signal=TERM --kill-after=120 7200 bash dev/e2e/staging-reliability.sh --supported-upgrade
 fi
 if [ "$lane" = all ] || [ "$lane" = service-container ]; then

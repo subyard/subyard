@@ -17,9 +17,13 @@ Readiness checks return state and diagnostics; the operation boundary renders th
 Expected drift is not a warning. Follow the
 [activation diagnostic contract](docs/control-plane.md#release-migrations).
 
-Checks report every refusal they can determine independently, in stable order, not only the first.
-Only a finding that depends on a failed read may be skipped.
-Use `domain.CollectRefusals` for each check being changed; no separate audit is required.
+A check whose result is shown to the operator — a command preflight, `--check`, `validate`,
+`status`, readiness, a release gate verdict or a migration refusal — reports every refusal it can
+determine independently, in stable order, through `domain.CollectRefusals`. It may skip only a
+finding that needs data from a read that failed. Helpers below that boundary (parsers,
+single-value validators, file and guest reads, apply steps after the first mutation) may fail
+fast; the boundary check calls independent helpers separately and collects their results.
+Review applies this rule to the boundary check being changed, not to helpers it calls.
 
 Before suggesting CLI commands, check the [generated CLI reference](docs/cli-reference.md)
 or the command's `--help`. Registry completion flags apply to whole command families,

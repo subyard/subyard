@@ -570,8 +570,9 @@ an existing target must be owned by the developer and not writable by group or o
 3. It renames the copies into the target without replacing anything. The target wins:
    an entry that already exists there is not transferred, and where the target has a
    non-directory in place of a source directory, that whole subtree is not transferred.
-   The plan lists, bounded with a count, the entries that already exist in the target;
-   their source copies are deleted with the backup. Only directories the transfer
+   The plan counts the entries that already exist in the target and gives an `ls`
+   command for the target; their source copies are deleted with the backup. Entry names
+   come from the yard and are not rendered. Only directories the transfer
    creates get the source modes; existing target directories are never changed. If the
    target refuses entries (permissions or space), every refused path is reported as
    pending configuration and there is no exchange; the next `yard init` restarts it.
@@ -596,8 +597,9 @@ Finish deletes a backup only while it is still the recorded original directory o
 parent's mount. It never follows a link or enters a mount. Anything finish cannot remove
 (a changed backup, a mount inside it, foreign entries in the stage, or a filesystem error
 such as a denied access) is kept and the record is removed anyway. `yard integration status` lists each retained
-`<directory>.subyard-backup-*` and `.subyard-stage-<yard>-*` by name, with its size (or
-unknown) and an inspection command; remove it manually once its data is no longer needed.
+`<directory>.subyard-backup-*` and `.subyard-stage-<yard>-*` by its declared directory and name
+prefix, a short digest of its name, its size (or unknown) and a `find` command for it; remove it
+manually once its data is no longer needed.
 Retained items are state, not a warning, and never block activation, init or deselection.
 
 Transfer state is independent of the selection. An adoption interrupted before the
@@ -680,8 +682,9 @@ The boot loader verifies the two profiles against the Subyard ownership record i
 `/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot
 registration and missing live profiles. Administrator overrides, unrecorded policy installations,
 and missing or changed owned files require operator review. When a release update or
-`yard migrate` refuses while inspecting this policy, the refusal names the yard and the policy
-finding and points to `yard -Y NAME integration status`.
+`yard migrate` refuses while inspecting this policy, the refusal names the yard, states that its
+policy cannot be verified or reconciled and points to `yard -Y NAME integration status`; the
+finding text comes from the yard and is not rendered.
 
 To opt out, remove `codex` from the yard's `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off`
 in the yard's settings, and run `yard setup` for that yard. Setup refuses this setting before

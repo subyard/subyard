@@ -40,6 +40,11 @@ One bounded writer batches requests into SQLite WAL transactions with
 failure is retryable; no memory-only admission is success. Requests are atomic:
 the official receiver's consumer interface has no downstream partial-success
 counts, so the collector never commits part of a request and rejects the whole.
+The one exception is a raw OTLP refusal for disk budget or partition reserve:
+only raw OTLP and its per-request correlations are refused; the request's
+derived usage records and bindings are committed, and their deterministic IDs
+make the sender's retry add nothing. A spool frame carrying raw OTLP is retried
+whole.
 Field redactions are counted as policy actions, not undisclosed record loss.
 
 Raw rows have stable `(origin_id, event_id)` pairs. Export and replay preserve
@@ -49,7 +54,9 @@ Identical payloads with distinct identities remain separate. Run and resource
 joins are scoped to the origin.
 Native OTLP has no universal delivery ID: an acknowledgement lost after commit
 can produce another delivery. Native source IDs are retained where available;
-ambiguous retry duplicates are not advertised as exactly-once usage totals.
+ambiguous retry duplicates in raw OTLP are not advertised as exactly-once
+usage totals. Derived usage records are keyed by the provider request ID or the
+native log's own time and sequence, so they do not repeat.
 
 ## Internal record contract
 

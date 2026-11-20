@@ -248,7 +248,7 @@ Use the store's own identifiers and export cursor for each database. Keep
 archive exports private under the previous release's capture rules. Schema 5
 stores the schema version and generation ID in the initialization transaction.
 The first spool cutover is the implemented archive transition. General rotation
-and compression are deferred. A future transition must checkpoint WAL and drain
+is deferred. A future transition must checkpoint WAL and drain
 or transfer committed spool offsets and loss revisions before a new store
 consumes surviving segments. The logical JSON/protobuf export stays independent
 of the physical storage codec, with bounded decoded sizes and SQL access to
@@ -276,8 +276,10 @@ The canonical source is `records`. Its provenance columns include
 `origin_id`, `event_id`, `sequence`, `source_id`, `source_version`, `source_time`,
 `received_time`, `kind`, `encoding`, `policy_version`, `import_policy_version`
 and `redactions`.
-`protobuf` stores sanitized supported OTLP ExportRequest data; `body` stores
-versioned internal resource/run JSON. Views and projections are conveniences:
+`protobuf` stores sanitized supported OTLP ExportRequest data as one zstd frame
+per record; rows written before compression stay plain protobuf. `export`
+returns plain protobuf for both, while `query` returns the stored bytes. `body`
+stores versioned internal resource/run JSON. Views and projections are conveniences:
 
 | Table/view | Meaning |
 | --- | --- |
@@ -288,6 +290,8 @@ versioned internal resource/run JSON. Views and projections are conveniences:
 | `samples`, `sample_values` | One measurement per object/source event |
 | `allocations` | Generation-specific latest allocation state |
 | `gaps` | Missing boundaries, stale/offline sources and coverage failures |
+| `model_requests`, `tool_outputs` | Usage records per model request and tool output |
+| `model_turn_triggers` | Model requests with the preceding usage event of the same agent |
 
 Each displayed object's `sample_refs` points to canonical `(origin_id,event_id)`
 records. Export or join those identities to inspect source provenance independently
@@ -351,9 +355,71 @@ ORDER BY s.source_time
 LIMIT 1000;
 ```
 
-Do not write derived calculations back into canonical records. A future usage
-projection can be rebuilt from these records without combining incompatible token
-counters, per-request events or cache/reasoning subsets.
+Do not write derived calculations back into canonical records.
+
+### Usage and attribution
+
+The collector derives one `usage` record per native model request, tool output
+and user prompt from the sanitized log it stores, and a durable `relation` for
+each session link it sees. Both carry `source_id=collector:usage`. They hold only
+IDs, categories and counters; native counter names are kept, so incompatible
+counters are never combined. Metrics and spans repeat the same usage and are not
+counted. Usage records are not rebuilt from older raw OTLP.
+
+| Client | Model request | Tool output | Request identity | Links |
+| --- | --- | --- | --- | --- |
+| Claude Code | `api_request`: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` (with 5m/1h), `cost_usd`, `query_source`, `request_id`, `prompt.id`, `event.sequence` | `tool_result`: `tool_use_id`, `tool_result_size_bytes`, `tool_input_size_bytes` | provider `request_id`, else log time and sequence | `session.id`; subagents by `agent_id`/`parent_agent_id` in the same session (2.1.327; earlier releases count subagents as the session) |
+| Codex | `sse_event` with `event.kind=response.completed`: `input_token_count` (includes `cached_token_count`), `output_token_count`, `reasoning_token_count`, `cache_write_token_count`; `tool_token_count` is their total | `tool_result`: `call_id`, `output_length`, `output_line_count` | log time (no response ID) | `conversation.id`; a child thread by `parent.conversation.id` on its final-answer `codex.agent_response` |
+
+Claude reports absent cache counters as zero, so a zero cache value does not
+prove the provider reported one. Codex fields that are absent stay `NULL`. A
+Codex WebSocket prewarm request can report its own completed response.
+
+Usage record IDs are derived from the client, session and request identity, so a
+re-delivered export, a resumed sender or a repeated replay adds no usage.
+`model_turn_triggers.cause` is `new_prompt` after a user prompt, `tool_result`
+after a tool output, otherwise `unknown`.
+
+A coordinator is attributed by its own session. Native subagents appear under
+the coordinator's session with their `native_agent_id`. A worker started from a
+coordinator is linked when its exporter reports the coordinator's session as the
+resource attribute `subyard.parent_session.id`; the collector then records a
+`parent_session` relation. The shipped agent bridge adds that attribute to each
+worker's `OTEL_RESOURCE_ATTRIBUTES`, from its own `CLAUDE_CODE_SESSION_ID` or else
+`CODEX_THREAD_ID`, which Claude and Codex give their tools. A worker started
+another way can set it the same way:
+
+```sh
+OTEL_RESOURCE_ATTRIBUTES="subyard.parent_session.id=$CLAUDE_CODE_SESSION_ID${OTEL_RESOURCE_ATTRIBUTES:+,$OTEL_RESOURCE_ATTRIBUTES}" codex exec ...
+```
+
+Without it the worker's usage is still counted under its own session and the
+link stays unknown. The managed Codex policy sets `otel.log_agent_responses`, so
+Codex logs each thread's final answer with its parent thread; the collector keeps
+the thread IDs and drops the response text. A worker's child threads report the
+same resource, so they are also linked to the coordinator, and their
+`child_thread` relation names the worker thread. One query reports a task from
+its coordinator session:
+
+```sql
+SELECT CASE WHEN m.session_id = :session AND m.native_agent_id IS NULL THEN 'coordinator'
+            WHEN m.session_id = :session THEN 'subagent'
+            WHEN m.session_id IN (SELECT session_id FROM relations
+                                  WHERE json_extract(body, '$.relation') = 'child_thread') THEN 'worker-thread'
+            ELSE 'worker' END AS party,
+       m.client, count(*) AS requests,
+       sum(coalesce(m.input_tokens, 0) + coalesce(m.input_token_count, 0)) AS input_tokens,
+       sum(coalesce(m.output_tokens, 0) + coalesce(m.output_token_count, 0)) AS output_tokens
+FROM model_requests AS m
+WHERE m.session_id = :session
+   OR m.session_id IN (SELECT session_id FROM relations
+                       WHERE json_extract(body, '$.relation') = 'parent_session'
+                         AND json_extract(body, '$.parent_session_id') = :session)
+GROUP BY 1, 2 ORDER BY 1;
+```
+
+Codex `input_token_count` includes its cached tokens while Claude
+`input_tokens` excludes `cache_read_tokens`; report cache columns separately.
 
 ## Resource attribution and measurement semantics
 
@@ -445,7 +511,9 @@ decimal strings are accepted for documented numeric fields. Zero is
 distinguished from a missing value.
 
 - Claude retains `event.name`, `session.id`, `ccr.session.id`, `app.version`,
-  `model`, `tool_name`, `prompt_length`, `input_tokens`, `output_tokens`,
+  `model`, `tool_name`, `prompt.id`, `request_id`, `agent_id`,
+  `parent_agent_id`, `tool_use_id`, `query_source`, `event.sequence`,
+  `tool_result_size_bytes`, `tool_input_size_bytes`, `prompt_length`, `input_tokens`, `output_tokens`,
   `cache_read_tokens`, `cache_creation_tokens`, `cache_creation_5m_tokens`,
   `cache_creation_1h_tokens`, `cost_usd`, `cost_usd_micros`, `duration_ms`,
   `ttft_ms` and `success`, plus supported token, cost and time metric points
@@ -454,6 +522,8 @@ distinguished from a missing value.
   stored value keeps the client's form and is checked as
   `claude_code.<name>`. Prompt, tool-detail and tool-content logging stay off.
 - Codex retains `event.name`, `conversation.id` and supported session aliases,
+  `parent.conversation.id`, `parent.turn.id`, `agent.type`, `event.kind`,
+  `call_id`, `output_length`, `output_line_count`,
   `app.version`, `model`, `slug`, `tool_name`, `tool_namespace`,
   `prompt_length`, `duration_ms`, `ttft_ms`, `success`, `input_token_count`,
   `output_token_count`, `cached_token_count`, `cache_write_token_count`,
@@ -488,11 +558,95 @@ Missing or invalid producer state makes profile readiness stale.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
-and limit queued sanitized data to 16 MiB/128 requests,
-active database, WAL and shared-memory capacity to 1 GiB and sample/OTLP
-retention to seven days. Each legacy archive uses additional disk space outside
-that ceiling. Lifecycle, session and attribution records remain under the hard
-disk bound so an old run's outstanding resource responsibility does not disappear during owner downtime.
+and limit queued sanitized data to 16 MiB/128 requests. The profile setting
+`TELEMETRY_DISK_BUDGET` (default `30GiB`) sets the collector's soft
+`--disk-bytes` budget. Raw OTLP is accepted while allocated database pages and
+the WAL stay a tenth below it and the data partition keeps 1 GiB free, or a
+twentieth of a smaller partition. Beyond that the collector refuses raw OTLP and
+its per-request session correlations with a retryable status, still stores the
+request's usage records and bindings and all lifecycle, resource and sample
+records. The collector keeps a private `raw-otlp-refused` marker in the data
+directory while this lasts and removes it once raw OTLP fits again, including
+right after a prune. `stats` warns with the cleanup command for that store, and `yard status`
+and `yard profile status telemetry` show the `storage-capacity` warning with the
+command to run inside the yard while the profile stays ready. Those records
+are small and are not bounded by the budget, so a store above a lowered budget
+still opens. Each legacy archive uses additional disk space outside it.
+Nothing is pruned automatically. Remove old raw OTLP, per-request session
+correlations, samples and filtered-event markers manually:
+
+```sh
+"$collector" prune --data-dir "$data" --older-than 60d
+```
+
+The command asks the running collector over its control socket, or opens the
+store when the collector is stopped. Usage records and their bindings stay
+unless `--include-usage` is added; run lifecycle, resource and attribution
+records always stay, so an old run's outstanding resource responsibility does
+not disappear. Freed pages are reused; the database file does not shrink.
+
+A collector release older than this budget cannot run on such a store: it
+refuses to open a database above a third of its 1 GiB default bound, and its
+export would label zstd frames as plain protobuf. Before `yard update --rollback`
+or any downgrade, run these steps inside the yard as the developer account that
+owns `$data`. They keep a copy of this release's collector and export the whole
+history in windows of 1000 records into a private directory. The collector may
+keep running. The export is about 1.3 times the raw OTLP volume, because OTLP
+is decompressed and base64-encoded: roughly 8–9 GB for 60 days at about
+100 MB a day. Check free space with `df -h "$HOME"` first, or set `keep` to a
+private directory on another partition.
+
+```sh
+collector=/usr/local/lib/subyard-telemetry/subyard-telemetry
+data=/var/lib/subyard/telemetry
+keep="$HOME/telemetry-before-rollback"
+mkdir -m 0700 "$keep"
+cp "$collector" "$keep/subyard-telemetry"
+after=0
+n=1
+while :; do
+  file=$(printf '%s/telemetry-%04d.jsonl' "$keep" "$n")
+  (umask 077 && "$keep/subyard-telemetry" export --data-dir "$data" --after "$after" --limit 1000 > "$file") || break
+  if [ ! -s "$file" ]; then rm "$file"; break; fi
+  after=$(tail -n 1 "$file" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["sequence"])') || break
+  n=$((n + 1))
+done
+echo "last exported sequence: $after"
+```
+
+The loop stops at the first empty window and prints the last exported
+sequence. If it stops on an error instead, fix the cause and rerun the lines
+from `while :` to the end in the same shell; they resume at the failed window.
+Each export read has a 5 s deadline; if a window of large records exceeds it,
+rerun those lines with a smaller `--limit`, such as `--limit 100`.
+
+If the older collector already fails to open the store after a rollback, move
+the store aside and let the older collector start fresh. Run the two
+`systemctl` commands with `sudo`; run the `mv` commands as the developer
+account, with the same `data` value:
+
+```sh
+sudo systemctl stop subyard-telemetry.service
+data=/var/lib/subyard/telemetry
+mv "$data/telemetry.sqlite" "$data/telemetry.sqlite.newer"
+for suffix in -wal -shm; do
+  if [ -e "$data/telemetry.sqlite$suffix" ]; then mv "$data/telemetry.sqlite$suffix" "$data/telemetry.sqlite.newer$suffix"; fi
+done
+sudo systemctl start subyard-telemetry.service
+```
+
+The kept collector still reads the moved store. Give it a directory that holds
+the three files under their original names:
+
+```sh
+data=/var/lib/subyard/telemetry
+keep="$HOME/telemetry-before-rollback"
+mkdir -m 0700 "$keep/store"
+for suffix in "" -wal -shm; do
+  if [ -e "$data/telemetry.sqlite.newer$suffix" ]; then mv "$data/telemetry.sqlite.newer$suffix" "$keep/store/telemetry.sqlite$suffix"; fi
+done
+"$keep/subyard-telemetry" stats --data-dir "$keep/store"
+```
 The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
 and 64 KiB frames. It keeps records ordered within each generated run stream and
 within the broker stream. SQLite commits the records, projections and byte
@@ -510,12 +664,13 @@ agent commands and broker operations. Producers retain a small content-free over
 marker outside that quota. The collector consumes it even if the producer never
 writes again. A filesystem that rejects even the marker cannot guarantee a durable loss count; producer
 failure remains nonfatal to the native workload. Inspect `serve --help` and the owning producer constants before
-changing bounds. Accepted data can expire under the configured retention policy;
-export it first when a longer history is required.
+changing bounds. Export data before pruning it when a longer history is required.
 
 An OTLP success acknowledges a completed SQLite commit. A storage/capacity failure
 is retryable and never acknowledges an unsaved request. Admission is atomic per
-request; there is no misleading partial-success count. Collector failure does not
+request; there is no misleading partial-success count. Only a raw OTLP refusal
+for disk budget or partition reserve keeps the request's other records, such as
+usage and bindings. Collector failure does not
 make agent commands or broker lifecycle operations wait indefinitely. If the
 bounded local spool fills, collection records a capacity gap where the reserved
 marker can be written. Native bytes the receiver never saw cannot be recovered
@@ -550,14 +705,14 @@ Replay sanitizes new imports with the destination's `--policy-file` or default
 policy and applies queue and disk limits. `policy_version` preserves the original
 validated capture-policy claim and `import_policy_version` records the local
 policy applied by replay. Legacy exports without that optional field remain
-readable. Expiring a sample or OTLP row also expires its projections and
-deduplication claim. An expired sample can be restored once and rejoin its
+readable. Pruning a sample or OTLP row also removes its projections and
+deduplication claim. A pruned sample can be restored once and rejoin its
 retained object and run. Run lifecycle and coverage records remain available.
 
 OTLP has no universal delivery identity. If a sender retries after a successful
 commit whose acknowledgement was lost, the native delivery can appear twice.
-Stable source event IDs support idempotent retries for internal producers. Native
-OTLP observations without such an identity can repeat in token totals.
+Stable source event IDs support idempotent retries for internal producers. Raw
+native OTLP observations can repeat; the derived usage records do not.
 
 ## Standalone and nested containers
 

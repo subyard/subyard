@@ -33,6 +33,9 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 		if err = rows.Scan(&encoding, &body, &protobuf); err != nil {
 			t.Fatal(err)
 		}
+		if protobuf, err = decompressOTLP(protobuf); err != nil {
+			t.Fatal(err)
+		}
 		if bytes.Contains(body, []byte("canary")) || bytes.Contains(protobuf, []byte("canary")) {
 			t.Fatalf("private client value survived in %s record", encoding)
 		}
@@ -54,6 +57,9 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 						}
 						if name == "tool_result" && attrs["tool_name"] == "Read" {
 							name = "tool_result/failed"
+						}
+						if name == "api_request" && attrs["agent_id"] != nil {
+							name = "api_request/subagent"
 						}
 						events[name] = attrs
 					}
@@ -83,18 +89,24 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 		"api_request": {"model": "claude-opus-5-5", "input_tokens": int64(1200), "output_tokens": int64(345),
 			"cache_read_tokens": int64(800), "cache_creation_tokens": int64(64), "cache_creation_5m_tokens": int64(64),
 			"cache_creation_1h_tokens": int64(0), "cost_usd": 0.0421, "cost_usd_micros": int64(42100),
-			"duration_ms": float64(2300), "ttft_ms": float64(410)},
-		"tool_decision":      {"tool_name": "Bash"},
-		"tool_result":        {"tool_name": "Bash", "success": true, "duration_ms": float64(12)},
+			"duration_ms": float64(2300), "ttft_ms": float64(410), "request_id": "req_011CVfixture0001",
+			"prompt.id": "4e5b5d3f-0cf1-4979-aeeb-36b23fa62c20", "query_source": "repl_main_thread", "event.sequence": int64(2)},
+		"api_request/subagent": {"agent_id": "a1b2c3d4fixture", "query_source": "agent:custom", "input_tokens": int64(90)},
+		"tool_decision":        {"tool_name": "Bash", "tool_use_id": "toolu_fixture0001"},
+		"tool_result": {"tool_name": "Bash", "success": true, "duration_ms": float64(12), "tool_use_id": "toolu_fixture0001",
+			"tool_result_size_bytes": int64(512), "tool_input_size_bytes": int64(311)},
 		"tool_result/failed": {"tool_name": "Read", "success": false, "duration_ms": float64(3)},
 		"codex.conversation_starts": {"conversation.id": "019a0000-1111-7222-8333-944455556666", "app.version": "0.170.0",
 			"model": "gpt-5.5", "slug": "gpt-5.5"},
 		"codex.user_prompt": {"prompt_length": int64(24)},
 		"codex.api_request": {"duration_ms": float64(812), "model": "gpt-5.5"},
 		"codex.sse_event": {"input_token_count": int64(1500), "output_token_count": int64(220), "cached_token_count": int64(1024),
-			"cache_write_token_count": int64(0), "reasoning_token_count": int64(64), "tool_token_count": int64(1720), "ttft_ms": float64(390)},
-		"codex.tool_decision": {"tool_name": "exec_command", "tool_namespace": "functions"},
-		"codex.tool_result":   {"tool_name": "exec_command", "tool_namespace": "functions", "success": true, "duration_ms": float64(12)},
+			"cache_write_token_count": int64(0), "reasoning_token_count": int64(64), "tool_token_count": int64(1720), "ttft_ms": float64(390),
+			"event.kind": "response.completed"},
+		"codex.tool_decision": {"tool_name": "exec_command", "tool_namespace": "functions", "call_id": "call_fixture0001"},
+		"codex.tool_result": {"tool_name": "exec_command", "tool_namespace": "functions", "success": true, "duration_ms": float64(12),
+			"call_id": "call_fixture0001", "output_length": int64(64), "output_line_count": int64(2)},
+		"codex.agent_response": {"agent.type": "subagent", "parent.conversation.id": "019a0000-1111-7222-8333-944455556666"},
 	}
 	for name, fields := range want {
 		got, ok := events[name]

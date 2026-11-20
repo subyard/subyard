@@ -46,7 +46,7 @@ var wireVocabulary = map[string][]string{
 	"unit":       strings.Fields("1 % s ms us ns By KiBy MiBy GiBy By/s 1/s USD tokens {token} {request} {session} {line} {commit}"),
 	"scopeName":  strings.Fields("codex codex_otel codex-otel claude-code claude_code"),
 	"spanName":   strings.Fields("agent.interaction llm_request tool_execution claude_code.interaction claude_code.llm_request claude_code.tool codex.turn codex.api_request"),
-	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.tool_decision codex.conversation_starts codex.conversation_start codex.websocket_connect codex.websocket_request codex.websocket_event codex.turn_ttft codex.turn_cost codex.startup_phase codex.sandbox_outcome claude_code.session_start"),
+	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.tool_decision codex.conversation_starts codex.conversation_start codex.websocket_connect codex.websocket_request codex.websocket_event codex.turn_ttft codex.turn_cost codex.startup_phase codex.sandbox_outcome codex.agent_response claude_code.session_start"),
 	"metricName": strings.Fields("claude_code.session.count claude_code.lines_of_code.count claude_code.pull_request.count claude_code.commit.count claude_code.cost.usage claude_code.token.usage claude_code.code_edit_tool.decision claude_code.active_time.total codex.api_request codex.api_request.duration_ms codex.sse_event codex.sse_event.duration_ms codex.tool.call codex.tool.call.duration_ms codex.turn.cost_microusd codex.websocket.request codex.websocket.request.duration_ms codex.turn.e2e_duration_ms codex.turn.ttft.duration_ms codex.turn.ttfm.duration_ms codex.turn.token_usage codex.turn.tool.call codex.turn.memory codex.turn.network_proxy codex.thread.started codex.conversation.turn.count codex.websocket.event codex.websocket.event.duration_ms gen_ai.client.token.usage gen_ai.client.operation.duration codex.turn.duration_ms codex.api_request.duration codex.turn.token.usage"),
 }
 
@@ -63,11 +63,15 @@ var attributeRules = func() map[string]string {
 		"duration_ms": "decimal", "ttft_ms": "decimal", "cost_usd": "decimal", "success": "bool",
 		"host.id": "label", "subyard.host.id": "label", "subyard.yard.id": "label", "subyard.project.id": "label",
 		"subyard.worktree.id": "label", "subyard.task.id": "label",
+		// Usage attribution: identifiers, categories and counters only.
+		"request_id": "id", "prompt.id": "id", "agent_id": "id", "parent_agent_id": "id", "tool_use_id": "id", "call_id": "id",
+		"parent.conversation.id": "id", "parent.turn.id": "id", "subyard.parent_session.id": "id",
+		"query_source": "label", "agent.type": "label", "event.kind": "label",
 	}
 	for _, name := range sessionAttributeNames {
 		rules[name] = "id"
 	}
-	for _, name := range strings.Fields("gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens prompt_length cache_read_tokens cache_creation_tokens cache_creation_5m_tokens cache_creation_1h_tokens cost_usd_micros input_token_count output_token_count cached_token_count cache_write_token_count reasoning_token_count tool_token_count") {
+	for _, name := range strings.Fields("gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens prompt_length cache_read_tokens cache_creation_tokens cache_creation_5m_tokens cache_creation_1h_tokens cost_usd_micros input_token_count output_token_count cached_token_count cache_write_token_count reasoning_token_count tool_token_count event.sequence tool_result_size_bytes tool_input_size_bytes output_length output_line_count") {
 		rules[name] = "counter"
 	}
 	return rules
@@ -420,7 +424,7 @@ func sanitizeOTLP(e *Envelope, p Policy, f valueFilter) ([]Envelope, error) {
 	protobuf, err := transformOTLP(e.Encoding, e.Protobuf, func(body map[string]any) any {
 		clean, _ := policy.clean(e.Encoding, body)
 		if e.native {
-			relations = sessionEnvelopes(clean.(map[string]any))
+			relations = append(sessionEnvelopes(clean.(map[string]any)), usageEnvelopes(clean.(map[string]any))...)
 		}
 		return clean
 	})
@@ -428,7 +432,9 @@ func sanitizeOTLP(e *Envelope, p Policy, f valueFilter) ([]Envelope, error) {
 	e.PolicyVersion = policyFingerprint(p)
 	for i := range relations {
 		relations[i].OriginID = e.OriginID
-		relations[i].EventID = e.EventID + ":" + strconv.Itoa(i)
+		if relations[i].EventID == "" { // Usage and bindings carry their own deterministic IDs.
+			relations[i].EventID = e.EventID + ":" + strconv.Itoa(i)
+		}
 		relations[i].ReceivedTime = e.ReceivedTime
 		relations[i].PolicyVersion = e.PolicyVersion
 	}

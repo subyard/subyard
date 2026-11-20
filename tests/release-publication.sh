@@ -2424,26 +2424,36 @@ class HostedChecks(unittest.TestCase):
         self.state = {"request": "hosted-request", "identity_sha256": m.identity_hash(self.identity), "checks": ["profile:sample"]}
         m.write_json(self.directory / "ci-hosted.json", self.state)
         owner = self
+        self.attempt_jobs, self.reruns = {}, []
+        self.artifacts = [{"id": 99, "name": "ci-hosted-0", "expired": False, "size_in_bytes": 10000}]
         class HostedGitHub(FakeGitHub):
             def api(self, path, method="GET", payload=None, missing=False):
                 if path == "actions/workflows/release-vm.yml":
                     return {"id": 88}
-                if path == "actions/runs/456/attempts/1":
+                if path.startswith("actions/runs/456/attempts/"):
+                    return {**copy.deepcopy(owner.run), "run_attempt": int(path.rsplit("/", 1)[1])}
+                if path == "actions/runs/456":
                     return copy.deepcopy(owner.run)
+                if path == "actions/runs/456/rerun-failed-jobs" and method == "POST":
+                    owner.reruns.append(owner.run["run_attempt"])
+                    owner.run.update(run_attempt=owner.run["run_attempt"] + 1, status="queued")
+                    return None
                 if path.startswith("contents/.github/workflows/release-vm.yml?ref="):
                     return {"type": "file", "path": ".github/workflows/release-vm.yml", "sha": owner.policy}
                 return super().api(path, method, payload, missing)
             def pages(self, path, key=None):
                 if path == "actions/workflows/release-vm.yml/runs?event=workflow_dispatch":
                     return [copy.deepcopy(owner.run)]
-                if path == "actions/runs/456/attempts/1/jobs":
-                    return [copy.deepcopy(owner.job)]
+                if path.startswith("actions/runs/456/attempts/") and path.endswith("/jobs"):
+                    attempt = int(path.split("/")[4])
+                    return copy.deepcopy(owner.attempt_jobs.get(attempt, [owner.job] if attempt == 1 else []))
                 if path == "actions/runs/456/artifacts":
-                    return [{"id": 99, "name": "ci-hosted-0", "expired": False, "size_in_bytes": 10000}]
+                    return copy.deepcopy(owner.artifacts)
                 return super().pages(path, key)
             def download(self, path, destination):
-                if path == "actions/artifacts/99/zip":
-                    destination.write_bytes(owner.archive())
+                artifact = next((item for item in owner.artifacts if path == f"actions/artifacts/{item['id']}/zip"), None)
+                if artifact:
+                    destination.write_bytes(owner.archive(artifact.get("attempt")))
                     return
                 return super().download(path, destination)
         self.github = HostedGitHub(self.identity)
@@ -2452,7 +2462,7 @@ class HostedChecks(unittest.TestCase):
         self.receipt_mutation = lambda value: None
         self.execution_attempt = 1
 
-    def archive(self):
+    def archive(self, attempt=None):
         receipt = json.loads((self.remote / "receipt.json").read_text())
         self.receipt_mutation(receipt)
         selected = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "passed"}
@@ -2462,7 +2472,7 @@ class HostedChecks(unittest.TestCase):
         with zipfile.ZipFile(stream, "w") as archive:
             archive.writestr("receipt.json", raw)
             archive.writestr("runs/" + "d" * 32 + ".json", json.dumps(selected))
-            archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": self.execution_attempt,
+            archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": attempt or self.execution_attempt,
                 "head_sha": self.identity["commit"], "check": "profile:sample"}))
             for pattern in ("*.log", "attempts/*.json", "manifests/*.json"):
                 for path in self.remote.glob(pattern):
@@ -2851,20 +2861,16 @@ class HostedChecks(unittest.TestCase):
 
     def test_accept_runs_local_checks_before_waiting_for_hosted_ones(self):
         calls = []
-        record = lambda name: lambda *args, **kwargs: calls.append((name, kwargs.get("exclude", ()), args[2] if name == "run" else None)) or 0
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=record("run")), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
-             patch.object(m, "collect_ci", side_effect=record("collect")):
-            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 0)
-        self.assertEqual(calls, [("run", ["profile:sample"], []), ("wait", (), None), ("collect", (), None),
-                                 ("run", (), ["profile:sample"])])
-        calls.clear()
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=record("run")), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
-            m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0)
-        self.assertEqual(calls, [("run", (), [])])
+        record = lambda name, value=0: lambda *args, **kwargs: calls.append((name, kwargs.get("exclude", ()), args[2] if name == "run" else None)) or value
+        for wait in (60, 0):
+            calls.clear()
+            with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+                 patch.object(m.a, "run_checks", side_effect=record("run")), \
+                 patch.object(m, "wait_ci_hosted", side_effect=record("wait", None)), \
+                 patch.object(m, "collect_ci", side_effect=record("collect", set())):
+                self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], wait), 0)
+            self.assertEqual(calls, [("run", ["profile:sample"], []), ("wait", (), None), ("collect", (), None),
+                                     ("run", (), ["profile:sample"])])
         # Ordinary acceptance leaves optional hosted VM checks not run and does not wait.
         calls.clear()
         with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
@@ -2883,6 +2889,124 @@ class HostedChecks(unittest.TestCase):
              patch.object(m, "collect_ci", side_effect=record("collect")):
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 1)
         self.assertEqual([call[0] for call in calls], ["run", "collect"])
+
+    def test_attempt_n_pass_counts_and_publication_rechecks_that_attempt(self):
+        self.run.update(run_attempt=2)
+        self.attempt_jobs = {1: [{**self.job, "conclusion": "failure"}], 2: [{**self.job, "id": 790}]}
+        # A foreign-attempt artifact name is skipped even when its header claims the counted attempt.
+        self.artifacts = [{"id": 100, "name": "ci-hosted-0-1", "expired": False, "size_in_bytes": 10000, "attempt": 2},
+                          {"id": 101, "name": "ci-hosted-0-2", "expired": False, "size_in_bytes": 10000, "attempt": 2}]
+        result, report = self.collect()
+        self.assertEqual((result["ci_hosted"]["run_attempt"], result["ci_hosted"]["job_id"]), (2, 790))
+        self.assertIn("CI-HOSTED profile:sample run=456 job=790", report)
+        self.assertTrue(m.publish_remote(self.github, self.prepared, m.attestation(self.output, self.identity), self.root)["immutable"])
+
+    def test_job_carried_into_a_rerun_keeps_its_original_attempt_in_both_listing_shapes(self):
+        # GitHub lists a job carried into attempt 2 either with a new ID and run_attempt 2 or as the original job.
+        for shape in ({**self.job, "id": 791}, self.job):
+            with self.subTest(job=shape["id"]):
+                self.run.update(run_attempt=2)
+                self.attempt_jobs = {1: [self.job], 2: [shape]}
+                result, _ = self.collect()
+                self.assertEqual((result["ci_hosted"]["run_attempt"], result["ci_hosted"]["job_id"]), (1, 789))
+                m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
+                _, receipt = m.a.load_bound(self.output)
+                receipt["checks"]["profile:sample"] = {"status": "pending"}
+                m.a.save(self.output, receipt)
+                shutil.rmtree(self.directory / "ci-hosted-downloads")
+
+    def test_running_hosted_jobs_stay_pending_and_only_failed_ones_fall_back(self):
+        self.run.update(status="in_progress", conclusion=None)
+        self.job.update(status="in_progress", conclusion=None)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(m.collect_ci(self.github, self.directory, self.identity), {"profile:sample"})
+            self.job.update(status="completed", conclusion="failure")
+            self.assertEqual(m.collect_ci(self.github, self.directory, self.identity), set())
+            with patch.object(m, "discover", return_value=None):
+                self.assertEqual(m.collect_ci(self.github, self.directory, self.identity), {"profile:sample"})
+        for wait in (60, 0):
+            for owned, lost, expected in (({"profile:sample"}, None, 1), ({"profile:sample"}, True, 0), (set(), None, 0)):
+                with self.subTest(wait=wait, owned=owned, lost=lost), \
+                     patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+                     patch.object(m.a, "run_checks", return_value=0) as run, \
+                     patch.object(m, "wait_ci_hosted", return_value=lost), \
+                     patch.object(m, "collect_ci", return_value=owned), redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], wait), expected)
+                    # The first pass excludes hosted checks; a fallback pass runs only what no hosted job owns.
+                    self.assertEqual([call.args[2] for call in run.call_args_list], [[]] + ([["profile:sample"]] if expected == 0 else []))
+                    self.assertEqual("CI-HOSTED pending: profile:sample" in printed.getvalue(), expected == 1)
+
+    def test_retry_hosted_reruns_failed_jobs_once_and_refuses_without_work(self):
+        retry = lambda: m.retry_hosted(self.github, self.directory, self.identity)
+        self.run.update(status="in_progress", conclusion=None)
+        self.assertEqual(retry(), (True, "CI-HOSTED attempt=1 running"))
+        self.run.update(status="completed", conclusion="success")
+        self.assertEqual(retry(), (False, "refused: hosted run passed; nothing to retry"))
+        self.run.update(conclusion="failure")
+        self.job.update(conclusion="failure")
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["profile:sample"] = {"status": "failed"}  # Already tried locally: attempt N would not count.
+        m.a.save(self.output, receipt)
+        self.assertEqual(retry(), (False, "refused: no failed hosted job of a check still open here; use retry CHECK"))
+        receipt["checks"]["profile:sample"] = {"status": "pending"}
+        m.a.save(self.output, receipt)
+        self.assertEqual(retry(), (True, "CI-HOSTED-RETRY run=456 attempt=2 checks=profile:sample"))
+        # Repeating after a lost response discovers the started attempt instead of posting again.
+        self.assertEqual(retry(), (True, "CI-HOSTED attempt=2 running"))
+        self.assertEqual(self.reruns, [1])
+        (self.directory / "ci-hosted.json").unlink()
+        self.assertEqual(retry(), (False, "refused: no hosted request for this candidate"))
+
+    def test_control_channel_retry_hosted_makes_accept_wait_for_the_new_attempt(self):
+        self.run.update(conclusion="failure")
+        self.job.update(conclusion="failure")
+        waits, replies = [], []
+        def wait(github, directory, identity, seconds):
+            waits.append(self.run["run_attempt"])
+            if len(waits) == 1:
+                replies.append(m.a.control_request(self.output, {"action": "retry-hosted"}))
+            else:
+                self.run.update(status="completed", conclusion="success")
+                self.attempt_jobs = {2: [{**self.job, "id": 790, "conclusion": "success"}]}
+                self.artifacts = [{"id": 101, "name": "ci-hosted-0-2", "expired": False, "size_in_bytes": 10000, "attempt": 2}]
+        with m.a.control(self.output), patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+             patch.object(m.a, "run_checks", return_value=0) as run, patch.object(m, "wait_ci_hosted", side_effect=wait), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 0)
+            self.assertEqual(m.a.control_request(self.output, {"action": "retry-hosted"}),
+                             {"accepted": False, "reason": "refused: hosted checks already fall back to local runs; use retry CHECK"})
+        self.assertEqual(replies, [{"accepted": True, "reason": "CI-HOSTED-RETRY run=456 attempt=2 checks=profile:sample"}])
+        self.assertEqual(waits, [1, 2])
+        _, receipt = m.a.load_bound(self.output)
+        self.assertEqual(receipt["checks"]["profile:sample"]["ci_hosted"]["run_attempt"], 2)
+        self.assertEqual(len(run.call_args_list), 2)
+        m.a.CONTROL.clear()
+
+    def test_retry_hosted_during_final_collection_keeps_the_new_attempt_checks_pending(self):
+        # Past the deadline (always with wait 0) an accepted or unconfirmed rerun is read again before fallback.
+        outcomes = {"accepted": (True, "CI-HOSTED-RETRY run=456 attempt=2 checks=profile:sample"),
+                    "timeout": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt"),
+                    # The POST timed out and the second read still shows the completed attempt.
+                    "timeout-unseen": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt")}
+        for case, outcome in outcomes.items():
+            collected, replies = [], []
+            def collect(github, directory, identity):
+                collected.append(len(collected))
+                if len(collected) == 1:
+                    replies.append(m.a.CONTROL["retry-hosted"]({"action": "retry-hosted"}))
+                    return set()
+                return set() if case == "timeout-unseen" else {"profile:sample"}
+            with self.subTest(case=case), patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+                 patch.object(m.a, "run_checks", return_value=0) as run, patch.object(m, "wait_ci_hosted", return_value=None), \
+                 patch.object(m, "retry_hosted", side_effect=[outcome]), patch.object(m, "collect_ci", side_effect=collect), \
+                 redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0), 1)
+                self.assertEqual(replies, [outcome] if case == "accepted" else [(False, "refused: rerun outcome unknown; repeat "
+                    "retry-hosted to discover the new attempt; this accept keeps open hosted checks pending, so repeat retry-hosted after it exits")])
+                self.assertEqual("CI-HOSTED-RETRY outcome unknown" in printed.getvalue(), case != "accepted")
+                self.assertEqual(collected, [0, 1])
+                self.assertEqual([call.args[2] for call in run.call_args_list], [[]])  # No local fallback run.
+                self.assertIn("CI-HOSTED pending: profile:sample", printed.getvalue())
 
     def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
         with patch.object(m, "discover") as discover:

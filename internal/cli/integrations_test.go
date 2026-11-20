@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -533,4 +534,45 @@ func TestRetiredIntegrationCommands(t *testing.T) {
 			}
 		}
 	})
+}
+
+// persistRetainedExecutor lists retained transfer data with guest text in every field.
+type persistRetainedExecutor struct{ canary string }
+
+func (fixture persistRetainedExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 5 && request.Command[0] == "python3" && request.Command[4] == "retained" {
+		payload, _ := json.Marshal(map[string]any{"retained": []map[string]any{
+			{"integration": fixture.canary, "kind": "backup", "path": "/home/dev/.codex/sessions.subyard-backup-" + fixture.canary, "bytes": 5},
+			{"integration": "codex", "kind": fixture.canary, "path": "/" + fixture.canary}}})
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	return ports.InstanceExecResult{}, nil
+}
+
+func TestIntegrationStatusOmitsGuestText(t *testing.T) {
+	const canary = "SUBYARD-CANARY-7f3a"
+	cli, _, runtime, _, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	root := cli.options.RepositoryRoot
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_codex_PERSIST=.codex/sessions:/mnt/host/agent-sessions/codex/sessions\n", 0o600)
+	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
+	catalog, err := config.LoadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.catalog = catalog
+	runtime.plan.Changed = false
+	cli.options.Executor = persistRetainedExecutor{canary: canary}
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := cli.queryIntegrationStatus(context.Background(), loaded, "")
+	if err != nil || len(status.PersistRetained) != 1 || status.PersistRetained[0].Directory != "/home/dev/.codex" || status.PersistRetained[0].Prefix != "sessions.subyard-backup-" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	cli.printIntegrationStatus(status, false)
+	cli.printIntegrationStatus(status, true)
+	if strings.Contains(output.String(), canary) || !strings.Contains(output.String(), "persist retained backup /home/dev/.codex/sessions.subyard-backup-* (sha256:") {
+		t.Fatalf("status rendered guest text or lost the retained backup: %s", output.String())
+	}
 }

@@ -16,7 +16,7 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	incus := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{
 		ExitCode: 1,
 		Stdout:   []byte("synthetic-private-stdout"),
-		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\nBubblewrap AppArmor: the owned policy directory is missing\n"),
+		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\n" + bubblewrapRefusalPrefix + "synthetic-private-finding\n" + bubblewrapRefusalPrefix + "second synthetic-private-finding\n"),
 	}, Err: errors.New("guest command exited with status 1: synthetic-private-cause")}}}
 	runtime := Runtime{Executor: incus, Yard: domain.Context{YardName: "example"}}
 	fingerprint, changed, err := runtime.integrationServices(context.Background(), "observe")
@@ -42,8 +42,8 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	if message = err.Error(); strings.Contains(message, "synthetic-private") || strings.Contains(message, "--yes") {
 		t.Fatalf("diagnostic exposed raw output or bypassed confirmation: %s", message)
 	}
-	if !strings.Contains(message, "Bubblewrap AppArmor: the owned policy directory is missing") {
-		t.Fatalf("independent Bubblewrap refusal was lost: %s", message)
+	if strings.Count(message, bubblewrapRefusalText) != 1 {
+		t.Fatalf("independent Bubblewrap refusal was lost or repeated: %s", message)
 	}
 }
 
@@ -72,18 +72,18 @@ func TestIntegrationServiceUnknownErrorsStaySanitized(t *testing.T) {
 
 func TestBubblewrapPolicyRefusalDiagnosticIsBounded(t *testing.T) {
 	retry := "run 'yard' '-Y' 'example' 'integration' 'status'"
-	prefix := "yard example: Bubblewrap AppArmor: "
-	for line, public := range map[string]bool{
-		"Bubblewrap AppArmor: the yard cannot load AppArmor profiles.":          true,
-		"Bubblewrap AppArmor: " + strings.Repeat("x", 480-len(prefix)):          true,
-		"Bubblewrap AppArmor: " + strings.Repeat("x", 481-len(prefix)):          false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/\x1b[0m":  false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/caf\xe9":  false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/local/x ": false,
-	} {
-		message, got := bubblewrapPolicyRefusal{line: line, yard: "example", retry: retry}.ActivationDiagnostic()
-		if got != retry || (message != "") != public || public && message != "yard example: "+line {
-			t.Fatalf("unexpected diagnostic for %q: %q / %q", line, message, got)
-		}
+	message, got := bubblewrapPolicyRefusal{line: bubblewrapRefusalText, yard: "example", retry: retry}.ActivationDiagnostic()
+	if got != retry || message != "yard example: "+bubblewrapRefusalText {
+		t.Fatalf("unexpected diagnostic: %q / %q", message, got)
+	}
+	if message, _ := (bubblewrapPolicyRefusal{line: bubblewrapRefusalText, yard: strings.Repeat("y", 64), retry: retry}).ActivationDiagnostic(); message != "" {
+		t.Fatalf("invalid yard name was rendered: %q", message)
+	}
+}
+
+// The host recognizes every refusal by the prefix the policy program prints.
+func TestBubblewrapRefusalPrefixMatchesThePolicyProgram(t *testing.T) {
+	if !strings.Contains(bubblewrapPolicy, "printf '"+bubblewrapRefusalPrefix+"%s.") {
+		t.Fatal("policy program refusal format changed")
 	}
 }

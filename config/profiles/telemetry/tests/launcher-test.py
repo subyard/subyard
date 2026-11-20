@@ -629,6 +629,22 @@ raise SystemExit(23)
         self.assertEqual(env['OTEL_EXPORTER_OTLP_HEADERS'], 'x-subyard-agent-run-id=run')
         self.assertEqual(env['OTEL_EXPORTER_OTLP_LOGS_HEADERS'], 'Authorization=Bearer private-fixture,x-subyard-agent-run-id=run')
 
+    def test_unregistered_run_exports_without_run_context(self):
+        # The receiver answers 503 to exports naming an unregistered run.
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                started = []
+                def capture(command, env):
+                    started.append((command, env))
+                    raise OSError('fixture stops before exec')
+                args = types.SimpleNamespace(command=[agent, 'exec'], data_dir=name, agent=agent, agent_version='fixture',
+                    scope_mode='partial', task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
+                with patch.object(launcher.records, 'emit', return_value=False), patch.object(launcher, 'gated_child', side_effect=capture):
+                    self.assertEqual(launcher.launch(args), 127)
+                (command, env), = started
+                self.assertEqual(command, [agent, 'exec'])
+                self.assertNotIn('subyard.agent_run.id', env.get('OTEL_RESOURCE_ATTRIBUTES', ''))
+                self.assertNotIn('x-subyard-agent-run-id', env.get('OTEL_EXPORTER_OTLP_HEADERS', ''))
 
 if __name__ == '__main__':
     unittest.main()

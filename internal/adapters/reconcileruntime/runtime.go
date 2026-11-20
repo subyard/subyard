@@ -2562,7 +2562,14 @@ func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.Reconc
 
 func profileServiceObservation(output string, exceeded bool, err error) (ports.ReconcileStageObservation, error) {
 	if err == nil {
-		return ports.ReconcileStageObservation{Converged: true}, nil
+		observation := ports.ReconcileStageObservation{Converged: true}
+		for _, line := range strings.Split(output, "\n") {
+			owner, code, found := strings.Cut(strings.TrimPrefix(line, "profile service advisory owner="), " code=")
+			if !exceeded && found && "profile service advisory owner="+owner+" code="+code == line && domain.SafeName(owner) && profile.ValidServiceAdvisory(code) {
+				observation.Advisories = append(observation.Advisories, ports.ProfileAdvisory{Owner: owner, Code: code})
+			}
+		}
+		return observation, nil
 	}
 	observation := ports.ReconcileStageObservation{}
 	var exit *exec.ExitError

@@ -1215,7 +1215,7 @@ install -d -m 0700 "$OWNER_YARD_DIR/test-yard"
 printf '# %s\n' "$MARKER" > "$registration"
 chmod 0600 "$registration"
 write_owner_registration test-yard test-vms 2224 1 "$diagnostic_cpu"
-# This 40GiB disposable fixture keeps an explicit 4GiB reserve; product defaults remain 5GiB.
+# This disposable fixture keeps an explicit 4GiB reserve; product defaults remain 5GiB.
 printf 'E2E_DISK_RESERVE=4GiB\n' >> "$registration"
 if [ "$SUPPORTED_UPGRADE" = 1 ]; then
   prepare_supported_upgrade_owner

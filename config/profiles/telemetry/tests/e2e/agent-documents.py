@@ -55,7 +55,8 @@ def main():
                 assert fields['OTEL_LOGS_EXPORTER'] == 'otlp'
                 assert document['otelHeadersHelper'] == HELPER
             else:
-                assert fields['log_user_prompt'] is False and fields['headers_helper'] == HELPER
+                assert fields['log_user_prompt'] is False and fields['log_agent_responses'] is True
+                assert fields['headers_helper'] == HELPER
                 for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
                     assert fields[key]['otlp-http']['tls'] == {}
     if phase == 'disabled':

@@ -4,8 +4,8 @@ import argparse
 import ast
 import copy
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import contextmanager, ExitStack
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager, ExitStack, suppress
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -17,6 +17,8 @@ import platform
 import re
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tarfile
@@ -76,6 +78,114 @@ def acceptance_lock(output, shared=False):
         except BlockingIOError:
             raise ValueError("candidate is already in use by another collector") from None
         yield
+
+
+# Request handlers of the running command by action; nothing outlives the process.
+CONTROL = {}
+RETRYABLE = ("failed", "blocked", "interrupted", "incomplete")
+
+
+def control_address(output):
+    return "\0subyard-acceptance-" + hashlib.sha256(str(Path(output).resolve()).encode()).hexdigest()[:32]
+
+
+def same_user(connection):
+    return struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1] == os.geteuid()
+
+
+def read_message(connection, data=b""):
+    while not data.endswith(b"\n"):
+        chunk = connection.recv(4096)
+        if not chunk or len(data) + len(chunk) > 4096:
+            raise ValueError("control message incomplete or too large")
+        data += chunk
+    return json.loads(data)
+
+
+@contextmanager
+def control(output):
+    """Serve same-user requests to this collector while the command runs."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(control_address(output))
+    except OSError:
+        server.close()
+        raise ValueError("candidate is already in use by another collector") from None
+    server.listen(8)
+
+    def respond(connection):
+        connection.settimeout(5)
+        if not same_user(connection):
+            return False, "refused: request from another user"
+        try:
+            request = read_message(connection)
+            handler = CONTROL.get(request["action"])
+        except (ValueError, OSError, KeyError, TypeError):
+            return False, "refused: malformed request"
+        if handler is None:
+            return False, "refused: " + ("no live dispatch in progress" if request["action"] == "retry"
+                                         else "no hosted wait in progress")
+        try:
+            return handler(request)
+        except (ValueError, OSError) as error:
+            return False, f"refused: {error}"
+
+    def serve():
+        while True:
+            try:
+                connection, _ = server.accept()
+            except OSError:
+                return
+            with connection, suppress(Exception):
+                accepted, reason = respond(connection)
+                connection.sendall(json.dumps({"accepted": accepted, "reason": reason}).encode() + b"\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        yield
+    finally:
+        try:
+            server.shutdown(socket.SHUT_RDWR)  # Wakes the blocked accept.
+        except OSError:
+            pass
+        server.close()
+
+
+def control_request(output, request):
+    """Ask the collector serving output; None when no collector is running."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        try:
+            client.connect(control_address(output))
+        except ConnectionRefusedError:
+            return None
+        if not same_user(client):
+            raise ValueError("control channel belongs to another user")
+        client.settimeout(300)
+        client.sendall(json.dumps(request).encode() + b"\n")
+        reply = read_message(client)
+    if not isinstance(reply, dict) or type(reply.get("accepted")) is not bool or not isinstance(reply.get("reason"), str):
+        raise ValueError("malformed control reply")
+    return reply
+
+
+class RetryRequests:
+    """Hands live retry requests from the control thread to the dispatcher."""
+    def __init__(self):
+        self.lock, self.items, self.open = threading.Lock(), [], True
+
+    def submit(self, name):
+        reply = Future()
+        with self.lock:
+            if self.open:
+                self.items.append((name, reply))
+                return reply
+        reply.set_result("no live dispatch in progress")
+        return reply
+
+    def take(self, close=False):
+        with self.lock:
+            items, self.items, self.open = self.items, [], self.open and not close
+        return items
 
 
 def private_file(path, mode="w"):
@@ -334,6 +444,8 @@ CI_HOSTED_POLICIES = frozenset({
     "836bbd8229d65149c75731a2f9ea46f2aa45e241",
     # Checkout uses the workflow SHA; the exact workflow/candidate commit guard is retained.
     "14d5180368026f77db2f4890ec5b3d0fd9706a24",
+    # Evidence artifacts are named per attempt, so a rerun job uploads beside the earlier attempt.
+    "bf7eea8d8a2ddc4073a7fe7d4be8a6ce6475a13e",
 })
 
 
@@ -1357,7 +1469,7 @@ def broker_slots(env):
     return {}
 
 
-def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
+def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None, requests=None, retryable=None):
     if not live:
         return
     pending = deque(live)
@@ -1369,6 +1481,20 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
     if recovery_wait_seconds is None:
         duration = re.fullmatch(r"([0-9]{1,6})([sm])", env["SUBYARD_E2E_CAPACITY_WAIT"])
         recovery_wait_seconds = int(duration[1]) * (60 if duration[2] == "m" else 1) if duration else 0
+
+    def answer():
+        # A retried lane goes first in the current pass; the normal path then picks its slot.
+        for name, reply in requests.take() if requests else ():
+            slot = next((slot for item, slot in active.values() if item == name), None)
+            reason = ("the collector is stopping" if STOP.is_set() else "a result could not be recorded" if error is not None
+                      else "not selected by the running collector; retry after it finishes"
+                      " (hosted checks: wait or use retry-hosted)" if name not in live
+                      else f"running on slot-{slot}" if slot else "already queued" if name in pending or name in retries
+                      else retryable(name))
+            if reason is None:
+                (retries if retrying else pending).appendleft(name)
+                print(f"RETRY {name}: queued by a live request", flush=True)
+            reply.set_result(reason)
 
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         while pending or active or retries:
@@ -1391,10 +1517,12 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
                 if capacity_blocked and not retrying:
                     retries.append(name)
 
+            answer()
+            poll = SLOT_POLL_SECONDS if requests else None
             if STOP.is_set():
                 if not active:
                     break
-                wait(active, return_when=FIRST_COMPLETED)
+                wait(active, timeout=poll, return_when=FIRST_COMPLETED)
                 continue
             # Match the first-pass drain on master. Once retries are eligible,
             # they can use any available slot while other retries run.
@@ -1423,7 +1551,7 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
                         deadline = None
                         continue
             if active:
-                timeout = SLOT_POLL_SECONDS if ready and free else None
+                timeout = SLOT_POLL_SECONDS if ready and free else poll
                 wait(active, timeout=timeout, return_when=FIRST_COMPLETED)
             else:
                 now = time.monotonic()
@@ -1587,7 +1715,25 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     invocation.write()
             return result
 
-        dispatch_live(live, slots, env, collect)
+        requests = RetryRequests()
+
+        def retryable(name):
+            with lock:
+                status = receipt["checks"][name]["status"]
+            return None if status in RETRYABLE else f"status is {status}" + (
+                "; force it with run --only CHECK --rerun after this collector finishes" if status == "passed" else "")
+
+        def retry(request):
+            reason = requests.submit(request.get("check")).result()
+            return (True, f"accepted: {request['check']} queued") if reason is None else (False, "refused: " + reason)
+
+        CONTROL["retry"] = retry
+        try:
+            dispatch_live(live, slots, env, collect, requests=requests, retryable=retryable)
+        finally:
+            CONTROL.pop("retry", None)
+            for _, reply in requests.take(close=True):
+                reply.set_result("no live dispatch in progress")
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
             receipt["error"] = "source changed during acceptance"
@@ -3123,6 +3269,10 @@ def main():
     reuse = sub.add_parser("reuse", help="transfer profile/VM PASS results under isolated-test or harness-only policies")
     reuse.add_argument("--output", type=Path, required=True)
     reuse.add_argument("--from", dest="sources", type=Path, action="append", required=True, help="earlier candidate; first match wins")
+    retry = sub.add_parser("retry", help="rerun one failed check; a running collector queues it beside its other lanes")
+    retry.add_argument("--output", type=Path, required=True)
+    add_slot_arguments(retry)
+    retry.add_argument("check")
     superseded = sub.add_parser("supersede", help="retain original evidence and explicitly retire this candidate")
     superseded.add_argument("--output", type=Path, required=True)
     deferred = sub.add_parser("defer-external", help="record authorized external deferrals; execution stays not-run")
@@ -3168,7 +3318,13 @@ def main():
     if args.action == "defer-external":
         with acceptance_lock(output):
             return defer_external(output, args.obligation, args.reason, args.authorization_reference)
-    with acceptance_lock(output):
+    if args.action == "retry":
+        reply = control_request(output, {"action": "retry", "check": args.check})
+        if reply is not None:
+            print(reply["reason"], flush=True)
+            return 0 if reply["accepted"] else 1
+        args.only, args.rerun, args.first, args.exclude, args.with_vms = [args.check], False, [], [], False
+    with acceptance_lock(output), control(output):
         return run_checks(output, selected_slots(args), args.only, args.rerun, args.first, args.exclude, args.with_vms)
 
 
