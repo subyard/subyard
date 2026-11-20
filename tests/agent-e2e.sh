@@ -6170,7 +6170,7 @@ operator_yard() {
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
-    'config set '*|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
@@ -6187,6 +6187,10 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
+# The creation runtime removes the DEV_SUDO assignment before the hop update.
+[ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
+  -e "yard update --version $HOP_VERSION --yes" "$trace")" \
+  = "yard config unset DEV_SUDO --scope host --yes"$'\n'"yard update --version $HOP_VERSION --yes" ]
 jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
 PUBLISHED_OWNER
 
