@@ -108,19 +108,13 @@ func writeHostRPCFixture(t *testing.T, path string, inventory any) {
 }
 
 func TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	inventory := inventoryResult("remote-owner", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, inventory)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "add", "owner-alias"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "add", "owner-alias"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("host add failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -128,7 +122,7 @@ func TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether(t *testing.T)
 		!strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "remote-owner") {
 		t.Fatalf("host add omitted exact trust/identity plan: %#v", prompt.Requests)
 	}
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	records, err := (ownerinventory.Connections{Root: dataRoot}).List()
 	if err != nil || len(records) != 1 || records[0].Trust == nil ||
 		records[0].Trust.Fingerprint != trust.Fingerprint {
@@ -142,11 +136,11 @@ func TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether(t *testing.T)
 }
 
 func TestHostAddUpgradesLegacyDiscoveryToManagedTrust(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	inventory := inventoryResult("remote-owner", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, inventory)
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	store := ownerinventory.Connections{Root: dataRoot}
 	if err := store.RegisterLegacy(ownerinventory.Connection{
 		HostID: "remote-owner", Destination: "owner-alias",
@@ -154,14 +148,7 @@ func TestHostAddUpgradesLegacyDiscoveryToManagedTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"host", "add", "owner-alias", "--yes"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "add", "owner-alias", "--yes"}, Stdout: &stdout, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("legacy upgrade failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -173,53 +160,41 @@ func TestHostAddUpgradesLegacyDiscoveryToManagedTrust(t *testing.T) {
 }
 
 func TestHostAddEOFDoesNotMutateState(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	hostAddSSHFixture(t, inventoryResult("remote-owner", "default", "").inventory)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "add", "owner-alias"},
-		Environment: environment, WorkingDir: root, Stdin: bytes.NewReader(nil),
-		Stdout: &stdout, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "add", "owner-alias"}, Stdin: bytes.NewReader(nil), Stdout: &stdout, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("EOF registration returned %d: %s", code, stderr.String())
 	}
-	records, err := (ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}).List()
+	records, err := (ownerinventory.Connections{Root: filepath.Join(fixture.DataHome, "owner-inventory")}).List()
 	if err != nil || len(records) != 0 {
 		t.Fatalf("EOF registration mutated state: %#v, %v", records, err)
 	}
 }
 
 func TestHostAddCollisionIsRejectedBeforePrompt(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	inventory := inventoryResult("remote-owner", "default", "").inventory
 	hostAddSSHFixture(t, inventory)
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	if err := os.MkdirAll(filepath.Join(dataRoot, "routing", "remote-owner"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
-		Arguments: []string{"host", "add", "owner-alias"}, Environment: environment,
-		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "add", "owner-alias"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Seen) != 0 {
 		t.Fatalf("collision reached prompt: code=%d prompts=%#v stderr=%s", code, prompt.Seen, stderr.String())
 	}
 }
 
 func TestHostRepairShowsKeyAndHostIDChangeBeforeApplying(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	oldInventory := inventoryResult("owner-a", "default", "").inventory
 	_, oldTrust := hostAddSSHFixture(t, oldInventory)
 	store := ownerinventory.Connections{Root: dataRoot}
@@ -232,13 +207,7 @@ func TestHostRepairShowsKeyAndHostIDChangeBeforeApplying(t *testing.T) {
 	_, newTrust := hostAddSSHFixture(t, newInventory)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "repair", "owner-a"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "repair", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("cancelled repair returned %d: %s", code, stderr.String())
 	}
@@ -259,13 +228,7 @@ func TestHostRepairShowsKeyAndHostIDChangeBeforeApplying(t *testing.T) {
 	prompt = &testkit.Prompt{Answers: []bool{true}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "repair", "owner-a"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = fixture.New(Options{Arguments: []string{"host", "repair", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("confirmed repair failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -277,11 +240,11 @@ func TestHostRepairShowsKeyAndHostIDChangeBeforeApplying(t *testing.T) {
 }
 
 func TestHostRemoveUsesAuthoritativeInventoryBeforePrompt(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	empty := inventoryResult("owner-a", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, empty)
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	store := ownerinventory.Connections{Root: dataRoot}
 	if err := store.Register(ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}, ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: empty}); err != nil {
 		t.Fatal(err)
@@ -290,10 +253,7 @@ func TestHostRemoveUsesAuthoritativeInventoryBeforePrompt(t *testing.T) {
 	writeHostRPCFixture(t, os.Getenv("SSH_RPC_RESPONSE"), withProject)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "remove", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Seen) != 0 {
 		t.Fatalf("authoritative project reached removal prompt: code=%d prompts=%#v stderr=%s", code, prompt.Seen, stderr.String())
 	}
@@ -304,11 +264,11 @@ func TestHostRemoveUsesAuthoritativeInventoryBeforePrompt(t *testing.T) {
 }
 
 func TestHostRemoveAllowsMissingCacheAfterAuthoritativeEmptyInventory(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	empty := inventoryResult("owner-a", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, empty)
-	dataRoot := filepath.Join(home, ".subyard", "owner-inventory")
+	dataRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 	store := ownerinventory.Connections{Root: dataRoot}
 	if err := store.Register(ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}, ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: empty}); err != nil {
 		t.Fatal(err)
@@ -318,10 +278,7 @@ func TestHostRemoveAllowsMissingCacheAfterAuthoritativeEmptyInventory(t *testing
 	}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "remove", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("removal failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -331,42 +288,33 @@ func TestHostRemoveAllowsMissingCacheAfterAuthoritativeEmptyInventory(t *testing
 }
 
 func TestHostRemoveFindsUnmergedLegacyRouteByEndpointBeforePrompt(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
 	empty := inventoryResult("owner-a", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, empty)
-	store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+	store := ownerinventory.Connections{Root: filepath.Join(fixture.DataHome, "owner-inventory")}
 	if err := store.Register(ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}, ownerinventory.Snapshot{FetchedAt: time.Now(), Inventory: empty}); err != nil {
 		t.Fatal(err)
 	}
 	control := &remoteControlStub{records: []domain.RemoteRecord{{Spec: domain.RemoteSpec{LegacyAlias: "old-yard", OwnerEndpoint: "owner-alias"}}}}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, RemoteControl: control})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "remove", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, RemoteControl: control})
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Seen) != 0 || !strings.Contains(stderr.String(), "yard remote remove old-yard") {
 		t.Fatalf("unmerged legacy route was not rejected: code=%d prompts=%#v stderr=%s", code, prompt.Seen, stderr.String())
 	}
 }
 
 func TestHostRenamePrintsExactPlanAndAppliesAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n", 0o600)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "rename", "owner-b"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("host rename failed: code=%d stderr=%s", code, stderr.String())
 	}
-	content, err := os.ReadFile(filepath.Join(configHome, "host-id"))
+	content, err := os.ReadFile(filepath.Join(fixture.ConfigHome, "host-id"))
 	if err != nil || string(content) != "owner-b\n" {
 		t.Fatalf("renamed identity = %q err=%v", content, err)
 	}
@@ -380,21 +328,15 @@ func TestHostRenamePrintsExactPlanAndAppliesAfterConfirmation(t *testing.T) {
 }
 
 func TestHostRenameRefusalLeavesIdentityUntouched(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n", 0o600)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "rename", "owner-b"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("refused host rename returned %d, stderr=%s", code, stderr.String())
 	}
-	content, err := os.ReadFile(filepath.Join(configHome, "host-id"))
+	content, err := os.ReadFile(filepath.Join(fixture.ConfigHome, "host-id"))
 	if err != nil || string(content) != "owner-a\n" {
 		t.Fatalf("refused rename mutated identity = %q err=%v", content, err)
 	}
@@ -403,9 +345,9 @@ func TestHostRenameRefusalLeavesIdentityUntouched(t *testing.T) {
 func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 	for _, verb := range []string{"add", "repair", "remove", "rename"} {
 		t.Run(verb, func(t *testing.T) {
-			root, home, configHome, environment := configCommandFixture(t)
-			writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
-			store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+			fixture := newFixture(t, withCheckoutConfig())
+			fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n", 0o600)
+			store := ownerinventory.Connections{Root: filepath.Join(fixture.DataHome, "owner-inventory")}
 			inventory := inventoryResult("owner-a", "default", "").inventory
 			_, trust := hostAddSSHFixture(t, inventory)
 			if verb == "repair" || verb == "remove" {
@@ -424,11 +366,7 @@ func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 				target = "local-renamed"
 			}
 			var stdout bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-				WorkingDir: root, Stdout: &stdout, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Stdout: &stdout, Stderr: io.Discard})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -457,7 +395,7 @@ func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 				(verb == "repair" || verb == "remove") && (len(before) != 1 || before[0].HostID != "owner-a") {
 				t.Fatalf("planning mutated registrations: %#v", before)
 			}
-			identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+			identity, err := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 			if err != nil || string(identity) != "local-owner\n" {
 				t.Fatalf("planning mutated identity: %q, %v", identity, err)
 			}
@@ -483,7 +421,7 @@ func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 					t.Fatalf("remove retained connection: %#v", connections)
 				}
 			case "rename":
-				identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+				identity, err := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 				if err != nil || string(identity) != "local-renamed\n" {
 					t.Fatalf("rename result: %q, %v", identity, err)
 				}
@@ -498,13 +436,9 @@ func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 }
 
 func TestHostExactRPCRejectsChangedManifest(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n", 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-		WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n", 0o600)
+	program := fixture.New(Options{Stdout: io.Discard, Stderr: io.Discard})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -523,18 +457,18 @@ func TestHostExactRPCRejectsChangedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(manifest), 0o600)
+	fixture.Write(configsync.ManifestPath(fixture.ConfigHome), string(manifest), 0o600)
 	params, _ := json.Marshal(map[string]any{"confirmed": true, "digest": plan.Digest})
 	_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "host-stale", Params: params}, nil)
 	var fault *rpc.Error
 	if !errors.As(err, &fault) || fault.Code != domain.PlanStaleCode {
 		t.Fatalf("rename did not reject its changed machine-local baseline as stale: %v", err)
 	}
-	identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+	identity, err := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 	if err != nil || string(identity) != "owner-a\n" {
 		t.Fatalf("stale plan mutated owner identity: %q, %v", identity, err)
 	}
-	current, err := os.ReadFile(configsync.ManifestPath(configHome))
+	current, err := os.ReadFile(configsync.ManifestPath(fixture.ConfigHome))
 	if err != nil || !bytes.Equal(current, manifest) {
 		t.Fatalf("stale plan mutated manifest: %q, %v", current, err)
 	}
@@ -545,31 +479,31 @@ func TestRegisteredHostRenameNoninteractiveConsent(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		for _, flag := range []string{"", "--yes", "-y"} {
 			t.Run(fmt.Sprintf("recovery=%t/flag=%s", explicit, flag), func(t *testing.T) {
-				root, home, configHome, environment := configCommandFixture(t)
+				fixture := newFixture(t, withCheckoutConfig())
 				origin, source := configBareSourceRepository(t, "owner-a", "YARD_IMAGE=images:debian/13\n")
 				runConfigSyncGit(t, source, "config", "user.name", "Subyard Test")
 				runConfigSyncGit(t, source, "config", "user.email", "test@invalid")
-				writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
-				loaded := loadConfigCommandContext(t, root, environment, "default")
-				plan, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded)})
+				fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n")
+				loaded := loadConfigCommandContext(t, fixture.Root, fixture.Environment, "default")
+				plan, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: fixture.ConfigHome, RepositoryRoot: fixture.Root, OperatorHome: fixture.Home, Environment: environmentMap(fixture.Environment), FileSettings: config.SyncableFileMappings(loaded)})
 				if err != nil {
 					t.Fatal(err)
 				}
 				if err := configsync.Apply(plan); err != nil {
 					t.Fatal(err)
 				}
-				if err := configsync.RegisterSourceOrigin(configHome, source, origin); err != nil {
+				if err := configsync.RegisterSourceOrigin(fixture.ConfigHome, source, origin); err != nil {
 					t.Fatal(err)
 				}
 				arguments := []string{"host", "rename", "owner-b"}
 				if explicit {
-					writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-b\n")
-					payload, err := os.ReadFile(configsync.ManifestPath(configHome))
+					fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-b\n")
+					payload, err := os.ReadFile(configsync.ManifestPath(fixture.ConfigHome))
 					if err != nil {
 						t.Fatal(err)
 					}
-					writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(bytes.ReplaceAll(payload, []byte("owner-a"), []byte("owner-b"))))
-					if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); err != nil {
+					fixture.Write(configsync.ManifestPath(fixture.ConfigHome), string(bytes.ReplaceAll(payload, []byte("owner-a"), []byte("owner-b"))))
+					if err := os.Remove(filepath.Join(fixture.ConfigHome, config.GitSettingsRelativePath, "config.env")); err != nil {
 						t.Fatal(err)
 					}
 					arguments = append(arguments, "--source-host-id", "owner-a")
@@ -579,29 +513,26 @@ func TestRegisteredHostRenameNoninteractiveConsent(t *testing.T) {
 				}
 				before := strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD"))
 				oldTree := strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD:hosts/owner-a"))
-				identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+				identity, err := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 				if err != nil {
 					t.Fatal(err)
 				}
-				manifest, err := os.ReadFile(configsync.ManifestPath(configHome))
+				manifest, err := os.ReadFile(configsync.ManifestPath(fixture.ConfigHome))
 				if err != nil {
 					t.Fatal(err)
 				}
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Arguments: arguments, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
 				code := program.Run(context.Background())
 				if flag == "" {
 					if code != 1 || !strings.Contains(stderr.String(), "confirmation required") || strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD")) != before {
 						t.Fatalf("unconfirmed rename code=%d stderr=%s", code, stderr.String())
 					}
-					current, err := os.ReadFile(configsync.HostIDPath(configHome))
+					current, err := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 					if err != nil || !bytes.Equal(current, identity) {
 						t.Fatal("unconfirmed rename changed identity")
 					}
-					current, err = os.ReadFile(configsync.ManifestPath(configHome))
+					current, err = os.ReadFile(configsync.ManifestPath(fixture.ConfigHome))
 					if err != nil || !bytes.Equal(current, manifest) || strings.TrimSpace(configSourceGitOutput(t, source, "status", "--porcelain")) != "" {
 						t.Fatal("unconfirmed rename changed source worktree or manifest")
 					}
@@ -622,80 +553,74 @@ func TestRegisteredHostRenameNoninteractiveConsent(t *testing.T) {
 }
 
 func TestRegisteredHostRenameRecoveryBeforeBrokenSettingsLoad(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
 	source := filepath.Join(testkit.TempDir(t), "source")
-	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
-	writeConfigCommandFile(t, filepath.Join(source, "hosts/owner-a/config.env"), "SSH_PORT=2233\n")
-	writeConfigCommandFile(t, filepath.Join(source, "hosts/owner-a/yards/demo/config.env"), "SSH_PORT=2234\nYARD_KIND=vm\n")
+	fixture.Write(filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
+	fixture.Write(filepath.Join(source, "hosts/owner-a/config.env"), "SSH_PORT=2233\n")
+	fixture.Write(filepath.Join(source, "hosts/owner-a/yards/demo/config.env"), "SSH_PORT=2234\nYARD_KIND=vm\n")
 	runConfigSyncGit(t, source, "init", "-q")
 	runConfigSyncGit(t, source, "config", "user.name", "Subyard Test")
 	runConfigSyncGit(t, source, "config", "user.email", "test@invalid")
 	commitConfigSource(t, source, "initial")
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
-	loaded := loadConfigCommandContext(t, root, environment, "default")
-	native, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded)})
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n")
+	loaded := loadConfigCommandContext(t, fixture.Root, fixture.Environment, "default")
+	native, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: fixture.ConfigHome, RepositoryRoot: fixture.Root, OperatorHome: fixture.Home, Environment: environmentMap(fixture.Environment), FileSettings: config.SyncableFileMappings(loaded)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := configsync.Apply(native); err != nil {
 		t.Fatal(err)
 	}
-	if err := configsync.RegisterSource(configHome, source); err != nil {
+	if err := configsync.RegisterSource(fixture.ConfigHome, source); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := os.ReadFile(configsync.ManifestPath(configHome))
+	payload, err := os.ReadFile(configsync.ManifestPath(fixture.ConfigHome))
 	if err != nil {
 		t.Fatal(err)
 	}
 	payload = bytes.ReplaceAll(payload, []byte("owner-a"), []byte("owner-b"))
-	writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(payload))
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-b\n")
-	if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); err != nil {
+	fixture.Write(configsync.ManifestPath(fixture.ConfigHome), string(payload))
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-b\n")
+	if err := os.Remove(filepath.Join(fixture.ConfigHome, config.GitSettingsRelativePath, "config.env")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "yards/demo/config.env")); err != nil {
+	if err := os.Remove(filepath.Join(fixture.ConfigHome, config.GitSettingsRelativePath, "yards/demo/config.env")); err != nil {
 		t.Fatal(err)
 	}
 	// Preserve the upstream migration's local port pin. The deleted Git kind
 	// leaves a recoverable VM-only local setting invalid before early ingress.
-	writeConfigCommandFile(t, filepath.Join(configHome, "yards/demo/config.env"), "SSH_PORT=2234\nVM_CPU_WEIGHT=1000\nYARD_IMAGE=images:ubuntu/24.04\n")
-	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "demo"}); err == nil || !strings.Contains(err.Error(), "require YARD_KIND=vm") {
+	fixture.Write(filepath.Join(fixture.ConfigHome, "yards/demo/config.env"), "SSH_PORT=2234\nVM_CPU_WEIGHT=1000\nYARD_IMAGE=images:ubuntu/24.04\n")
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: fixture.Root, OperatorHome: fixture.Home, Environment: environmentMap(fixture.Environment), YardName: "demo"}); err == nil || !strings.Contains(err.Error(), "require YARD_KIND=vm") {
 		t.Fatalf("deleted Git cache did not break effective VM settings: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{Answers: []bool{true}}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b", "--source-host-id", "owner-a"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "rename", "owner-b", "--source-host-id", "owner-a"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("recovery code=%d stderr=%s", code, stderr.String())
 	}
 	if len(prompt.Requests) != 1 {
 		t.Fatalf("confirmation count=%d", len(prompt.Requests))
 	}
-	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "default"}); err != nil {
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: fixture.Root, OperatorHome: fixture.Home, Environment: environmentMap(fixture.Environment), YardName: "default"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestLocalHostRenameRejectsRegisteredRemoteIdentity(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
-	store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+	fixture := newFixture(t, withCheckoutConfig())
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "owner-a\n")
+	store := ownerinventory.Connections{Root: filepath.Join(fixture.DataHome, "owner-inventory")}
 	if err := store.Write(ownerinventory.Connection{HostID: "owner-b", Destination: "remote.example"}); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{Answers: []bool{true}}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "rename", "owner-b"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "remote owner") {
 		t.Fatalf("collision code=%d stderr=%s prompts=%d", code, stderr.String(), len(prompt.Requests))
 	}
-	identity, _ := os.ReadFile(configsync.HostIDPath(configHome))
+	identity, _ := os.ReadFile(configsync.HostIDPath(fixture.ConfigHome))
 	if string(identity) != "owner-a\n" {
 		t.Fatal("collision changed identity")
 	}
