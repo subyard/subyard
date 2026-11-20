@@ -42,7 +42,7 @@ class LifecycleTest(unittest.TestCase):
                     unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
                 self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
 
-    def test_recorded_collector_startup_with_another_disk_budget_is_stale_not_foreign(self):
+    def test_recorded_collector_unit_with_any_startup_is_stale_not_foreign(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -53,27 +53,70 @@ class LifecycleTest(unittest.TestCase):
             for directory in ('control', 'units'):
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
-            path = units/guest.COLLECTOR
-            for current, loaded in (('2147483648', ''), ('2147483648', ' --disk-bytes 1073741824'), ('', ' --disk-bytes 1073741824')):
-                with self.subTest(current=current, loaded=loaded), patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=current):
-                    runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', units, root/'bin',
-                                            account=account, etc=root/'etc')
-                    desired = runtime.starts[guest.COLLECTOR]
-                    # The v0.30 startup named the analytics token; the loaded one keeps its own budget.
-                    previous = desired.removesuffix(runtime.budget).replace(str(runtime.auth), str(runtime.data/'auth.token'))+loaded
-                    unit = runtime.assets[path][0].replace(desired.encode(), previous.encode(), 1)
+            path, inventory = units/guest.COLLECTOR, root/'control/assets.json'
+            with patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES='2147483648'):
+                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', units, root/'bin',
+                                        account=account, etc=root/'etc')
+            desired = runtime.starts[guest.COLLECTOR]
+            current = runtime.assets[path][0]
+            v030 = desired.removesuffix(' --disk-bytes 2147483648').replace(str(runtime.auth), str(runtime.data/'auth.token'))
+            # Previous and future releases may start the collector with any arguments and environment.
+            for command, environment in ((v030, ''), (desired.replace('2147483648', '1073741824'), ''),
+                                         (desired.replace(str(runtime.auth), '/var/lib/subyard/other/second.token'), ''),
+                                         (desired+' --future-flag --budget-file /etc/x', ''), (desired, 'GOMEMLIMIT=200MiB'),
+                                         (desired.removeprefix('/usr/bin/setpriv --no-new-privs '), '')):
+                with self.subTest(command=command, environment=environment):
+                    unit = current.replace(('ExecStart='+desired).encode(), ('ExecStart='+command).encode(), 1)
+                    if environment:
+                        unit = unit.replace(b'ExecStart=', ('Environment='+environment+'\nExecStart=').encode(), 1)
                     path.write_bytes(unit)
                     fields = dict(LoadState='loaded', FragmentPath=str(path), User='dev', Group=str(account.pw_gid), Type='simple',
                                   UMask='0077', LimitCORE='0', NoNewPrivileges='yes', DropInPaths='', KillMode='control-group',
                                   MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms', ActiveState='active',
-                                  ExecStart='{ path=/usr/bin/setpriv ; argv[]='+previous+' ; ignore_errors=no ; start_time=x ; }')
-                    show = '\n'.join(f'{key}={value}' for key, value in fields.items())
-                    with patch.object(guest, 'systemctl', return_value=show):
-                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(b'other').hexdigest()}))
-                        with self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                                  ExecStart='{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; start_time=x ; }',
+                                  Environment=environment, NeedDaemonReload='no')
+                    def show(fields=fields):
+                        return '\n'.join(f'{key}={value}' for key, value in fields.items())
+                    def refused():
+                        with patch.object(guest, 'systemctl', side_effect=lambda *args: show()), \
+                             self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
                             runtime.manager(guest.COLLECTOR)
-                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(unit).hexdigest()}))
+                    recorded = {str(path): hashlib.sha256(unit).hexdigest()}
+                    inventory.write_text(json.dumps(recorded))
+                    with patch.object(guest, 'systemctl', side_effect=lambda *args: show()):
                         self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+                    # The inventory proves ownership; an unrecorded file or a drop-in is foreign.
+                    inventory.write_text(json.dumps({str(path): hashlib.sha256(b'other').hexdigest()}))
+                    refused()
+                    inventory.write_text(json.dumps(recorded))
+                    for changed in ({'DropInPaths': '/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
+                                    {'FragmentPath': '/etc/systemd/system/'+guest.COLLECTOR},
+                                    {'NeedDaemonReload': 'yes'}, {'User': 'root'}, {'KillMode': 'process'}):
+                        with self.subTest(changed=changed):
+                            refused_fields = {**fields, **changed}
+                            with patch.object(guest, 'systemctl', return_value=show(refused_fields)), self.assertRaises(ValueError):
+                                runtime.manager(guest.COLLECTOR)
+            # Over the current file, another loaded startup or environment comes from a drop-in.
+            path.write_bytes(current)
+            inventory.write_text(json.dumps({str(path): hashlib.sha256(current).hexdigest()}))
+            fields.update(ExecStart='{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no ; }', Environment='', NeedDaemonReload='no')
+            for changed in ({}, {'ExecStart': '{ path=/usr/bin/setpriv ; argv[]='+desired+' ; ignore_errors=no ; }', 'Environment': 'X=1'}):
+                with self.subTest(over_current=changed), patch.object(guest, 'systemctl', return_value=show({**fields, **changed})), \
+                     self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                    runtime.manager(guest.COLLECTOR)
+            # An apply interrupted before daemon-reload recorded both versions; the replaced one stays loaded.
+            inventory.write_text(json.dumps({str(path): hashlib.sha256(current).hexdigest(), guest.REPLACED: {str(path): 'x'*64}}))
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})):
+                self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+            # A symlinked or missing unit file is not a regular unit this profile wrote.
+            path.unlink()
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})), \
+                 self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                runtime.manager(guest.COLLECTOR)
+            (root/'elsewhere').write_bytes(current)
+            path.symlink_to(root/'elsewhere')
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})), self.assertRaises(ValueError):
+                runtime.manager(guest.COLLECTOR)
 
     def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
         profile = Path(guest.__file__).parent
@@ -794,7 +837,7 @@ for path, value in (
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             units=Path(name)
             command='/usr/bin/setpriv --no-new-privs /usr/local/lib/subyard-telemetry/subyard-telemetry serve'
-            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},budget='',
+            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},
                 data=units/'data',auth=units/'data-private/auth.token',
                 assets={units/guest.COLLECTOR:(b'known unit',0o644)})
             fields=dict(LoadState='loaded',FragmentPath=str(units/guest.COLLECTOR),User='dev',Group='1000',
@@ -945,6 +988,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                         KillMode='process' if unit==guest.MANAGER else 'control-group',Delegate='yes',
                         MemoryMax=str(256*1024*1024),TasksMax='64',CPUQuotaPerSecUSec='250ms')
                     fields.update(states[unit])
+                    # A startup other than the file's stays loaded until daemon-reload drops it.
+                    fields.setdefault('NeedDaemonReload', 'no' if 'argv[]='+command+' ; ' in fields['ExecStart'] else 'yes')
                     return '\n'.join(f'{key}={value}' for key,value in fields.items())
                 if args[0] == 'enable':
                     for unit in args[2:]:
@@ -962,6 +1007,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 if args[0] == 'daemon-reload':
                     for state in states.values():
                         state.pop('ExecStart', None)
+                        state.pop('Environment', None)
                 if args[0] in ('stop','start'):
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
@@ -1122,6 +1168,23 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(calls[-3:], [('stop',guest.COLLECTOR), ('daemon-reload',),
                                              ('enable','--now',guest.COLLECTOR,guest.MANAGER)])
                 self.assertEqual(runtime.observe()['state'],'current')
+                # Rolling back from a later release that changed the startup: its recorded
+                # units are stale, not foreign, and apply rewrites them with this startup.
+                saved=json.loads((root/'control/assets.json').read_text())
+                for unit in (guest.COLLECTOR,guest.MANAGER):
+                    path=root/'units'/unit
+                    future=runtime.assets[path][0].replace(b' --data-dir ',b' --future-flag --data-dir ',1)
+                    future=future.replace(b'ExecStart=',b'Environment=FUTURE=1\nExecStart=',1)
+                    path.write_bytes(future)
+                    saved[str(path)]=hashlib.sha256(future).hexdigest()
+                    states[unit]['Environment']='FUTURE=1'
+                (root/'control/assets.json').write_text(json.dumps(saved))
+                self.assertEqual(runtime.observe()['state'],'stale')
+                runtime.apply()
+                self.assertIn(('stop',guest.COLLECTOR,guest.MANAGER),calls)
+                self.assertEqual(runtime.observe()['state'],'current')
+                for unit in (guest.COLLECTOR,guest.MANAGER):
+                    self.assertEqual((root/'units'/unit).read_bytes(),runtime.assets[root/'units'/unit][0])
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},
                                 {'DropInPaths':'/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
                                 {'KillMode':'process'},{'MemoryMax':'infinity'},{'Environment':'PRIVATE=unsafe'},

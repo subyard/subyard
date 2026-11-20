@@ -79,7 +79,6 @@ class Runtime:
         # The profile's TELEMETRY_DISK_BUDGET; the collector default applies without it.
         budget = os.environ.get('SUBYARD_TELEMETRY_DISK_BYTES', '')
         budget = ' --disk-bytes '+budget if re.fullmatch('[1-9][0-9]{0,18}', budget) else ''
-        self.budget = budget
         self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}{budget}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
         collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
@@ -266,7 +265,7 @@ class Runtime:
         return self.token()
 
     def manager(self, unit, startup=False):
-        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
+        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,NeedDaemonReload,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
         fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
         # A failed service waiting for Restart= has failed, e.g. after a reboot
         # during a rename, while its unit still names the previous account.
@@ -287,31 +286,23 @@ class Runtime:
             else:
                 expected['Delegate'] = 'yes'
             command = self.starts[unit]
-            path = self.units/unit
-            current = self.assets[path][0]
-            # Recognize only the prior managed service envelopes recorded in
-            # the inventory. Its bearer moves outside the analytics directory.
-            old_auth = str(self.data/'auth.token')
-            candidates = {command, command.removeprefix('/usr/bin/setpriv --no-new-privs ')}
             start = fields.get('ExecStart', '')
-            if unit == COLLECTOR:
-                candidates.update(value.replace(str(self.auth), old_auth) for value in tuple(candidates))
-                # v0.30 had no disk budget; a changed budget setting leaves the previous one loaded.
-                loaded = re.search(r'( --disk-bytes [1-9][0-9]{0,18})? ; ignore_errors=no ; ', start)
-                loaded = (loaded.group(1) or '') if loaded else ''
-                if self.budget != loaded:
-                    candidates.update(value.removesuffix(self.budget)+loaded for value in tuple(candidates))
-            for candidate in sorted(candidates):
-                if candidate == command or not start.startswith('{ path='+candidate.split()[0]+' ; argv[]='+candidate+' ; ignore_errors=no ; '):
-                    continue
-                prior = current.replace(command.encode(), candidate.encode(), 1)
-                if (self.asset_snapshot(path) in (prior, current)
-                        and hashlib.sha256(prior).hexdigest() in self.recorded_digests(self.saved_inventory(), path)):
-                    command = candidate  # Known previous startup, stale until migrated.
-                    break
-            valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
+            if not (start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
+                    and fields.get('Environment', '') == fields.get('EnvironmentFiles', '') == ''):
+                # Any other startup is a previous one of ours, stale until apply rewrites it, only
+                # when the loaded unit is a file the inventory recorded: a previous file loaded from
+                # disk, or one an interrupted apply replaced after recording both versions. Over
+                # the loaded current file, another startup comes from a drop-in.
+                path = self.units/unit
+                content = self.asset_snapshot(path)
+                saved = self.saved_inventory()
+                replacing = isinstance(saved.get(REPLACED), dict) and str(path) in saved[REPLACED]
+                if (content is None or hashlib.sha256(content).hexdigest() not in self.recorded_digests(saved, path)
+                        or not (replacing or fields.get('NeedDaemonReload') == 'no' and content != self.assets[path][0])):
+                    raise ValueError('foreign loaded unit envelope')
+                del expected['Environment'], expected['EnvironmentFiles']
             nnp = fields.get('NoNewPrivileges')
-            if (any(fields.get(key, '') != value for key, value in expected.items()) or not valid_start
+            if (any(fields.get(key, '') != value for key, value in expected.items())
                     or nnp not in (('yes', 'no') if dropins else ('yes',))):
                 raise ValueError('foreign loaded unit envelope')
         return fields
