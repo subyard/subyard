@@ -1147,6 +1147,27 @@ checkpoint and projection must remain unchanged through execution. The original 
 transition owner, catalog and journal bindings are preserved. A marked target validates the checkpoint
 itself; a target without a transition registry retains the existing active-owner route.
 
+`releasetransition.HistoryCompatibility` decides whether a target release may own the active
+migration history. It compares registry identities (`identical`, `differs` or `absent`), then reads
+the authoritative ledger or checkpoint through the target registry and its checkpoint-reader marker.
+It returns a kind (`identity`, `equivalent`, `steps` or `refuse`), the registry relation and the
+collected refusals; a verdict that is not admitted always carries a refusal. Only `identity` is
+admitted for now, so a differing registry refuses as before. Callers that ask whether registries
+differ read the relation, not admission. The sealed
+[`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
+digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
+in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release
+without it declares no predecessor.
+
+`yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
+JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the
+runtime's installed-engine selection, including first publication. Run it from the active
+release's verified engine, `RUNTIME_ROOT/current/bin/yard-engine`: that engine selects rollback
+targets and owns the declaration, while older releases lack the verb. It needs no repository,
+takes no lock and writes nothing. Read `admitted`, `kind`, `registry` and `refusals`, with their
+causes, from the JSON instead of relying on the exit code: 0 means admitted and 1 refused, while 2
+covers usage and verification errors, including a missing config home, and prints no JSON.
+
 `yard migrate` assesses and confirms the necessary work, then uses the same verified transition
 owner, authorization, lock, journal and convergence engine as `yard update`. It does not download
 or publish a release, choose a version, or rotate runtime links to another release. Completed

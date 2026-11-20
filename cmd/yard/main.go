@@ -15,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/networkruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -58,6 +59,10 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	// Installers run this read-only verdict from a verified engine, also before it has a repository.
+	if len(os.Args) > 1 && os.Args[1] == releaseruntime.HistoryCompatibilityVerb {
+		os.Exit(releaseruntime.RunHistoryCompatibility(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
