@@ -250,15 +250,16 @@ On a yard that had no grant, `yard init` publishes the `prompt` grant only after
 agents' approval policies are installed and verified, so an interrupted init leaves the yard
 without sudo rather than with sudo and no prompts.
 
-For Claude and Codex, the hook rejects other literal spellings of the escalation commands, as it
-does for [Git](#commit-and-push-approval-prompts): an executable path such as `/usr/bin/sudo`, a
-quoted command word, an assignment prefix, a wrapper, `xargs`, `find -exec`, `eval`, a
-compound-command keyword, a subshell or function body, a `$(…)` or backtick substitution, and
-literal shell `-c` commands such as `bash -c 'sudo …'`. Use the bare command, such as
-`sudo apt-get install …`, to reach the approval prompt; a direct command after `&&`, `;` or `|`
-also prompts. For Codex the whole command must be plain, as for Git: a redirect such as
-`> /dev/null`, a variable, a newline or a comment makes the hook refuse it, because Codex would
-otherwise run it without asking. The Git approval limits apply here too. In addition:
+For Claude and Codex, the hook applies the [Git approval rule](#commit-and-push-approval-prompts)
+to `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. A word that names one of them, also as
+a path such as `/usr/bin/sudo` or after `=`, is a mention. Use the bare command, such as
+`sudo apt-get install …`, at the start or after a plain prefix, to reach the prompt. Commands such
+as `rg sudo src | head`, `which sudo`, `du -su` and `cat /etc/sudoers` run as usual, and
+`git commit` counts as a listed command here, so `git commit -m 'Fix sudo'` does too. Expected
+false positives include `man sudo`, `grep sudo . 2>/dev/null`, a heredoc file that mentions sudo,
+`gh pr create --title 'Fix sudo'` and `ssh host 'sudo …'`. For Codex the whole command must be
+plain, because Codex would otherwise run it without asking. The Git approval limits apply here
+too. In addition:
 
 - Claude blocks a Bash call if the hook fails or times out. Codex continues its normal
   permission flow on hook failures and timeouts, so only its direct sudo prompt rules remain.
@@ -862,18 +863,32 @@ approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-poli
 mode and accept either correctly installed policy. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
-In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
-`git commit` and `git push`, including Git global options such as `-C` and `-c`, quoted command
-words, executable paths, assignment prefixes, and literal shell `-c` commands. It also rejects them
-behind a wrapper (`env`, `command`, `exec`, `nohup`, `nice`, `time`, `timeout`, `setsid`,
-`stdbuf`, `xargs`), as a `find -exec`, `-execdir`, `-ok` or `-okdir` command, in `eval`, after a
-compound-command keyword such as `if`, `then`, `do`, `{` or `!`, in a subshell or function body,
-and inside `$(…)` or backtick substitutions. Codex matches its prompt rules only against plain
-commands: words joined by `&&`, `||`, `;` or `|`. Its hook therefore also rejects `git commit`
-and `git push` in any command with a redirect such as `2>&1`, a variable, a newline or a
-comment. Use a direct `git commit` or `git push` to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
-or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
-and `git rebase` continue through the normal permission flow.
+In `prompt` mode, Claude and Codex also use a managed Bash `PreToolUse` hook. It refuses a
+literal mention of `git commit` or `git push` unless the client's own prompt covers it. A mention
+is a `git` word, also as a path such as `/usr/bin/git`, followed by words that resolve to `commit`
+or `push` after Git global options such as `-C` and `-c`. The hook finds it anywhere in the
+command text, including quoted strings, heredoc bodies and comments, without running or expanding
+anything:
+
+- A command without a mention runs as usual.
+- A direct command reaches the client's prompt: it starts literally with `git commit` or
+  `git push`, either at the start or after a plain prefix, as in `cd <directory> && git push`.
+  Plain means simple commands of words joined by `&&`, `||`, `;` or `|`, without `$`, backticks,
+  redirects, parentheses, newlines, comments or `&`, and not starting with a reserved word such
+  as `if` or with an assignment.
+- A mention in a plain command that starts with `echo`, `printf`, `grep`, `rg`, `which`, `type`,
+  `ls`, `cat`, `head`, `tail`, `wc`, `cut`, `uniq`, `cd` or `true` is text, as long as every
+  command of its pipeline is one of these or a direct command: `rg 'git push' docs | head`.
+- Anything else is refused with a message that names the direct form.
+
+Claude prompts once for a whole call, so the check ends at its first direct command. Codex
+matches its prompt rules only against a whole plain command, so for Codex the whole command must
+be plain: `git push 2>&1`, a variable or a `$(…)` substitution in the same command is refused.
+Commands such as `git stash push`, `git log --grep commit` and `git rebase` mention neither
+action and continue through the normal permission flow. Expected false positives are commands
+that only name an action outside that list, such as `gh pr create --title 'git push fix'`,
+`grep 'git push' docs 2>/dev/null`, `ssh host 'git push'`, or a heredoc or comment that
+contains `git push`; use a plain form or write the text with a separate command.
 
 OpenCode's `prompt` template asks for direct `git commit` and `git push` commands. The `off`
 template removes those ask patterns. Config refreshes also apply the template for the selected
@@ -882,12 +897,11 @@ usual precedence. Use `opencode-permission-check` in the project to inspect the 
 
 Limits:
 
-- The hook is a client guardrail. It inspects literal shell command words without running or
-  expanding them. It skips quoted heredoc bodies and resumes after their terminator. Aliases,
-  computed commands such as `$cmd push`, `case` arms, process launchers it does not know (for
-  example `flock`, `watch`, `script -c`, `parallel` or `ssh`), scripts, Make targets, subprocesses
-  and direct writes to `.git` are outside its coverage. Other Git
-  subcommands such as `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
+- The hook is a client guardrail. It sees only names spelled literally: variables such as
+  `$cmd push`, globs, aliases, scripts, Make targets and options such as `env -Ssudo` are outside
+  its coverage, as are options that make a listed command run another one, such as `rg --pre`.
+  Subprocesses and direct writes to `.git` are outside it too. Other Git subcommands such as
+  `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
 - Claude is configured to block a Bash call if the hook fails or times out. Codex continues
   its normal permission flow on hook failures and timeouts, including its direct Git prompt rules.
 - When Claude runs under an organization's server-managed settings, the yard's drop-in is not the

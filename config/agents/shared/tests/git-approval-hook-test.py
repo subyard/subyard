@@ -5,6 +5,11 @@ import subprocess
 import sys
 
 hook = sys.argv[1]
+CLAUDE, CODEX = [], ["--plain"]
+MODES = (CLAUDE, CODEX)
+ESCALATION = ("sudo", "su", "doas", "pkexec", "sudoedit", "run0")
+SUDO_GATES = (["sudo"], ["git", "sudo"])
+GIT_GATES = ([], ["git"], ["git", "sudo"])
 
 
 def run(gates, command):
@@ -22,7 +27,12 @@ def allowed(gates, command):
     assert result.returncode == 0 and not result.stdout and not result.stderr, (gates, command, result)
 
 
-for gates in ([], ["git"], ["git", "sudo"]):
+def each(gate_sets, modes=MODES):
+    return [mode + gates for gates in gate_sets for mode in modes]
+
+
+# Any other spelling of git commit or push is refused in both modes.
+for gates in each(GIT_GATES):
     for action in ("commit", "push"):
         for command in (
             f"git -C 'other repo' {action}",
@@ -31,28 +41,29 @@ for gates in ([], ["git"], ["git", "sudo"]):
             f"git '{action}'",
             f'"git" {action}',
             f"git\t{action}",
+            f"git  {action}",
             f"/usr/bin/git {action}",
             f"sh -c 'git {action}'",
             f'bash -lc "cd x && git {action}"',
             f"bash -O extglob -c 'git {action}'",
-            f"bash +O extglob -c 'git {action}'",
             f"bash --init-file /dev/null -oO errexit extglob -c 'git {action}'",
-            f"bash --rcfile /dev/null -c 'git {action}'",
-            f"sh -oe errexit -c 'git {action}'",
             f"bash -c -- '/usr/bin/git {action}'",
-            f"bash -n +n -c '/usr/bin/git {action}'",
             f"examples=(/usr/bin/git {action}); (/usr/bin/git {action})",
             f"true; /usr/bin/git {action}",
             f"GIT_DIR=.git git {action}",
             f"env git {action}",
-            f"env -u HOME GIT_DIR=.git git {action}",
             f"command git {action}",
             f"nohup git {action}",
             f"timeout -k 1 10 git {action}",
             f"env -S 'git {action}'",
+            f"git `true` {action}",
+            f"git $(true) {action}",
+            f"git > /dev/null {action}",
+            f"gh pr create --title 'git {action} fix'",
         ):
             denied(gates, command, f"git {action}")
 
+for gates in each(GIT_GATES):
     for command in (
         "git commit --amend",
         "git push",
@@ -64,26 +75,24 @@ for gates in ([], ["git"], ["git", "sudo"]):
         "git -c alias.commit=example status",
         "echo '&&' /usr/bin/git push",
         "echo '# text'; git log",
-        "# /usr/bin/git push",
-        "cat <<'EOF'\n/usr/bin/git push\nEOF",
         "sh -c 'git log --grep commit; git stash push'",
-        "bash -n -c '/usr/bin/git commit'",
-        "bash -cn '/usr/bin/git commit'",
-        "bash -c -o noexec -- '/usr/bin/git commit'",
-        "examples=(/usr/bin/git push)",
-        "examples+=(\n/usr/bin/git push\n); git status",
         "command -v git",
         "env git status",
+        "git commit -m 'Fix (push) and ; text'",
+        "echo hi > f",
+        "cat f > /dev/null && echo $HOME",
+        "if true; then echo ok; fi",
+        "x=$(git status)",
     ):
         allowed(gates, command)
 
-escalation = ("sudo", "su", "doas", "pkexec", "sudoedit", "run0")
-for gates in (["sudo"], ["git", "sudo"]):
-    for name in escalation:
+for gates in each(SUDO_GATES):
+    for name in ESCALATION:
         for command in (
             f"/usr/bin/{name} id",
             f"'{name}' id",
             f"\\{name} id",
+            f"{name}\tid",
             f"env {name} id",
             f"env -i PATH=/usr/bin {name} id",
             f"command {name} id",
@@ -109,106 +118,135 @@ for gates in (["sudo"], ["git", "sudo"]):
         "run0 id",
         "cd /tmp && sudo id",
         "echo x | sudo tee /tmp/x",
-        "echo sudo",
-        "man sudo",
-        "command -v sudo",
-        "git commit -m 'sudo'",
-        "apt-cache show sudo",
-        "cat <<'EOF'\n/usr/bin/sudo id\nEOF",
+        "sudo id || true",
         "sudo -u root /usr/bin/sudo id",
+        "git commit -m 'sudo'",
+        # A mention inside a read-only command's arguments is text.
+        "rg sudo src | head",
+        "echo su",
+        "which sudo",
+        "git commit -m 'Fix sudo'",
+        "du -su",
+        "cat /etc/sudoers",
+        "git stash push",
+        "git log --grep commit",
+        "echo then sudo",
+        "grep -rn sudo docs | cut -d: -f1 | uniq | wc -l",
+        "type sudo; ls /usr/bin/sudo",
+        "echo sudo | sudo tee /tmp/x",
     ):
         allowed(gates, command)
 
 # Without the sudo gate, escalation spellings stay ungated.
-for gates in ([], ["git"]):
-    for command in ("/usr/bin/sudo id", "env sudo id", "bash -c 'sudo id'"):
+for gates in each(([], ["git"])):
+    for command in ("/usr/bin/sudo id", "env sudo id", "bash -c 'sudo id'", "man sudo"):
         allowed(gates, command)
 
-# Compound starts, substitutions, heredoc tails and command-running operands are not direct.
+# Compound commands, substitutions, heredocs, stdin-fed shells and command-running operands.
 for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo", "sudo id"),
                           (["git"], "git push", "git push"), (["git", "sudo"], "git commit", "git commit")):
-    for command in (
-        f"if {call}; then true; fi",
-        f"if true; then {call}; fi",
-        f"if false; then true; elif {call}; then true; fi",
-        f"if false; then true; else {call}; fi",
-        f"while {call}; do break; done",
-        f"until {call}; do break; done",
-        f"for x in 1; do {call}; done",
-        f"{{ {call}; }}",
-        f"! {call}",
-        f"f() {{ {call}; }}; f",
-        f"function f {{ {call}; }}",
-        f"({call})",
-        f"echo $({call})",
-        f'echo "result: $({call})"',
-        f"x=$({call})",
-        f"echo `{call}`",
-        f'echo "`{call}`"',
-        f"echo $(echo $({call}))",
-        f"cat > notes.txt <<'EOF'\nharmless text\nEOF\n/usr/bin/{call}",
-        f"cat > notes.txt <<EOF && env {call}\nharmless text\nEOF",
-        f"cat <<-EOF\n\tdata\n\tEOF\nenv {call}",
-        f"cat <<EOF\n$({call})\nEOF",
-        f"printf '%s\\n' a | xargs {call}",
-        f"xargs -I{{}} -n 1 {call} < list",
-        f"xargs -0 --max-args 1 {call} < list",
-        f"find . -name x -exec {call} \\;",
-        f"find . -execdir {call} {{}} +",
-        f"find . -ok {call} ';'",
-        f"find . -exec sh -c '{call}' \\;",
-        f"eval '{call}'",
-        f"eval {call}",
-        f"env -iu HOME {call}",
-        f"env -i -C /tmp {call}",
-        f"env -uHOME {call}",
-        f"env -iS '{call}'",
-        f"env --split-string='{call}'",
-        f"setsid {call}",
-        f"stdbuf -oL {call}",
-    ):
-        denied(gates, command, name)
+    for mode in MODES:
+        for command in (
+            f"if {call}; then true; fi",
+            f"if true; then {call}; fi",
+            f"if true; then true; {call}; fi",
+            f"if false; then true; elif {call}; then true; fi",
+            f"while {call}; do break; done",
+            f"until {call}; do break; done",
+            f"for x in 1; do {call}; done",
+            f"{{ {call}; }}",
+            f"! {call}",
+            f"f() {{ {call}; }}; f",
+            f"function f {{ {call}; }}",
+            f"({call})",
+            f"coproc {call}",
+            f"builtin command {call}",
+            f"x=1; {call}",
+            f"echo $({call})",
+            f'echo "result: $({call})"',
+            f"x=$({call})",
+            f"echo `{call}`",
+            f'echo "`{call}`"',
+            f"echo $(echo $({call}))",
+            f"cat > notes.txt <<'EOF'\nharmless text\nEOF\n/usr/bin/{call}",
+            f"cat > notes.txt <<EOF && env {call}\nharmless text\nEOF",
+            f"cat <<-EOF\n\tdata\n\tEOF\nenv {call}",
+            f"cat <<EOF\n$({call})\nEOF",
+            f"bash <<'EOF'\n{call}\nEOF",
+            f"echo '{call}' | bash",
+            f"printf '%s\\n' '{call}' | sh",
+            f"echo $((1<<2))\nenv {call}",
+            f"</dev/null {call}",
+            f">&2 /usr/bin/{call}",
+            f"timeout 5s -- {call}",
+            f"printf '%s\\n' a | xargs {call}",
+            f"xargs -I{{}} -n 1 {call} < list",
+            f"find . -name x -exec {call} \\;",
+            f"find . -execdir {call} {{}} +",
+            f"find . -ok {call} ';'",
+            f"find . -exec sh -c '{call}' \\;",
+            f"eval '{call}'",
+            f"eval {call}",
+            f"env -iu HOME {call}",
+            f"env -i -C /tmp {call}",
+            f"env -uHOME {call}",
+            f"env -iS '{call}'",
+            f"env --split-string='{call}'",
+            f"setsid {call}",
+            f"stdbuf -oL {call}",
+            f"echo x | xargs -0 {call}",
+            # Deep quoting is rescanned word by word, without a depth limit.
+            f"bash -c \"bash -c \\\"sh -c '{call}'\\\"\"",
+            f"eval \"$(printf '%s' '{call}')\"",
+        ):
+            denied(mode + gates, command, name)
 
-for gates in (["sudo"], ["git", "sudo"], ["git"]):
+for gates in each(SUDO_GATES):
+    # Quoting and escapes are removed before a word is named. Unplaceable text, such as an
+    # unterminated quote, separates words instead of hiding them.
+    for command in ("$'sudo' id", "$\"sudo\" id", "s\\udo id", "su''do id", "'/usr/bin/sudo' id",
+                    "cat 'notes; sudo id"):
+        denied(gates, command, "sudo")
+
+# Expected false positives: a mention outside a plain read-only command is refused.
+for gates in each(SUDO_GATES):
     for command in (
-        "cat > notes.txt <<'EOF'\nsudo id; git push; $(sudo id); `git commit`\nEOF\ngit status",
-        "cat > script.sh <<'EOF'\nif sudo id; then git push; fi\nEOF",
-        "cat <<EOF\nplain $HOME text\nEOF\necho done",
-        "echo 'literal $(sudo id) and `git push`'",
-        "echo \"price: \\$(sudo id)\"",
-        "echo done # $(sudo id) `git push`",
-        "if true; then echo ok; fi",
-        "for x in a b; do echo $x; done",
-        "echo $(date) $(( 1 + 2 ))",
-        "x=$(git status)",
-        "printf '%s\\n' a | xargs echo",
-        "find . -name '*.go' -exec grep -n sudo {} +",
-        "find . -name 'git push'",
-        "eval 'echo git push sudo'",
-        "env -S 'printf %s' 'release note; /usr/bin/sudo'",
-        "env -S 'printf %s' 'note; git push'",
-        "env -iu HOME printf '%s' sudo",
-        "xargs -I{} echo sudo {} < list",
+        "man sudo",
+        "grep sudo . 2>/dev/null",
+        "cat > notes.txt <<'EOF'\nRun sudo id first.\nEOF",
+        "cat <<'EOF'\n/usr/bin/sudo id\nEOF",
+        "gh pr create --title 'Fix sudo'",
+        "ssh host 'sudo id'",
+        "command -v sudo",
+        "apt-cache show sudo",
+        "rg sudo | sort",
+        "echo 'literal $(sudo id)'",
+        "echo done # sudo id",
         "{ echo sudo; }",
-        "! grep -q sudo /etc/group",
-        "echo then sudo",
+        "env -iu HOME printf '%s' sudo",
+        "find . -name '*.go' -exec grep -n sudo {} +",
     ):
-        allowed(gates, command)
+        denied(gates, command, "sudo")
+for gates in each(GIT_GATES):
+    for command in ("# /usr/bin/git push", "cat <<'EOF'\n/usr/bin/git push\nEOF",
+                    "bash -n -c '/usr/bin/git push'", "examples=(/usr/bin/git push)",
+                    "find . -name 'git push'"):
+        denied(gates, command, "git push")
 
-# Direct escalation stays with the agent's own approval prompt.
-for gates in (["sudo"], ["git", "sudo"]):
-    for command in ("sudo id && echo ok", "echo x | sudo tee /tmp/x > /dev/null",
-                    "cat > f <<'EOF'\ndata\nEOF\nsudo install -m 0644 f /etc/f", "sudo $(which id)"):
-        allowed(gates, command)
-
-# --plain (Codex): a gated command needs a command of words joined by &&, ||, ; or |.
-for gates, name, call in ((["--plain", "sudo"], "sudo", "sudo id"), (["--plain", "git", "sudo"], "sudo", "sudo id"),
-                          (["--plain", "git"], "git push", "git push"), (["--plain", "git", "sudo"], "git push", "git push")):
+# Claude prompts once for a whole call, so its check ends at the first direct command.
+for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo", "sudo id"),
+                          (["git"], "git push", "git push"), (["git", "sudo"], "git push", "git push")):
     for command in (f"{call} > /dev/null", f"{call} 2>&1", f"echo x | {call} > out", f"{call}\necho done",
-                    f"{call} $HOME", f"{call} # note", f"{call} &", f"{call} < /dev/null"):
-        denied(gates, command, name)
+                    f"{call} $HOME", f"{call} # note", f"{call} &", f"{call} < /dev/null",
+                    f"{call} 'quoted $text'", f"cd /tmp && {call} > /dev/null; echo $(id) | bash",
+                    f"{call}; /usr/bin/{call}"):
+        allowed(CLAUDE + gates, command)
+        denied(CODEX + gates, command, name)
     for command in (call, f"{call} | cat", f"true && {call}", f"{call}; echo ok", f"{call} || true",
-                    f"{call} 'quoted $text'", "echo hi > f", "cat f > /dev/null && echo $HOME"):
-        allowed(gates, command)
-    for command in (f"{call} > /dev/null", f"{call}\necho done"):
-        allowed([gate for gate in gates if gate != "--plain"], command)
+                    f"{call} 'quoted text'", f"ls -d /t* && {call}"):
+        allowed(CLAUDE + gates, command)
+        allowed(CODEX + gates, command)
+    # A refused prefix is not rescued by a later direct command.
+    for command in (f"echo $HOME; {call}", f"ls > f; {call}", f"x=1 {call}", f"echo '{call}' | bash; {call}"):
+        denied(CLAUDE + gates, command, name)
+        denied(CODEX + gates, command, name)
