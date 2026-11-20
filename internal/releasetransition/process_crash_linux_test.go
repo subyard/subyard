@@ -283,7 +283,7 @@ esac
 	owner := &crashOwner{trace: trace, options: tm.Options{Executable: "/bin/false", Incus: incus, ConfigHome: home, DataHome: data, Environment: append(os.Environ(), "D12_STATE="+state), Stdout: io.Discard, Stderr: io.Discard}}
 	owner.options.RunYard = func(_ context.Context, yard string, output io.Writer, args ...string) error {
 		command := strings.Join(args, " ")
-		if command == "check" {
+		if command == "check --host" {
 			return nil
 		}
 		if command == "test-vms status" {

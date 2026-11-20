@@ -346,8 +346,8 @@ prepare)
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
   grep -Fq 'Reminder: reboot the host once' "$STATE/status.log" || die 'yard status shows no reboot reminder'
-  owner "$launcher" check >"$STATE/check.log" 2>&1 || true
-  grep -Fq 'reboot the host once' "$STATE/check.log" || die 'yard check shows no reboot reminder'
+  owner "$launcher" check --host >"$STATE/check.log" 2>&1 || true
+  grep -Fq 'reboot the host once' "$STATE/check.log" || die 'yard check --host shows no reboot reminder'
   grep -Fq "cannot decide whether the administrator's unmanaged-devices list" "$STATE/update.log" \
     && grep -Eq 'manages: ([^ ]+, )*dum0' "$STATE/update.log" \
     && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$STATE/update.log" \

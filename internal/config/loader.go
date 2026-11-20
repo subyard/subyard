@@ -97,7 +97,7 @@ func (err *retiredYardTemplateError) render(source string) string {
 replace its YARD_TEMPLATE assignment with:
   YARD_TEMPLATE=test-vms
 then verify the unchanged yard identity:
-  yard -Y %s check
+  yard -Y %s check --host
   yard -Y %s status
 to retire that yard after the config migration:
   yard -Y %s test-vms status
@@ -697,7 +697,7 @@ func addDerivedPortCollisions(values environment, tracker *settingTracker, colli
 			if other, ok := strings.CutPrefix(peer.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), other) {
 				continue
 			}
-			if values[peer.Name] == values[definition.Name] {
+			if hostListenerPort(values[peer.Name]) == hostListenerPort(values[definition.Name]) {
 				collisions.add(definition.Name, peer.Name)
 			}
 		}
@@ -711,8 +711,10 @@ func validateHostListenerCollisions(values map[string]string, settings Catalog) 
 	return domain.CollectRefusals(collisions.refusals...)
 }
 
-func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
-	ports := map[string][]string{}
+// hostListeners are the selected host listener settings with a port, shared
+// by the within-yard and cross-yard collision checks.
+func hostListeners(values map[string]string, settings Catalog) []string {
+	var names []string
 	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
 			continue
@@ -723,15 +725,31 @@ func addHostListenerCollisions(values map[string]string, settings Catalog, colli
 		if owner, ok := strings.CutPrefix(definition.Owner, "profile:"); ok && !slices.Contains(strings.Fields(values["ENVIRONMENT_PROFILES"]), owner) {
 			continue
 		}
-		value := values[definition.Name]
-		if value == "" {
-			continue
+		if values[definition.Name] != "" {
+			names = append(names, definition.Name)
 		}
+	}
+	return names
+}
+
+// hostListenerPort is the port a listener value reserves, so equivalent
+// spellings such as 02222 and 2222 collide.
+func hostListenerPort(value string) string {
+	if port, err := strconv.Atoi(value); err == nil {
+		return strconv.Itoa(port)
+	}
+	return value
+}
+
+func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
+	ports := map[string][]string{}
+	for _, name := range hostListeners(values, settings) {
+		value := hostListenerPort(values[name])
 		// Every listener already on this port collides with this one.
 		for _, previous := range ports[value] {
-			collisions.add(definition.Name, previous)
+			collisions.add(name, previous)
 		}
-		ports[value] = append(ports[value], definition.Name)
+		ports[value] = append(ports[value], name)
 	}
 }
 
@@ -1106,7 +1124,7 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line, unavailable: unknown})
 	}
 	discard := func(name, value string, line int) {
-		if policy.ignores(name) {
+		if policy.ignores(name) || isRetiredSetting(name) || settings.RetiredSetting(name) {
 			discarded = append(discarded, observedAssignment{name: name, value: value, line: line})
 		}
 	}

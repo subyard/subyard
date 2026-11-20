@@ -182,21 +182,42 @@ func New(config Config) (*Runtime, error) {
 }
 
 func (runtime *Runtime) Initialized() bool {
-	for _, path := range []string{runtime.identityFile, runtime.ageIdentity, runtime.signingKey} {
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return false
-		}
-	}
-	for _, path := range []string{
-		filepath.Join(runtime.shared, ".git"), runtime.sharedBare, filepath.Join(runtime.local, ".git"),
+	missing, err := runtime.InspectInitialization()
+	return err == nil && len(missing) == 0
+}
+
+// InspectInitialization reads the structural prerequisites that Initialized
+// requires, never credential contents: it returns the absent or malformed
+// paths and every independent read failure.
+func (runtime *Runtime) InspectInitialization() ([]string, error) {
+	var missing []string
+	var failures []error
+	for _, entry := range []struct {
+		path      string
+		directory bool
+	}{
+		{runtime.identityFile, false}, {runtime.ageIdentity, false}, {runtime.signingKey, false},
+		{filepath.Join(runtime.shared, ".git"), true}, {runtime.sharedBare, true}, {filepath.Join(runtime.local, ".git"), true},
 	} {
-		info, err := os.Lstat(path)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return false
+		info, err := os.Lstat(entry.path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			failures = append(failures, err)
+		} else if err != nil || info.Mode()&os.ModeSymlink != 0 || entry.directory != info.IsDir() || !entry.directory && !info.Mode().IsRegular() {
+			missing = append(missing, entry.path)
 		}
 	}
-	return true
+	return missing, domain.CollectRefusals(failures...)
+}
+
+// PartialIdentity is the existing age identity of an uninitialized ledger,
+// which Initialize refuses to replace, or empty when Initialize may create it.
+func (runtime *Runtime) PartialIdentity() (string, error) {
+	if _, err := os.Lstat(runtime.ageIdentity); err == nil {
+		return runtime.ageIdentity, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return "", nil
 }
 
 func (runtime *Runtime) Initialize(ctx context.Context) error {
@@ -210,10 +231,10 @@ func (runtime *Runtime) Initialize(ctx context.Context) error {
 		fmt.Fprintf(runtime.config.Stderr, "  [ ok ] host credential ledger already initialized at %s\n", runtime.config.Root)
 		return nil
 	}
-	if _, err := os.Lstat(runtime.ageIdentity); err == nil {
-		return fmt.Errorf("incomplete key identity already exists at %s", runtime.ageIdentity)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if partial, err := runtime.PartialIdentity(); err != nil {
 		return err
+	} else if partial != "" {
+		return fmt.Errorf("incomplete key identity already exists at %s", partial)
 	}
 	for _, directory := range []string{
 		runtime.config.Root, runtime.idDirectory, runtime.peersDirectory,

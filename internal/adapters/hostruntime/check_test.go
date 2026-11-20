@@ -4,11 +4,117 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
+
+// The check --host preflight keeps its rendered bytes; inspection shares its facts.
+func TestHostCheckPreflightGoldenAndInspection(t *testing.T) {
+	const ready = `Subyard host check
+
+OS:
+  [ ok ] Test OS (kernel 1.0)
+
+CPU virtualization:
+  [ ok ] hardware virtualization flags present (vmx)
+
+KVM device:
+  [ ok ] /dev/kvm present
+
+Resources:
+  [ ok ] 4 CPU(s)
+  [ ok ] 8.0 GiB RAM
+
+Storage (/storage):
+  [ ok ] 100 GiB free on / (fs: test)
+
+Existing tools:
+  [ ok ] incus present (6.0.6)
+  [ ok ] no host Docker (expected; Docker lives inside the yard)
+
+Yard SSH port:
+  [ ok ] SSH_PORT 2323 is unique across configured yards
+  [ ok ] host loopback port 2323 is free
+
+Host is ready.
+`
+	for _, failed := range []bool{false, true} {
+		facts, want := readyFacts(), ready
+		if failed {
+			facts.KVM, facts.StorageFree, facts.PortListening = false, 0, true
+			for _, replacement := range [][2]string{
+				{"[ ok ] /dev/kvm present", "[warn] /dev/kvm missing — needed for hardware-accelerated virtualization"},
+				{"[ ok ] 100 GiB free on / (fs: test)", "[fail] only 0 GiB free on /; need >= 2 GiB (fs: test)"},
+				{"[ ok ] host loopback port 2323 is free", "[warn] host port 2323 is already listening (another service, or this yard is running)"},
+				{"Host is ready.", "Host is not ready: 1 hard requirement(s) failed, 2 warning(s)."},
+			} {
+				want = strings.Replace(want, replacement[0], replacement[1], 1)
+			}
+		}
+		var output bytes.Buffer
+		check := HostCheck{Yard: testYard("alpha", 2323), Output: &output,
+			Probe: func(context.Context, HostCheck) (HostFacts, error) { return facts, nil }}
+		if err := check.Run(context.Background(), CheckOptions{}); errors.Is(err, ErrHostNotReady) != failed || output.String() != want {
+			t.Fatalf("check --host bytes changed: err=%v\ngot:  %q\nwant: %q", err, output.String(), want)
+		}
+		output.Reset()
+		observed := check.Observe(context.Background())
+		var expected []domain.Inspected
+		if failed {
+			expected = []domain.Inspected{
+				{Key: "preflight.kvm", State: domain.InspectedNotice, Resource: "KVM device", Message: "/dev/kvm missing — needed for hardware-accelerated virtualization", Next: "yard check --host"},
+				{Key: "preflight.storage", State: domain.InspectedBlocked, Resource: "Storage (/storage)", Message: "only 0 GiB free on /; need >= 2 GiB (fs: test)", Next: "yard check --host"},
+			}
+		}
+		if output.Len() != 0 || !reflect.DeepEqual(observed, expected) {
+			t.Fatalf("inspection rendered or changed the preflight: %#v output=%q", observed, output.String())
+		}
+		unconfigured := check
+		unconfigured.Yard = domain.Context{}
+		if failed && len(unconfigured.Observe(context.Background())) != 1 {
+			t.Fatal("unconfigured inspection kept yard storage facts")
+		}
+	}
+	failure := errors.New("probe unavailable")
+	check := HostCheck{Probe: func(context.Context, HostCheck) (HostFacts, error) { return HostFacts{}, failure }}
+	if observed := check.Observe(context.Background()); len(observed) != 1 || observed[0].State != domain.InspectedUnknown {
+		t.Fatalf("failed facts read: %#v", observed)
+	}
+}
+
+func TestHostObservationNeverProbesTheYardSSHPort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{}, 4)
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	check := HostCheck{Yard: testYard("alpha", listener.Addr().(*net.TCPAddr).Port), Observation: true}
+	if facts, err := collectHostFacts(context.Background(), check); err != nil || facts.PortListening {
+		t.Fatalf("observation probed the yard SSH port: %+v %v", facts, err)
+	}
+	check.Observation = false
+	if facts, err := collectHostFacts(context.Background(), check); err != nil || !facts.PortListening {
+		t.Fatalf("preflight no longer probes the yard SSH port: %+v %v", facts, err)
+	}
+	if <-accepted; len(accepted) != 0 {
+		t.Fatal("observation opened a connection to the yard SSH port")
+	}
+}
 
 func TestHostCheckRejectsStrictPortCollisionWithoutHostAccess(t *testing.T) {
 	var output bytes.Buffer
