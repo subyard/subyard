@@ -475,8 +475,7 @@ def validate_hosted_binding(name, result, candidate, manifest):
         or any(manifest["candidate"][key] != value for key, value in candidate.items() if key != "candidate_bundle_sha256")
         or result.get("execution_environment") != manifest["environment"]
         or result.get("status") != "passed" or result.get("capture_status") != "recorded"
-        or result.get("environment_evidence") != "recorded" or not result.get("environments")
-        or result.get("cleanup_status") != "recorded" or not result.get("cleanup")):
+        or result.get("environment_evidence") != "recorded" or not result.get("environments")):
         raise ValueError("CI hosted result identity, policy or complete cleanup changed")
 
 
@@ -1064,10 +1063,12 @@ def lane_evidence(log, slot, declared=None):
                 elif event == "refused":
                     state["state"] = "refused"
                 else:
-                    runs[run] = {"state": "granted", "staged": set()}
+                    runs[run] = {"state": "granted", "staged": set(), "vms": int(fields[2])}
                     environments.append((fields[1].decode(), int(fields[2]), fields[3].decode()))
             elif not state or state["state"] != "granted":
                 found = f"lease {event} outside a held lease"
+            elif event in ("work", "cleaned") and int(fields[1]) > state["vms"]:
+                found = f"lease {event} for VM{int(fields[1])} outside its {state['vms']}-VM grant"
             elif event == "work":
                 vm = int(fields[1])
                 found = f"VM{vm} staged again before its guest cleanup" if vm in state["staged"] else None
@@ -1133,16 +1134,19 @@ def launcher_lane(argv):
     return values[0] if len(values) == 1 and LANE_ID.fullmatch(values[0]) else None
 
 
-def pass_counts(directory, name, result):
-    """Whether a recorded PASS still counts under lane_status, with the refusal reason when not."""
+def pass_counts(directory, name, result, declared=None):
+    """Whether a recorded PASS still counts under lane_status: (counts, reason when not, the typed
+    grants' environments of a slot lane or None). declared is a retained launcher's lane ID."""
     evidence = None
     if is_live(name):
         try:
-            evidence = lane_evidence(Path(directory) / result["log"], result_slot(result))
+            evidence = lane_evidence(Path(directory) / result["log"], result_slot(result), declared)
         except (OSError, ValueError, KeyError, TypeError):
-            return False, "lane evidence is unreadable"
+            return False, "lane evidence is unreadable", None
     status, reason = lane_status(result, evidence)
-    return status == "passed", reason or "lane evidence is not a complete PASS"
+    environments = evidence and [{"type": kind, "vm_count": count, "base_fingerprint": base}
+                                 for kind, count, base in sorted(set(evidence.environments))]
+    return status == "passed", reason or "lane evidence is not a complete PASS", environments
 
 
 def downgraded(result, reason):
@@ -1330,15 +1334,23 @@ def load_bound(output, entries=None, context=None):
             if result.get("inherited") and result.get("evidence_transfer", {}).get("schema_version") != 2 and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
                                             or result.get("from_log_sha256") != result["log_sha256"]):
                 raise ValueError("inherited evidence provenance is incomplete")
+            declared = None
             if "evidence_transfer" in result:
-                transfer_artifacts(output, result)
-            counts, reason = pass_counts(output, name, result)
+                files = transfer_artifacts(output, result)
+                if result["evidence_transfer"].get("origin") == "standalone":
+                    # An intact launcher whose lane ID is absent or differs from the header is rerun.
+                    launch = read_transfer_json(output / files["launch"])
+                    declared = launcher_lane(launch.get("argv") if isinstance(launch, dict) else None) or ""
+            counts, reason, environments = pass_counts(output, name, result, declared)
             if not counts:
                 # An earlier collector counted this PASS under a weaker rule: rerun it.
                 receipt["checks"][name] = downgraded(result, reason)
                 if context is not None:
                     context["attempts"].pop(name, None)
                 continue
+            if environments is not None:
+                # Publication reports the environments of the lane's own typed grants.
+                result["environments"] = environments
             if "evidence_transfer" in result:
                 if not result.get("inherited"):
                     raise ValueError("reviewed transfer must remain inherited coverage")
@@ -2039,7 +2051,8 @@ def validate_attempt(record, manifest, name, command, log_sha256=None):
                 raise ValueError("invalid attempt phase measurement")
     if facts["status"] == "passed" and (facts["exit_code"] != 0 or facts["capture_status"] != "recorded"
         or facts["termination"] != "exit" or not is_sha(facts["log_sha256"])
-        or facts["execution_environment"] is None or facts["duration_seconds"] is None):
+        or facts["execution_environment"] is None or facts["duration_seconds"] is None
+        or not is_live(name) and facts["cleanup"] and any(item["exit_code"] != 0 for item in facts["cleanup"].values())):
         raise ValueError("invalid or incomplete original attempt PASS")
 
 
@@ -2451,8 +2464,7 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
             or record["result"]["capture_status"] != "recorded"
             or record["result"]["execution_environment"] is None
             or record["result"]["duration_seconds"] is None
-            or is_live(name) and (record["result"]["cleanup_status"] != "recorded" or not record["result"]["cleanup"]
-                or record["result"]["environment_evidence"] != "recorded")
+            or is_live(name) and record["result"]["environment_evidence"] != "recorded"
             or document["preparation_environment"] != tested["environment"]
             or any(document[key] != value for key, value in attempt_facts(record).items())
             or document["artifacts"] != {"attempt": evidence_hash(record), "manifest": document["tested_manifest_sha256"],
@@ -3233,7 +3245,7 @@ def apply_transfers(target, prepared, batch_id=None, verify_inputs=None):
                 copied[role] = copied_cache[key]
             result = transfer_result(transfer, copied, batch_id)
             validate_transferred_result(staging, receipt, name, result, command, root)
-            counts, reason = pass_counts(staging, name, result)
+            counts, reason, _ = pass_counts(staging, name, result)
             if not counts:
                 raise ValueError(f"{name}: transferred evidence is not a complete PASS: {reason}")
             incoming["checks"][name] = result

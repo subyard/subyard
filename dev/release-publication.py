@@ -1620,9 +1620,10 @@ def collect_ci(github, directory, identity):
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
-            counts, reason = a.pass_counts(cached, name, result)
+            counts, reason, environments = a.pass_counts(cached, name, result)
             if not counts:
                 raise ValueError("hosted evidence is not a complete PASS: " + reason)
+            result["environments"] = environments
             # Persist the immutable original evidence before publishing the result reference.
             for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):
                 target = output / relative

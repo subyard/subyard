@@ -1590,6 +1590,23 @@ exit "$COLLECTOR_EXIT"
             with self.assertRaisesRegex(ValueError, "artifact changed"):
                 m.load_bound(second, context={})
 
+    def test_retained_launcher_with_another_lane_id_is_rerun(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True)
+            launch = Path(review["standalone"]["launch"]["path"])
+            argv = [("SUBYARD_E2E_LANE=" + "f" * 32 if value.startswith("SUBYARD_E2E_LANE=") else value)
+                    for value in json.loads(launch.read_text())["argv"]]
+            launch.write_text(json.dumps(dict(json.loads(launch.read_text()), argv=argv)))
+            review["standalone"]["launch"]["sha256"] = m.digest(launch)
+            declaration.write_text(json.dumps(review))
+            # r5: an earlier collector committed this transfer without comparing launcher and header.
+            reader = m.lane_evidence
+            with patch.object(m, "lane_evidence", side_effect=lambda log, slot, declared=None: reader(log, slot)):
+                self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, loaded = m.load_bound(second, context={"attempts": {}})
+            self.assertEqual((loaded["checks"][name]["status"], loaded["checks"][name]["reason"]),
+                             ("failed", "the launcher lane ID differs from the log header"))
+
     def raw_standalone_fixture(self, directory):
         first, second, name, declaration, review = self.transfer_fixture(directory, standalone=True)
         launch_path = Path(review["standalone"]["launch"]["path"])
@@ -2290,7 +2307,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
         nested = ("E2E lease: yard=nested project=p run=fedcba98 purpose=t slot=slot-002 type=android-test vms=1 base=" + "b" * 64 + "\n"
                   + stage("guest-cleanup", "end", vm=2) + lease_record("cleaned vm=2 exit_code=0", slot=2, run="fedcba98", lane="e" * 32)
                   + "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=1\n")
-        staged = record("request") + record(GRANT) + record("work vm=1") + record("work vm=2")
+        staged = record("request") + record(GRANT.replace("vms=1", "vms=2")) + record("work vm=1") + record("work vm=2")
         refused = record("request", run="0123abce") + record("refused resource=memory", run="0123abce")
         cases = (
             ("one clean lease", lease(), None, None),
@@ -2307,6 +2324,11 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             ("work after the last cleanup", lease().replace(record("release exit_code=0"), record("work vm=1") + record("release exit_code=0")),
                 "staged VM1 has no confirmed guest cleanup before release", None),
             # r4: a second staging of a VM before its cleanup leaves one directory uncleaned.
+            # r5: work and cleanup name only VMs within the grant, as operator summaries require.
+            ("work beyond the granted VMs", lease().replace(record("work vm=1"), record("work vm=2")).replace("cleaned vm=1", "cleaned vm=2"),
+                "lease work for VM2 outside its 1-VM grant", None),
+            ("cleanup beyond the granted VMs", lease().replace(record("release exit_code=0"), record("cleaned vm=2 exit_code=0") + record("release exit_code=0")),
+                "lease cleaned for VM2 outside its 1-VM grant", None),
             ("VM staged twice before its cleanup", lease().replace(record("work vm=1"), record("work vm=1") * 2),
                 "VM1 staged again before its guest cleanup", None),
             ("VM staged again after its cleanup", lease().replace(record("release exit_code=0"),
@@ -2472,6 +2494,12 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             # The attempt record of a PASS keeps untagged cleanup phases without judging them.
             m.completed_attempt(source, root, receipt, name, dict(result, execution_environment=receipt["environment"],
                 cleanup={**result.get("cleanup", {}), "guest-cleanup/vm2": {"exit_code": 1, "duration_seconds": 1}}))
+            # r5: a check without a slot fails on its own cleanup, in its attempt record as in lane_status.
+            local = m.execute("verify", ["bash", "-c", "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=3\\n'"],
+                              root, source, m.clean_environment())
+            self.assertEqual((local["status"], local["reason"]), ("failed", "cleanup/release exited 3"))
+            with self.assertRaisesRegex(ValueError, "invalid or incomplete original attempt PASS"):
+                m.completed_attempt(source, root, receipt, "verify", dict(local, status="passed", execution_environment=receipt["environment"]))
             # An older collector wrote no lane header and still counted the PASS.
             log = source / result["log"]
             log.write_text(log.read_text().split("\n", 1)[1])

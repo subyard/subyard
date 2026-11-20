@@ -741,6 +741,34 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.validate_attestation(invalid, identity, root)
 
+    def test_v2_attempt_transfer_of_a_lane_without_cleanup_measurements(self):
+        # r5: a slot lane's original attempt transfers on its lane records, without untagged cleanup phases.
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            source, _, _ = accepted(directory, prepared, identity)
+            name = "profile:sample"
+            root, old = m.a.load_bound(source)
+            result = old["checks"][name]
+            result.update(termination="exit", capture_status="recorded", duration_seconds=1, environment_evidence="recorded")
+            result["original_attempt"] = m.a.completed_attempt(source, root, old, name, result)
+            m.a.save(source, old)
+            target_dir = directory / "target"
+            target_dir.mkdir()
+            target, root, _ = accepted(target_dir, prepared, identity)
+            _, current = m.a.load_bound(target)
+            current["checks"][name] = {"status": "pending"}
+            m.a.save(target, current)
+            _, source_manifest = m.a.original_attempt(source, old, name, result)
+            review = {"schema_version": 2, "check": name, "tested_manifest_sha256": m.a.evidence_hash(source_manifest),
+                "target_manifest_sha256": m.a.evidence_hash(m.a.candidate_manifest(root, current)), "original_attempt": result["original_attempt"],
+                "review": {"unchanged_scope": "Exact synthetic check", "reason": "Same inputs", "authorization_reference": "fixture-review"},
+                "standalone": None}
+            path = directory / "review-v2.json"
+            path.write_text(json.dumps(review))
+            self.assertEqual(m.a.transfer_evidence(target, source, name, path), 0)
+            self.assertEqual(m.a.load_bound(target)[1]["checks"][name]["status"], "passed")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="subyard-publication-", dir="/tmp")
         self.directory = Path(self.temporary.name)
@@ -835,8 +863,8 @@ class Contracts(unittest.TestCase):
             m.validate_attestation(legacy, self.identity, self.output / "source")
         native_execute = m.a.execute
         def execute_profile(*args):
-            return native_execute(*args) | {"environment_evidence": "recorded",
-                                            "environments": document["checks"]["p0-release-smoke"]["environments"]}
+            # The lane controller's typed grant is its environment.
+            return native_execute(*args)
         with patch.object(m, "GitHub", return_value=github), \
              patch.object(m.a, "execution_environment", return_value=document["environment"]), \
              patch.object(m.a, "broker_slots", return_value={4: "available"}), \
@@ -1759,6 +1787,15 @@ class Contracts(unittest.TestCase):
         decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
         self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}])
 
+    def test_attestation_reports_the_environment_of_the_typed_grant(self):
+        # r5: a stored environment that contradicts the lane's typed grant is never published.
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["profile:sample"]["environments"] = [{"type": "android-test", "vm_count": 1, "base_fingerprint": "c" * 64}]
+        m.a.save(self.output, receipt)
+        document = m.attestation(self.output, self.identity)
+        self.assertEqual(document["checks"]["profile:sample"]["environments"],
+                         [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}])
+
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()
         document = m.attestation(self.output, self.identity, [path])
@@ -2590,13 +2627,25 @@ class HostedChecks(unittest.TestCase):
 
     def test_hosted_pass_that_fails_the_lane_rule_stays_open(self):
         counts = m.a.pass_counts
-        def hosted(directory, name, result):
-            return (False, "granted lease has no confirmed release") if result.get("execution") == "ci-hosted" else counts(directory, name, result)
+        def hosted(directory, name, result, declared=None):
+            return ((False, "granted lease has no confirmed release", None) if result.get("execution") == "ci-hosted"
+                    else counts(directory, name, result, declared))
         with patch.object(m.a, "pass_counts", side_effect=hosted) as counted:
             result, report = self.collect()
         self.assertEqual(result, {"status": "pending"})
         self.assertIn("profile:sample: hosted evidence is not a complete PASS: granted lease has no confirmed release", report)
         self.assertTrue(any(call.args[2].get("execution") == "ci-hosted" for call in counted.call_args_list))
+
+    def test_hosted_pass_without_cleanup_measurements_counts_by_its_lane_records(self):
+        # r5: untagged guest cleanup phases never decide a slot lane, absent or failed.
+        root, receipt = m.a.load_bound(self.remote)
+        result = receipt["checks"]["profile:sample"]
+        for key in ("cleanup", "cleanup_status"):
+            result.pop(key, None)
+        result["original_attempt"] = m.a.completed_attempt(self.remote, root, receipt, "profile:sample", result)
+        m.a.save(self.remote, receipt)
+        result, _ = self.collect()
+        self.assertEqual((result["status"], result["execution"]), ("passed", "ci-hosted"))
 
     def test_publication_rechecks_job_and_refuses_tampered_hosted_policy_or_runner(self):
         self.collect()
