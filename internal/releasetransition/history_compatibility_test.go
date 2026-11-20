@@ -2,8 +2,10 @@ package releasetransition
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +27,17 @@ func shippedHistoryRegistry(t *testing.T) (RegistryV2, Fingerprint, Fingerprint)
 		t.Fatal(err)
 	}
 	return registry, digest, canonical
+}
+
+// olderHistoryRegistry drops the newest migration: a predecessor that differs
+// in more than retired prefixes.
+func olderHistoryRegistry(registry RegistryV2) RegistryV2 {
+	last := registry.Migrations[len(registry.Migrations)-1]
+	older := registry
+	older.Migrations = slices.Clone(registry.Migrations[:len(registry.Migrations)-1])
+	older.CurrentEpochs = maps.Clone(registry.CurrentEpochs)
+	older.CurrentEpochs[last.Domain] = last.FromEpoch
+	return older
 }
 
 // historySnapshots returns the authoritative ledger and checkpoint for one shape.
@@ -90,7 +103,7 @@ func historySnapshots(t *testing.T, registry RegistryV2, digest Fingerprint, sha
 
 func TestHistoryCompatibilityVerdicts(t *testing.T) {
 	registry, digest, canonical := shippedHistoryRegistry(t)
-	other := Fingerprint(strings.Repeat("b", 64))
+	other := olderHistoryRegistry(registry)
 	evidence := func(shape string, reader bool, readerErr error) *HistoryEvidence {
 		ledger, checkpoint := historySnapshots(t, registry, digest, shape)
 		return &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: ledger, Checkpoint: checkpoint,
@@ -109,55 +122,55 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 		registry    HistoryRegistryRelation
 	}{
 		{name: "registryless pair", input: HistoryCompatibilityInput{}, kind: HistoryIdentity, registry: RegistryAbsent},
-		{name: "identity without history", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical}, kind: HistoryIdentity},
-		{name: "identity ledger", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("ledger", false, nil)}, kind: HistoryIdentity},
-		{name: "identity checkpoint reader", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("advanced", true, nil)}, kind: HistoryIdentity},
-		{name: "identity matching projection", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("checkpoint", false, nil)}, kind: HistoryIdentity},
-		{name: "identity declared predecessor", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, Predecessor: canonical}, kind: HistoryIdentity, predecessor: true},
+		{name: "identity without history", input: HistoryCompatibilityInput{Active: &registry, Target: &registry}, kind: HistoryIdentity},
+		{name: "identity ledger", input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("ledger", false, nil)}, kind: HistoryIdentity},
+		{name: "identity checkpoint reader", input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("advanced", true, nil)}, kind: HistoryIdentity},
+		{name: "identity matching projection", input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("checkpoint", false, nil)}, kind: HistoryIdentity},
+		{name: "identity declared predecessor", input: HistoryCompatibilityInput{Active: &registry, Target: &registry, Predecessor: canonical}, kind: HistoryIdentity, predecessor: true},
 		{
 			name:  "registry differs skips history",
-			input: HistoryCompatibilityInput{ActiveRegistry: other, TargetRegistry: canonical, History: &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: corrupt}},
+			input: HistoryCompatibilityInput{Active: &other, Target: &registry, History: &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: corrupt}},
 			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
 			name:  "registryless target differs",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical},
+			input: HistoryCompatibilityInput{Active: &registry},
 			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
 			name:  "declared predecessor is not admitted yet",
-			input: HistoryCompatibilityInput{ActiveRegistry: other, TargetRegistry: canonical, Predecessor: canonical},
+			input: HistoryCompatibilityInput{Active: &other, Target: &registry, Predecessor: canonical},
 			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, predecessor: true, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
 			name:  "unverifiable history",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: corrupt}},
+			input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: corrupt}},
 			kind:  HistoryIdentity, reason: HistoryUnverifiable,
 			message: "the selected release cannot verify the authoritative active migration history",
 		},
 		{
 			name:  "missing history",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("missing", true, readerErr)},
+			input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("missing", true, readerErr)},
 			kind:  HistoryIdentity, reason: HistoryMissing,
 			message: "the authoritative active migration history is missing",
 		},
 		{
 			name:  "unverifiable checkpoint reader",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("checkpoint", false, readerErr)},
+			input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("checkpoint", false, readerErr)},
 			kind:  HistoryIdentity, reason: HistoryCheckpointReaderUnverifiable, cause: readerErr,
 			message: "the selected release's migration checkpoint capability cannot be verified",
 		},
 		{
 			name:  "ledger reader ignores the checkpoint marker",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("ledger", false, readerErr)},
+			input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("ledger", false, readerErr)},
 			kind:  HistoryIdentity,
 		},
 		{
 			name:  "projection behind checkpoint",
-			input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("advanced", false, nil)},
+			input: HistoryCompatibilityInput{Active: &registry, Target: &registry, History: evidence("advanced", false, nil)},
 			kind:  HistoryIdentity, reason: HistoryProjectionDiffers,
 			message: "the retained release requires a legacy ledger that matches the authoritative migration checkpoint",
 		},
@@ -190,9 +203,15 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 	}
 }
 
-func TestHistoryCompatibilityAdmitsOnlyIdentity(t *testing.T) {
-	for _, kind := range []HistoryCompatibilityKind{HistoryEquivalent, HistorySteps, HistoryRefuse} {
-		verdict := HistoryCompatibilityVerdict{Kind: kind, Registry: RegistryDiffers}.sealed()
+func TestHistoryCompatibilityAdmitsIdentityAndDeclaredEquivalent(t *testing.T) {
+	for _, verdict := range []HistoryCompatibilityVerdict{
+		{Kind: HistoryEquivalent}, {Kind: HistorySteps, DeclaredPredecessor: true}, {Kind: HistoryRefuse, DeclaredPredecessor: true},
+		// Each direction of an Equivalent pair needs its own declaration.
+		{Kind: HistoryEquivalent, DeclaredSuccessor: true}, {Kind: HistoryEquivalent, Successor: true, DeclaredPredecessor: true},
+	} {
+		kind := verdict.Kind
+		verdict.Registry = RegistryDiffers
+		verdict = verdict.sealed()
 		message, _ := verdict.Refusal()
 		// Callers that read only the refusal text must still see a refusal.
 		if verdict.Admitted() || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != HistoryRegistryDiffers ||
@@ -202,6 +221,12 @@ func TestHistoryCompatibilityAdmitsOnlyIdentity(t *testing.T) {
 	}
 	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryIdentity, Registry: RegistryIdentical}).sealed(); !verdict.Admitted() {
 		t.Fatalf("identity gained a refusal: %#v", verdict)
+	}
+	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryEquivalent, Registry: RegistryDiffers, DeclaredPredecessor: true}).sealed(); !verdict.Admitted() {
+		t.Fatalf("declared equivalent predecessor gained a refusal: %#v", verdict)
+	}
+	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryEquivalent, Registry: RegistryDiffers, Successor: true, DeclaredSuccessor: true}).sealed(); !verdict.Admitted() {
+		t.Fatalf("declaring equivalent successor gained a refusal: %#v", verdict)
 	}
 	first, second := errors.New("first cause"), errors.New("second cause")
 	verdict := HistoryCompatibilityVerdict{Kind: HistoryIdentity, Refusals: []HistoryRefusal{

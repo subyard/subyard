@@ -1195,23 +1195,53 @@ transition owner, catalog and journal bindings are preserved. A marked target va
 itself; a target without a transition registry retains the existing active-owner route.
 
 `releasetransition.HistoryCompatibility` decides whether a target release may own the active
-migration history. It compares registry identities (`identical`, `differs` or `absent`), then reads
-the authoritative ledger or checkpoint through the target registry and its checkpoint-reader marker.
-It returns a kind (`identity`, `equivalent`, `steps` or `refuse`), the registry relation and the
-collected refusals; a verdict that is not admitted always carries a refusal. Only `identity` is
-admitted for now, so a differing registry refuses as before. Callers that ask whether registries
-differ read the relation, not admission. The sealed
+migration history. It compares the parsed registries by canonical digest (`identical`, `differs` or
+`absent`), and `PlanDownPath` relates them. The relation is `identity` for one registry, or
+`equivalent` when one registry is the other with completed prefixes retired: the unretired registry
+retired through the other's floors (`RegistryV2.RetirePrefixes`) has the retired one's canonical
+digest, so the unretired registry's own `MigrationPrefixDigest` proves every retired digest and
+later definitions are unchanged. When the active registry is the retired one, the target must also
+parse it: a release engine validates the active registry before it serves any request, and parsers
+up to v0.30.0 require every `dependsOn` to name a migration defined earlier in the same registry.
+A surviving definition that depends on retired history therefore refuses with `registry-unreadable`,
+together with the registry refusal when the pair is also undeclared. The current registry parser
+applies the same rule, so today the runtime and the verb refuse such an active registry earlier, as
+one whose sealed registry cannot be verified, and do not reach `registry-unreadable`.
+For the v0.30.0 registry this admits only retirements that also retire the NM guard step, or the
+definition-free `project-state` prefix. Any other relation is `refuse`; `steps` is not produced
+yet. For an admitted relation it then reads the authoritative ledger or checkpoint through the
+target registry and its checkpoint-reader marker. Checkpoint reading checks prefix digests and
+epochs, not the writer's registry digest, so either release of an equivalent pair reads history
+the other wrote, and an equivalent admission writes nothing. The verdict carries the kind, the
+registry relation, whether the target is the retiring `successor`, and the collected refusals; a
+verdict that is not admitted always carries a refusal. `identity` is admitted. `equivalent` is
+admitted only within a declared pair: rollback to the predecessor the active release declares, or
+the return to a successor that declares the active release as its predecessor. An undeclared
+equivalent target, such as an older release, keeps the registry refusal and is not read. Callers
+that decide by the registry read `RegistryAdmitted`, so an admitted equivalent target behaves like
+identical registries for source-floor advice, first-publication evidence and bootstrap
+publication, and an undeclared one like differing registries. Only an equivalent relation depends
+on a declaration, the newer release's, so one that cannot be verified refuses only an equivalent
+target: the runtime selection and the verb report a verification error, and the engine treats it as
+no declared predecessor. The engine applies the same verdict to its own and the rollback target's
+parsed registries and its own declaration; identical sealed bytes stand in for a target registry it
+cannot parse. The sealed
 [`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
 digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
 in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release
-without it declares no predecessor.
+without it declares no predecessor. A release parses its own declaration strictly. Another
+release's declaration, which can come from a newer release, is read only for
+`predecessorRegistryDigest`: unknown fields, list entries and schema versions above 1 are
+tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
+well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the
 runtime's installed-engine selection, including first publication. Run it from the active
 release's verified engine, `RUNTIME_ROOT/current/bin/yard-engine`: that engine selects rollback
 targets and owns the declaration, while older releases lack the verb. It needs no repository,
-takes no lock and writes nothing. Read `admitted`, `kind`, `registry` and `refusals`, with their
+takes no lock and writes nothing. Read `admitted`, `kind`, `registry`, `successor`,
+`declaredPredecessor`, `declaredSuccessor` and `refusals`, with their
 causes, from the JSON instead of relying on the exit code: 0 means admitted and 1 refused, while 2
 covers usage and verification errors, including a missing config home, and prints no JSON.
 

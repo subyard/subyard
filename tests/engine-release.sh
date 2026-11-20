@@ -1285,4 +1285,48 @@ fi
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'failed inspection changed stable runtime links'
 
+# A release whose registry only retires the definition-free project-state
+# prefix rolls back to its declared predecessor and forward again without
+# rewriting history. The engine's registry code derives its inputs.
+retired_release="$TMP/release-retired"
+go build -buildvcs=false -o "$TMP/registry-fixture" "$ROOT/tests/helpers/registry-fixture"
+"$TMP/registry-fixture" retire "$ROOT/config/release-transition.json" project-state=1 > "$TMP/retired-release-transition.json"
+"$TMP/registry-fixture" declare "$ROOT/config/release-transition.json" > "$TMP/retired-release-rollback.json"
+"$ROOT/dev/package-engine.sh" --output-dir "$retired_release" --version 1.2.0-test \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" \
+  --release-transition-registry "$TMP/retired-release-transition.json" \
+  --release-rollback-declaration "$TMP/retired-release-rollback.json" >/dev/null
+retired_update() {
+  YARD_RELEASE_BASE_URL="file://$retired_release" YARD_RELEASE_CACHE="$TMP/cache" \
+    "$runtime_root/current/bin/yard" update --yes --runtime-root "$runtime_root" --version 1.2.0-test >/dev/null
+}
+history_verdict() {
+  "$runtime_root/current/bin/yard-engine" _history-compatibility "$runtime_root" "$SUBYARD_CONFIG_HOME" "${1#releases/}" || true
+}
+history_files() {
+  sha256sum "$SUBYARD_CONFIG_HOME"/release-transition/v2/{ledger,history-checkpoint}.json 2>/dev/null || true
+}
+retired_update
+retired_target="$(readlink "$runtime_root/current")"
+[ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.2.0-test ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$candidate_target" ] \
+  || fail 'retired-prefix release did not activate over the candidate'
+history_before="$(history_files)"
+verdict="$(history_verdict "$candidate_target")"
+jq -e '.admitted and .kind == "equivalent" and .registry == "differs" and .declaredPredecessor and (.successor | not)' \
+  <<<"$verdict" >/dev/null || fail "retired-prefix release does not admit its declared predecessor: $verdict"
+installed_update --runtime-root "$runtime_root" --rollback >/dev/null
+[ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$retired_target" ] \
+  && [ "$("$runtime_root/current/bin/yard" version | awk '{print $2}')" = 1.1.0-test ] \
+  || fail 'retired-prefix release did not roll back to its declared predecessor'
+verdict="$(history_verdict "$retired_target")"
+jq -e '.admitted and .kind == "equivalent" and .successor and .declaredSuccessor' <<<"$verdict" >/dev/null \
+  || fail "the predecessor does not admit its retired successor: $verdict"
+retired_update
+[ "$(readlink "$runtime_root/current")" = "$retired_target" ] \
+  && [ "$(readlink "$runtime_root/previous")" = "$candidate_target" ] \
+  || fail 'the predecessor did not roll forward to its retired successor'
+[ "$(history_files)" = "$history_before" ] || fail 'equivalent rollback cycle rewrote the migration history'
+
 printf 'ok: release publication and resumable v2 activation ingress are verified\n'
