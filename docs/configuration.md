@@ -277,7 +277,11 @@ After an upgrade, an existing yard that inherits the shipped default gets the gr
 shows the desired value and `yard status` names it. `yard config status` does not inspect guest
 sudoers, so it can report a clean yard while the grant still awaits `yard init`. The installed
 record keeps `yes` and `no`; an installation without one, also from an older runtime, counts as
-`prompt`. A change of mode is listed as a pending init-owned setting until `yard init` applies it.
+`prompt`. A change of mode is listed as a pending init-owned setting, but release activation and
+`yard integration` also reprovision the agents and record the new mode without reconciling sudoers.
+After `yard config set DEV_SUDO no` and then `yard update`, for example, pending init and
+`yard status` look clean while the old grant remains; a change from `no` to `prompt` likewise
+leaves the yard without a grant. Run `yard init` after every `DEV_SUDO` change.
 
 To disable the grant across owner hosts, publish a shared override in the connected private
 configuration repository:
