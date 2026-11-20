@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3397,7 +3398,8 @@ func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.
 }
 
 func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	source, _, home, environment := configCommandFixture(t)
+	root := checkoutMirrorFixture(t, source)
 	flat := filepath.Join(home, "yards/neighbor.env")
 	overlay := filepath.Join(root, "private/yards/neighbor.env")
 	const ignored = "SSH_PORT=2399\nGIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
@@ -3823,6 +3825,80 @@ func configCommandFixture(t *testing.T) (string, string, string, []string) {
 		"SUBYARD_NO_AUDIT=1",
 	}
 	return root, home, configHome, environment
+}
+
+// checkoutMirrorFixture returns a temporary repository root for tests that seed a
+// checkout overlay under private/. It copies the tracked config/ files, whose shipped
+// packages must be real directories, and links every other top-level entry of source
+// except private/.
+func checkoutMirrorFixture(t *testing.T, source string) string {
+	t.Helper()
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "private", "config":
+		default:
+			if err := os.Symlink(filepath.Join(source, entry.Name()), filepath.Join(root, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, relative := range checkoutConfigFiles(t, source) {
+		info, err := os.Lstat(filepath.Join(source, relative))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("unsupported checkout entry %s", relative)
+		}
+		data, err := os.ReadFile(filepath.Join(source, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(root, relative)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, destination, data, info.Mode().Perm())
+	}
+	return root
+}
+
+// checkoutConfigFiles lists the tracked config/ files of a Git checkout, leaving out
+// ignored operator-local files. A source tree without Git metadata has no ignore list,
+// so all of its regular config/ files are listed.
+func checkoutConfigFiles(t *testing.T, source string) []string {
+	t.Helper()
+	if prefix, err := exec.Command("git", "-C", source, "rev-parse", "--show-prefix").Output(); err == nil && strings.TrimSpace(string(prefix)) == "" {
+		listed, err := exec.Command("git", "-C", source, "ls-files", "-z", "--", "config").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00")
+	}
+	var files []string
+	err := filepath.WalkDir(filepath.Join(source, "config"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		files = append(files, relative)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
 }
 
 func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.FileMode) {

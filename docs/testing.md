@@ -662,6 +662,13 @@ clean checkout, base commit or `.git` directory is required. Install the tools l
 temporary repositories. The release packaging test uses a disposable copy of the current public
 files because it adds fixtures; that copy needs no Git metadata.
 
+When the checkout is a Git work-tree root, `./tests/run.sh` ends with `checkout-unchanged`.
+It fails when the run added or removed a path outside `.build/`, in the checkout or in an
+optional `private/` clone. It compares path lists from `git ls-files`, with ignored directories
+collapsed, so content edits and Git status changes of existing paths during the run pass. In
+`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`. Outside
+a Git work-tree root the check is skipped. The runner also sets `PYTHONDONTWRITEBYTECODE=1`.
+
 `make test`, `./tests/run.sh`, the host-free profile runners and `dev/process-coverage.sh`
 place disposable fixtures in `/tmp`, independently of a workspace-local `TMPDIR`, so Orca
 cannot discover them in the working project. When invoking an individual test script or `go test` directly, use
