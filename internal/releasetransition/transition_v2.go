@@ -1490,10 +1490,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		}
 	}
 	var rollbackBlocker *Blocker
-	if transition.options.Direction == DirectionActivatePrevious &&
-		(transition.options.RollbackTarget == nil ||
-			(transition.options.RollbackTarget.RegistryDigest != "" &&
-				transition.options.RollbackTarget.RegistryDigest != transition.registryDigest)) {
+	if transition.options.Direction == DirectionActivatePrevious && transition.rollbackRegistryRefused() {
 		rollbackBlocker = rollbackIncompatibleBlocker()
 	}
 	if !checkpointAuthority && !transition.options.MigrationCheckpoint && ledgerSnapshot.Exists && rollbackBlocker == nil {
@@ -1878,6 +1875,7 @@ func (transition *V2Transition) rollbackCompatibilityBlocker(fresh bool) *Blocke
 	if fresh && err == nil && version.LT(semver.MustParse("0.11.0")) {
 		return rollbackIncompatibleBlocker()
 	}
+	// observe decided a registry-bearing target through rollbackRegistryRefused.
 	if target.RegistryDigest != "" {
 		return nil
 	}
@@ -1898,6 +1896,22 @@ func (transition *V2Transition) rollbackCompatibilityBlocker(fresh bool) *Blocke
 		}
 	}
 	return nil
+}
+
+// rollbackRegistryRefused applies HistoryCompatibility to the sealed registry
+// file digests of this engine and the retained target. A registryless target
+// keeps the catalog rule in rollbackCompatibilityBlocker.
+func (transition *V2Transition) rollbackRegistryRefused() bool {
+	target := transition.options.RollbackTarget
+	if target == nil {
+		return true
+	}
+	if target.RegistryDigest == "" {
+		return false
+	}
+	return !HistoryCompatibility(HistoryCompatibilityInput{
+		ActiveRegistry: transition.registryDigest, TargetRegistry: target.RegistryDigest,
+	}).Admitted()
 }
 
 func rollbackIncompatibleBlocker() *Blocker {
@@ -4056,7 +4070,7 @@ func pendingConfigurationMessage(blockers []Blocker) string {
 
 func pendingConfigurationMessageWithin(blockers []Blocker, limit int) string {
 	for _, blocker := range blockers {
-		if !strings.HasSuffix(blocker.Resource, ".pending-configuration") {
+		if !blocker.PendingConfiguration() {
 			return blockers[0].Message
 		}
 	}

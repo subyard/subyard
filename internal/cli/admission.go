@@ -53,6 +53,7 @@ const (
 	earlyConfigRepairAlias
 	earlyConfigReduceSelection
 	earlyConfigValidate
+	earlyInstallationCheck
 	earlyHelp
 	earlyRPC
 	earlyMigrate
@@ -218,6 +219,11 @@ func (cli *CLI) admission(
 
 func earlyDispatch(definition command.Definition, arguments []string, explicit, help bool) (earlyPath, []string) {
 	switch definition.Handler {
+	case "@check":
+		// Only check --host is the forwarded host preflight of a selected yard.
+		if !slices.Contains(arguments, "--host") {
+			return earlyInstallationCheck, nil
+		}
 	case "@network":
 		if help {
 			return earlyNetworkHelp, nil

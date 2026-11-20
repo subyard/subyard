@@ -186,6 +186,7 @@ for required in config/installation-capabilities.json \
   config/commands.registry \
   config/migrations.json \
   config/release-transition.json \
+  config/release-rollback.json \
   config/preview/subyard-preview \
   config/preview/instructions.md \
   completions/yard.bash; do

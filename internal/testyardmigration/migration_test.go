@@ -72,7 +72,7 @@ set -eu
 			"YARD_INSTANCE_NAME=yard",
 			"MIGRATION_PRESERVED=yes",
 		},
-	}, LegacyYard, nil, "check")
+	}, LegacyYard, nil, "check", "--host")
 	if err != nil {
 		t.Fatalf("migration child retained the caller's loaded yard context: %v", err)
 	}
@@ -109,10 +109,10 @@ func TestApplyRecreatesCanonicalTestYardAndRemovesLegacyController(t *testing.T)
 	}
 	calls := read(t, log)
 	for _, expected := range []string{
-		"-Y e2e-yard check",
+		"-Y e2e-yard check --host",
 		"-Y e2e-yard teardown --yes",
 		"-Y test-yard init --yes",
-		"-Y test-yard check",
+		"-Y test-yard check --host",
 	} {
 		if !strings.Contains(calls, expected+"\n") {
 			t.Fatalf("calls omitted %q:\n%s", expected, calls)
@@ -365,7 +365,7 @@ func TestApplyAdoptsExistingCanonicalProjectAfterSourceRecovery(t *testing.T) {
 		t.Fatalf("legacy registration remains: %v", err)
 	}
 	calls := read(t, log)
-	if calls != "-Y test-yard check\n" {
+	if calls != "-Y test-yard check --host\n" {
 		t.Fatalf("adoption unexpectedly changed lifecycle:\n%s", calls)
 	}
 	if _, err := os.Stat(filepath.Join(configHome, "yards", CurrentYard, "projects", ".lock")); err != nil {
@@ -507,7 +507,7 @@ func TestRunningLegacyPreflightPreparesPowerOnlyAfterAuthorizedIdleCheck(t *test
 				(err != nil && !strings.Contains(err.Error(), test.failure)) {
 				t.Fatalf("preflight error = %v, want %q", err, test.failure)
 			}
-			want := "-Y e2e-yard check\n-Y e2e-yard test-vms status\n"
+			want := "-Y e2e-yard check --host\n-Y e2e-yard test-vms status\n"
 			if test.power {
 				want += "-Y e2e-yard _migrate reconcile-power-reconciler\n"
 			}
@@ -617,7 +617,7 @@ func TestCommitResumesAfterRegistrationMoveAndFinishesCurrentYard(t *testing.T) 
 	calls := read(t, log)
 	for _, expected := range []string{
 		"-Y test-yard init --yes",
-		"-Y test-yard check",
+		"-Y test-yard check --host",
 	} {
 		if !strings.Contains(calls, expected+"\n") {
 			t.Fatalf("resumed commit omitted %q:\n%s", expected, calls)
@@ -2410,14 +2410,14 @@ func assertForwardOwnerBoundaryFacts(
 		assertExactTestFile(t, currentRegistration, registration, 0o600)
 		assertFakeProjectState(t, options, "current")
 		assertCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-			"-Y test-yard check\n", 1)
+			"-Y test-yard check --host\n", 1)
 		assertTestPathPresent(t, controller)
 	case "after-legacy-controller-archive":
 		assertTestPathAbsent(t, legacyDirectory)
 		assertExactTestFile(t, currentRegistration, registration, 0o600)
 		assertFakeProjectState(t, options, "current")
 		assertCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-			"-Y test-yard check\n", 1)
+			"-Y test-yard check --host\n", 1)
 		assertTestPathAbsent(t, controller)
 		assertTestPathPresent(t, controllerArchive)
 	default:
@@ -2483,7 +2483,7 @@ func assertCompensationOwnerBoundaryFacts(
 		assertTestPathAbsent(t, currentRegistration)
 		assertFakeProjectState(t, options, "legacy")
 		assertCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-			"-Y e2e-yard check\n", 3)
+			"-Y e2e-yard check --host\n", 3)
 	default:
 		t.Fatalf("missing independent compensation facts for %q", point)
 	}
@@ -2561,7 +2561,7 @@ func assertAdoptCurrentBoundaryFacts(
 		assertTestPathAbsent(t, filepath.Dir(legacyRegistration))
 		assertExactTestFile(t, currentRegistration, registration, 0o600)
 		assertCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-			"-Y test-yard check\n", 1)
+			"-Y test-yard check --host\n", 1)
 		assertTestPathPresent(t, controller)
 	case "after-legacy-controller-archive":
 		assertTestPathAbsent(t, filepath.Dir(legacyRegistration))
@@ -2600,7 +2600,7 @@ func assertDesiredOwnerFacts(t *testing.T, options Options, before Prepared) {
 	))
 	assertFakeProjectState(t, options, "current")
 	assertMinimumCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-		"-Y test-yard check\n", 1)
+		"-Y test-yard check --host\n", 1)
 }
 
 func assertDesiredFlatOwnerFacts(t *testing.T, options Options) {
@@ -2627,7 +2627,7 @@ func assertDesiredFlatOwnerFacts(t *testing.T, options Options) {
 	))
 	assertFakeProjectState(t, options, "current")
 	assertMinimumCallCount(t, filepath.Join(filepath.Dir(options.ConfigHome), "calls"),
-		"-Y test-yard check\n", 1)
+		"-Y test-yard check --host\n", 1)
 }
 
 func assertDesiredAdoptCurrentFacts(t *testing.T, options Options) {
@@ -2657,7 +2657,7 @@ func assertDesiredAdoptCurrentFacts(t *testing.T, options Options) {
 		strings.Contains(calls, "-Y test-yard init --yes\n") {
 		t.Fatalf("adopt-current resume changed lifecycle:\n%s", calls)
 	}
-	if strings.Count(calls, "-Y test-yard check\n") < 1 {
+	if strings.Count(calls, "-Y test-yard check --host\n") < 1 {
 		t.Fatalf("adopt-current resume omitted canonical check:\n%s", calls)
 	}
 }

@@ -1424,7 +1424,7 @@ esac
 					return errors.New("unexpected owner mutation")
 				}
 				switch strings.Join(arguments, " ") {
-				case "check":
+				case "check --host":
 					return nil
 				case "test-vms status":
 					_, err := io.WriteString(output, "ttl_remaining_seconds\t0\n")

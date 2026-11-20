@@ -16,9 +16,9 @@ func (cli *CLI) runHostCheck(
 ) int {
 	for _, argument := range arguments {
 		switch argument {
-		case "-y", "--yes":
+		case "-y", "--yes", "--host":
 		case "-h", "--help":
-			fmt.Fprintf(cli.options.Stdout, "Usage: %s check\n", cli.options.Program)
+			fmt.Fprintf(cli.options.Stdout, "Usage: %s check --host\n", cli.options.Program)
 			return 0
 		default:
 			cli.errorf("unknown option %q", argument)

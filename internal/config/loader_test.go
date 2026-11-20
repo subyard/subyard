@@ -174,7 +174,7 @@ func TestRetiredE2EVMTemplateReportsMigrationAndTeardown(t *testing.T) {
 	for _, expected := range []string{
 		yardFile,
 		"YARD_TEMPLATE=test-vms",
-		"yard -Y e2e-yard check",
+		"yard -Y e2e-yard check --host",
 		"yard -Y e2e-yard status",
 		"yard -Y e2e-yard test-vms status",
 		"yard -Y e2e-yard teardown",

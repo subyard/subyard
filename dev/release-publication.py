@@ -1409,6 +1409,7 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
     output = directory / "acceptance"
     # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
     hosted = hosted_open(directory, output) if with_vms or only else []
+    wanted = None
     if only:
         # The selection also runs required checks, so their hosted results count here too.
         receipt = json.loads((output / "receipt.json").read_text())
@@ -1434,7 +1435,11 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
     if hosted:
         with a.acceptance_lock(output):
             first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
-            failed = first and json.loads((output / "receipt.json").read_text()).get("result") == "failed"
+            # Only failures of checks this pass selected stop the hosted fallback; unselected
+            # or hosted checks may fail in the receipt without blocking a targeted retry.
+            checks = json.loads((output / "receipt.json").read_text())["checks"]
+            failed = first and any(checks[name].get("status") == "failed" for name in checks
+                                   if (wanted is None or name in wanted) and name not in hosted)
         if failed:
             # Hosted jobs may still run: never duplicate them locally. Count those already finished;
             # the rest stay pending for a later accept, and the receipt keeps the local failure.

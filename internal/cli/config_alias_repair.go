@@ -357,6 +357,18 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 	return 0
 }
 
+// configValidateRetry is config validate's repair for one configuration refusal.
+func configValidateRetry(home, name string, err error) string {
+	retry := config.SourceAliasRepairRetry(home, name, err)
+	if next := config.Diagnose(home, err).Next; retry == "" && len(next) != 0 {
+		retry = strings.Join(next, "; ")
+	}
+	if retry == "" {
+		retry = "restore the identified source or use its supported schema migration, then run config validate"
+	}
+	return retry
+}
+
 func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 	all, structured := false, false
 	for _, argument := range arguments {
@@ -423,13 +435,7 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		if err != nil {
 			failed = true
 			result.Diagnostic = (configProspectiveError{home, err}).Error()
-			result.Retry = config.SourceAliasRepairRetry(home, name, err)
-			if next := config.Diagnose(home, err).Next; result.Retry == "" && len(next) != 0 {
-				result.Retry = strings.Join(next, "; ")
-			}
-			if result.Retry == "" {
-				result.Retry = "restore the identified source or use its supported schema migration, then run config validate"
-			}
+			result.Retry = configValidateRetry(home, name, err)
 		}
 		rows = append(rows, result)
 	}

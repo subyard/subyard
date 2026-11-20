@@ -2880,15 +2880,33 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(calls, [("run", (), [])])
         # A failed local pass is reported without waiting for hosted jobs or running them locally.
         calls.clear()
-        receipt = json.loads((self.output / "receipt.json").read_text())
-        failed = {**receipt, "result": "failed"}
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["p0-release-smoke"]["status"] = "failed"
+        m.a.save(self.output, receipt)
         with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
              patch.object(m.a, "run_checks", side_effect=lambda *args, **kwargs: calls.append(("run", kwargs.get("exclude", ()), args[2])) or 1), \
-             patch.object(m.json, "loads", side_effect=lambda text, *args, **kwargs: failed if text == (self.output / "receipt.json").read_text() else json.JSONDecoder().decode(text)), \
              patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
              patch.object(m, "collect_ci", side_effect=record("collect")):
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 1)
         self.assertEqual([call[0] for call in calls], ["run", "collect"])
+
+    def test_targeted_accept_falls_back_despite_a_failure_of_an_unselected_check(self):
+        # Another check, local or a second open hosted lane, failed earlier: a targeted retry of
+        # the hosted check still waits for its job and then runs it locally.
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["p0-release-smoke"]["status"] = "failed"
+        m.a.save(self.output, receipt)
+        self.assertEqual(json.loads((self.output / "receipt.json").read_text())["result"], "failed")
+        for hosted in (["profile:sample"], ["p0-release-smoke", "profile:sample"]):
+            with self.subTest(hosted=hosted), \
+                 patch.object(m, "hosted_open", return_value=hosted), \
+                 patch.object(m.a, "run_checks", return_value=1) as run, \
+                 patch.object(m, "wait_ci_hosted", return_value=None), \
+                 patch.object(m, "collect_ci", return_value=set()), redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], ["profile:sample"], True, [], 60), 1)
+                self.assertEqual([(call.args[2], call.kwargs.get("exclude", ())) for call in run.call_args_list],
+                                 [(["profile:sample"], ["profile:sample"]), (["profile:sample"], ())])
+                self.assertNotIn("CI-HOSTED-SKIP all", printed.getvalue())
 
     def test_attempt_n_pass_counts_and_publication_rechecks_that_attempt(self):
         self.run.update(run_attempt=2)

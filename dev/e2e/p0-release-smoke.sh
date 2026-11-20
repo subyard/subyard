@@ -22,7 +22,8 @@ verify_smoke_state() {
   [ "$(operator_yard --version)" = "yard $version" ] \
     || die "unexpected active release, expected $version"
   if [ "$version" != "$OLD_VERSION" ]; then assert_registered_ownership; fi
-  operator_yard check
+  # Published baselines predate check --host: their bare check is the host preflight.
+  if [ "$version" = "$OLD_VERSION" ]; then operator_yard check; else operator_yard check --host; fi
   [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
     || die 'release smoke yard is not running'
   operator_yard shell "$SMOKE_PROJECT" --yes -- grep -Fxq "$MARKER" retained.txt
