@@ -1,6 +1,7 @@
 package uninstall
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,7 +46,7 @@ func classify(mode string, err error) error {
 	return fmt.Errorf("native teardown artifact guard failed (%s): exit status 1", mode)
 }
 
-var staleModes = []string{"guard-artifacts", "guard-artifact", "remove-artifact", "capture-tree", "check-tree", "remove-tree", "verify-tree", "publish-plan"}
+var staleModes = []string{"guard-artifacts", "guard-artifact", "remove-artifact", "remove-artifact-as", "capture-tree", "check-tree", "remove-tree", "verify-tree", "publish-plan"}
 
 func pinParent(path string) (int, string, error) {
 	parts := strings.Split(path, "/")
@@ -311,11 +312,12 @@ func removeEntries(fd int, name string, entries []Entry, resumable bool, exclusi
 }
 
 // guardArtifact checks an approved artifact against its original facts, or
-// its digest when only a binding was approved, and optionally removes it.
+// its digest when only a binding was approved. A non-nil before removes it and
+// runs immediately before each unlink.
 // beforeArtifactRemoval is a fixture seam between the artifact check and its removal.
 var beforeArtifactRemoval func()
 
-func guardArtifact(path, binding string, originals []Entry, remove bool) error {
+func guardArtifact(path, binding string, originals []Entry, before func() error) error {
 	return withParent(path, "teardown artifact changed during observation", func(parent int, name string) error {
 		entries, err := walkEntries(parent, name, artifactLimit, nil, nil, false, nil)
 		if err != nil {
@@ -335,16 +337,16 @@ func guardArtifact(path, binding string, originals []Entry, remove bool) error {
 		} else if sum, err := digest(entries); err != nil || sum != binding && len(entries) > 0 {
 			return errors.Join(err, guardRefusal("teardown artifact changed after confirmation"))
 		}
-		if !remove {
+		if before == nil {
 			return nil
 		}
 		if beforeArtifactRemoval != nil {
 			beforeArtifactRemoval()
 		}
 		if originals == nil {
-			return removeEntries(parent, name, entries, false, nil, false, nil)
+			return removeEntries(parent, name, entries, false, nil, false, before)
 		}
-		return removeEntries(parent, name, originals, true, nil, false, nil)
+		return removeEntries(parent, name, originals, true, nil, false, before)
 	})
 }
 
@@ -373,20 +375,24 @@ func captureArtifact(path string) (ports.TeardownArtifact, error) {
 }
 
 // RemoveArtifact deletes one approved selected-teardown artifact by binding.
-func RemoveArtifact(path string, approved []ports.TeardownArtifactBinding) error {
+// Cancellation is checked before every unlink and returned unclassified.
+func RemoveArtifact(ctx context.Context, path string, approved []ports.TeardownArtifactBinding) error {
 	items, err := approvedBindings(approved)
 	if err == nil {
-		err = guardSelected(items, path, true)
+		err = guardSelected(items, path, ctx.Err)
+	}
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return err
 	}
 	return classify("remove-artifact", err)
 }
 
-func guardSelected(items []ports.TeardownArtifact, path string, remove bool) error {
+func guardSelected(items []ports.TeardownArtifact, path string, before func() error) error {
 	index := slices.IndexFunc(items, func(item ports.TeardownArtifact) bool { return item.Path == path })
 	if index < 0 || slices.ContainsFunc(items[index+1:], func(item ports.TeardownArtifact) bool { return item.Path == path }) {
 		return guardRefusal("teardown artifact was not approved")
 	}
-	return guardArtifact(items[index].Path, items[index].Binding, items[index].Entries, remove)
+	return guardArtifact(items[index].Path, items[index].Binding, items[index].Entries, before)
 }
 
 // approvedBindings validates the bounded artifact transport.

@@ -187,10 +187,10 @@ elif command -v ufw >/dev/null 2>&1; then
 fi
 sshdir="$SUBYARD_OPERATOR_HOME/.ssh"
 snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
-# The pinned guard removes only the approved snippet, with ancestors bound to
-# the operator. Only the config rewrite runs as the operator: the engine may be
-# pinned through a root process's /proc/PID/fd, which the operator cannot reopen.
-teardown_guard remove-artifact "$snip" || exit 75
+# The pinned guard unlinks the approved snippet with the operator's filesystem
+# credentials. The engine may be pinned through a root process's /proc/PID/fd,
+# which the operator cannot reopen, so only the config rewrite runs via sudo.
+teardown_guard remove-artifact-as "$OPERATOR_USER" "$snip" || exit 75
 # shellcheck disable=SC2016
 {
   declare -f ssh_config_remove_exact &&

@@ -109,10 +109,7 @@ func checkTeardownConfig(before, after *teardownConfigSnapshot) error {
 }
 
 func (cli *CLI) removeTeardownConfigArtifact(ctx context.Context, approved []ports.TeardownArtifactBinding, path string) error {
-	err := ctx.Err()
-	if err == nil {
-		err = uninstall.RemoveArtifact(path, approved)
-	}
+	err := uninstall.RemoveArtifact(ctx, path, approved)
 	if errors.Is(err, domain.ErrPlanStale) {
 		return domain.ErrPlanStale
 	}

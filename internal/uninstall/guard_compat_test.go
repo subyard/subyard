@@ -43,9 +43,10 @@ func TestRecoverySchemaAcceptsReleasedAndCurrentOnly(t *testing.T) {
 	}
 }
 
-// A schema 1 store written by v0.30.0 resumes under the Go guard: unchanged
-// approved facts are accepted, replacement, symbolic links and additions refuse.
-func TestReleasedSchemaOneStoreResumesUnderGoGuard(t *testing.T) {
+// Schema 1 facts keep their drift guards under the Go guard: unchanged approved
+// facts are accepted, replacement, symbolic links and additions refuse. The
+// full-uninstall lane resumes an actual v0.30.0-written checkpoint end to end.
+func TestSchemaOneFactsKeepDriftGuards(t *testing.T) {
 	for _, drift := range []string{"unchanged", "replaced", "symlinked", "foreign"} {
 		t.Run(drift, func(t *testing.T) {
 			store, plan := recoveryFixture(t)
@@ -90,7 +91,7 @@ func TestReleasedSchemaOneStoreResumesUnderGoGuard(t *testing.T) {
 				testkit.WriteFile(t, filepath.Join(owned, "nested", "foreign"), []byte("foreign"), 0600)
 			}
 			approved := saved.Services[0].Artifacts[0]
-			guardErr := classify("guard-artifact", guardArtifact(approved.Path, approved.Binding, approved.Entries, false))
+			guardErr := classify("guard-artifact", guardArtifact(approved.Path, approved.Binding, approved.Entries, nil))
 			treeErr := saved.Trees[0].Remove()
 			if drift == "unchanged" {
 				if guardErr != nil || treeErr != nil {

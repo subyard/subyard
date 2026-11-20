@@ -2,6 +2,7 @@ package uninstall
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,7 +48,7 @@ func TestFullSharedRemoverReportsOnlyVerifiedGoneBridges(t *testing.T) {
 	}
 	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", string(inventory))
 	t.Cleanup(func() { incusQuery, incusCall = queryIncus, callIncus })
-	for _, kind := range []string{"removed", "absent-retry", "foreign", "selected-foreign", "changed", "delete-error", "still-present"} {
+	for _, kind := range []string{"removed", "absent-retry", "foreign", "selected-foreign", "changed", "delete-error", "still-present", "null-collection", "null-consumers"} {
 		t.Run(kind, func(t *testing.T) {
 			present, calls := kind != "absent-retry", 0
 			incusQuery = func(path, _ string, target any) error {
@@ -54,7 +56,9 @@ func TestFullSharedRemoverReportsOnlyVerifiedGoneBridges(t *testing.T) {
 				switch path {
 				case "/1.0/networks":
 					value = []string{}
-					if present {
+					if kind == "null-collection" {
+						value = nil
+					} else if present {
 						value = []string{"/1.0/networks/owned?project=default"}
 					}
 				case "/1.0/profiles/default":
@@ -69,6 +73,9 @@ func TestFullSharedRemoverReportsOnlyVerifiedGoneBridges(t *testing.T) {
 					}
 					if kind == "changed" {
 						observed["description"] = "changed"
+					}
+					if kind == "null-consumers" {
+						observed["used_by"] = nil
 					}
 					value = observed
 				default:
@@ -102,7 +109,7 @@ func TestFullSharedRemoverReportsOnlyVerifiedGoneBridges(t *testing.T) {
 					t.Fatalf("verified removal: %d %q %d", code, output, calls)
 				}
 			default:
-				if code != ports.TeardownPlanStaleExitCode || output != "" || (kind == "foreign" || kind == "changed") && calls != 0 {
+				if code != ports.TeardownPlanStaleExitCode || output != "" || kind != "delete-error" && kind != "still-present" && calls != 0 {
 					t.Fatalf("refusal: %d %q %d", code, output, calls)
 				}
 			}
@@ -280,5 +287,178 @@ func TestGuardAllReportsOnlyStructuralDetails(t *testing.T) {
 		"plan_stale: teardown inventory, artifact or resource binding is invalid\n"
 	if stderr.String() != expected {
 		t.Fatalf("diagnostic %q", stderr.String())
+	}
+}
+
+func TestFullFileRemoverRequiresAnActualPoolCollection(t *testing.T) {
+	for _, pools := range []string{"null", "{}", `["/1.0/storage-pools/backing"]`, "[]"} {
+		t.Run(pools, func(t *testing.T) {
+			store, plan := recoveryFixture(t)
+			backing := filepath.Join(store.Directory, "backing")
+			if err := os.Mkdir(backing, 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(backing, "data"), []byte("pool data"), 0600)
+			tree, err := Capture(backing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree.Resource = &ports.TeardownResource{Kind: "pool", Name: "backing"}
+			plan.Trees, plan.Stage = []Tree{tree}, RecoveryYardsRemoved
+			lock, release, err := OwnerLock(context.Background(), plan.Installation.DataHome, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.OwnerLock = &lock
+			release()
+			if _, err = store.Save(plan, nil); err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(filepath.Join(store.Directory, "plan.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(body)
+			t.Setenv("SUBYARD_TEARDOWN_PLAN", filepath.Join(store.Directory, "plan.json"))
+			t.Setenv("SUBYARD_TEARDOWN_PLAN_SHA256", hex.EncodeToString(sum[:]))
+			t.Setenv("SUBYARD_TEARDOWN_PARENT_ID", "0:0")
+			t.Cleanup(func() { incusQuery = queryIncus })
+			incusQuery = func(path, _ string, target any) error {
+				if path != "/1.0/storage-pools" {
+					return fmt.Errorf("unexpected query %s", path)
+				}
+				return decodeFixture(pools, target)
+			}
+			code := RunGuard([]string{"remove-files"}, nil, io.Discard, io.Discard)
+			_, statErr := os.Stat(filepath.Join(backing, "data"))
+			if pools == "[]" {
+				if code != 0 || !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("verified absent pool kept its backing data: exit %d, %v", code, statErr)
+				}
+				return
+			}
+			if code != ports.TeardownPlanStaleExitCode || statErr != nil {
+				t.Fatalf("unproven pool absence removed backing data: exit %d, %v", code, statErr)
+			}
+		})
+	}
+}
+
+// decodeFixture decodes like queryIncus, so shape errors keep their category.
+func decodeFixture(body string, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			return typeMismatch("unexpected Incus response shape")
+		}
+		return err
+	}
+	return nil
+}
+
+func TestGuardInventoryKeepsHistoricalOutcomes(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	stale := "plan_stale: teardown inventory, artifact or resource binding is invalid\n"
+	t.Run("volume-without-pool", func(t *testing.T) {
+		t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"volume","name":"vol","binding":"`+binding+`"}]`)
+		if _, code := runGuard(t, "validate"); code != 0 {
+			t.Fatalf("validation refused an optional pool: exit %d", code)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := RunGuard([]string{"volumes"}, nil, &stdout, &stderr); code != 1 || stdout.String() != "" || stderr.String() != stale {
+			t.Fatalf("volume without pool: exit %d, %q, %q", code, stdout.String(), stderr.String())
+		}
+	})
+	for name, resource := range map[string]string{
+		"numeric-name":    `{"kind":"instance","name":7,"binding":"` + binding + `"}`,
+		"null-name":       `{"kind":"instance","name":null,"binding":"` + binding + `"}`,
+		"numeric-binding": `{"kind":"instance","name":"yard","binding":7}`,
+		"numeric-pool":    `{"kind":"volume","name":"vol","pool":7,"binding":"` + binding + `"}`,
+		"scalar-resource": `7`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SUBYARD_TEARDOWN_INVENTORY", "["+resource+"]")
+			var stderr bytes.Buffer
+			if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
+				t.Fatalf("exit %d", code)
+			}
+			expected := `plan_stale: {"action":"guard-all","stage":"inventory","kind":"none","ordinal":0,"category":"TypeError"}` + "\n" + stale
+			if stderr.String() != expected {
+				t.Fatalf("diagnostic %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestArtifactRemovalStopsAtCancellationBeforeNextUnlink(t *testing.T) {
+	t.Setenv("SUBYARD_TEARDOWN_PLAN", "")
+	path := filepath.Join(testkit.TempDir(t), "overrides")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		testkit.WriteFile(t, filepath.Join(path, name), []byte(name), 0600)
+	}
+	artifact, err := CaptureArtifact(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Cleanup(func() { beforeArtifactRemoval, statAt = nil, factAt })
+	beforeArtifactRemoval = func() {
+		stats := 0
+		statAt = func(fd int, name, relative string) (Entry, error) {
+			// Cancel while the directory removal is already under way.
+			if stats++; stats == 3 {
+				cancel()
+			}
+			return factAt(fd, name, relative)
+		}
+	}
+	err = RemoveArtifact(ctx, path, ports.ArtifactBindings([]ports.TeardownArtifact{artifact}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled removal: %v", err)
+	}
+	names, _ := os.ReadDir(path)
+	if len(names) != 2 {
+		t.Fatalf("removal continued after cancellation: %d entries remain", len(names))
+	}
+}
+
+func TestOperatorArtifactRemovalUsesOnlyThatAccountsCredentials(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the credential drop itself is covered by the root teardown lanes")
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUBYARD_TEARDOWN_PLAN", "")
+	for _, account := range []string{"root", current.Username} {
+		t.Run(account, func(t *testing.T) {
+			path := filepath.Join(testkit.TempDir(t), "subyard-demo.config")
+			testkit.WriteFile(t, path, []byte("Host yard-demo\n"), 0600)
+			artifact, err := CaptureArtifact(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire, _ := json.Marshal(ports.ArtifactBindings([]ports.TeardownArtifact{artifact}))
+			t.Setenv("SUBYARD_TEARDOWN_ARTIFACTS", string(wire))
+			_, code := runGuard(t, "remove-artifact-as", account, path)
+			_, statErr := os.Lstat(path)
+			if account == "root" {
+				// Without root no other account's credentials can be assumed.
+				if code != ports.TeardownPlanStaleExitCode || statErr != nil {
+					t.Fatalf("foreign credentials assumed: exit %d, %v", code, statErr)
+				}
+				return
+			}
+			if code != 0 || !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("operator removal: exit %d, %v", code, statErr)
+			}
+		})
 	}
 }

@@ -1683,8 +1683,10 @@ command printed by the failed operation. Its entrypoint remains usable after con
 
 Retry uses the saved owner identity and approved paths, with a fresh confirmation. An ordinary
 local `teardown --full` also detects this saved plan when its original data root is selected.
-The recovery directory disappears only after verified cleanup. Stable, secret-free account
-coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-locks-<uid>` and the shared host-network lock under
+The recovery directory disappears only after verified cleanup: it is first renamed whole to
+`<data-root>.uninstall.removed-<n>`, so an interruption leaves either the complete recovery
+directory or none; a remaining `removed-<n>` directory is inert and safe to delete.
+Stable, secret-free account coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-locks-<uid>` and the shared host-network lock under
 `/run/lock/subyard-network` remain: removing an active lock inode would let queued operations
 bypass serialization. Queued mutations and late audit/cache writers recheck their original
 installation generation before writing.

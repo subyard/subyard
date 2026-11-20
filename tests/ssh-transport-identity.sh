@@ -173,7 +173,7 @@ legacy_config_tmp_pattern="\$cfg.tmp"
 typed_ssh_dir="sshdir=\"\$SUBYARD_OPERATOR_HOME/.ssh\""
 typed_ssh_paths="snip=\"\$sshdir/\$YARD_SNIP\"; cfg=\"\$sshdir/config\""
 root_snippet_remove="rm -f \"\$snip\""
-remove_helper_call="teardown_guard remove-artifact \"\$snip\" || exit 75"
+remove_helper_call="teardown_guard remove-artifact-as \"\$OPERATOR_USER\" \"\$snip\" || exit 75"
 operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- bash -s"
 positional_helper_arguments="bash -s -- \"\$cfg\" \"Include \$YARD_SNIP\""
 ! grep -Fq "$legacy_config_tmp_pattern" "$teardown_script" \
@@ -187,7 +187,7 @@ fi
 ! grep -Fq "$root_snippet_remove" "$teardown_script" \
   || fail 'teardown root still removes the operator SSH snippet'
 grep -Fq "$remove_helper_call" "$teardown_script" \
-  || fail 'teardown does not remove the snippet through the pinned native guard'
+  || fail 'teardown does not unlink the snippet with operator credentials through the pinned guard'
 grep -Fq "$operator_identity_drop" "$teardown_script" \
   || fail 'teardown does not drop non-interactively to the operator for SSH cleanup'
 grep -Fq "$positional_helper_arguments" \

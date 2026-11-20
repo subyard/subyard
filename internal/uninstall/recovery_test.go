@@ -4,13 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -139,6 +142,31 @@ func TestRecoveryRetainsExactTargetsAndPrivateModes(t *testing.T) {
 	}
 	if _, err := store.Save(plan, &binding); err == nil {
 		t.Fatal("stale previous publication accepted")
+	}
+}
+
+func TestRecoveryRefusesSpecialPublicationSidecarWithoutReading(t *testing.T) {
+	store, plan := recoveryFixture(t)
+	binding, err := store.Save(plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(store.Directory, ".plan-next"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		plan.Stage = RecoveryProducersStopped
+		_, err := store.Save(plan, &binding)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, domain.ErrPlanStale) {
+			t.Fatalf("special sidecar adopted: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("publication blocked on a special sidecar")
 	}
 }
 
@@ -405,5 +433,54 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 				t.Fatal("original producer drift escaped stale check")
 			}
 		})
+	}
+}
+
+func TestRetiredStoreInterruptionNeverStrandsARoutedPartialStore(t *testing.T) {
+	store, plan := recoveryFixture(t)
+	store.Directory = filepath.Join(store.Directory, "data.uninstall")
+	if err := os.Mkdir(store.Directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	engine := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	if err := os.MkdirAll(filepath.Dir(engine), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, engine, []byte("retained engine"), 0700)
+	// The caller dies after the store left its routed name, before any unlink.
+	t.Cleanup(func() { beforeRetiredRemoval = nil })
+	beforeRetiredRemoval = func() error { return errors.New("intentional interruption") }
+	retired, err := store.Retire()
+	if err == nil || retired == "" {
+		t.Fatalf("fixture interruption did not happen: %q %v", retired, err)
+	}
+	if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("interrupted retirement left a routed store", err)
+	}
+	if _, _, err := (RecoveryStore{Directory: retired, UID: store.UID}).Read(); err != nil {
+		t.Fatal("retired store was not complete when it left its routed name", err)
+	}
+	beforeRetiredRemoval = nil
+	retired, err = store.Retire()
+	if !errors.Is(err, os.ErrNotExist) || retired != "" {
+		t.Fatalf("absent store retired again: %q %v", retired, err)
+	}
+	// An uninterrupted retirement removes the whole store.
+	if err := os.Mkdir(store.Directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err = store.Retire(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{store.Directory, retired} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s remains: %v", path, err)
+		}
 	}
 }

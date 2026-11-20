@@ -38,12 +38,16 @@ func writePending(parent int, name string, body []byte, mode, uid uint32) (Entry
 	if err := unix.Fstat(fd, &info); err != nil {
 		return Entry{}, err
 	}
+	// Never read a sidecar before its type and owner are proven: a FIFO would block.
+	if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07777 != 0600 && info.Mode&07777 != mode || info.Uid != uid {
+		return Entry{}, guardRefusal("unsafe interrupted file publication")
+	}
 	existing := make([]byte, len(body)+1)
 	size, err := io.ReadFull(file, existing)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return Entry{}, err
 	}
-	if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07777 != 0600 && info.Mode&07777 != mode || info.Uid != uid || !bytes.HasPrefix(body, existing[:size]) {
+	if !bytes.HasPrefix(body, existing[:size]) {
 		return Entry{}, guardRefusal("unsafe interrupted file publication")
 	}
 	if _, err := file.WriteAt(body, 0); err != nil {

@@ -5,7 +5,6 @@ import os
 import pathlib
 import tempfile
 import subprocess
-import sys
 import signal
 import shlex
 import time

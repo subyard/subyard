@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -177,12 +178,28 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 			return guardRefusal("approved unit name resolves to an unapproved artifact")
 		}
 		return nil
+	case "remove-artifact-as":
+		// Root keeps the pinned guard; the operator's credentials decide whether
+		// its directory entry may be deleted at all.
+		account, err := argument(arguments, 0)
+		if err != nil {
+			return err
+		}
+		path, err := argument(arguments, 1)
+		if err != nil {
+			return err
+		}
+		approved, err := approvedArtifacts()
+		if err != nil {
+			return err
+		}
+		return asAccount(account, func() error { return guardSelected(approved, path, func() error { return nil }) })
 	case "guard-artifacts", "guard-artifact", "remove-artifact":
 		approved, err := approvedArtifacts()
 		if err != nil || mode == "guard-artifacts" {
 			for _, item := range approved {
 				if err == nil {
-					err = guardArtifact(item.Path, item.Binding, item.Entries, false)
+					err = guardArtifact(item.Path, item.Binding, item.Entries, nil)
 				}
 			}
 			return err
@@ -191,7 +208,11 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		if err != nil {
 			return err
 		}
-		return guardSelected(approved, path, mode == "remove-artifact")
+		var before func() error
+		if mode == "remove-artifact" {
+			before = func() error { return nil }
+		}
+		return guardSelected(approved, path, before)
 	case "guard-all":
 		project, _ := argument(arguments, 0)
 		stage, kind, ordinal := "inventory", "none", 0
@@ -220,9 +241,13 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		return nil
 	case "volumes":
 		for _, resource := range resources {
-			if resource.Kind == "volume" {
-				fmt.Fprintf(stdout, "%s\t%s\n", resource.Pool, resource.Name)
+			if resource.Kind != "volume" {
+				continue
 			}
+			if resource.Pool == "" {
+				return missingField("pool")
+			}
+			fmt.Fprintf(stdout, "%s\t%s\n", resource.Pool, resource.Name)
 		}
 		return nil
 	case "list", "guard":
@@ -297,6 +322,9 @@ func readPlan() (*RecoveryPlan, error) {
 	var info unix.Stat_t
 	if err := unix.Fstat(fd, &info); err != nil {
 		return nil, err
+	}
+	if info.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, guardRefusal("changed or unsafe full uninstall plan")
 	}
 	body, err := io.ReadAll(io.LimitReader(file, 64<<20+1))
 	if err != nil {
@@ -411,34 +439,33 @@ func producerOwner() (uint32, error) {
 
 // approvedArtifacts resolves bindings from the bounded transport or the
 // protected plan; a full plan never accepts facts outside its originals.
+// Only the environment transport is raw JSON; plan facts stay typed.
 func approvedArtifacts() ([]ports.TeardownArtifact, error) {
 	plan, err := optionalPlan()
 	if err != nil {
 		return nil, err
 	}
-	value, present := os.LookupEnv("SUBYARD_TEARDOWN_ARTIFACTS")
-	payload := []byte(value)
-	if !present && plan != nil {
+	var approved []ports.TeardownArtifact
+	if value, present := os.LookupEnv("SUBYARD_TEARDOWN_ARTIFACTS"); present {
+		if len(value) > 65536 {
+			return nil, guardRefusal("missing or oversized teardown artifacts")
+		}
+		if err := decodeExact([]byte(value), &approved, "invalid teardown artifact fields", []string{"Binding", "Path"}, []string{"Binding", "Entries", "Path"}); err != nil {
+			return nil, err
+		}
+		if approved == nil {
+			return nil, guardRefusal("invalid teardown artifacts")
+		}
+	} else if plan == nil {
+		return nil, guardRefusal("missing or oversized teardown artifacts")
+	} else {
 		services, err := approvedServices(plan)
 		if err != nil {
 			return nil, err
 		}
-		artifacts, err := ownerArtifacts(services)
-		if err != nil {
+		if approved, err = ownerArtifacts(services); err != nil {
 			return nil, err
 		}
-		if payload, err = json.Marshal(artifacts); err != nil {
-			return nil, err
-		}
-	} else if !present || len(payload) > 65536 {
-		return nil, guardRefusal("missing or oversized teardown artifacts")
-	}
-	var approved []ports.TeardownArtifact
-	if err := decodeExact(payload, &approved, "invalid teardown artifact fields", []string{"Binding", "Path"}, []string{"Binding", "Entries", "Path"}); err != nil {
-		return nil, err
-	}
-	if approved == nil {
-		return nil, guardRefusal("invalid teardown artifacts")
 	}
 	if err := validateArtifacts(approved); err != nil {
 		return nil, err
@@ -473,6 +500,20 @@ var (
 	resourceFields   = []string{"binding", "bindings", "kind", "name", "owner", "path", "pool", "usedBy"}
 )
 
+// inventoryText reads a text field; an absent field is empty, and another
+// JSON type (null too, unless nullable) keeps the historical TypeError category.
+func inventoryText(fields map[string]json.RawMessage, key string, nullable bool) (string, error) {
+	raw, present := fields[key]
+	if !present || nullable && string(raw) == "null" {
+		return "", nil
+	}
+	var value string
+	if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+		return "", typeMismatch("teardown resource " + key + " is not text")
+	}
+	return value, nil
+}
+
 func inventory() ([]ports.TeardownResource, error) {
 	value := os.Getenv("SUBYARD_TEARDOWN_INVENTORY")
 	if len(value) > 65536 {
@@ -489,26 +530,42 @@ func inventory() ([]ports.TeardownResource, error) {
 	seen := map[[3]string]bool{}
 	for index, body := range raw {
 		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(body, &fields); err != nil {
-			return nil, err
+		if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+			return nil, typeMismatch("teardown resource is not an object")
 		}
 		for key := range fields {
 			if !slices.Contains(resourceFields, key) {
 				return nil, guardRefusal("invalid teardown resource fields")
 			}
 		}
-		resource := &resources[index]
-		if err := json.Unmarshal(body, resource); err != nil {
-			return nil, err
-		}
-		if !slices.Contains(resourceKinds, resource.Kind) {
+		if kind, err := inventoryText(fields, "kind", true); err != nil || !slices.Contains(resourceKinds, kind) {
 			return nil, guardRefusal("invalid teardown resource kind")
 		}
-		if !resourceIdentity.MatchString(resource.Name) || resource.Pool != "" && !resourceIdentity.MatchString(resource.Pool) {
+		name, err := inventoryText(fields, "name", false)
+		if err != nil {
+			return nil, err
+		}
+		pool, err := inventoryText(fields, "pool", true)
+		if err != nil {
+			return nil, err
+		}
+		if !resourceIdentity.MatchString(name) || pool != "" && !resourceIdentity.MatchString(pool) {
 			return nil, guardRefusal("invalid teardown resource identity")
 		}
-		if !hexDigest(resource.Binding) {
+		binding, err := inventoryText(fields, "binding", false)
+		if err != nil {
+			return nil, err
+		}
+		if !hexDigest(binding) {
 			return nil, guardRefusal("invalid teardown binding")
+		}
+		resource := &resources[index]
+		if err := json.Unmarshal(body, resource); err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if errors.As(err, &typeErr) {
+				return nil, typeMismatch("invalid teardown resource field type")
+			}
+			return nil, err
 		}
 		key := [3]string{resource.Kind, resource.Pool, resource.Name}
 		if seen[key] {
@@ -520,9 +577,7 @@ func inventory() ([]ports.TeardownResource, error) {
 }
 
 // missingField and typeMismatch keep the historical diagnostic categories.
-type missingField string
-
-func (field missingField) Error() string { return "missing teardown resource field " + string(field) }
+type missingField = ports.TeardownMissingField
 
 type typeMismatch string
 
@@ -549,17 +604,37 @@ func queryIncus(path, project string, target any) error {
 	return nil
 }
 
+// queryList reads an Incus collection. Only an actual JSON array, even an
+// empty one, is evidence; null or another shape never proves absence.
+func queryList(path, project string) ([]string, error) {
+	var values []string
+	if err := incusQuery(path, project, &values); err != nil {
+		return nil, err
+	}
+	if values == nil {
+		return nil, typeMismatch("Incus collection is not a list")
+	}
+	return values, nil
+}
+
+// presentIn reports whether an Incus collection names the resource.
+func presentIn(path, name string) (bool, error) {
+	values, err := queryList(path, "default")
+	return slices.ContainsFunc(values, func(value string) bool {
+		return strings.HasSuffix(strings.SplitN(value, "?", 2)[0], "/"+name)
+	}), err
+}
+
 var fractionPattern = regexp.MustCompile(`\.(\d+)`)
 
 func guardResource(resource ports.TeardownResource, project string) error {
 	kind, name := resource.Kind, resource.Name
-	var path string
-	var fields []string
+	path := ""
 	switch kind {
 	case "instance":
-		path, fields = "/1.0/instances/"+name, []string{"name", "type", "created_at", "config", "devices", "profiles"}
+		path = "/1.0/instances/" + name
 	case "profile", "host-profile":
-		path, fields = "/1.0/profiles/"+name, []string{"name", "config", "devices", "description"}
+		path = "/1.0/profiles/" + name
 		if kind == "host-profile" {
 			project = "default"
 		}
@@ -567,83 +642,67 @@ func guardResource(resource ports.TeardownResource, project string) error {
 		if resource.Pool == "" {
 			return missingField("pool")
 		}
-		path, fields = "/1.0/storage-pools/"+resource.Pool+"/volumes/custom/"+name, []string{"name", "type", "content_type", "config", "description"}
+		path = "/1.0/storage-pools/" + resource.Pool + "/volumes/custom/" + name
 	case "project":
-		path, fields, project = "/1.0/projects/"+name, []string{"name", "config", "description"}, "default"
+		path, project = "/1.0/projects/"+name, "default"
 	case "network":
-		path, fields, project = "/1.0/networks/"+name, []string{"name", "type", "managed", "config", "description"}, "default"
+		path, project = "/1.0/networks/"+name, "default"
 	case "pool":
-		path, fields, project = "/1.0/storage-pools/"+name, []string{"name", "driver", "config", "description"}, "default"
+		path, project = "/1.0/storage-pools/"+name, "default"
+	case "image":
+		path = "/1.0/images/" + name
 	}
-	var value any
-	if fields == nil {
-		var image map[string]any
-		if err := incusQuery("/1.0/images/"+name, project, &image); err != nil {
+	var observed map[string]any
+	if err := incusQuery(path, project, &observed); err != nil {
+		return err
+	}
+	// The live recheck reads the same shared binding fields as assessment.
+	for _, field := range ports.TeardownBindingFields(kind) {
+		if _, present := observed[field]; !present {
+			return missingField(field)
+		}
+	}
+	if kind == "instance" || kind == "volume" {
+		snapshots, err := queryList(path+"/snapshots", project)
+		if err != nil {
 			return err
 		}
-		fingerprint, ok := image["fingerprint"]
+		names := []string{}
+		for _, item := range snapshots {
+			if index := strings.IndexAny(item, "?#"); index >= 0 {
+				item = item[:index]
+			}
+			item = item[strings.LastIndex(item, "/")+1:]
+			if unescaped, err := url.PathUnescape(item); err == nil {
+				item = unescaped
+			}
+			names = append(names, item)
+		}
+		sort.Strings(names)
+		observed["snapshots"] = names
+	}
+	if kind == "instance" {
+		timestamp, ok := observed["created_at"].(string)
 		if !ok {
-			return missingField("fingerprint")
+			return typeMismatch("instance creation time is not text")
 		}
-		value = fingerprint
-	} else {
-		var observed map[string]any
-		if err := incusQuery(path, project, &observed); err != nil {
-			return err
+		suffix := ""
+		if match := fractionPattern.FindStringSubmatch(timestamp); match != nil {
+			suffix = strings.TrimRight(match[1], "0")
 		}
-		selected := map[string]any{}
-		for _, field := range fields {
-			item, ok := observed[field]
-			if !ok {
-				return missingField(field)
-			}
-			selected[field] = item
+		stamp, err := time.Parse(time.RFC3339, fractionPattern.ReplaceAllString(timestamp, ""))
+		if err != nil {
+			return guardRefusal("invalid instance creation time")
 		}
-		if kind == "instance" || kind == "volume" {
-			var snapshots []string
-			if err := incusQuery(path+"/snapshots", project, &snapshots); err != nil {
-				return err
-			}
-			names := []string{}
-			for _, item := range snapshots {
-				if index := strings.IndexAny(item, "?#"); index >= 0 {
-					item = item[:index]
-				}
-				item = item[strings.LastIndex(item, "/")+1:]
-				if unescaped, err := url.PathUnescape(item); err == nil {
-					item = unescaped
-				}
-				names = append(names, item)
-			}
-			sort.Strings(names)
-			selected["snapshots"] = names
+		if suffix != "" {
+			suffix = "." + suffix
 		}
-		if kind == "instance" {
-			timestamp, ok := selected["created_at"].(string)
-			if !ok {
-				return typeMismatch("instance creation time is not text")
-			}
-			suffix := ""
-			if match := fractionPattern.FindStringSubmatch(timestamp); match != nil {
-				suffix = strings.TrimRight(match[1], "0")
-			}
-			stamp, err := time.Parse(time.RFC3339, fractionPattern.ReplaceAllString(timestamp, ""))
-			if err != nil {
-				return guardRefusal("invalid instance creation time")
-			}
-			if suffix != "" {
-				suffix = "." + suffix
-			}
-			selected["created_at"] = stamp.UTC().Format("2006-01-02T15:04:05") + suffix + "Z"
-		}
-		value = selected
+		observed["created_at"] = stamp.UTC().Format("2006-01-02T15:04:05") + suffix + "Z"
 	}
-	payload, err := json.Marshal(value)
+	current, err := ports.TeardownBinding(kind, observed)
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(payload)
-	current := hex.EncodeToString(sum[:])
 	variants := []string{}
 	if kind == "host-profile" {
 		variants = resource.Bindings
@@ -749,13 +808,7 @@ func removeShared(selected bool, stdout io.Writer) error {
 		}
 		return "/1.0/networks"
 	}
-	present := func(kind, name string) (bool, error) {
-		var values []string
-		err := incusQuery(endpoint(kind), "default", &values)
-		return slices.ContainsFunc(values, func(value string) bool {
-			return strings.HasSuffix(strings.SplitN(value, "?", 2)[0], "/"+name)
-		}), err
-	}
+	present := func(kind, name string) (bool, error) { return presentIn(endpoint(kind), name) }
 	var candidates []ports.TeardownResource
 	for _, resource := range resources {
 		if resource.Kind == "host-profile" {
@@ -775,12 +828,17 @@ func removeShared(selected bool, stdout io.Writer) error {
 			return err
 		}
 		var actual struct {
-			UsedBy []string `json:"used_by"`
+			UsedBy json.RawMessage `json:"used_by"`
 		}
+		var consumers []string
 		if err := incusQuery(endpoint(resource.Kind)+"/"+resource.Name, "default", &actual); err != nil {
 			return err
 		}
-		foreign := slices.ContainsFunc(actual.UsedBy, func(consumer string) bool {
+		// An absent consumer list is empty; null or another shape is no evidence.
+		if actual.UsedBy != nil && (json.Unmarshal(actual.UsedBy, &consumers) != nil || consumers == nil) {
+			return typeMismatch("shared resource consumers are not a list")
+		}
+		foreign := slices.ContainsFunc(consumers, func(consumer string) bool {
 			return strings.SplitN(consumer, "?", 2)[0] != "/1.0/profiles/default" || len(profile.UsedBy) > 0
 		})
 		if foreign && !selected {
@@ -944,13 +1002,9 @@ func removeFiles() error {
 			if resource.Kind != "pool" {
 				return guardRefusal("invalid backing storage owner")
 			}
-			var values []string
-			if err := incusQuery("/1.0/storage-pools", "default", &values); err != nil {
+			if remains, err := presentIn("/1.0/storage-pools", resource.Name); err != nil {
 				return err
-			}
-			if slices.ContainsFunc(values, func(value string) bool {
-				return strings.HasSuffix(strings.SplitN(value, "?", 2)[0], "/"+resource.Name)
-			}) {
+			} else if remains {
 				return guardRefusal("backing storage pool remains; preserve its data")
 			}
 		}
@@ -1174,4 +1228,60 @@ func checkProfiles(arguments []string, stderr io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// asAccount runs fn on a dedicated OS thread with the account's filesystem
+// credentials. Switching fsuid away from root also drops that thread's
+// file-permission capabilities. The thread is never unlocked, so the runtime
+// discards it instead of reusing it.
+func asAccount(name string, fn func() error) error {
+	account, err := user.Lookup(name)
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil {
+		return err
+	}
+	if os.Geteuid() != 0 {
+		if uid != os.Geteuid() {
+			return os.ErrPermission
+		}
+		return fn()
+	}
+	names, err := account.GroupIds()
+	if err != nil {
+		return err
+	}
+	groups := []int{gid}
+	for _, value := range names {
+		group, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		groups = append(groups, group)
+	}
+	result := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		if err := unix.Setgroups(groups); err != nil {
+			result <- err
+			return
+		}
+		// setfsuid/setfsgid return the previous value; -1 only reads it back.
+		_, gidErr := unix.SetfsgidRetGid(gid)
+		_, uidErr := unix.SetfsuidRetUid(uid)
+		currentUID, _ := unix.SetfsuidRetUid(-1)
+		currentGID, _ := unix.SetfsgidRetGid(-1)
+		if gidErr != nil || uidErr != nil || currentUID != uid || currentGID != gid {
+			result <- os.ErrPermission
+			return
+		}
+		result <- fn()
+	}()
+	return <-result
 }
