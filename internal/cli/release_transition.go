@@ -252,6 +252,18 @@ type activationApplicability struct {
 	declared string
 }
 
+// desired is a stage owner's Desired. Its native observation and the
+// projection of prepared settings before their import both use it, so the
+// two cannot disagree on the same yard state.
+func (reconciler *activationStageReconciler) desired(applicability activationApplicability, target releasetransition.ReleaseID) (releasetransition.Fingerprint, error) {
+	return activationStageFingerprint(struct {
+		ID     string                      `json:"id"`
+		Stage  ports.ReconcileStageID      `json:"stage"`
+		State  string                      `json:"state"`
+		Target releasetransition.ReleaseID `json:"target"`
+	}{reconciler.id, reconciler.stage, cmp.Or(applicability.declared, applicability.state), target})
+}
+
 type activationStageReconciler struct {
 	configuration        *CLI
 	prospective          func(releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error)
@@ -315,12 +327,7 @@ func (reconciler *activationStageReconciler) Observe(
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
-	desired, err := activationStageFingerprint(struct {
-		ID     string                      `json:"id"`
-		Stage  ports.ReconcileStageID      `json:"stage"`
-		State  string                      `json:"state"`
-		Target releasetransition.ReleaseID `json:"target"`
-	}{reconciler.id, reconciler.stage, cmp.Or(applicability.declared, applicability.state), releases.Target})
+	desired, err := reconciler.desired(applicability, releases.Target)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
@@ -487,7 +494,7 @@ func (cli *CLI) brokerActivationReconciler(
 
 func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessRequest, files *config.ProspectiveFiles) *activationStageReconciler {
 	const id = "test-vm-broker"
-	return &activationStageReconciler{
+	reconciler := &activationStageReconciler{
 		configuration: cli,
 		prospective: func(view releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error) {
 			yards, err := view.ListYards()
@@ -496,8 +503,7 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 			}
 			return cli.brokerActivationWithFiles(request, &config.ProspectiveFiles{Root: request.ConfigHome, Yards: yards, ReadSnapshot: view.ReadSnapshot}), nil
 		},
-		sourceActivation: cli.prepareBrokerSourceActivation(request, id),
-		id:               id, stage: ports.ReconcileStageTestVMs,
+		id: id, stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
 			names, err := config.YardNames(request.ConfigHome)
 			if err != nil {
@@ -540,6 +546,8 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 		},
 		authorize: cli.releaseTransitionPrivilegeAuthorization,
 	}
+	reconciler.sourceActivation = cli.prepareBrokerSourceActivation(request, reconciler)
+	return reconciler
 }
 
 func (cli *CLI) releaseTransitionIngressFactory(

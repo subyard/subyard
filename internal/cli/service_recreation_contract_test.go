@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -242,18 +243,59 @@ func TestReleaseTransitionIngressBindsServiceRecreation(t *testing.T) {
 	}
 }
 
-// An update whose reinstall fails reports its next step; retrying the update
-// finishes the release ready and keeps naming the reinstall.
-func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T) {
-	program, _, _, stage, calls := serviceRecreationFixture(t)
-	calls.fail = "service"
+// productionBroker is the shipped broker owner, with its projection of
+// prepared settings, bound to the recreation fixture's runtime and children.
+func productionBroker(t *testing.T) (*CLI, *activationStageReconciler, *serviceRecreationCalls, *int) {
+	t.Helper()
+	program, _, _, fixture, calls := serviceRecreationFixtureFor(t, "test-vm-broker")
+	home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+	broker := program.brokerActivationWithFiles(releasetransition.ProcessRequest{ConfigHome: home}, nil)
+	broker.platform, broker.recreation = fixture.platform, fixture.recreation
+	projections := new(int)
+	project := broker.sourceActivation
+	broker.sourceActivation = func(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
+		*projections++
+		return project(ctx, releases, links, view)
+	}
+	return program, broker, calls, projections
+}
+
+// brokerUpdate runs `yard update` through the engine with the broker owner.
+// With pending source work the engine first projects the broker's Desired
+// from the prepared settings, then verifies it against the native one.
+func brokerUpdate(t *testing.T, program *CLI, broker *activationStageReconciler, pendingSource bool) func() releasetransition.ProcessResponse {
+	t.Helper()
 	root := program.options.RepositoryRoot
 	home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
-	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+	payload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
+	writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), payload, 0o600)
+	if pendingSource {
+		registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ledger := releasetransition.BaselineLedgerV2(registry)
+		for _, migration := range registry.Migrations {
+			if migration.Kind == "local-ssh-port-settings-v2-to-v3" {
+				break
+			}
+			if ledger, err = ledger.Advance(registry, migration); err != nil {
+				t.Fatal(err)
+			}
+		}
+		encoded, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeReleaseTransitionTestFile(t, filepath.Join(home, "release-transition/v2/ledger.json"), encoded, 0o600)
+		// The broker yard's port still comes from Git settings; the update
+		// pins the same effective port into its local settings first.
+		writeConfigCommandFile(t, filepath.Join(home, "yards/fixture-runtime/config.env"), "YARD_KIND=container\n")
+		writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/fixture-runtime/config.env"), "SSH_PORT=3333\n")
+	}
 	runtimeRoot := testkit.TempDir(t)
 	for _, release := range []string{"release-a", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
@@ -266,13 +308,13 @@ func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T)
 	request := releasetransition.ProcessRequest{SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		RuntimeRoot: runtimeRoot, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
 		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64))}
-	update := func() (releasetransition.ProcessResponse, releasetransition.ProcessResponse) {
+	verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
+	return func() releasetransition.ProcessResponse {
 		t.Helper()
 		inspect := request
 		inspect.Mode = releasetransition.ProcessInspect
-		verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
 		inspected, err := executeReleaseTransitionRequest(context.Background(), root, inspect, verify,
-			[]releasetransition.V2ActivationReconciler{stage}, releaseTransitionOwnerFixture{}, nil)
+			[]releasetransition.V2ActivationReconciler{broker}, releaseTransitionOwnerFixture{}, nil)
 		if err != nil || inspected.Inspection == nil {
 			t.Fatalf("inspect: %#v %v", inspected, err)
 		}
@@ -280,23 +322,111 @@ func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T)
 		converge.Mode = releasetransition.ProcessConverge
 		converge.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: "confirmed"}
 		converged, err := executeReleaseTransitionRequest(context.Background(), root, converge, verify,
-			[]releasetransition.V2ActivationReconciler{stage}, releaseTransitionOwnerFixture{}, nil)
-		if err != nil {
-			t.Fatal(err)
+			[]releasetransition.V2ActivationReconciler{broker}, releaseTransitionOwnerFixture{}, nil)
+		if err != nil || converged.Outcome == nil {
+			t.Fatalf("converge: %#v %v", converged, err)
 		}
-		return inspected, converged
+		return converged
 	}
+}
+
+// The projection of prepared settings and the native observation derive the
+// same Desired for every broker yard state.
+func TestBrokerProjectionMatchesNativeDesired(t *testing.T) {
+	for _, state := range []string{"absent", "unfinished-init", "running"} {
+		t.Run(state, func(t *testing.T) {
+			program, broker, calls, projections := productionBroker(t)
+			home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+			switch state {
+			case "absent":
+				delete(calls.incus.Instances, calls.key)
+			case "unfinished-init":
+				half := calls.instance
+				half.Config = maps.Clone(half.Config)
+				half.Config["user.subyard.initialized"] = "false"
+				calls.incus.Instances[calls.key] = half
+			}
+			names, err := config.YardNames(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releases := releasetransition.ReleasePair{From: "release-a", Target: "release-b"}
+			view := releasetransition.V2SourceActivationView{Settings: preparedActivationSnapshotFixture{home: home, names: names}}
+			projected, err := broker.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.From}, view)
+			if err != nil || *projections != 1 {
+				t.Fatalf("projection: %+v %v (%d)", projected, err, *projections)
+			}
+			native, err := broker.Observe(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.From})
+			if err != nil || native.Desired != projected.Desired {
+				t.Fatalf("native Desired %s differs from projected %s: %v", native.Desired, projected.Desired, err)
+			}
+		})
+	}
+}
+
+// An update whose reinstall fails reports its next step; retrying the update
+// finishes the release ready and keeps naming the reinstall, whether the
+// failed install left no runtime or a half-initialized one, and whether the
+// update also carries pending source work.
+func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T) {
+	for _, half := range []bool{false, true} {
+		for _, pendingSource := range []bool{false, true} {
+			t.Run(fmt.Sprintf("half=%v/pending-source=%v", half, pendingSource), func(t *testing.T) {
+				program, broker, calls, projections := productionBroker(t)
+				calls.fail, calls.halfInstall = "service", half
+				update := brokerUpdate(t, program, broker, pendingSource)
+				install := "yard service install fixture-service --yard fixture-runtime"
+				failed := update()
+				if failed.Outcome.Status == releasetransition.StatusReady || !strings.Contains(fmt.Sprintf("%+v", *failed.Outcome), install) {
+					t.Fatalf("failed reinstall outcome: %+v", failed.Outcome)
+				}
+				retried := update()
+				if retried.Outcome.Status != releasetransition.StatusReady ||
+					!slices.ContainsFunc(retried.Outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }) {
+					t.Fatalf("retried update outcome: %+v", retried.Outcome)
+				}
+				if want := [][]string{{"stop"}, {"-Y", "fixture-runtime", "teardown", "--yes"}, {"-Y", "fixture-runtime", "service", "install", "fixture-service", "--yard", "fixture-runtime", "--yes"}}; !slices.EqualFunc(calls.calls, want, slices.Equal) {
+					t.Fatalf("retry repeated effects: %v", calls.calls)
+				}
+				if pendingSource != (*projections != 0) {
+					t.Fatalf("source projections: %d", *projections)
+				}
+				if values, err := config.ReadAssignments(filepath.Join(environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME"), "yards/fixture-runtime/config.env")); err != nil || values["SSH_PORT"] != "3333" {
+					t.Fatalf("pending settings work did not finish: %v %v", values, err)
+				}
+			})
+		}
+	}
+}
+
+// An update with pending source work ends ready whatever state the broker
+// yard is in: the engine verifies the projected Desired against the native one.
+func TestUpdateWithPendingSourceWorkEndsReadyForEveryBrokerState(t *testing.T) {
 	install := "yard service install fixture-service --yard fixture-runtime"
-	_, failed := update()
-	if failed.Outcome == nil || failed.Outcome.Status == releasetransition.StatusReady || !strings.Contains(fmt.Sprintf("%+v", *failed.Outcome), install) {
-		t.Fatalf("failed reinstall outcome: %+v", failed.Outcome)
-	}
-	_, retried := update()
-	if retried.Outcome == nil || retried.Outcome.Status != releasetransition.StatusReady ||
-		!slices.ContainsFunc(retried.Outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }) {
-		t.Fatalf("retried update outcome: %+v", retried.Outcome)
-	}
-	if want := [][]string{{"stop"}, {"-Y", "fixture-runtime", "teardown", "--yes"}, {"-Y", "fixture-runtime", "service", "install", "fixture-service", "--yard", "fixture-runtime", "--yes"}}; !slices.EqualFunc(calls.calls, want, slices.Equal) {
-		t.Fatalf("retry repeated effects: %v", calls.calls)
+	for _, state := range []string{"absent", "unfinished-init", "running"} {
+		t.Run(state, func(t *testing.T) {
+			program, broker, calls, projections := productionBroker(t)
+			switch state {
+			case "absent":
+				delete(calls.incus.Instances, calls.key)
+			case "unfinished-init":
+				half := calls.instance
+				half.Config = maps.Clone(half.Config)
+				half.Config["user.subyard.initialized"] = "false"
+				calls.incus.Instances[calls.key] = half
+			case "running":
+				calls.sameEngine = true
+			}
+			outcome := brokerUpdate(t, program, broker, true)().Outcome
+			if outcome.Status != releasetransition.StatusReady || *projections == 0 {
+				t.Fatalf("update with pending source work: %+v (%d projections)", outcome, *projections)
+			}
+			if named := slices.ContainsFunc(outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }); named != (state != "running") {
+				t.Fatalf("reinstall warning: %v", outcome.Warnings)
+			}
+			if len(calls.calls) != 0 {
+				t.Fatalf("unexpected children: %v", calls.calls)
+			}
+		})
 	}
 }
