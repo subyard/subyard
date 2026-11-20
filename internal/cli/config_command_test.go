@@ -3828,8 +3828,9 @@ func configCommandFixture(t *testing.T) (string, string, string, []string) {
 }
 
 // checkoutMirrorFixture returns a temporary repository root for tests that seed a
-// checkout overlay under private/. It copies config/, whose shipped packages must be
-// real directories, and links every other top-level entry of source except private/.
+// checkout overlay under private/. It copies the tracked config/ files, whose shipped
+// packages must be real directories, and links every other top-level entry of source
+// except private/.
 func checkoutMirrorFixture(t *testing.T, source string) string {
 	t.Helper()
 	entries, err := os.ReadDir(source)
@@ -3842,50 +3843,62 @@ func checkoutMirrorFixture(t *testing.T, source string) string {
 	}
 	for _, entry := range entries {
 		switch entry.Name() {
-		case "private":
-		case "config":
-			copyCheckoutTree(t, filepath.Join(source, entry.Name()), filepath.Join(root, entry.Name()))
+		case "private", "config":
 		default:
 			if err := os.Symlink(filepath.Join(source, entry.Name()), filepath.Join(root, entry.Name())); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
+	for _, relative := range checkoutConfigFiles(t, source) {
+		info, err := os.Lstat(filepath.Join(source, relative))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("unsupported checkout entry %s", relative)
+		}
+		data, err := os.ReadFile(filepath.Join(source, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(root, relative)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, destination, data, info.Mode().Perm())
+	}
 	return root
 }
 
-func copyCheckoutTree(t *testing.T, source, target string) {
+// checkoutConfigFiles lists the tracked config/ files of a Git checkout, leaving out
+// ignored operator-local files. A source tree without Git metadata has no ignore list,
+// so all of its regular config/ files are listed.
+func checkoutConfigFiles(t *testing.T, source string) []string {
 	t.Helper()
-	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+	if prefix, err := exec.Command("git", "-C", source, "rev-parse", "--show-prefix").Output(); err == nil && strings.TrimSpace(string(prefix)) == "" {
+		listed, err := exec.Command("git", "-C", source, "ls-files", "-z", "--", "config").Output()
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
-		info, err := entry.Info()
-		if err != nil {
+		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00")
+	}
+	var files []string
+	err := filepath.WalkDir(filepath.Join(source, "config"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
 			return err
 		}
 		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		destination := filepath.Join(target, relative)
-		switch {
-		case entry.IsDir():
-			return os.Mkdir(destination, 0o700)
-		case info.Mode().IsRegular():
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			testkit.WriteFile(t, destination, data, info.Mode().Perm())
-			return nil
-		default:
-			return fmt.Errorf("unsupported checkout entry %s", path)
-		}
+		files = append(files, relative)
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return files
 }
 
 func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.FileMode) {
