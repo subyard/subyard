@@ -252,6 +252,11 @@ func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecrea
 	if err := run(ctx, record.Yard, cli.options.Stderr, "teardown", "--yes"); err != nil {
 		return fmt.Errorf("remove service %s runtime in yard %s: %w", record.Service, record.Yard, err)
 	}
+	// A same-release repair caches the removed guest's installed view; the
+	// install must read the desired settings it applies.
+	if cli.activation != nil {
+		cli.activation.leaveRecreatedYardToInstall(record.Yard, cli.activation.request.ConfigHome)
+	}
 	install := serviceInstallArguments(record.Service, record.Yard, record.Pool)
 	if err := run(ctx, record.Yard, cli.options.Stderr, append(install, "--yes")...); err != nil {
 		return serviceReinstallError{command: "yard " + strings.Join(install, " "), yard: record.Yard, err: err}

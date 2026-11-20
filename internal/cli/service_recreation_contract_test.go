@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -150,5 +151,37 @@ func TestPreparedActivationSkipsLegacyTestYard(t *testing.T) {
 	with := plan(append(slices.Clone(names), legacyTestYardName), map[string]config.PersistentFileSnapshot{legacy: {Exists: true, Content: []byte("SSH_PORT=2240\n")}})
 	if with.Desired != without.Desired {
 		t.Fatal("prospective activation planned the legacy yard")
+	}
+}
+
+// A same-release repair caches each yard's installed view. Teardown still uses
+// it; the install after teardown reads the desired context it applies.
+func TestRecreationInstallReadsDesiredContextAfterTeardown(t *testing.T) {
+	program, _, _, stage, _ := serviceRecreationFixture(t)
+	home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+	installed, err := program.loadReleaseTransitionContext("fixture-runtime", home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.activation = &releaseConfiguration{request: releasetransition.ProcessRequest{ConfigHome: home}, repair: true,
+		yards: map[string]releaseYardConfiguration{home + "/fixture-runtime": {loaded: installed}}}
+	run := stage.recreation.runYard
+	var views []string
+	stage.recreation.runYard = func(ctx context.Context, yard string, output io.Writer, arguments ...string) error {
+		if _, err := program.resolveReleaseTransitionContext(ctx, yard, home); err != nil {
+			return err
+		}
+		views = append(views, arguments[0]+map[bool]string{false: ":installed", true: ":desired"}[program.unobservedReleaseYard(yard, home)])
+		return run(ctx, yard, output, arguments...)
+	}
+	releases := releasetransition.ReleasePair{From: "next-release", Target: "next-release"}
+	if _, err := stage.Observe(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.Target}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.Reconcile(context.Background(), releasetransition.ReleaseLinks{Active: releases.Target}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(views, []string{"teardown:installed", "service:desired"}) {
+		t.Fatalf("child context views: %v", views)
 	}
 }

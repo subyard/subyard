@@ -328,6 +328,19 @@ func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli
 	return true
 }
 
+// leaveRecreatedYardToInstall drops the installed view of a yard whose runtime
+// recreation removed. Its install, and every later load in this transition,
+// reads the yard's desired context like a yard left to its init.
+func (source *releaseConfiguration) leaveRecreatedYardToInstall(yard, home string) {
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	delete(source.yards, home+"/"+yard)
+	if source.uninitialized == nil {
+		source.uninitialized = map[string]bool{}
+	}
+	source.uninitialized[yard] = true
+}
+
 // unobservedReleaseYard reports a yard whose activation context was never read
 // from its guest because the yard is left to its init. Consumers that never
 // defer a yard must not treat that desired-only context as installed state.
