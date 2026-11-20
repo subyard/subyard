@@ -3,6 +3,8 @@
 # through the broker, the project builds against it and runs connected tests through a lease.
 set -euo pipefail
 [ "$#" -eq 0 ] || { printf 'usage: android-gradle.sh\n' >&2; exit 2; }
+# The runtime delivers android-gradle-watch.py with this script.
+[ -n "${android_gradle_watch_source:-}" ] || { printf 'android-gradle: missing watcher source\n' >&2; exit 2; }
 [ "$(id -u)" = 1000 ] || { printf 'android-gradle: requires the fixture developer\n' >&2; exit 1; }
 # shellcheck source=/dev/null
 . /etc/profile.d/subyard-android.sh
@@ -24,12 +26,13 @@ work="$(mktemp -d /tmp/subyard-android-gradle.XXXXXX)"
 chmod 0700 "$work"
 printf '%s\n' subyard-android-gradle-v1 > "$work/.marker"
 stage='setup'
-# Every relay refusal is reported with the total, on success and failure.
+# Relay refusals are reported on success and failure: the logged total, the first 50 and the last.
 relay_refusals() {
   local pattern='^Android ADB relay: refused a loopback connection' count
   count="$(grep -c "$pattern" "$work/connected.log" || true)"
-  printf 'android-gradle: relay refusals=%s\n' "${count:-0}"
-  grep -m 50 "$pattern" "$work/connected.log" | sed 's/^/android-gradle: relay refusal: /' || true
+  printf 'android-gradle: relay refusal records=%s\n' "${count:-0}"
+  grep "$pattern" "$work/connected.log" | awk 'NR <= 50 { print; next } { last = $0 } END { if (last != "") print last }' \
+    | sed 's/^/android-gradle: relay refusal: /' || true
 }
 cleanup() {
   local result=$?
@@ -73,10 +76,11 @@ stage='project'
 mkdir -p project/app/src/main/java/org/subyard/gradle project/app/src/androidTest/java/org/subyard/gradle
 cd project
 # Maven Central answers shared CI addresses with HTTP 429; Google's mirror of it serves the
-# same artifacts. Each run starts with an empty Gradle cache in a fresh yard.
+# same artifacts. Each run starts with an empty Gradle cache in a fresh yard. The plugin portal
+# redirects misses to Maven Central, and the only plugin comes from Google.
 cat > settings.gradle.kts <<'KTS'
 pluginManagement {
-    repositories { google(); maven("https://maven-central.storage-download.googleapis.com/maven2/"); gradlePluginPortal() }
+    repositories { google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") }
 }
 dependencyResolutionManagement {
     repositories { google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") }
@@ -205,77 +209,33 @@ PY
 printf 'android gradle: sdk install outside defaults, repeat and list=PASS\n'
 assemble 36.1 -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1
 stage='connected'
-# Bounded watchers keep the newest records of the leased stage in two rotating files each:
+# Bounded watchers keep the newest device records of the leased stage (android-gradle-watch.py):
 # a wedged device no longer answers captures taken after the failure.
-cat > "$work/watch.py" <<'PY'
-import os, signal, subprocess, sys, time
-if sys.argv[1:] == ['--newest']:
-    # Redaction may lengthen records within the capture bound; a record cut here is dropped,
-    # so redaction never sees part of one.
-    data = sys.stdin.buffer.read()[-49153:]
-    sys.stdout.buffer.write(data[data.find(b'\n') + 1:] if len(data) > 49152 else data)
-    raise SystemExit
-path, cap, interval, command = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
-class Stop(Exception):
-    pass
-def stop(_signum, _frame):
-    raise Stop
-signal.signal(signal.SIGTERM, stop)
-output = open(path, 'ab')
-def write(data):
-    global output
-    if output.tell() + len(data) > cap:
-        output.close()
-        os.replace(path, path + '.1')
-        output = open(path, 'ab')
-    output.write(data[:cap])
-    output.flush()
-child = None
-try:
-    if interval == 0:
-        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        for record in child.stdout:
-            write(record)
-        write(b'watch: stream ended exit=%d\n' % child.wait())
-    else:
-        while True:
-            started = time.time()
-            # A sample that does not answer within its interval is recorded, not waited for.
-            try:
-                result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, timeout=interval)
-                data, status = result.stdout, b'%d' % result.returncode
-            except subprocess.TimeoutExpired as expired:
-                data, status = expired.stdout or b'', b'timeout'
-            write(b'--- sample time=%.3f\n' % started + data[:16384] + b'\n--- exit=%s\n' % status)
-            time.sleep(max(0.0, interval - (time.time() - started)))
-except Stop:
-    pass
-finally:
-    if child is not None and child.poll() is None:
-        child.kill()
-        child.wait()
-PY
+printf '%s\n' "$android_gradle_watch_source" > "$work/watch.py"
 # Runs in the leased child before Gradle; failures here never change the stage result.
 connected_watch() {
   local adb="$ANDROID_SDK_ROOT/platform-tools/adb" watch="$ANDROID_GRADLE_WORK/watch"
+  local watcher="$ANDROID_GRADLE_WORK/watch.py"
   mkdir -p "$watch"
+  # The snapshot runs beside Gradle; the capture helper bounds it.
   {
     printf 'android-gradle evidence: before connected meminfo\n' >&2
     android_capture_evidence "$adb" shell dumpsys meminfo || true
-  } 2> "$watch/before.log"
-  python3 "$ANDROID_GRADLE_WORK/watch.py" "$watch/logcat.log" 2097152 0 \
-    "$adb" logcat -b main -b system -b crash -v threadtime < /dev/null &
+  } 2> "$watch/before.log" &
+  ANDROID_GRADLE_SNAPSHOT="$!"
+  # -D marks every change of buffer, which the crash section follows.
+  python3 "$watcher" stream "$watch/logcat.log" 2097152 -- \
+    "$adb" logcat -D -b main -b system -b crash -v threadtime < /dev/null &
   ANDROID_GRADLE_WATCHERS="$!"
   # The events buffer records lmkd kills, process deaths, crashes and ANRs.
-  python3 "$ANDROID_GRADLE_WORK/watch.py" "$watch/events.log" 1048576 0 \
+  python3 "$watcher" stream "$watch/events.log" 1048576 -- \
     "$adb" logcat -b events -v threadtime < /dev/null &
   ANDROID_GRADLE_WATCHERS+=" $!"
   # dmesg is not permitted to the shell user; the kernel log buffer may be.
-  python3 "$ANDROID_GRADLE_WORK/watch.py" "$watch/kernel.log" 1048576 0 \
+  python3 "$watcher" stream "$watch/kernel.log" 1048576 -- \
     "$adb" logcat -b kernel -v threadtime < /dev/null &
   ANDROID_GRADLE_WATCHERS+=" $!"
-  python3 "$ANDROID_GRADLE_WORK/watch.py" "$watch/memory.log" 1048576 20 \
+  python3 "$watcher" sample "$watch/memory.log" 1048576 20 -- \
     "$adb" shell 'cat /proc/loadavg /proc/meminfo; for p in cpu memory io; do printf "pressure %s\n" "$p"; cat "/proc/pressure/$p"; done; grep -E "^(oom_kill|allocstall|pgmajfault|pswp|workingset_refault)" /proc/vmstat' \
     < /dev/null &
   ANDROID_GRADLE_WATCHERS+=" $!"
@@ -284,7 +244,6 @@ connected_watch() {
 # The child's EXIT trap runs while run still owns the emulator and ADB relay.
 connected() {
   local result=$? section file watch="$ANDROID_GRADLE_WORK/watch" pid
-  local -a command
   # Only reports relay health; the captures below keep run's ADB_SERVER_SOCKET.
   local relay_probe='
 import socket, sys
@@ -303,32 +262,23 @@ raise SystemExit(0 if healthy else 1)
   for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
     kill -TERM "$pid" 2>/dev/null || true
   done
-  for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
+  # The bounded snapshot finishes on its own; stopping it would orphan its adb query.
+  for pid in ${ANDROID_GRADLE_WATCHERS:-} ${ANDROID_GRADLE_SNAPSHOT:-}; do
     wait "$pid" 2>/dev/null || true
   done
   if [ "$result" -ne 0 ]; then
     cat "$watch/before.log" >&2 2>/dev/null || true
     printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
     android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true
-    # Each section keeps the newest bytes; the capture helper redacts and bounds them.
+    # Each section keeps the newest whole records; the capture helper redacts and bounds them.
     for section in logcat-notable logcat-crash logcat events-notable kernel memory; do
       printf 'android-gradle evidence: %s\n' "$section" >&2
-      case "$section" in
-        logcat-notable) command=(awk '$5 ~ /^[WEF]$/ || $6 ~ /^(vold|lmkd|lowmemorykiller|Watchdog|StorageManagerService|StorageUserConnection|FuseDaemon):?$/') ;;
-        logcat-crash) command=(awk '/^--------- (beginning of|switch to) / { crash = ($NF == "crash"); next } crash') ;;
-        logcat) command=(cat) ;;
-        events-notable) command=(grep -E ' (am_kill|am_crash|am_anr|am_proc_died|am_low_memory|am_wtf|killinfo|watchdog)[: ]') ;;
-        kernel|memory) command=(cat) ;;
-      esac
       case "$section" in
         logcat*) file=logcat.log ;;
         events*) file=events.log ;;
         *) file="$section.log" ;;
       esac
-      android_capture_evidence bash -c '
-        source="$1" newest="$2"; shift 2
-        cat "$source.1" "$source" 2>/dev/null | "$@" | python3 "$newest" --newest
-      ' _ "$watch/$file" "$ANDROID_GRADLE_WORK/watch.py" "${command[@]}" || true
+      android_capture_evidence python3 "$ANDROID_GRADLE_WORK/watch.py" section "$section" "$watch/$file" || true
     done
   fi
   exit "$result"

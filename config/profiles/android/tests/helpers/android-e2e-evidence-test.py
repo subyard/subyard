@@ -92,7 +92,9 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
 # one TCP probe only reports relay health.
 gradle_source = (E2E / 'android-gradle.sh').read_text()
 connected = gradle_source[gradle_source.index("stage='connected'\n"):gradle_source.index('not_writable "$work/connected.log"')]
-watch_source = connected.split("cat > \"$work/watch.py\" <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+WATCH = E2E / 'android-gradle-watch.py'
+# The runtime delivers the watcher inside the guest script, exactly as here.
+watch_assignment = 'android_gradle_watch_source=' + shlex.quote(WATCH.read_text().rstrip('\n')) + '\n'
 
 
 def live_processes(marker):
@@ -105,14 +107,16 @@ def live_processes(marker):
     return found
 
 
-# Watchers keep only the newest bytes in two rotating files, record unanswered samples,
+def watch(*arguments, **options):
+    return subprocess.run([sys.executable, '-I', str(WATCH), *arguments], capture_output=True, timeout=30, **options)
+
+
+# Watchers keep only the newest records in two rotating files, record unanswered samples,
 # and stop with their command on TERM.
 with tempfile.TemporaryDirectory(prefix='android-gradle-watch-', dir='/tmp') as name:
-    watch = Path(name, 'watch.py')
-    watch.write_text(watch_source)
     stream = Path(name, 'stream.log')
-    result = subprocess.run([sys.executable, str(watch), str(stream), '1000', '0', sys.executable, '-c',
-                             'for index in range(5000): print("record", index)'], capture_output=True, timeout=30)
+    result = watch('stream', str(stream), '1000', '--', sys.executable, '-c',
+                   'for index in range(5000): print("record", index)')
     assert result.returncode == 0, result.stderr
     newest, older = stream.read_text(), Path(str(stream) + '.1').read_text()
     assert len(newest) <= 1000 and len(older) <= 1000, (len(newest), len(older))
@@ -120,8 +124,8 @@ with tempfile.TemporaryDirectory(prefix='android-gradle-watch-', dir='/tmp') as 
     assert older.startswith('record ') and int(older.splitlines()[-1].split()[1]) + 1 == int(newest.split()[1])
     sample = Path(name, 'sample.log')
     started = time.monotonic()
-    sampler = subprocess.Popen([sys.executable, str(watch), str(sample), '4096', '1', 'bash', '-c',
-                                'echo sampled; exec sleep 30', name])
+    sampler = subprocess.Popen([sys.executable, '-I', str(WATCH), 'sample', str(sample), '4096', '1', '--',
+                                'bash', '-c', 'echo sampled; exec sleep 30', name])
     for _ in range(100):
         if '--- exit=timeout' in (sample.read_text() if sample.exists() else ''):
             break
@@ -131,11 +135,41 @@ with tempfile.TemporaryDirectory(prefix='android-gradle-watch-', dir='/tmp') as 
     assert sample.read_text().startswith('--- sample time='), sample.read_text()
     assert 'sampled\n\n--- exit=timeout\n' in sample.read_text(), sample.read_text()
     assert not live_processes(name)
-    for size, expected in ((10, 'tail\n' * 10), (20000, 'tail\n' * 9830)):
-        result = subprocess.run([sys.executable, str(watch), '--newest'], input='head\n' + 'tail\n' * size,
-                                capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0 and result.stdout == ('head\n' + expected if size == 10 else expected), \
-            (len(result.stdout), result.stdout[:20])
+    # A missing records file is a failed capture, not an empty one.
+    result = watch('section', 'kernel', str(Path(name, 'absent.log')))
+    assert result.returncode == 3 and result.stdout == b'' and b'no records file' in result.stderr, result
+    # Sections keep the newest whole records within the bound; an oversized record, even
+    # an unterminated last one, is omitted rather than cut before redaction.
+    records = Path(name, 'records.log')
+    records.write_text('head\n' + 'tail\n' * 20000 + 'token=' + 'a' * 50000)
+    result = watch('section', 'memory', str(records))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b'watch: 10172 older or oversized records omitted\n' + b'tail\n' * 9830, result.stdout[:80]
+    records.write_text('head\n' + 'tail')
+    assert watch('section', 'memory', str(records)).stdout == b'head\ntail\n'
+    # logcat -D marks every buffer change; only crash-buffer records follow a crash divider.
+    Path(str(records) + '.1').write_text('--------- beginning of main\n'
+                                         '11-19 19:30:17.000   100   100 I Startup : quiet\n'
+                                         '--------- beginning of crash\n'
+                                         '11-19 19:30:18.317   612   750 F libc    : Fatal signal 6\n')
+    records.write_text('--------- switch to main\n'
+                       '11-19 19:30:19.019   228   228 I vold    : Killing all processes\n'
+                       '--------- switch to crash\n'
+                       '11-19 19:30:19.500   613   751 F libc    : Fatal signal 11\n'
+                       '--------- switch to system\n'
+                       '11-19 19:30:19.600   612   700 W ActivityManager: slow\n')
+    assert watch('section', 'logcat-crash', str(records)).stdout == (
+        b'11-19 19:30:18.317   612   750 F libc    : Fatal signal 6\n'
+        b'11-19 19:30:19.500   613   751 F libc    : Fatal signal 11\n')
+    assert watch('section', 'logcat-notable', str(records)).stdout == (
+        b'11-19 19:30:18.317   612   750 F libc    : Fatal signal 6\n'
+        b'11-19 19:30:19.019   228   228 I vold    : Killing all processes\n'
+        b'11-19 19:30:19.500   613   751 F libc    : Fatal signal 11\n'
+        b'11-19 19:30:19.600   612   700 W ActivityManager: slow\n')
+    records.write_text('11-19 19:30:18.000   612   750 I am_kill : [0,1838,com.example,900,stale]\n'
+                       '11-19 19:30:18.001   612   750 I am_pss  : noise\n')
+    assert watch('section', 'events-notable', str(records)).stdout == \
+        b'11-19 19:30:18.000   612   750 I am_kill : [0,1838,com.example,900,stale]\n'
 
 
 def fake_relay(mode, requests):
@@ -156,6 +190,7 @@ def fake_relay(mode, requests):
     return listener
 
 
+# Dividers appear only because the watcher asks for them with -D.
 logcat_records = ('--------- beginning of main\n'
                   '11-19 19:30:17.000   100   100 I Startup : quiet\n'
                   '--------- beginning of crash\n'
@@ -163,7 +198,7 @@ logcat_records = ('--------- beginning of main\n'
                   '--------- switch to main\n'
                   '11-19 19:30:19.019   228   228 I vold    : Killing all processes referencing /storage/emulated/0\n'
                   '11-19 19:30:19.100   300   300 E Other   : failure from 192.0.2.1\n')
-watch_commands = ('shell dumpsys meminfo', 'logcat -b main -b system -b crash -v threadtime',
+watch_commands = ('shell dumpsys meminfo', 'logcat -D -b main -b system -b crash -v threadtime',
                   'logcat -b events -v threadtime', 'logcat -b kernel -v threadtime')
 # (23, 7): a fast adb failure and a relay closed by the UID guard still keep every capture.
 # 124 and 137: the meminfo snapshot hangs and, for 137, ignores TERM until the kill grace.
@@ -176,7 +211,8 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         adb = tools / 'adb'
         adb.write_text('#!/bin/bash\nprintf "%s %s\\n" "$ADB_SERVER_SOCKET" "$*" >> "$CALLS"\n'
                        'case "$*" in\n'
-                       f'  "logcat -b main -b system -b crash -v threadtime") printf %s {shlex.quote(logcat_records)} ;;\n'
+                       '  "logcat -D -b main -b system -b crash -v threadtime") '
+                       f'printf %s {shlex.quote(logcat_records)} ;;\n'
                        '  "logcat -b events -v threadtime") printf "11-19 19:30:18.000   612   750 I am_kill : '
                        '[0,1838,com.example,900,stale]\\n11-19 19:30:18.001   612   750 I am_pss  : noise\\n" ;;\n'
                        '  "logcat -b kernel -v threadtime") printf "kernel record\\n" ;;\n'
@@ -191,13 +227,15 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         adb.chmod(0o755)
         requests = []
         relay = fake_relay(relay_mode, requests)
-        script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "sleep 1; exit $2"); '
+        gradle_started = directory / 'gradle-started'
+        script = ('set -euo pipefail\nwork="$1"; '
+                  'gradle=(bash -c "date +%s.%N > \\"$work/gradle-started\\"; sleep 1; exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT="$3" '
                   'ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
-                  'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + connected)
+                  'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + watch_assignment + connected)
         calls = directory / 'calls'
-        started = time.monotonic()
+        started = time.time()
         try:
             result = subprocess.run(['bash', '-c', script, '_', name, str(child_exit),
                                      str(relay.getsockname()[1])],
@@ -206,8 +244,10 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
                                     capture_output=True, text=True, timeout=60)
         finally:
             relay.close()
-        elapsed = time.monotonic() - started
+        elapsed = time.time() - started
         assert result.returncode == child_exit, result.stderr
+        # Gradle starts beside the meminfo snapshot; only the leased child's exit waits for it.
+        assert float(gradle_started.read_text()) - started < 2, gradle_started.read_text()
         # Watchers stop with the leased child, before run releases the lease.
         assert not live_processes(name)
         observed = calls.read_text().splitlines()
@@ -216,10 +256,9 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
                    for line in observed[:-1]), observed
         commands = [line.split(' ', 1)[1] for line in observed[:-1]]
         assert all(command in commands for command in watch_commands), commands
-        assert commands[0] == 'shell dumpsys meminfo', commands
         assert any(command.startswith('shell cat /proc/loadavg /proc/meminfo') for command in commands), commands
-        # The hung meminfo snapshot keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
-        bound = 1 + {124: 5, 137: 5 + 2}.get(adb_exit, 0)
+        # The hung snapshot keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
+        bound = max(1, {124: 5, 137: 5 + 2}.get(adb_exit, 0))
         assert bound <= elapsed < bound + 4, elapsed
         evidence = (directory / 'emulator-evidence.log').read_text()
         if child_exit == 0:
@@ -254,7 +293,7 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         raw = sections['logcat'][0]
         assert raw.endswith(f'watch: stream ended exit={adb_exit}\n'), raw[-100:]
         if adb_exit not in (124, 137):
-            assert len(raw.encode()) >= 49144 and '[address]' in raw
+            assert 'records omitted' in raw and '[address]' in raw
         events = sections['events-notable'][0]
         assert events == '11-19 19:30:18.000   612   750 I am_kill : [0,1838,com.example,900,stale]\n', events
         kernel = sections['kernel'][0]
@@ -263,24 +302,27 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         memory = sections['memory'][0]
         assert memory.startswith('--- sample time=') and f'\n--- exit={adb_exit}\n' in memory, memory[:200]
 
-# Every relay refusal and their total are reported on failure, before the log tails, and on success.
-gradle_cleanup = gradle_source[gradle_source.index('# Every relay refusal'):gradle_source.index('trap cleanup EXIT')]
+# Relay refusals are reported on failure, before the log tails, and on success: the logged
+# total, the first 50 records and the last.
+gradle_cleanup = gradle_source[gradle_source.index('# Relay refusals are reported'):gradle_source.index('trap cleanup EXIT')]
 refusal = 'Android ADB relay: refused a loopback connection owned by another account peer_uid=1001'
-for outcome in ('exit 23', 'relay_refusals; exit 0'):
+for outcome, count in (('exit 23', 2), ('relay_refusals; exit 0', 2), ('relay_refusals; exit 0', 52)):
     with tempfile.TemporaryDirectory(prefix='android-gradle-cleanup-', dir='/tmp') as directory:
         work = Path(directory, 'work')
         work.mkdir(mode=0o700)
         (work / '.marker').write_text('subyard-android-gradle-v1\n')
-        (work / 'connected.log').write_text(f'start\n{refusal}\n{refusal} again\nend\n')
+        logged = [f'{refusal} refusals={index}' for index in range(1, count + 1)]
+        (work / 'connected.log').write_text('start\n' + ''.join(line + '\n' for line in logged) + 'end\n')
         result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + gradle_cleanup
                                  + f'\ntrap cleanup EXIT\nstage=connected\n{outcome}\n', '_', str(work)],
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode == (23 if outcome == 'exit 23' else 0) and not work.exists(), result.stderr
         lines = (result.stderr if outcome == 'exit 23' else result.stdout).splitlines()
-        reported = ['android-gradle: relay refusals=2', f'android-gradle: relay refusal: {refusal}',
-                    f'android-gradle: relay refusal: {refusal} again']
+        shown = logged if count <= 51 else logged[:50] + logged[-1:]
+        reported = [f'android-gradle: relay refusal records={count}'] + [
+            f'android-gradle: relay refusal: {line}' for line in shown]
         start = lines.index(reported[0])
-        assert lines[start:start + 3] == reported, lines
+        assert lines[start:start + len(reported)] == reported, lines
         if outcome == 'exit 23':
             assert start < lines.index('android-gradle: connected.log (last 80 lines)')
 # Without refusals the total is still reported.
@@ -288,21 +330,34 @@ with tempfile.TemporaryDirectory(prefix='android-gradle-cleanup-', dir='/tmp') a
     Path(directory, 'connected.log').write_text('start\nend\n')
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + gradle_cleanup
                              + '\nrelay_refusals\n', '_', directory], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0 and result.stdout == 'android-gradle: relay refusals=0\n', result
+    assert result.returncode == 0 and result.stdout == 'android-gradle: relay refusal records=0\n', result
 
+# The runtime delivers the watcher byte for byte inside the guest script, ahead of the lane.
+runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
+delivery = runtime_source[runtime_source.index('  gradle_script="$(cat'):]
+delivery = delivery[:delivery.index('android-gradle.sh")"\n') + len('android-gradle.sh")"\n')]
+result = subprocess.run(['bash', '-c', 'set -euo pipefail\nroot="$1"\n' + delivery
+                         + 'eval "$(grep "^android_gradle_watch_source=" <<< "$gradle_script")"\n'
+                         + 'printf "%s\\n" "$android_gradle_watch_source"\n', '_', str(ROOT)],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and result.stdout == WATCH.read_text(), result.stderr
 
-# Every run starts with an empty Gradle cache, so the fixture project resolves Maven Central
-# artifacts only through the mirror; Maven Central answers shared CI addresses with HTTP 429.
+# The lane refuses to start without the watcher the runtime delivers.
+preamble = gradle_source[:gradle_source.index('[ "$(id -u)" = 1000 ]')]
+result = subprocess.run(['bash', '-c', preamble], capture_output=True, text=True, timeout=10)
+assert result.returncode == 2 and result.stderr == 'android-gradle: missing watcher source\n', result
+
+# Every run starts with an empty Gradle cache, so the fixture project resolves only from Google
+# and the Maven Central mirror: Maven Central answers shared CI addresses with HTTP 429, and the
+# plugin portal redirects its misses there.
 project_stage = gradle_source[gradle_source.index("stage='project'\n"):gradle_source.index('not_writable() {')]
 with tempfile.TemporaryDirectory(prefix='android-gradle-project-', dir='/tmp') as directory:
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\ncd "$1"\n' + project_stage, '_', directory],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     settings = Path(directory, 'project/settings.gradle.kts').read_text()
-    mirror = 'maven("https://maven-central.storage-download.googleapis.com/maven2/")'
     blocks = re.findall(r'repositories \{([^}]*)\}', settings)
-    assert len(blocks) == 2 and all(mirror in block for block in blocks), settings
-    assert 'mavenCentral' not in settings and 'repo.maven.apache.org' not in settings, settings
+    assert blocks == [' google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") '] * 2, settings
 
 
 # After the Gradle exec fails, root cleanup captures the retained journal without

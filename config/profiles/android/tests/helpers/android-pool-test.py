@@ -1812,9 +1812,14 @@ os.write(1, result.stdout)
                         foreign.settimeout(2)
                         peer_port = foreign.getsockname()[1]
                         self.assertEqual(foreign.recv(1), b'')
+                    # The refusal log writes on its own thread.
+                    for _ in range(100):
+                        if 'refusals=1 ' in output.getvalue():
+                            break
+                        time.sleep(0.01)
                 self.assertIn('refused a loopback connection owned by another account '
                               f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()} peer_state=ESTABLISHED '
-                              f'peer_port={peer_port} relay_port={port} refusals=1 ', output.getvalue())
+                              f'peer_port={peer_port} relay_port={port} refusals=1 unlogged=0 ', output.getvalue())
                 # A peer that resets before verification is refused as unknown, counted, and the
                 # relay keeps serving its owner.
                 accept = relay.get_request
@@ -1841,10 +1846,38 @@ os.write(1, result.stdout)
                 with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
                     own.settimeout(2)
                     self.assertEqual(own.recv(1), b'')
+                # A stderr pipe nobody drains drops and counts refusal records; the relay keeps
+                # accepting, serves its owner and shuts down promptly.
+                read_end, write_end = os.pipe()
+                os.set_blocking(write_end, False)
+                with contextlib.suppress(BlockingIOError):
+                    while True:
+                        os.write(write_end, b'x' * 65536)
+                os.set_blocking(write_end, True)
+                stalled = os.fdopen(write_end, 'w')
+                try:
+                    with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])), \
+                            patch.object(sys, 'stderr', stalled):
+                        for _ in range(relay.refusal_log.records.maxsize + 20):
+                            with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
+                                foreign.settimeout(2)
+                                self.assertEqual(foreign.recv(1), b'')
+                    self.assertGreaterEqual(relay.refusal_log.dropped, 19)
+                    self.assertEqual(relay.refusals, 2 + relay.refusal_log.records.maxsize + 20)
+                    with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                        own.settimeout(2)
+                        self.assertEqual(own.recv(1), b'')
+                    started = time.monotonic()
+                    relay.shutdown()
+                    self.assertLess(time.monotonic() - started, 2)
+                finally:
+                    os.close(read_end)
+                    with contextlib.suppress(OSError):
+                        stalled.close()
             finally:
                 relay.shutdown()
                 relay.server_close()
-        self.assertEqual(tunnels, ['tunnel', 'tunnel'])
+        self.assertEqual(tunnels, ['tunnel', 'tunnel', 'tunnel'])
         self.assertTrue(self.refused(port))
 
     def test_acquire_retains_tcp_relay_until_release(self):

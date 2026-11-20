@@ -428,8 +428,10 @@ if [ "$lane" = gradle ]; then
   android_phase_end 0
   android_phase_begin gradle
   # Default-package build, broker SDK addition and connected tests through one lease.
-  gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh" \
-    "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
+  # The guest receives the script on stdin; the watcher travels inside it.
+  gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh"
+    printf 'android_gradle_watch_source=%q\n' "$(cat "$root/config/profiles/android/tests/e2e/android-gradle-watch.py")"
+    cat "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
   android_phase_end 0
