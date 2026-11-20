@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import secrets
 import select
@@ -187,6 +188,27 @@ def loopback_peer(local, peer, tables=('/proc/net/tcp', '/proc/net/tcp6')):
     return (owners.pop() if len(owners) == 1 else None), states
 
 
+class RefusalLog:
+    """Writes relay refusals on its own thread: a stalled stderr drops and counts records,
+    and never blocks the relay's accept loop."""
+
+    def __init__(self, limit=64):
+        self.records, self.dropped = queue.Queue(limit), 0
+        threading.Thread(target=self.write, daemon=True).start()
+
+    def add(self, record):
+        try:
+            self.records.put_nowait(record)
+        except queue.Full:
+            self.dropped += 1
+
+    def write(self):
+        while True:
+            record = self.records.get()
+            with contextlib.suppress(OSError, ValueError):
+                print(record, file=sys.stderr, flush=True)
+
+
 class TcpRelay(socketserver.ThreadingTCPServer):
     """Loopback ADB server port for clients such as ddmlib that cannot use ADB_SERVER_SOCKET."""
     daemon_threads = True
@@ -206,12 +228,11 @@ class TcpRelay(socketserver.ThreadingTCPServer):
             return True
         self.refusals += 1
         reason = 'whose owner is unknown' if peer_uid is None else 'owned by another account'
-        with contextlib.suppress(OSError, ValueError):
-            print(f'Android ADB relay: refused a loopback connection {reason} '
-                  f'peer_uid={peer_uid if peer_uid is not None else "unknown"} expected_uid={expected_uid} '
-                  f'peer_state={",".join(states) or "absent"} '
-                  f'peer_port={client_address[1]} relay_port={self.server_address[1]} '
-                  f'refusals={self.refusals} time={time.time():.3f}', file=sys.stderr, flush=True)
+        self.refusal_log.add(f'Android ADB relay: refused a loopback connection {reason} '
+                             f'peer_uid={peer_uid if peer_uid is not None else "unknown"} expected_uid={expected_uid} '
+                             f'peer_state={",".join(states) or "absent"} '
+                             f'peer_port={client_address[1]} relay_port={self.server_address[1]} '
+                             f'refusals={self.refusals} unlogged={self.refusal_log.dropped} time={time.time():.3f}')
         return False
 
 
@@ -533,7 +554,7 @@ def start_tcp_relay(token, listener):
     server = TcpRelay(listener.getsockname(), RelayHandler, bind_and_activate=False)
     server.socket.close()
     server.socket, server.server_address = listener, listener.getsockname()
-    server.token, server.refusals = token, 0
+    server.token, server.refusals, server.refusal_log = token, 0, RefusalLog()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
