@@ -1523,6 +1523,9 @@ exit "$COLLECTOR_EXIT"
             direct = ("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
                 + "sample_source_bundle_sha256=" + review["tested"]["candidate_bundle_sha256"] + " base_fingerprint=" + "a" * 64 + " lane=one\n"
                 + "".join(f"E2E_PHASE phase=transport state=start duration_seconds=0 exit_code=0 vm={vm}\n" for vm in (1, 2))
+                + "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+                + "E2E lease: yard=nested slot=slot-003 run=nested type=android-test vms=1 base=" + "b" * 64 + "\n"
+                + "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1\n"
                 + "".join(f"E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm={vm}\n" for vm in (1, 2))
                 + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
                 + "E2E lease released: slot=slot-002 run=sample\n")
@@ -1550,7 +1553,7 @@ exit "$COLLECTOR_EXIT"
             _, target = m.load_bound(second)
             result = target["checks"][name]
             self.assertEqual(result["execution"], "inherited")
-            self.assertEqual(result["environments"][0]["vm_count"], 2)
+            self.assertEqual(result["environments"], [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "a" * 64}])
             self.assertIsNone(result["duration_seconds"])
             self.assertNotIn("phases", result)
             self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
@@ -2430,6 +2433,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             ("an unused VM needs no guest cleanup", request + grant(vms=2) + work(1) + release(), None, None),
             ("two sequential clean leases", clean + clean.replace("0123abcd", "0123abce"), None, None),
             ("refused request followed by a grant", request + refusal + clean, None, None),
+            ("guest work after a refused request", clean + request + refusal + stage("guest", "start", vm=1) + stage("guest", "end", vm=1),
+                "guest work started after a capacity refusal", None),
             ("final typed refusal after a clean lease", clean + request + refusal + stage("allocation", "end", 4), None, "memory"),
             ("second grant while the first is held", request + grant() + grant(run="0123abce") + release(run="0123abce"),
                 "second lease granted while slot-001 is held", None),
@@ -2462,7 +2467,10 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                     log.write_text(text)
                     self.assertEqual(m.lane_leases(log, 1)[:2], (issue, refused))
             log.write_text(clean + "x" * 5000 + "\n" + grant(run="0123abce")[:-1])
-            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 1, "a" * 64)]))
+            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 1, "a" * 64)], [1]))
+            # Cleanup reports only VMs cleaned inside the lane's own leases.
+            log.write_text(stage("guest-cleanup", "end", vm=2) + request + grant(vms=2) + work(1) + release())
+            self.assertEqual(m.lane_leases(log, 1), (None, None, [("subyard-pair", 2, "a" * 64)], [1]))
             # One decision for PASS, capacity block and failure, including results recorded elsewhere.
             log.write_text(clean)
             self.assertEqual(m.lane_status({"exit_code": 0}, log, 1), ("passed", None))
@@ -2472,8 +2480,59 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             log.write_text(clean + request + refusal)
             self.assertEqual(m.lane_status({"exit_code": 4}, log, 1), ("blocked", "capacity_memory"))
             self.assertEqual(m.lane_status({"exit_code": 0}, log, 1), ("failed", "final lease request was refused for memory"))
+            # A lane that keeps working after a refused second request never passes or blocks.
+            log.write_text(clean + request + refusal + work(1))
+            for code in (0, 4):
+                self.assertEqual(m.lane_status({"exit_code": code}, log, 1), ("failed", "guest work started after a capacity refusal"))
             self.assertEqual([m.termination(code) for code in (0, 1, 4, 124, 130, 137, 143, -9, None)],
                              ["exit", "exit", "exit", "timeout", "signal", "signal", "signal", "signal", "unknown"])
+
+    def test_client_and_runner_print_exactly_what_the_lane_rule_reads(self):
+        # Rewording one of these lines must fail here, not turn every lane into a failure.
+        client = (root / "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh").read_text()
+        runner = (root / "dev/agent-e2e.sh").read_text()
+        def printed(source, *formats, values):
+            for fmt in formats:
+                self.assertIn("printf '" + fmt + "'", source)
+            text = "".join(formats)
+            for value in values:
+                text = text.replace("%s", value, 1)
+            return text.replace("\\n", "\n").encode()
+        self.assertIn("die() { printf '%s: %s\\n' \"$E2E_PROGRAM\"", client)
+        self.assertIn('E2E_PROGRAM="${E2E_PROGRAM:-subyard-test-vms}"', client)
+        self.assertIn("E2E_PROGRAM=agent-e2e\n", runner)
+        cases = [
+            (m.LEASE_REQUEST, printed(client, "E2E lease request: slot=%s run=%s\\n", values=("slot-001", "0123abcd"))),
+            (m.LEASE_GRANT, printed(client, "E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s", " type=%s vms=%s base=%s\\n",
+                                    values=("y", "p", "0123abcd", "t", "slot-001", "subyard-pair", "2", "a" * 64))),
+            (m.LEASE_RELEASED, printed(client, "E2E lease released: slot=%s run=%s\\n", values=("slot-001", "0123abcd"))),
+            (m.LEASE_RELEASED, printed(client, "E2E lease released: handle=%s slot=%s reason=%s\\n", values=("0123abcd", "slot-001", "explicit"))),
+            (m.LEASE_RELEASE_END, printed(client, "E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\\n",
+                                          values=("3", "1"))),
+            (m.LEASE_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", " vm=%s", "\\n",
+                                    values=("guest-cleanup", "end", "1", "0", "2"))),
+            (m.LEASE_STAGE, printed(runner, "E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s", "\\n",
+                                    values=("cleanup/release", "end", "1", "0"))),
+        ]
+        for program in ("agent-e2e", "subyard-test-vms"):
+            cases += [
+                (m.CAPACITY_REFUSAL, printed(client, "%s: retryable capacity refusal for %s: resource=%s; retry after resources become available\\n",
+                                             values=(program, "slot-001", "memory"))),
+                (m.UNCONFIRMED_LEASE, printed(client, "%s: interrupted acquire cleanup remains unconfirmed: slot=%s run=%s\\n",
+                                              values=(program, "slot-001", "0123abcd"))),
+                (m.UNCONFIRMED_LEASE, printed(client, "%s: acquire cleanup remains unconfirmed: slot=%s run=%s\\n",
+                                              values=(program, "slot-001", "0123abcd"))),
+                (m.UNCONFIRMED_LEASE, printed(client, "%s: lease acquire unknown-outcome cause=%s\\n", values=(program, "stream-failed"))),
+            ]
+            for message in ("broker capability probe failed", "broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire"):
+                self.assertIn('die "' + message + '"', client)
+                cases.append((m.UNCONFIRMED_LEASE, f"{program}: {message}\n".encode()))
+        for pattern, line in cases:
+            with self.subTest(line=line):
+                self.assertIsNotNone(pattern.fullmatch(line))
+        # An ended lease is reported, but it is not a release.
+        ended = printed(client, "E2E lease had already ended: handle=%s slot=%s\\n", values=("0123abcd", "slot-001"))
+        self.assertIsNone(m.LEASE_RELEASED.fullmatch(ended))
 
     def test_recorded_pass_that_fails_the_lane_rule_is_rerun_and_never_moved(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

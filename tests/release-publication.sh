@@ -1722,6 +1722,18 @@ class Contracts(unittest.TestCase):
         for code in (124, 137):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 m.validate_operator_acceptance(dict(decision, exit_code=code), "profile:sample", decision["command"], self.identity)
+        # The summary names only cleaned VMs, in order, within the leased VM count.
+        for cleaned in ([{"vm": 2, "exit_code": 0}, {"vm": 1, "exit_code": 0}], [{"vm": 3, "exit_code": 0}],
+                        [{"vm": 1, "exit_code": 1}], [{"vm": 1, "exit_code": 0}, {"vm": 1, "exit_code": 0}], ["vm1"]):
+            invalid = dict(decision, cleanup=dict(decision["cleanup"], guest_cleanup=cleaned))
+            with self.subTest(cleaned=cleaned), self.assertRaises(ValueError):
+                m.validate_operator_acceptance(invalid, "profile:sample", decision["command"], self.identity)
+        # A VM without guest work has no cleanup to claim.
+        files["log"].write_text(log.replace("E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n", ""))
+        declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
+        m.write_json(path, declaration)
+        decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
+        self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}])
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()

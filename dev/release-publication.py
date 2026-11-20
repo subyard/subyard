@@ -565,9 +565,12 @@ def validate_operator_acceptance(document, name, command, identity):
             or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
             raise ValueError("invalid operator acceptance physical environment")
         counts.add(item["vm_count"])
-    cleanup = {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in range(1, max(counts) + 1)],
-               "release_exit_code": 0, "lease_released": True}
-    if canonical(document["cleanup"]) != canonical(cleanup):
+    # Guest cleanup lists the VMs that were cleaned; a VM without guest work needs none.
+    cleaned = document["cleanup"].get("guest_cleanup") if isinstance(document["cleanup"], dict) else None
+    vms = [item.get("vm") for item in cleaned] if isinstance(cleaned, list) and all(isinstance(item, dict) for item in cleaned) else None
+    if (vms is None or any(type(vm) is not int or not 1 <= vm <= max(counts) for vm in vms) or vms != sorted(set(vms))
+        or canonical(document["cleanup"]) != canonical({"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in vms],
+                                                        "release_exit_code": 0, "lease_released": True})):
         raise ValueError("operator acceptance cleanup or release unconfirmed")
 
 
@@ -634,7 +637,7 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        issue, refusal, leased = a.lane_leases(files["log"], argv[-1])
+        issue, refusal, leased, cleaned = a.lane_leases(files["log"], argv[-1])
         issue = issue or refusal and f"final lease request was refused for {refusal}"
         if issue or not leased:
             raise ValueError("operator acceptance original cleanup or release unconfirmed" + (": " + issue if issue else ""))
@@ -652,7 +655,7 @@ def operator_acceptances(paths, identity, root, receipt):
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
                   "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
-                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in range(1, max(count for _, count, _ in environments) + 1)],
+                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in cleaned],
                               "release_exit_code": 0, "lease_released": True}}
         validate_operator_acceptance(public, name, command, identity)
         accepted[name] = public

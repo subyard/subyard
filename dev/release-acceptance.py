@@ -1005,12 +1005,13 @@ def termination(code):
 
 
 def lane_leases(log, slot=None):
-    """Read the lane's own leases from its log: (first issue or None, final capacity refusal or None, environments).
+    """Read the lane's own leases from its log: (first issue or None, final capacity refusal or None,
+    the lane's own granted environments, VMs with a clean guest cleanup inside a held lease).
 
     Only lines outside guest windows belong to the lane; lease clients nested in a guest print
     into the same log. Guest cleanup lines of concurrent VMs can sit inside another VM's window."""
     lane_slot = int(slot) if slot is not None else None
-    depth, held, requested, refusal, issue, environments = 0, None, None, None, None, []
+    depth, held, requested, refusal, issue, environments, cleaned = 0, None, None, None, None, [], set()
 
     def number(value):
         return int(value.decode().removeprefix("slot-"))
@@ -1028,8 +1029,9 @@ def lane_leases(log, slot=None):
             stage = LEASE_STAGE.fullmatch(line)
             if stage and int(stage[3]) <= 255 and bool(stage[4]) == (stage[1] != b"allocation" and stage[1] != b"cleanup/release"):
                 phase, state, code, vm = stage[1], stage[2], int(stage[3]), stage[4]
-                if depth == 0 and state == b"start" and phase in (b"transport", b"guest"):
-                    refusal = None  # Started guest work is not a refusal before any lease.
+                if depth == 0 and state == b"start" and phase in (b"transport", b"guest") and refusal:
+                    # A refused request leaves no lease for this work: neither a block nor a PASS.
+                    found = "guest work started after a capacity refusal"
                 if phase == b"guest":
                     depth = depth + 1 if state == b"start" else max(depth - 1, 0)
                 if held is not None and vm and state == b"start" and phase in (b"transport", b"guest"):
@@ -1039,6 +1041,7 @@ def lane_leases(log, slot=None):
                         found = f"guest cleanup of VM{vm.decode()} exited {code}"
                     elif held is not None:
                         held["dirty"].discard(int(vm))
+                        cleaned.add(int(vm))
                 elif depth == 0 and state == b"end" and code and phase in (b"allocation", b"cleanup/release"):
                     # A typed capacity refusal ends its allocation with exit 4.
                     if not (phase == b"allocation" and code == 4 and refusal):
@@ -1087,12 +1090,12 @@ def lane_leases(log, slot=None):
         issue = f"lease slot-{held['slot']:03d} has no confirmed release"
     if issue is None and requested is not None:
         issue = "lease request ended without a grant or typed refusal"
-    return issue, None if issue else refusal, environments
+    return issue, None if issue else refusal, environments, sorted(cleaned)
 
 
 def lane_status(result, log, slot=None):
     """The one PASS decision for a live or local check result and its bound log: (status, reason)."""
-    issue, refusal, _ = lane_leases(log, slot)
+    issue, refusal, _, _ = lane_leases(log, slot)
     code = result.get("exit_code")
     if refusal and code != 4:
         issue = f"final lease request was refused for {refusal}"
@@ -2706,12 +2709,9 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
         validate_historical_p0_log(files["log"], receipt["candidate_bundle_sha256"], actual[-1])
     # The bound source and exact launcher select a checksum-verified bundle.
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
-    environments, stages = set(), set()
+    stages = set()
     with files["log"].open("rb") as stream:
         for line in stream:
-            environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-            if environment:
-                environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
             stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if stage:
                 if stage[2] != b"0" and not (historical_p0 and stage.groups() == (b"guest", b"23", b"1")):
@@ -2719,9 +2719,11 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
             if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
                 raise ValueError("standalone controller contains a failed phase")
-    issue, refusal, leased = lane_leases(files["log"], actual[-1])
+    # Only the lane's own grants are its environments; nested guest clients lease their own.
+    issue, refusal, leased, _ = lane_leases(files["log"], actual[-1])
+    environments = set(leased)
     issue = issue or refusal and f"final lease request was refused for {refusal}"
-    if not environments or not leased or issue or not historical_p0 and ("cleanup/release", None) not in stages:
+    if not environments or issue or not historical_p0 and ("cleanup/release", None) not in stages:
         raise ValueError("standalone controller evidence incomplete" + (": " + issue if issue else ""))
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
