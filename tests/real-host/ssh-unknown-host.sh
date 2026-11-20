@@ -30,6 +30,8 @@ fi
 OWNER_HOME="$STATE/owner-home"
 OWNER_CONFIG_HOME="$STATE/owner-config"
 OWNER_DATA_HOME="$STATE/owner-data"
+OWNER_INSTALL="$STATE/owner-install"
+OWNER_YARD="$OWNER_INSTALL/bin/yard"
 CONTROLLER_HOME="$STATE/controller-home"
 CONTROLLER_CONFIG_HOME="$STATE/controller-config"
 CONTROLLER_DATA_HOME="$STATE/controller-data"
@@ -37,15 +39,19 @@ SSHD_PID=''
 YARD_INITIALIZED=0
 REMOTE_ADDED=0
 HOST_ID=''
+# The owner is an installed current-worktree release with its own homes.
+owner_env() {
+  env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
+    SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
+    YARD_RUNTIME_ROOT="$OWNER_INSTALL/runtime" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 "$@"
+}
 cleanup() {
   local rc=$? cleanup_failed=0
   set +e
   if [ "$REMOTE_ADDED" = 1 ]; then "$ROOT/.build/yard" remote remove "$REMOTE_NAME" --yes >&2 || cleanup_failed=1; fi
   [ -z "$SSHD_PID" ] || { kill -TERM "$SSHD_PID" 2>/dev/null; wait "$SSHD_PID" 2>/dev/null; }
   if [ "$YARD_INITIALIZED" = 1 ]; then
-    env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
-      SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
-      SUBYARD_NO_AUDIT=1 "$ROOT/.build/yard" -Y "$YARD_NAME" teardown --yes >&2 || cleanup_failed=1
+    owner_env "$OWNER_YARD" -Y "$YARD_NAME" teardown --yes >&2 || cleanup_failed=1
   fi
   if [ "$cleanup_failed" = 1 ]; then
     printf 'ssh-unknown-host: cleanup failed; fixture retained at %s\n' "$STATE" >&2
@@ -68,9 +74,15 @@ if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   exec sg incus-admin -c "$resume_command"
 fi
 bash "$ROOT/dev/build-engine.sh" --force >/dev/null
-install -d -m 0700 "$OWNER_HOME" "$OWNER_CONFIG_HOME/yards/$YARD_NAME" \
-  "$OWNER_DATA_HOME" "$CONTROLLER_HOME" "$CONTROLLER_CONFIG_HOME" \
-  "$CONTROLLER_DATA_HOME" "$STATE/host"
+install -d -m 0700 "$OWNER_HOME" "$OWNER_CONFIG_HOME" "$OWNER_DATA_HOME" "$OWNER_INSTALL" \
+  "$CONTROLLER_HOME" "$CONTROLLER_CONFIG_HOME" "$CONTROLLER_DATA_HOME" "$STATE/host"
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+installed="$(export HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
+  SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
+  release_candidate_install "$ROOT" "$OWNER_INSTALL")"
+[ "$installed" = "$OWNER_YARD" ] || fail 'owner candidate installation did not publish its launcher'
+install -d -m 0700 "$OWNER_CONFIG_HOME/yards/$YARD_NAME"
 printf 'owner-%s\n' "$RUN_ID" >"$OWNER_CONFIG_HOME/host-id"
 printf 'controller-%s\n' "$RUN_ID" >"$CONTROLLER_CONFIG_HOME/host-id"
 chmod 0600 "$OWNER_CONFIG_HOME/host-id" "$CONTROLLER_CONFIG_HOME/host-id"
@@ -87,14 +99,9 @@ FORWARD_SSH_AGENT=0
 EOF
 chmod 0600 "$OWNER_CONFIG_HOME/yards/$YARD_NAME/config.env"
 YARD_INITIALIZED=1
-env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
-  SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
-  STORAGE_PATH="$(incus storage get default source)" \
-  SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1 \
-  "$ROOT/.build/yard" -Y "$YARD_NAME" init --yes >/dev/null
-env HOME="$OWNER_HOME" SUBYARD_OPERATOR_HOME="$OWNER_HOME" \
-  SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$OWNER_DATA_HOME" \
-  SUBYARD_NO_AUDIT=1 "$ROOT/.build/yard" -Y "$YARD_NAME" start --yes >/dev/null
+owner_env STORAGE_PATH="$(incus storage get default source)" MIN_DISK_GIB=1 \
+  "$OWNER_YARD" -Y "$YARD_NAME" init --yes >/dev/null
+owner_env "$OWNER_YARD" -Y "$YARD_NAME" start --yes >/dev/null
 owner_port="$(free_port)"
 
 export HOME="$CONTROLLER_HOME"
@@ -106,15 +113,15 @@ export SUBYARD_NO_AUDIT=1
 ssh-keygen -q -t ed25519 -N '' -f "$STATE/owner-host-key"
 ssh-keygen -q -t ed25519 -N '' -f "$STATE/controller-key"
 cat >"$STATE/owner-bash-env" <<EOF
-export PATH='$ROOT/bin':\$PATH
-export YARD_ENGINE_PATH='$ROOT/.build/yard'
+export PATH='$OWNER_INSTALL/bin':\$PATH
+export YARD_RUNTIME_ROOT='$OWNER_INSTALL/runtime'
 EOF
 chmod 0600 "$STATE/owner-bash-env"
 cat >"$STATE/owner-command" <<EOF
 #!/usr/bin/env bash
 export HOME='$OWNER_HOME' SUBYARD_OPERATOR_HOME='$OWNER_HOME' SUBYARD_CONFIG_HOME='$OWNER_CONFIG_HOME'
 export SUBYARD_HOME='$OWNER_DATA_HOME' SUBYARD_NO_AUDIT=1 BASH_ENV='$STATE/owner-bash-env'
-export PATH='$ROOT/bin':\$PATH YARD_ENGINE_PATH='$ROOT/.build/yard'
+export PATH='$OWNER_INSTALL/bin':\$PATH YARD_RUNTIME_ROOT='$OWNER_INSTALL/runtime'
 exec /bin/bash -lc "\${SSH_ORIGINAL_COMMAND:?missing SSH command}"
 EOF
 chmod 0700 "$STATE/owner-command"
@@ -167,8 +174,8 @@ export SSH_UNKNOWN_CONFIG="$HOME/.ssh/config"
 export PATH="$STATE/bin:$PATH"
 
 ssh fixture-owner -- \
-  "test \"\$YARD_ENGINE_PATH\" = '$ROOT/.build/yard' && test \"\$(command -v yard)\" = '$ROOT/bin/yard'" \
-  || fail 'owner login shell did not resolve the candidate engine and launcher'
+  "test \"\$(command -v yard)\" = '$OWNER_YARD'" \
+  || fail 'owner login shell did not resolve the installed candidate launcher'
 
 "$ROOT/.build/yard" remote add "$REMOTE_NAME" fixture-owner --yard "$YARD_NAME" --yes >/dev/null
 REMOTE_ADDED=1
