@@ -256,7 +256,12 @@ type ReconcileStageObservation struct {
 	// profile declaration that this yard kind does not apply.
 	// They are neither refusals nor warnings.
 	Diagnostics []string
+	// Advisories are closed warning codes of converged profiles; see
+	// profile.ValidServiceAdvisory.
+	Advisories []ProfileAdvisory
 }
+
+type ProfileAdvisory struct{ Owner, Code string }
 
 type InitPlatform interface {
 	ReconcileStageRunner

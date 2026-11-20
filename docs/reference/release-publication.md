@@ -55,14 +55,35 @@ After downloading the preparation artifact, `prepare` also dispatches `release-v
 for the 25 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
 commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
 leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
-hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
-350 minutes). Repeating preparation discovers the durable request instead of dispatching another.
-`accept` waits up to six hours for that request, then collects only completed successful jobs before
-running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
-a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
-for local execution when requested. After a local check fails, `accept` neither waits nor runs hosted
-checks locally: it counts finished hosted results and leaves the rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
+hosted pool setup, and runs one fresh collector selection per job (up to 12 jobs at once, each bounded to
+350 minutes; one failed job never cancels the others). Repeating preparation discovers the durable
+request instead of dispatching another. `accept` runs local checks first, waits up to six hours for that
+request, then counts completed successful jobs of every run attempt. Locally it then runs only the
+requested hosted checks whose jobs failed, are missing or were refused; checks whose jobs still run stay
+pending (`CI-HOSTED pending: CHECKS`) and the result stays incomplete. `--ci-wait-seconds 0` collects the
+current snapshot without waiting, with the same split; a nonzero override is bounded to 86400 seconds.
+With a wait of at least ten minutes, a request that still has no discovered run falls back to local runs;
+after a shorter wait, including `0`, its checks stay pending. When GitHub cannot be read or the inventory
+exceeds the reviewed limit, every requested hosted check falls back to a local run. After a local check fails,
+`accept` neither waits nor runs hosted checks locally: it counts finished hosted results and leaves the
+rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
 `CI-HOSTED-SKIP CHECK: REASON`.
+
+Do not cancel the hosted run when one job fails. Once it finishes, rerun its failed jobs with one command:
+
+```sh
+dev/release.sh retry-hosted --candidate rRUN_ID-aATTEMPT
+```
+
+It reruns every failed, cancelled and timed-out job of the run, once at least one of their checks
+is still open locally, and prints
+`CI-HOSTED-RETRY run=RUN attempt=N checks=...`; a running `accept` then waits for attempt N too.
+GitHub keeps the only state: while the run is in progress the command prints `CI-HOSTED attempt=N running`,
+so repeating it after a lost response is safe. When the outcome of its rerun request stays unknown inside a
+running `accept`, that `accept` keeps open hosted checks pending; repeat `retry-hosted` after it exits. It refuses when the run passed, when no failed job's check
+is still open (use `retry CHECK`), and once a running `accept` has started its local fallback. Evidence
+artifacts are named `ci-hosted-JOB_INDEX-ATTEMPT`; a job GitHub carries into a rerun keeps the evidence
+of the attempt that ran it. A later attempt's PASS does not count for a check already run locally.
 
 Hosted evidence is `execution: ci-hosted`, with the original runner environment, manifest, complete
 PASS attempt and recorded cleanup. Candidate ID, commit, source fingerprint, version, runtime and
@@ -114,8 +135,18 @@ python3 dev/release-acceptance.py run --output .build/release-local \
   --only p0-release-smoke --slots slot-1
 ```
 
-Local VM execution uses slots 1–4 by default. Use `--slots slot-2,slot-4` for an exact set,
-or `--slot-count 2` for slots 1 and 2. Slot flags alone do not request local VM execution.
+Without a slot flag, local VM execution uses every slot the broker gives among slots 1–4: each check
+takes the next slot the broker reports available. `--slot-count N` caps that at slots 1 through N.
+Use `--slots slot-2,slot-4` for an exact set only when the operator asks for it. Slot flags alone do not
+request local VM execution.
+
+To rerun one failed, blocked or interrupted lane without stopping the others, run
+`dev/release.sh retry --candidate rRUN_ID-aATTEMPT CHECK` (or `release-acceptance.py retry --output DIR CHECK`).
+A running `accept` or collector queues the lane first, starts it on the next available slot and keeps
+every other result; the command prints `accepted: ...` or `refused: REASON` and exits 1 on refusal: a
+lane that is running or queued, already passed (force a rerun with `run --only CHECK --rerun` once the
+collector finishes), outside the running selection, while no live dispatch is in progress, or still owned
+by a hosted job. With no running collector, `retry` runs that check as a new targeted invocation.
 Checks without counted hosted evidence or an explicit local request remain `not-run` in acceptance
 and publication. Once requested, incomplete or failed checks block the candidate, including after
 interruption or a later default invocation.
@@ -417,12 +448,16 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Request long VM smoke and shipped-profile VM checks using `accept --with-vms` or collector
-  `run --only CHECK`. Use `--slots` or `--slot-count` to narrow the default set of slots 1–4.
+  `run --only CHECK`. Use `--slot-count` to cap the default dynamic use of slots 1–4, and
+  `--slots` for an exact set only on the operator's request.
   Core `p0-release-smoke` is mandatory and cannot be excluded or waived as optional. Local-only
   acceptance remains incomplete until it passes. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.
+- Release acceptance always has priority on local slots and CI. While a release `accept` or Release VM
+  checks run is active, agents start no new non-release physical lanes or long hosted dispatches such as
+  Periodic E2E; non-release lanes on slots the release needs stop at their next safe point.
 - Release repairs land as reviewed PRs to the release base. Before preparation
   CI, run the [publication preflight](#operator-commands-and-retained-state)
   and assign every required local check and explicitly requested VM gate in the existing task plan:
@@ -807,8 +842,8 @@ Veranda and live P0 acceptance remain separate checks.
 artifact, one fresh collector per job. It shares the Periodic E2E pool setup. Job success requires
 a terminal recorded PASS for that exact selection and recorded cleanup; the collector's aggregate
 receipt stays incomplete while other checks are unrequested. `accept` waits up to six hours (override
-with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
-the remaining requested checks. Wrong SHA, failed jobs, unknown workflow policies, foreign candidates,
+with `--ci-wait-seconds`, including `0`), counts verified successful jobs of every attempt as `ci-hosted`,
+and runs only the remaining requested checks whose hosted jobs no longer run. Wrong SHA, failed jobs, unknown workflow policies, foreign candidates,
 stale attempts and missing cleanup refuse import. Publication rechecks GitHub execution facts.
 Nested-VM stages keep `vm:p0-full` local; its non-nested power-systemd and
 legacy-continuation lanes are the hosted `vm:p0-power-systemd` and

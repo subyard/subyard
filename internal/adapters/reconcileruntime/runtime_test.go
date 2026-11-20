@@ -101,8 +101,16 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		}
 	}
 	observation, err := profileServiceObservation("", false, nil)
-	if err != nil || !observation.Converged {
+	if err != nil || !observation.Converged || observation.Advisories != nil {
 		t.Fatalf("successful check changed: %#v %v", observation, err)
+	}
+	advisories := "profile service advisory owner=telemetry code=storage-capacity\nprofile service advisory owner=telemetry code=private-canary\nprivate-canary\n"
+	observation, err = profileServiceObservation(advisories, false, nil)
+	if err != nil || !observation.Converged || len(observation.Advisories) != 1 || observation.Advisories[0] != (ports.ProfileAdvisory{Owner: "telemetry", Code: "storage-capacity"}) {
+		t.Fatalf("converged advisory: %#v %v", observation, err)
+	}
+	if observation, _ = profileServiceObservation(advisories, true, nil); observation.Advisories != nil {
+		t.Fatal("oversized advisory output admitted")
 	}
 }
 

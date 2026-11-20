@@ -537,7 +537,9 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 			if strings.HasPrefix(desired, "release") {
 				// An independent conflict keeps the release as one refusal with it.
 				var release pendingInitOwnershipRelease
-				if !errors.As(err, &release) || release.yard != "default" || !slices.Equal(release.paths, []string{"/home/dev/.codex/config.toml"}) || !release.ActivationPendingConfiguration() {
+				// The fixture declares no integration catalog, so the guest path is shown only by digest.
+				if !errors.As(err, &release) || release.yard != "default" || len(release.paths) != 1 || !strings.HasPrefix(release.paths[0], "an undeclared path (sha256:") ||
+					strings.Contains(release.paths[0], "config.toml") || !release.ActivationPendingConfiguration() {
 					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
 				}
 				message, retry := release.ActivationDiagnostic()

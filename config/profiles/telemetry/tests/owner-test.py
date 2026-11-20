@@ -61,6 +61,8 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(archive.extractfile(member).read())
     assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file()
+    if os.environ.get('TELEMETRY_DISK_BUDGET')=='2GiB':
+        assert args[args.index('SUBYARD_TELEMETRY_DISK_BYTES=2147483648')-1]=='--env'
     if arguments[0]=='startup':
         assert not (stage/'subyard-telemetry').exists()
         assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
@@ -81,6 +83,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
         def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
+        def raw_refused(self): return os.environ.get('TELEMETRY_FIXTURE_ADVISORY')=='1'
         def apply(self): marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
@@ -105,6 +108,10 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(json.loads(startup.stdout), {'state':'drift'})
             self.assertEqual(invoke('--check').returncode,1,'fresh selected profile must be measured drift, not an unavailable adapter')
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0').returncode,0)
+            self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0',TELEMETRY_DISK_BUDGET='2GiB').returncode,0)
+            invalid = invoke('--check',TELEMETRY_DISK_BUDGET='2GB')
+            self.assertEqual(invalid.returncode,2)
+            self.assertIn(b'TELEMETRY_DISK_BUDGET must be a positive MiB or GiB value',invalid.stderr)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_STATE='unsafe').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_BAD_OUTPUT='1').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_TRANSPORT_FAIL='1').returncode,2)
@@ -123,6 +130,8 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(invoke('--yes').returncode,0)
             self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--check').returncode,0)
+            advisory = invoke('--check',TELEMETRY_FIXTURE_ADVISORY='1')
+            self.assertEqual((advisory.returncode,advisory.stderr),(0,b'subyard-profile-advisory-v1 storage-capacity\n'))
             managed_source = root/'settings.json'
             managed_source.write_text('{}')
             result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude codex',
@@ -191,6 +200,15 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             archives = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, archives
         return profile, observe
+
+    def test_disk_budget_matches_core_size_validation(self):
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        # Core validateSize: a MiB or GiB suffix on a positive strconv.Atoi integer.
+        for value, expected in (('', None), ('30GiB', 30 << 30), ('+2GiB', 2 << 30), ('01MiB', 1 << 20),
+                                ('9223372036854775807MiB', (1 << 63) - 1), ('9223372036854775808MiB', 0),
+                                ('0GiB', 0), ('-1GiB', 0), ('2GB', 0), ('2 GiB', 0), ('1_0GiB', 0), ('GiB', 0)):
+            with self.subTest(value=value):
+                self.assertEqual(owner['disk_budget'](value), expected)
 
     def test_unselected_runtime_needs_no_collector_binary(self):
         with tempfile.TemporaryDirectory(prefix='telemetry-owner-unselected-', dir='/tmp') as name:

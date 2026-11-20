@@ -980,7 +980,11 @@ or cannot establish a safe state. The recovery status and next action continue t
 the controlling guard. Settings blockers identify the yard without exposing assignment values.
 Configuration failures retain the failing yard, inspect/apply/verify phase, source role,
 path relative to config home, canonical key and line when known. Their public reason is fixed;
-assignment values, arbitrary parser text and guest stderr are never rendered. A suggested
+assignment values, arbitrary parser text and guest stderr are never rendered. Guest-reported strings
+are decoded as opaque guest text and matched against host-declared values; only the matched
+host value, a fixed reason or a short digest is rendered. Installed configuration values
+(applied diagnostic file paths and non-sensitive applied settings) are host-recorded and
+shape-validated, so `yard config status` may show them. A suggested
 `yard -Y <yard> config status` remains read-only during recovery and preserves this source context.
 Post-apply observation failure retains its adapter diagnostic; invalid observation requires
 operator action, while valid remaining drift stays recoverable.
@@ -2547,6 +2551,15 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `reason=CODE` after the existing owner/native-exit check record; callers without the
   opt-in retain that original record. Scoped human status displays `diagnostic: CODE`
   from the same observation. Runtime observation and status JSON stay unchanged.
+  A converged check (exit 0) may instead write exactly one
+  `subyard-profile-advisory-v1 CODE` line, where `CODE` is `storage-capacity`; the same
+  128-byte capture and opt-in apply, and the dispatcher reports it as
+  `profile service advisory owner=PROFILE code=CODE`. An advisory never changes
+  convergence or readiness. The profile declares each code it may report under
+  `advisories` with a fixed remediation of at most 240 safe characters; an undeclared
+  code is not shown. Scoped status prints `warning: CODE: REMEDIATION` and adds it to
+  the JSON `warnings` list, and `yard status` lists a `warning` shared row named by
+  the code with the remediation as its hint.
   Scoped disable invokes only that profile's `--remove`, carrying metadata bindings for its declared
   managed paths so replacement artifacts fail stale guards before deletion.
 - `startup_readiness` optionally names an executable Bash hook relative to the profile

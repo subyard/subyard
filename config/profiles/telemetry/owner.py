@@ -72,6 +72,18 @@ def collector_binary(source, selected):
     return None, refusals
 
 
+def disk_budget(value):
+    """Bytes for a size setting as core validates it, None when unset, 0 when invalid."""
+    if value == '':
+        return None
+    match = re.fullmatch('([+-]?[0-9]+)(MiB|GiB)', value)
+    number = int(match[1]) if match else 0
+    if number < 1 or number >= 1 << 63:
+        return 0
+    # The collector reads a signed 64-bit count; larger budgets are unbounded anyway.
+    return min(number << (20 if match[2] == 'MiB' else 30), (1 << 63) - 1)
+
+
 def main():
     arguments = sys.argv[1:]
     mode = {'--startup-check': 'startup', '--yes': 'apply', '--check': 'check', '--remove': 'apply', '--pause': 'pause', '--resume': 'resume'}
@@ -134,6 +146,9 @@ def main():
                 templates[agent] = content
             except (OSError, ValueError):
                 refusals.append('missing, unsafe or unreadable telemetry template for '+agent)
+    budget = disk_budget(os.environ.get('TELEMETRY_DISK_BUDGET', ''))
+    if budget == 0:
+        refusals.append('TELEMETRY_DISK_BUDGET must be a positive MiB or GiB value')
     if refusals:
         raise Refusal(refusals)
     stream = io.BytesIO()
@@ -153,11 +168,16 @@ def main():
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
+    if budget is not None:
+        startup_environment += ['--env', 'SUBYARD_TELEMETRY_DISK_BYTES='+str(budget)]
     output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
                   GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1
+        if output == 'telemetry-advisory storage-capacity':
+            print('subyard-profile-advisory-v1 storage-capacity', file=sys.stderr)
+            return 0
         if output:
             raise ValueError('unexpected telemetry check output')
         return 0

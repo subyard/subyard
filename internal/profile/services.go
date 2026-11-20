@@ -43,6 +43,17 @@ func ValidServiceReadinessReason(reason string) bool {
 	return false
 }
 
+// ValidServiceAdvisory admits the closed codes a converged profile may report.
+// An advisory never changes readiness; the profile declares its remediation.
+func ValidServiceAdvisory(code string) bool { return code == "storage-capacity" }
+
+// ServiceAdvisory reads one `subyard-profile-advisory-v1 CODE` record from a
+// converged check's bounded stderr.
+func ServiceAdvisory(output []byte) string {
+	buffer := serviceReadinessBuffer(output[:min(len(output), serviceReadinessLimit)])
+	return buffer.record("subyard-profile-advisory-v1 ", ValidServiceAdvisory)
+}
+
 type serviceReadinessBuffer []byte
 
 const serviceReadinessLimit = 128
@@ -53,17 +64,20 @@ func (buffer *serviceReadinessBuffer) Write(data []byte) (int, error) {
 }
 
 func (buffer *serviceReadinessBuffer) reason() string {
-	const prefix = "subyard-profile-readiness-v1 "
+	return buffer.record("subyard-profile-readiness-v1 ", ValidServiceReadinessReason)
+}
+
+func (buffer *serviceReadinessBuffer) record(prefix string, valid func(string) bool) string {
 	data := string(*buffer)
 	// Every valid closed record is shorter than a full (possibly truncated) buffer.
 	if len(*buffer) == serviceReadinessLimit || !strings.HasPrefix(data, prefix) || !strings.HasSuffix(data, "\n") {
 		return ""
 	}
-	reason := strings.TrimSuffix(strings.TrimPrefix(data, prefix), "\n")
-	if !ValidServiceReadinessReason(reason) {
+	code := strings.TrimSuffix(strings.TrimPrefix(data, prefix), "\n")
+	if !valid(code) {
 		return ""
 	}
-	return reason
+	return code
 }
 
 // ServiceCheckExit preserves ordinary drift and native failures separately from
@@ -147,6 +161,9 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 				return errors.New("profile service check unavailable")
 			}
 			return fmt.Errorf("profile %s owner service %s failed: %w", definition.Name, action, err)
+		}
+		if code := diagnostic.record("subyard-profile-advisory-v1 ", ValidServiceAdvisory); code != "" {
+			fmt.Fprintf(stderr, "profile service advisory owner=%s code=%s\n", definition.Name, code)
 		}
 		return nil
 	}

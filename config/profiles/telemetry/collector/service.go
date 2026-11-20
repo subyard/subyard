@@ -76,6 +76,22 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 			proxy.ServeHTTP(w, r)
 		}))
 	}
+	mux.HandleFunc("POST /prune", func(w http.ResponseWriter, r *http.Request) {
+		age, err := time.ParseDuration(r.URL.Query().Get("older_than"))
+		if err != nil || age <= 0 {
+			http.Error(w, "invalid age", http.StatusBadRequest)
+			return
+		}
+		// A large prune may outlast the control write timeout.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		removed, err := s.Prune(time.Now().Add(-age), r.URL.Query().Get("include_usage") == "1")
+		if err != nil {
+			http.Error(w, "telemetry prune failed", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"removed_records": removed})
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "spool_failures": failures.Load()})

@@ -49,7 +49,8 @@ func Stats(ctx context.Context, db *sql.DB) (map[string]any, error) {
 		}
 		counts[kind] = n
 	}
-	return map[string]any{"origin_id": origin, "store_generation_id": generation, "schema_version": schema, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}, rows.Err()
+	result := map[string]any{"origin_id": origin, "store_generation_id": generation, "schema_version": schema, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}
+	return result, rows.Err()
 }
 
 // ShowRun selects each measured object once and keeps its explicit temporal

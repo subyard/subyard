@@ -30,6 +30,51 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_disk_budget_reaches_the_collector_unit(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            source = Path(name)
+            shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            account = types.SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir=name)
+            for budget, flag in (('2147483648', ' --disk-bytes 2147483648'), ('', ''), ('2G', '')):
+                with patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=budget):
+                    unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
+                self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
+
+    def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            source, data = Path(name), Path(name)/'store'
+            shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
+            runtime = guest.Runtime(source, 'dev', False, [], data=data, account=account)
+            marker = data/'raw-otlp-refused'
+            with patch.object(guest.sqlite3, 'connect', side_effect=AssertionError('root opened SQLite')):
+                self.assertFalse(runtime.raw_refused())
+                data.mkdir()
+                self.assertFalse(runtime.raw_refused())
+                marker.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00.000000000Z\n')
+                marker.chmod(0o600)
+                self.assertTrue(runtime.raw_refused())
+                marker.write_bytes(b'private-canary\n')
+                self.assertFalse(runtime.raw_refused())
+                for unsafe in ('mode', 'link', 'symlink'):
+                    marker.unlink()
+                    target = data/'target'
+                    target.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00Z\n')
+                    target.chmod(0o600 if unsafe != 'mode' else 0o644)
+                    if unsafe == 'mode':
+                        target.rename(marker)
+                    elif unsafe == 'link':
+                        os.link(target, marker)
+                    else:
+                        marker.symlink_to(target)
+                    with self.subTest(unsafe=unsafe), self.assertRaises((ValueError, OSError)):
+                        runtime.raw_refused()
+                    target.unlink(missing_ok=True)
+
     def test_cutover_receipt_reads_the_validated_inode(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             runtime = object.__new__(guest.Runtime)

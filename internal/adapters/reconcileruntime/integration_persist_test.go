@@ -374,7 +374,7 @@ func TestPersistDeselectAfterTheExchangeRemovesOnlyOwnLink(t *testing.T) {
 		f := newPersistFixture(t)
 		f.interrupt(persistCuts["exchanged"])
 		f.mappings[0].Selected = false
-		facts := (persistObservation{Entries: []persistEntry{{Source: f.source, Target: f.target, Ops: []string{"finish"}}}}).facts()
+		facts := (persistObservation{Entries: []persistEntry{{Source: f.source, Target: f.target, Ops: []string{"finish"}}}}).facts("yard-default", "subyard-default")
 		if _, text, _ := persistStepText(facts[0]); !strings.Contains(text, "then remove the link; the data remains in "+f.target) {
 			t.Fatal("deselect finish step does not disclose the link removal", text)
 		}
@@ -489,14 +489,35 @@ func TestPersistTargetWinsAndThePlanDisclosesIt(t *testing.T) {
 	for i := range existing {
 		existing[i] = fmt.Sprintf("e%02d", i)
 	}
-	desired, _ := json.Marshal(persistStep{Ops: []string{"adopt"}, Source: f.source, Target: f.target, Existing: existing, ExistingCount: 25})
-	source, text, ok := persistStepText(integrationFact{Key: "persist:adopt:" + f.source, Desired: string(desired)})
-	if !ok || source != f.source || !strings.Contains(text, "25 entries already exist in the target and will not be transferred; their source copies are deleted with the backup") ||
-		!strings.Contains(text, "e19 and 5 more") {
+	// Target entry names are guest text: the plan shows their count and a host listing.
+	wire, _ := json.Marshal(map[string]any{"fingerprint": strings.Repeat("a", 64), "entries": []map[string]any{{"source": f.source, "ops": []string{"adopt"},
+		"existing": existing, "existing_count": 25}}})
+	var observed persistObservationWire
+	if err := json.Unmarshal(wire, &observed); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := resolvePersistEntries(observed.Entries, f.mappings, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := (persistObservation{Entries: entries}).facts("yard-default", "subyard-default")
+	source, text, ok := persistStepText(facts[0])
+	list := "'incus' 'exec' 'yard-default' '--project' 'subyard-default' '--' 'ls' '-A' '--' '" + f.target + "'"
+	if !ok || source != f.source || !strings.Contains(text, "25 entries already exist in the target and will not be transferred; their source copies are deleted with the backup. List the target entries on the owner host: "+list) ||
+		strings.Contains(text, "e19") {
 		t.Fatal("plan disclosure", text)
 	}
-	lines := persistOutcomeLines([]persistOutcome{{Source: f.source, NotTransferred: append(existing, "x1", "x2"), Retained: []string{"/b"}}})
-	if len(lines) != 2 || !strings.Contains(lines[0], "22 entries not transferred") || !strings.Contains(lines[0], "and 2 more") || !strings.Contains(lines[1], "retained /b") {
+	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"}}
+	applied, _ := json.Marshal(map[string]any{"source": f.source, "not_transferred": append(existing, "x1", "x2"),
+		"retained": []string{f.source + ".subyard-backup-0123456789abcdef", "/elsewhere/b"}})
+	var wireOutcome persistOutcomeWire
+	if err := json.Unmarshal(applied, &wireOutcome); err != nil {
+		t.Fatal(err)
+	}
+	lines := runtime.persistOutcomeLines(resolvePersistOutcomes([]persistOutcomeWire{wireOutcome}, f.mappings, "default"))
+	if len(lines) != 3 || !strings.Contains(lines[0], "22 entries not transferred") || !strings.Contains(lines[0], list) || strings.Contains(lines[0], "e01") ||
+		!strings.Contains(lines[1], "retained backup "+f.source+".subyard-backup-* (sha256:") || !strings.Contains(lines[2], "retained entry sha256:") ||
+		strings.Contains(strings.Join(lines, ""), "/elsewhere") {
 		t.Fatal("outcome lines", lines)
 	}
 }
@@ -820,10 +841,17 @@ func TestPersistRetainedListingIsReadOnlyWithSizes(t *testing.T) {
 	if read(t, backup+"/a") != "12345" || f.ops() != "" {
 		t.Fatal("listing changed data or retained items became work")
 	}
-	size := int64(5)
-	lines := (Runtime{Yard: domain.Context{YardInstanceName: "yard-default", IncusProject: "subyard-default"}}).PersistRetainedLines(
-		[]PersistRetained{{Kind: "backup", Path: backup, Bytes: &size}, {Kind: "stage", Path: stage}})
-	if len(lines) != 2 || !strings.Contains(lines[0], "(5 bytes)") || !strings.Contains(lines[1], "size unknown") || !strings.Contains(lines[1], "'ls' '-la'") {
+	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"}}
+	listing, _ := json.Marshal(map[string]any{"retained": retained})
+	items, err := runtime.resolvePersistRetainedListing(listing, f.mappings)
+	if err != nil || len(items) != 2 || items[0].Kind != "backup" || items[0].Directory != filepath.Dir(f.source) || items[0].Prefix != "projects.subyard-backup-" ||
+		*items[0].Bytes != 5 || items[1].Kind != "stage" || items[1].Directory != filepath.Dir(f.target) || items[1].Prefix != ".subyard-stage-default-" {
+		t.Fatalf("resolved retained items: %+v %v", items, err)
+	}
+	lines := runtime.PersistRetainedLines(items)
+	find := "'find' '" + filepath.Dir(f.source) + "' '-maxdepth' '1' '-name' 'projects.subyard-backup-*'"
+	if len(lines) != 2 || !strings.Contains(lines[0], "persist retained backup "+f.source+".subyard-backup-* (sha256:") || !strings.Contains(lines[0], ", 5 bytes)") ||
+		!strings.Contains(lines[0], find) || !strings.Contains(lines[1], "size unknown") || strings.Contains(strings.Join(lines, ""), "0123456789abcdef") {
 		t.Fatal("retained lines", lines)
 	}
 }
@@ -989,17 +1017,19 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 		{"reason": "a future reason", "path": "/home/dev/.claude/projects/x", "integration": "claude"},
 		{"reason": "persist target entry refused", "path": "/mnt/host/agent-sessions/claude/projects/p1/x", "detail": "Permission denied", "integration": "claude"},
 	}, "entries": []map[string]any{{"source": "/home/dev/.claude-memory", "persist": "deferred"}}})
-	err := runtime.persistRefusal(stderr)
+	mappings := []PersistMapping{{Integration: "claude", Source: "/home/dev/.claude/projects", Target: "/mnt/host/agent-sessions/claude/projects", Selected: true},
+		{Integration: "claude", Source: "/home/dev/.claude-memory", Target: "/mnt/host/agent-sessions/claude/memory", Selected: true}}
+	err := runtime.persistRefusal(stderr, mappings)
 	text := err.Error()
 	for _, want := range []string{"projects.subyard-transfer.json", "not a complete Subyard record", "'disable' 'claude'", "release activation does not start", "init", "Permission denied",
-		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "refused (unrecognized reason)", "'integration' 'status'",
-		"the target refused \"/mnt/host/agent-sessions/claude/projects/p1/x\"", "'namei' '-l' '--' '/mnt/host/agent-sessions/claude/projects/p1/'"} {
+		"filesystem error at \"/home/dev/.claude/projects\" (an entry below it, sha256:", "'namei' '-l' '--' '/home/dev/.claude/projects'", "'findmnt' '--submounts'", "AGENT_claude_PERSIST", "refused (unrecognized reason)", "'integration' 'status'",
+		"the target refused \"/mnt/host/agent-sessions/claude/projects\" (an entry below it, sha256:", "'namei' '-l' '--' '/mnt/host/agent-sessions/claude/projects/'"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("refusal omitted %q: %s", want, text)
 		}
 	}
 	var refused persistRefused
-	if !errors.As(err, &refused) || len(refused.entries) != 1 || refused.entries[0].Persist != "deferred" {
+	if !errors.As(err, &refused) || len(refused.entries) != 1 || refused.entries[0].Persist != "deferred" || refused.entries[0].Source != "/home/dev/.claude-memory" {
 		t.Fatal("refused entries not carried for the inventory projection")
 	}
 	var refusals *domain.Refusals
@@ -1080,10 +1110,12 @@ func (fixture *localPersistPlanExecutor) Exec(ctx context.Context, project, inst
 	var stdout, stderr strings.Builder
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
+	// The guest reports the yard's own paths, which the host resolves against its mappings.
+	output := strings.ReplaceAll(stdout.String(), fixture.home, "/home/"+fixture.developer)
 	if err == nil {
-		err = json.Unmarshal([]byte(stdout.String()), &fixture.observation)
+		err = json.Unmarshal([]byte(output), &fixture.observation)
 	}
-	return ports.InstanceExecResult{Stdout: []byte(stdout.String()), Stderr: []byte(stderr.String())}, err
+	return ports.InstanceExecResult{Stdout: []byte(output), Stderr: []byte(strings.ReplaceAll(stderr.String(), fixture.home, "/home/"+fixture.developer))}, err
 }
 
 func TestPersistAbsentSourceStableAcrossParentCreation(t *testing.T) {
@@ -1215,14 +1247,14 @@ func TestPersistDisableRemovesTheUnrecordedLinkOfAnInterruptedAdoption(t *testin
 		t.Fatal("disable plan", ops)
 	}
 	disclosed := false
-	for _, fact := range planned.facts() {
+	for _, fact := range planned.facts("yard-default", "subyard-default") {
 		if source, text, _ := persistStepText(fact); source == memory &&
 			strings.Contains(text, "remove the link "+memory+" to "+memoryTarget) && strings.Contains(text, "the data remains in "+memoryTarget) {
 			disclosed = true
 		}
 	}
 	if !disclosed {
-		t.Fatal("disable plan does not disclose the link removal", planned.facts())
+		t.Fatal("disable plan does not disclose the link removal", planned.facts("yard-default", "subyard-default"))
 	}
 	// A link the inventory records is retired by the inventory, not here.
 	recorded := observation.retireUnrecordedLinks([]integrationArtifact{{Kind: "link", Path: memory}})
@@ -1325,7 +1357,7 @@ func TestPersistInitInspectionBindsARetireOnlyPlan(t *testing.T) {
 	full := func() (IntegrationPlan, error) {
 		// The full plan applies the inventory narrowing: nothing records the link.
 		persist := f.observation().retireUnrecordedLinks(nil)
-		return IntegrationPlan{Changed: persist.changed(), persist: persist, facts: persist.facts()}, nil
+		return IntegrationPlan{Changed: persist.changed(), persist: persist, facts: persist.facts("yard-default", "subyard-default")}, nil
 	}
 	plan, inspected, err := persistInspectionPlan(f.observation(), nil, full)
 	if err != nil || !inspected {

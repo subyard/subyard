@@ -2,6 +2,7 @@
 """Prepare exact CI assets, collect local acceptance, publish through serialized Actions."""
 import argparse
 import base64
+from contextlib import nullcontext
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -17,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import uuid
@@ -1406,13 +1408,29 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
     results and run the hosted checks that did not pass there."""
     output = directory / "acceptance"
     # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
-    hosted = hosted_open(directory, output) if wait_seconds and (with_vms or only) else []
+    hosted = hosted_open(directory, output) if with_vms or only else []
     if only:
         # The selection also runs required checks, so their hosted results count here too.
         receipt = json.loads((output / "receipt.json").read_text())
         wanted = a.select_checks(receipt["checks"], only)
         wanted |= a.selected_requirements(receipt, wanted)
         hosted = [name for name in hosted if name in wanted]
+    control = {"phase": "local", "retry": False, "unknown": False, "lock": threading.Lock()}
+
+    def retry(request):
+        with control["lock"]:
+            if control["phase"] == "fallback":
+                return False, "refused: hosted checks already fall back to local runs; use retry CHECK"
+            try:
+                accepted, reason = retry_hosted(github, directory, identity)
+            except (ValueError, OSError) as error:
+                # A rerun may have started: never run its checks locally in this accept.
+                control["retry"] = control["unknown"] = True
+                return False, f"refused: {error}; this accept keeps open hosted checks pending, so repeat retry-hosted after it exits"
+            control["retry"] = control["retry"] or accepted
+            return accepted, reason
+
+    a.CONTROL["retry-hosted"] = retry  # Served until the command exits.
     if hosted:
         with a.acceptance_lock(output):
             first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
@@ -1424,11 +1442,34 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
             with a.acceptance_lock(output):
                 collect_ci(github, directory, identity)
             return first
-        with a.acceptance_lock(output):
-            wait_ci_hosted(github, directory, identity, wait_seconds)
-            collect_ci(github, directory, identity)
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            with a.acceptance_lock(output):
+                lost = wait_ci_hosted(github, directory, identity, max(0, math.ceil(deadline - time.monotonic())))
+                owned = collect_ci(github, directory, identity)
+            with control["lock"]:
+                # A retry-hosted request during this wait started a new attempt: wait for it too.
+                retried, control["retry"] = control["retry"] and not lost and not a.STOP.is_set(), False
+                if retried and time.monotonic() < deadline:
+                    continue
+                control["phase"] = "fallback"
+            if retried:
+                # Past the deadline the new attempt still owns its checks: never run them locally too.
+                with a.acceptance_lock(output):
+                    owned = collect_ci(github, directory, identity)
+            break
+        # Running hosted jobs keep their checks pending; only the rest fall back to local runs.
+        owned = set() if lost else owned.intersection(hosted)
+        if control["unknown"]:
+            print("CI-HOSTED-RETRY outcome unknown: open hosted checks stay pending; repeat retry-hosted after this accept exits", flush=True)
+            owned = set(hosted).intersection(hosted_open(directory, output))
+        if owned:
+            print("CI-HOSTED pending: " + ", ".join(sorted(owned)), flush=True)
         # Local failures of the first pass are not repeated; the receipt result covers every check.
-        only = hosted
+        only = [name for name in hosted if name not in owned]
+        if not only:
+            a.print_acceptance_summary(output, json.loads((output / "receipt.json").read_text()))
+            return 1
     with a.acceptance_lock(output):
         return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous)
 
@@ -1437,6 +1478,7 @@ DISCOVERY_SECONDS = 600
 
 
 def wait_ci_hosted(github, directory, identity, seconds):
+    """Wait for the hosted run; True when the request was given up and hosted checks fall back locally."""
     path = directory / "ci-hosted.json"
     if not path.exists() or seconds == 0:
         return
@@ -1450,13 +1492,13 @@ def wait_ci_hosted(github, directory, identity, seconds):
             run = discover(github, "release-vm.yml", state["request"])
         except (ValueError, OSError) as error:
             print(f"CI-HOSTED-SKIP all: {error}", flush=True)
-            return
+            return True
         if run and (run.get("status") == "completed" or run.get("head_sha") != identity["commit"]):
             return
         # A lost or refused dispatch never produces a run; do not hold acceptance for the whole wait.
         if not run and time.monotonic() - started >= DISCOVERY_SECONDS:
             print(f"CI-HOSTED-SKIP all: request {state['request']} has no hosted run after {DISCOVERY_SECONDS}s", flush=True)
-            return
+            return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
@@ -1466,61 +1508,69 @@ def wait_ci_hosted(github, directory, identity, seconds):
         a.STOP.wait(min(20, remaining))
 
 
+HOSTED_ARTIFACT = re.compile(r"ci-hosted-[0-9]+(?:-([0-9]+))?")
+
+
 def collect_ci(github, directory, identity):
-    """Bounded read of finished successful jobs; every refusal leaves local work open."""
+    """Bounded read of finished successful jobs of every attempt; every refusal leaves local work open.
+    Returns the checks whose hosted jobs are still running or not yet discovered."""
     output, state_path = directory / "acceptance", directory / "ci-hosted.json"
     if not state_path.exists():
-        return
+        return set()
     state = json.loads(state_path.read_text())
     if state.get("identity_sha256") != identity_hash(identity):
         raise ValueError("retained hosted request candidate changed")
+    owned, succeeded = set(), {}
     try:
         run = discover(github, "release-vm.yml", state["request"])
-        jobs, artifacts = [], []
+        artifacts = []
         if run:
-            run_id, attempt = run["id"], run["run_attempt"]
-            jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+            run_id, latest = run["id"], run["run_attempt"]
+            # A rerun lists every job again; a job carried over from an earlier attempt keeps that
+            # attempt's artifact, so walk attempts newest first and bind each artifact to its own attempt.
+            for attempt in range(latest, 0, -1):
+                jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+                if len(jobs) > len(a.CI_HOSTED_CHECKS):
+                    raise ValueError("hosted job or artifact inventory exceeds reviewed matrix limit")
+                if attempt == latest and run.get("status") != "completed":
+                    owned = set(state["checks"]) - {job.get("name") for job in jobs if job.get("status") == "completed"}
+                for job in jobs:
+                    if job.get("status") == "completed" and job.get("conclusion") == "success":
+                        succeeded.setdefault(job.get("name"), {}).setdefault(attempt, []).append(job)
             artifacts = [item for item in github.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
-                         if re.fullmatch(r"ci-hosted-[0-9]+", item["name"]) and not item.get("expired")]
-            if len(jobs) > len(a.CI_HOSTED_CHECKS) or len(artifacts) > len(a.CI_HOSTED_CHECKS):
+                         if HOSTED_ARTIFACT.fullmatch(item["name"]) and not item.get("expired")]
+            if len(artifacts) > latest * len(a.CI_HOSTED_CHECKS):
                 raise ValueError("hosted job or artifact inventory exceeds reviewed matrix limit")
     except (ValueError, OSError) as error:
         for name in state["checks"]:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
-        return
+        return set()
     if not run:
         for name in state["checks"]:
             print(f"CI-HOSTED-SKIP {name}: dispatch not discovered", flush=True)
-        return
+        return set(state["checks"])
     root, receipt = a.load_bound(output)
     commands = a.commands(root, identity["version"], receipt["profiles"])
     unavailable_artifacts = set()
     for name in state["checks"]:
         if a.STOP.is_set():
-            return
+            return owned
         if name not in a.CI_HOSTED_CHECKS or name not in commands:
             print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
             continue
         if not a.transfer_target_open(name, receipt["checks"][name]):
             continue
         try:
-            matches = [job for job in jobs if job.get("name") == name and job.get("status") == "completed" and job.get("conclusion") == "success"]
-            if len(matches) != 1:
+            candidates = succeeded.get(name, {})
+            if not candidates:
                 raise ValueError("job missing, running or unsuccessful")
-            job = matches[0]
-            policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
-            metadata = {"run_id": run_id, "run_attempt": attempt, "job_id": job["id"], "policy": policy,
-                        "head_sha": identity["commit"], "candidate_sha256": identity_hash(identity)}
-            hosted_run_job(github, identity, name, metadata)
             # Reviewed workflow uploads exactly one selection per artifact. Inspect each bounded
             # artifact once per collection, without accepting any source tree or candidate bundle.
             found = []
             for artifact in artifacts:
-                if not re.fullmatch(r"ci-hosted-[0-9]+", artifact["name"]) or artifact.get("expired"):
-                    continue
                 if artifact["id"] in unavailable_artifacts:
                     continue
-                cached = directory / "ci-hosted-downloads" / f"{run_id}-{attempt}-{artifact['id']}"
+                cached = directory / "ci-hosted-downloads" / f"{run_id}-{latest}-{artifact['id']}"
                 try:
                     if not cached.exists():
                         cached.parent.mkdir(mode=0o700, exist_ok=True)
@@ -1540,6 +1590,9 @@ def collect_ci(github, directory, identity):
                 # artifact before reading any check evidence; matching evidence still fails closed.
                 if execution["check"] != name:
                     continue
+                attempt, suffix = execution.get("run_attempt"), HOSTED_ARTIFACT.fullmatch(artifact["name"])[1]
+                if type(attempt) is not int or attempt not in candidates or suffix not in (None, str(attempt)):
+                    continue
                 if execution != {"run_id": run_id, "run_attempt": attempt, "head_sha": identity["commit"], "check": name}:
                     raise ValueError("hosted artifact belongs to another run or attempt")
                 incoming = json.loads((cached / "receipt.json").read_text())
@@ -1547,10 +1600,16 @@ def collect_ci(github, directory, identity):
                 if (not isinstance(incoming, dict) or len(selected) != 1
                     or not isinstance(selected[0], dict) or selected[0].get("selected") != [name]):
                     raise ValueError("matching hosted artifact selection is incomplete")
-                found.append((cached, incoming, selected[0]))
-            if len(found) != 1:
+                found.append((attempt, cached, incoming, selected[0]))
+            newest = [item for item in found if item[0] == max(entry[0] for entry in found)]
+            if len(newest) != 1 or len(candidates[newest[0][0]]) != 1:
                 raise ValueError("exact hosted selection artifact unavailable or ambiguous")
-            cached, incoming, selected = found[0]
+            attempt, cached, incoming, selected = newest[0]
+            job = candidates[attempt][0]
+            policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
+            metadata = {"run_id": run_id, "run_attempt": attempt, "job_id": job["id"], "policy": policy,
+                        "head_sha": identity["commit"], "candidate_sha256": identity_hash(identity)}
+            hosted_run_job(github, identity, name, metadata)
             checks = incoming.get("checks")
             if not isinstance(checks, dict) or not isinstance(checks.get(name), dict):
                 raise ValueError("matching hosted artifact check result is malformed")
@@ -1580,6 +1639,38 @@ def collect_ci(github, directory, identity):
             print(f"CI-HOSTED {name} run={run_id} job={job['id']}", flush=True)
         except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+    return owned
+
+
+def retry_hosted(github, directory, identity):
+    """Rerun the failed jobs of this candidate's hosted run; GitHub keeps the only retry state."""
+    path = directory / "ci-hosted.json"
+    if not path.exists():
+        return False, "refused: no hosted request for this candidate"
+    state = json.loads(path.read_text())
+    if state.get("identity_sha256") != identity_hash(identity):
+        raise ValueError("retained hosted request candidate changed")
+    run = discover(github, "release-vm.yml", state["request"])
+    if not run:
+        return False, "refused: hosted run not discovered"
+    attempt = run["run_attempt"]
+    if run["status"] != "completed":
+        return True, f"CI-HOSTED attempt={attempt} running"
+    if run["conclusion"] == "success":
+        return False, "refused: hosted run passed; nothing to retry"
+    checks = json.loads((directory / "acceptance/receipt.json").read_text())["checks"]
+    failed = sorted(job["name"] for job in github.pages(f"actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
+                    if job.get("conclusion") in ("failure", "cancelled", "timed_out") and job.get("name") in state["checks"]
+                    and job["name"] in checks and a.transfer_target_open(job["name"], checks[job["name"]]))
+    if not failed:
+        return False, "refused: no failed hosted job of a check still open here; use retry CHECK"
+    github.api(f"actions/runs/{run['id']}/rerun-failed-jobs", "POST")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if github.api(f"actions/runs/{run['id']}")["run_attempt"] > attempt:
+            return True, f"CI-HOSTED-RETRY run={run['id']} attempt={attempt + 1} checks={','.join(failed)}"
+        time.sleep(2)
+    raise ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt")
 
 
 def earlier_candidates(state_dir, directory, identity):
@@ -1704,6 +1795,13 @@ def main():
     prepare.add_argument("--version", required=True)
     prepare.add_argument("--commit", required=True)
     prepare.add_argument("--workflow-ref", help="dispatch branch at the candidate commit; default: prefer the default branch")
+    retry = sub.add_parser("retry", help="rerun one failed check; a running accept queues it beside its other lanes")
+    retry.add_argument("--candidate", required=True)
+    a.add_slot_arguments(retry)
+    retry.add_argument("check")
+    retry.set_defaults(ci_wait_seconds=21600, with_vms=False, level=None, level_reason=None)
+    hosted = sub.add_parser("retry-hosted", help="rerun failed jobs of the candidate's hosted run; accept waits for the new attempt")
+    hosted.add_argument("--candidate", required=True)
     for action in ("accept", "publish"):
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
@@ -1805,9 +1903,17 @@ def main():
             return 0
     candidate_parts(args.candidate)
     directory = state_dir / args.candidate
+    if args.action in ("retry", "retry-hosted"):
+        # A running accept owns the candidate: hand it the request instead of waiting for its lock.
+        reply = a.control_request(directory / "acceptance", {"action": "retry", "check": args.check}
+                                  if args.action == "retry" else {"action": "retry-hosted"})
+        if reply is not None:
+            print(reply["reason"], flush=True)
+            return 0 if reply["accepted"] else 1
     directory.mkdir(exist_ok=True)
     directory.chmod(0o700)
-    with a.acceptance_lock(directory):
+    # accept serves retry and retry-hosted requests for the whole command.
+    with a.acceptance_lock(directory), (a.control(directory / "acceptance") if args.action in ("accept", "retry") else nullcontext()):
         prepared = directory / "prepared"
         if not prepared.exists():
             with tempfile.TemporaryDirectory(prefix=".download-", dir=directory) as temporary:
@@ -1819,10 +1925,16 @@ def main():
             raise ValueError("local state belongs to another candidate/repository")
         write_json(directory / "identity.json", identity)
         output = directory / "acceptance"
-        if args.action == "accept":
+        if args.action == "retry-hosted":
+            accepted, reason = retry_hosted(github, directory, identity)
+            print(reason, flush=True)
+            return 0 if accepted else 1
+        if args.action in ("accept", "retry"):
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda signum, frame: a.STOP.set())
             ensure_acceptance(directory, identity, prepared)
+            if args.action == "retry":
+                args.only = [args.check]
             if not 0 <= args.ci_wait_seconds <= 86400:
                 raise ValueError("--ci-wait-seconds must be from 0 to 86400")
             with a.acceptance_lock(output):

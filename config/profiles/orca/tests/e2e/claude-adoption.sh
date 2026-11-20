@@ -83,8 +83,8 @@ if yard_declined integration enable claude >"$STATE/claude-adoption-existing-pla
   fail_with 'declined Claude enable was applied' "$STATE/claude-adoption-existing-plan.out"
 fi
 grep -Fq 'already exist in the target and will not be transferred' "$STATE/claude-adoption-existing-plan.out" \
-  && grep -Fq 'orca-existing/session.jsonl' "$STATE/claude-adoption-existing-plan.out" \
-  && grep -Fq 'MEMORY.md' "$STATE/claude-adoption-existing-plan.out" \
+  && grep -Fq "'ls' '-A' '--' '/mnt/host/agent-sessions/claude/projects'" "$STATE/claude-adoption-existing-plan.out" \
+  && grep -Fq "'ls' '-A' '--' '/mnt/host/agent-sessions/claude/memory'" "$STATE/claude-adoption-existing-plan.out" \
   || fail_with 'plan did not disclose the entries the target keeps' "$STATE/claude-adoption-existing-plan.out"
 guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl \
   || fail_with 'declined enable changed the projects source' "$STATE/claude-adoption-existing-plan.out"
@@ -133,8 +133,8 @@ pending_stage="$(guest_root sh -c 'ls -d /mnt/host/agent-sessions/claude/.subyar
 pending_logs=("$STATE/claude-adoption-pending-status.json" "$STATE/claude-adoption-pending-status.err")
 yard integration status claude --json >"${pending_logs[0]}" 2>"${pending_logs[1]}" \
   || fail_with 'status failed while a projects adoption is pending' "${pending_logs[@]}"
-jq -e --arg stage "$pending_stage" \
-  '[(.persist_retained // [])[].path] | index($stage) == null' "${pending_logs[0]}" >/dev/null \
+# Retained items name only their declared directory and prefix; no stage may be listed.
+jq -e '[(.persist_retained // [])[] | select(.kind == "stage")] | length == 0' "${pending_logs[0]}" >/dev/null \
   || fail_with 'status reported the pending stage as retained' "${pending_logs[@]}"
 # Disable plans and applies the runtime reconciliation for the deselected
 # selection itself: its confirmed plan discloses and performs the cancellation
@@ -289,14 +289,15 @@ guest_root runuser -u dev -- sh -eu -c 'install -d -m 0700 "$1" && printf "kept\
 retained_json_logs=("$STATE/claude-adoption-retained.json" "$STATE/claude-adoption-retained-json.err")
 yard integration status claude --json >"${retained_json_logs[0]}" 2>"${retained_json_logs[1]}" \
   || fail_with 'status with a retained backup failed' "${retained_json_logs[@]}"
-jq -e --arg path "$retained_backup" '[(.persist_retained // [])[] | select(.path == $path and .kind == "backup" and .bytes == 5)] | length == 1' \
+jq -e '[(.persist_retained // [])[] | select(.directory == "/home/dev/.claude" and .prefix == "projects.subyard-backup-" and .kind == "backup" and .bytes == 5)] | length == 1' \
   "$STATE/claude-adoption-retained.json" >/dev/null \
   || fail_with 'status omitted the retained backup' "${retained_json_logs[@]}"
 retained_logs=("$STATE/claude-adoption-retained.out" "$STATE/claude-adoption-retained.err")
 yard integration status claude >"${retained_logs[0]}" 2>"${retained_logs[1]}" \
   || fail_with 'status text with a retained backup failed' "${retained_logs[@]}"
-grep -Fq "persist retained backup $retained_backup (5 bytes)" "$STATE/claude-adoption-retained.out" \
-  && grep -Fq "'ls' '-la'" "$STATE/claude-adoption-retained.out" \
+grep -Fq "persist retained backup /home/dev/.claude/projects.subyard-backup-* (sha256:" "$STATE/claude-adoption-retained.out" \
+  && grep -Fq ", 5 bytes)" "$STATE/claude-adoption-retained.out" \
+  && grep -Fq "'find' '/home/dev/.claude' '-maxdepth' '1' '-name' 'projects.subyard-backup-*'" "$STATE/claude-adoption-retained.out" \
   || fail_with 'status text omitted the retained backup or its next step' "${retained_logs[@]}"
 if grep -Eiq 'warn' "$STATE/claude-adoption-retained.out"; then
   fail_with 'retained backup was rendered as a warning' "${retained_logs[@]}"

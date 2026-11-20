@@ -374,28 +374,37 @@ func TestInventoryConflictsRequireCompletedGuestExit(t *testing.T) {
 func TestPersistRefusalRendersUnknownGuestTextAsHostText(t *testing.T) {
 	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"},
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude"}, Integrations: []profile.IntegrationDefinition{}}
+	mappings := []PersistMapping{{Integration: "claude", Source: "/home/dev/.claude/projects", Target: "/mnt/host/agent-sessions/claude/projects", Selected: true}}
 	stderr, _ := json.Marshal(map[string]any{"conflicts": []map[string]string{
 		{"reason": "private future reason", "path": "/home/dev/.claude/projects/x", "integration": "claude"},
 		{"reason": "persist filesystem error", "path": "/home/dev/.claude/projects/p", "detail": "private detail: relative/name", "integration": "claude"},
-		{"reason": "persist filesystem error", "path": "/home/dev/.claude/projects/q", "detail": "Permission denied", "integration": "claude"},
+		{"reason": "persist filesystem error", "path": "/home/dev/.claude/projects", "detail": "Permission denied", "integration": "claude"},
 		{"reason": "atomic exchange unsupported", "path": "", "detail": "Invalid argument", "integration": "private-undeclared"},
-		{"reason": "persist paths overlap", "path": "/home/dev/.claude/projects", "detail": "/home/dev/.claude/other", "integration": "private-undeclared"},
-		{"reason": "persist space unavailable", "path": "/mnt/host/agent-sessions/claude/x", "detail": "needs 10 bytes plus a 1 GiB reserve; 5 available", "integration": "claude"},
-		{"reason": "persist target entry refused", "path": "/mnt/host/agent-sessions/claude/y", "detail": "Unknown error 999", "integration": "claude"},
-		{"reason": "persist paths overlap", "path": "/home/dev/.claude/a", "detail": "private relative detail", "integration": "claude"},
+		{"reason": "persist paths overlap", "path": "/home/dev/.claude/projects", "detail": "/home/dev/.claude/private", "integration": "private-undeclared"},
+		{"reason": "persist space unavailable", "path": "/mnt/host/agent-sessions/claude/projects", "detail": "needs 10 bytes plus a 1 GiB reserve; 5 available", "integration": "claude"},
+		{"reason": "persist target entry refused", "path": "/mnt/host/agent-sessions/claude/projects/y", "detail": "Unknown error 999", "integration": "claude"},
+		{"reason": "persist paths overlap", "path": "/home/dev/.claude/projects", "detail": "private relative detail", "integration": "claude"},
 		{"reason": "unsafe persist data", "path": "private relative path", "integration": "claude"},
-	}})
-	text := runtime.persistRefusal(stderr).Error()
-	for _, want := range []string{"refused (unrecognized reason) at \"/home/dev/.claude/projects/x\"", "(unrecognized detail)", "(Permission denied)",
-		"atomic exchange unsupported (Invalid argument)", "for \"/home/dev/.claude/projects\" and \"/home/dev/.claude/other\"",
-		"(needs 10 bytes plus a 1 GiB reserve; 5 available)", "(Unknown error 999)",
-		"for \"/home/dev/.claude/a\" and an unrecognized path;", "unsafe persist data at an unrecognized path; data was preserved"} {
+		{"reason": "persist mount boundary", "path": "/srv/private-elsewhere", "integration": "claude"},
+	}, "entries": []map[string]any{{"source": "/home/dev/private-undeclared", "persist": "deferred"}}})
+	err := runtime.persistRefusal(stderr, mappings)
+	text := err.Error()
+	for _, want := range []string{"refused (unrecognized reason) at \"/home/dev/.claude/projects\" (an entry below it, sha256:", "(unrecognized detail)", "(Permission denied)",
+		"atomic exchange unsupported (Invalid argument)", "for \"/home/dev/.claude/projects\" and \"/home/dev/.claude\" (an entry below it, sha256:",
+		"(the source size plus a 1 GiB reserve is not available)", "'df' '-h' '--' '/mnt/host/agent-sessions/claude/'", "(unknown operating system error)",
+		"for \"/home/dev/.claude/projects\" and an unrecognized path;", "unsafe persist data at an unrecognized path; data was preserved",
+		"persist transfer in yard default: an unrecognized path is a mount point"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("refusal omitted %q: %s", want, text)
 		}
 	}
-	if strings.Contains(text, "private") || strings.Contains(text, "'disable'") || strings.Contains(text, "AGENT_private") || strings.Contains(text, `"unrecognized detail"`) {
+	if strings.Contains(text, "private") || strings.Contains(text, "'disable'") || strings.Contains(text, "AGENT_private") || strings.Contains(text, `"unrecognized detail"`) ||
+		strings.Contains(text, "999") || strings.Contains(text, "10 bytes") {
 		t.Fatalf("refusal rendered undeclared guest text: %s", text)
+	}
+	var refused persistRefused
+	if errors.As(err, &refused) {
+		t.Fatal("an undeclared entry was carried to the inventory projection")
 	}
 }
 
@@ -607,7 +616,7 @@ func TestPersistRefusalWithoutPathInspectsStatus(t *testing.T) {
 		{"reason": "persist filesystem error", "path": "", "detail": "Permission denied", "integration": "claude"},
 	}})
 	var public interface{ ActivationDiagnostic() (string, string) }
-	if err := runtime.persistRefusal(stderr); !errors.As(err, &public) {
+	if err := runtime.persistRefusal(stderr, nil); !errors.As(err, &public) {
 		t.Fatalf("not public: %v", err)
 	}
 	message, retry := public.ActivationDiagnostic()

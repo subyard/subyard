@@ -46,6 +46,7 @@ class NativeTest(unittest.TestCase):
         env = native.parse('claude', claude.read_bytes())['env']
         self.assertEqual(env['OTEL_EXPORTER_OTLP_LOGS_HEADERS'], 'Authorization=Bearer '+self.token)
         self.assertFalse(otel['log_user_prompt'])
+        self.assertIs(otel['log_agent_responses'], True)
         self.assertNotIn('analytics', native.parse('codex', codex.read_bytes()))
         for path in (claude, codex):
             info = path.stat()

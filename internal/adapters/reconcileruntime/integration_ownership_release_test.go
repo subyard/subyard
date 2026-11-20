@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -75,9 +75,13 @@ func ownershipReleaseRuntime(t *testing.T, executor ports.InstanceExecutor, outp
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
 	testkit.WriteFile(t, filepath.Join(root, "scripts/reconcile-integrations.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	testkit.WriteFile(t, filepath.Join(root, "integration.json"), []byte("{}"), 0o600)
+	// The deselected integration still declares the retired document's destination.
 	return Runtime{RepositoryRoot: root, Executor: executor, Stdout: output,
-		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
-		Yard:  domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}}
+		Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+		Yard:         domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()},
+		Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}},
+		Environment:  []string{"AGENT_sample_CONFIG=" + filepath.Join(root, "settings.json"), "AGENT_sample_CONFIG_DEST=.sample/settings.json"}}
 }
 
 // Retiring a document whose owned fields changed is previewed as a warning,
@@ -89,7 +93,7 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 		pointers []string
 		fields   string
 	}{
-		{[]string{"/edited/mode", "/kept"}, "fields left in place: /edited/mode, /kept"},
+		{[]string{"/edited/" + guestCanary, "/edited/mode"}, "2 fields left in place"},
 		{nil, "no owned fields remain"},
 	} {
 		t.Run(scenario.fields, func(t *testing.T) {
@@ -111,7 +115,7 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := "  [ ok ] yard example: released ownership of " + path + ": owned fields changed after Subyard applied them; " + scenario.fields + "; Subyard no longer manages it\n"
-			if executor.retires != 1 || strings.Count(output.String(), "released ownership") != 1 || !strings.Contains(output.String(), result) {
+			if executor.retires != 1 || strings.Count(output.String(), "released ownership") != 1 || !strings.Contains(output.String(), result) || strings.Contains(output.String(), guestCanary) {
 				t.Fatalf("release result: retires=%d output=%q", executor.retires, output.String())
 			}
 			output.Reset()
@@ -135,19 +139,14 @@ func TestCompletedReleaseStillMarksThePlanBeforeInventoryCommit(t *testing.T) {
 	}
 }
 
-// Activation warnings reject text above the release diagnostic bound: the
-// notice lists every retained field when they fit, and otherwise counts them.
+// Activation warnings reject text above the release diagnostic bound; the
+// notice counts the retained fields.
 func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
-	long := make([]string, 40)
-	for index := range long {
-		long[index] = fmt.Sprintf("/field-%02d", index)
-	}
 	for _, scenario := range []struct {
 		observation configmaterial.Observation
 		fields      string
 	}{
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "fields left in place: /a, /b"},
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: long, ReleasedCount: len(long)}, "40 fields left in place"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 2}, "2 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 300}, "300 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseMissingDocument}, "nothing to remove"},
@@ -171,7 +170,7 @@ func TestIntegrationOwnershipNoticesPreviewOwnershipRelease(t *testing.T) {
 	var output bytes.Buffer
 	runtime := ownershipReleaseRuntime(t, executor, &output)
 	warnings, err := runtime.IntegrationOwnershipNotices(context.Background())
-	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; fields left in place: /kept"
+	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; 1 fields left in place"
 	if err != nil || !slices.Equal(warnings, []string{notice}) {
 		t.Fatalf("init preview: warnings=%q err=%v", warnings, err)
 	}

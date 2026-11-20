@@ -813,8 +813,8 @@ lease image and run by default. They are outside release acceptance.
 
 A manual dispatch can name the check ids to run in `checks`. A check the planner marks `manual`, such
 as `veranda:wayland-ime`, runs only when named there. The separate Stale runs workflow cancels
-runs of any workflow left queued or in progress for over a day, since such a run holds its
-concurrency group.
+runs of any workflow whose latest attempt has been queued or in progress for over a day, because such
+a run holds its concurrency group.
 
 Standard VM checks for a pull request run here, not as a required status check. Dispatch the lanes
 selected by the risk policy on the pushed branch (ids as printed by `dev/ci/plan-periodic-checks.py`)

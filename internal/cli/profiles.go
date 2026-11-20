@@ -183,6 +183,8 @@ type profileStatus struct {
 	Configured bool   `json:"configured"`
 	Runtime    string `json:"runtime"`
 	Ready      bool   `json:"ready"`
+	// Warnings are advisories of a converged profile, with its declared remediation.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBootstrap) error {
@@ -257,6 +259,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				if !converged && profile.ValidServiceReadinessReason(observation.Reason) {
 					diagnostic = observation.Reason
 				}
+				for _, advisory := range observation.Advisories {
+					if hint, declared := definition.Advisories[advisory.Code]; converged && declared && advisory.Owner == request.id {
+						status.Warnings = append(status.Warnings, advisory.Code+": "+hint)
+					}
+				}
 			} else {
 				converged, err = runtime.ProfileServiceConverged(ctx, request.id)
 			}
@@ -280,6 +287,9 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			fmt.Fprintf(cli.options.Stdout, "yard: %s\nprofile: %s\nenabled: %t\nconfigured: %t\nruntime: %s\nready: %t\n", status.Yard, status.ID, status.Enabled, status.Configured, status.Runtime, status.Ready)
 			if diagnostic != "" {
 				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", diagnostic)
+			}
+			for _, warning := range status.Warnings {
+				fmt.Fprintf(cli.options.Stdout, "warning: %s\n", warning)
 			}
 		}
 		return nil
