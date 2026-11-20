@@ -19,7 +19,8 @@ import (
 // installationCheckFixture enables audit: the check itself must not write a record.
 func installationCheckFixture(t *testing.T) *cliFixture {
 	t.Helper()
-	fixture := newFixture(t, withAudit())
+	// The installation check constructors leave WorkingDir empty, as before the fixture.
+	fixture := newFixture(t, withAudit(), withWorkingDir(""))
 	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"check||@check||forward|read|never|public|lifecycle|simple|check|check|--json --host --help|\n")
 	for _, directory := range []string{fixture.ConfigHome, fixture.DataHome} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {

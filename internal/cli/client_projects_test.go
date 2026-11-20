@@ -22,7 +22,8 @@ import (
 
 func clientProjectsFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 	t.Helper()
-	fixture := newFixture(t, append([]fixtureOption{withYards("named", "remote"), withEnv("SUBYARD_HOST_ID=local-owner")}, options...)...)
+	// These constructors leave WorkingDir empty, as before the fixture.
+	fixture := newFixture(t, append([]fixtureOption{withWorkingDir(""), withYards("named", "remote"), withEnv("SUBYARD_HOST_ID=local-owner")}, options...)...)
 	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"desktop||@client-projects|synthetic|local|mutate|never|public|projects|integration|desktop <command>|export projects|--check --config --help|export open\n")
 	return fixture
 }

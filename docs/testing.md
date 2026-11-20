@@ -105,6 +105,16 @@ fixture roots. Shell/Python fixtures can use `install -m`, `chmod` on fixture in
 or `tempfile.TemporaryDirectory`. Keep raw creation calls when creation is the operation
 under test; do not chmod its outputs to make an assertion pass.
 
+`internal/cli` tests build their environment with `newFixture` in
+[`fixture_test.go`](../internal/cli/fixture_test.go). `withCheckoutConfig()` gives an isolated
+copy of the checkout: `config/` is copied and loaded through `SUBYARD_CONFIG_DIR`, `private/` is
+absent, and other top-level entries link to the checkout. A fixture write that reaches the
+checkout fails the test; `checkout-unchanged` still guards the whole suite. `withCommands`
+replaces external tools with [`testkit.ExecFake`](../internal/testkit/execfake.go) shims: assert
+their argv with `AssertCalls`; an unexpected call exits 127 and fails the test.
+A slice that moves tests onto the fixture runs `dev/cli-fixture-slice-check.sh --base REF`
+with its reviewed mutant, rename and waiver lists in `dev/`.
+
 The normal host-free entrypoints (`make test`, `make verify`, `./tests/run.sh`,
 `bash dev/test-profiles.sh` and each profile's `tests/run.sh`) use baseline umask `0022`,
 including their Shell/Python checks. This changes only the runner's process and children.

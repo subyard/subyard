@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,9 +16,11 @@ import (
 )
 
 // cliFixture is one CLI test environment. The default flavour is a synthetic
-// repository root with private homes below Root; withCheckoutConfig and
-// withCheckoutMirror use the checkout's shipped config with private homes in
-// a temporary directory and guard the checkout for the whole test.
+// repository root with private homes below Root. withCheckoutConfig uses an
+// isolated copy of the checkout instead: config/ is copied, private/ is absent
+// and the other top-level entries link to the checkout, with private homes in
+// a temporary directory. Home, ConfigHome and DataHome are the effective homes
+// of Environment as newFixture leaves it.
 type cliFixture struct {
 	t           *testing.T
 	Root        string
@@ -25,6 +28,7 @@ type cliFixture struct {
 	ConfigHome  string
 	DataHome    string
 	Bin         string
+	WorkingDir  string
 	Environment []string
 	checkout    string
 	exec        *testkit.ExecFake
@@ -34,20 +38,23 @@ type cliFixture struct {
 // after the flavour's base setup.
 type fixtureOption struct {
 	checkout bool
-	mirror   bool
 	apply    func(*cliFixture)
 }
 
-// withCheckoutConfig uses the checkout as RepositoryRoot, as configCommandFixture does.
+// withCheckoutConfig uses an isolated copy of the checkout as RepositoryRoot,
+// as checkoutMirrorFixture builds it, with the shipped config read from the
+// copy. A test may seed private/ below Root; the checkout itself is never written.
 func withCheckoutConfig() fixtureOption { return fixtureOption{checkout: true} }
 
-// withCheckoutMirror uses a temporary mirror of the checkout as RepositoryRoot,
-// as checkoutMirrorFixture does, for tests that seed private/.
-func withCheckoutMirror() fixtureOption { return fixtureOption{checkout: true, mirror: true} }
+// withWorkingDir sets the WorkingDir that New uses when Options leave it
+// empty; an empty path keeps it empty.
+func withWorkingDir(path string) fixtureOption {
+	return fixtureOption{apply: func(fixture *cliFixture) { fixture.WorkingDir = path }}
+}
 
 // withCommands installs an ExecFake shim for each tool. A bare name goes to Bin,
 // which is put first on PATH for the test process and in Environment; a name
-// with a slash is a path below Root, such as a repository script.
+// with a slash is a local path below Root, such as a repository script.
 func withCommands(tools ...string) fixtureOption {
 	return fixtureOption{apply: func(fixture *cliFixture) {
 		fixture.t.Helper()
@@ -61,6 +68,9 @@ func withCommands(tools ...string) fixtureOption {
 				onPath = true
 				continue
 			}
+			if !localCommandPath(tool) {
+				fixture.t.Fatalf("fixture command %q is not a clean path below Root", tool)
+			}
 			fixture.exec.Install(tool, fixture.writable(tool))
 		}
 		if onPath && !slices.Contains(filepath.SplitList(os.Getenv("PATH")), fixture.Bin) {
@@ -68,6 +78,11 @@ func withCommands(tools ...string) fixtureOption {
 			fixture.Environment = slices.Clip(append(fixture.Environment, "PATH="+os.Getenv("PATH")))
 		}
 	}}
+}
+
+// localCommandPath reports whether tool is a clean relative path that stays below Root.
+func localCommandPath(tool string) bool {
+	return filepath.IsLocal(tool) && filepath.Clean(tool) == tool
 }
 
 // withEnv appends NAME=value assignments; the last assignment of a name wins.
@@ -109,21 +124,15 @@ func withYards(names ...string) fixtureOption {
 func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 	t.Helper()
 	fixture := &cliFixture{t: t}
-	checkout, mirror := false, false
-	for _, option := range options {
-		checkout = checkout || option.checkout
-		mirror = mirror || option.mirror
-	}
-	if checkout {
+	if slices.ContainsFunc(options, func(option fixtureOption) bool { return option.checkout }) {
 		root, home, _, environment := configCommandFixture(t)
 		if err := os.Chmod(filepath.Dir(home), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		guardCheckout(t, root)
-		fixture.checkout, fixture.Root, fixture.Environment = root, root, environment
-		if mirror {
-			fixture.Root = checkoutMirrorFixture(t, root)
-		}
+		fixture.checkout, fixture.Root = root, checkoutMirrorFixture(t, root)
+		fixture.Environment = append(slices.DeleteFunc(environment, func(assignment string) bool {
+			return strings.HasPrefix(assignment, "SUBYARD_CONFIG_DIR=")
+		}), "SUBYARD_CONFIG_DIR="+filepath.Join(fixture.Root, "config"))
 	} else {
 		root, environment, _ := nativeFixture(t)
 		if err := os.Chmod(root, 0o700); err != nil {
@@ -132,64 +141,25 @@ func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 		fixture.Root, fixture.Environment = root, environment
 	}
 	fixture.Environment = slices.Clip(fixture.Environment)
-	fixture.Home = fixture.Env("HOME")
-	fixture.ConfigHome = fixture.Env("SUBYARD_CONFIG_HOME")
-	fixture.DataHome = fixture.Env("SUBYARD_HOME")
+	fixture.WorkingDir = fixture.Root
 	fixture.Bin = testkit.TempDir(t)
+	fixture.resolveHomes()
 	for _, option := range options {
 		if option.apply != nil {
 			option.apply(fixture)
+			fixture.resolveHomes()
 		}
 	}
 	return fixture
 }
 
-// guardCheckout fails the test when it changes the status of the checkout's
-// config/ or the optional private/ clone, including ignored files.
-func guardCheckout(t *testing.T, root string) {
-	t.Helper()
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prefix, err := exec.Command(git, "-C", root, "rev-parse", "--show-prefix").Output(); err != nil || strings.TrimSpace(string(prefix)) != "" {
-		return
-	}
-	before := checkoutStatus(t, git, root)
-	t.Cleanup(func() {
-		if after := checkoutStatus(t, git, root); after != before {
-			t.Errorf("test changed checkout config/ or private/:\nbefore:\n%s\nafter:\n%s", before, after)
-		}
-	})
-}
-
-func checkoutStatus(t *testing.T, git, root string) string {
-	t.Helper()
-	status := func(directory string, paths ...string) string {
-		arguments := append([]string{"-C", directory, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--"}, paths...)
-		output, err := exec.Command(git, arguments...).Output()
-		if err != nil {
-			t.Fatalf("checkout status %s: %v", directory, err)
-		}
-		return string(output)
-	}
-	result := status(root, "config", "private")
-	private := filepath.Join(root, "private")
-	if _, err := os.Stat(filepath.Join(private, ".git")); err == nil {
-		// Operator and coordinator documents may change during a run, as in tests/run.sh.
-		for _, line := range strings.Split(strings.TrimSuffix(status(private), "\n"), "\n") {
-			path := line[min(3, len(line)):]
-			if line == "" || strings.HasPrefix(path, "tasks/") || strings.HasPrefix(path, "questions/") ||
-				strings.HasPrefix(path, "reference/") || strings.HasPrefix(path, "spec/") ||
-				!strings.Contains(path, "/") && strings.HasSuffix(path, ".md") {
-				continue
-			}
-			result += "private/" + line + "\n"
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
-	return result
+// resolveHomes derives the homes from Environment as the product does.
+func (fixture *cliFixture) resolveHomes() {
+	fixture.Home = fixture.Env("HOME")
+	operator := firstNonempty(fixture.Env("SUBYARD_OPERATOR_HOME"), fixture.Home)
+	fixture.ConfigHome = firstNonempty(fixture.Env("SUBYARD_CONFIG_HOME"),
+		filepath.Join(firstNonempty(fixture.Env("XDG_CONFIG_HOME"), filepath.Join(operator, ".config")), "subyard"))
+	fixture.DataHome = firstNonempty(fixture.Env("SUBYARD_HOME"), filepath.Join(operator, ".subyard"))
 }
 
 // path resolves a fixture path; a relative path is below Root.
@@ -230,7 +200,9 @@ func reachesInto(path, root string) (bool, error) {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)), nil
 }
 
-// resolveExisting resolves the symlinks of the longest existing ancestor of path.
+// resolveExisting resolves the symlinks of the longest existing ancestor of
+// path. A dangling symlink on the way is an error: a write would follow it to
+// a target that the check cannot place.
 func resolveExisting(path string) (string, error) {
 	missing := ""
 	for current := path; ; current = filepath.Dir(current) {
@@ -240,6 +212,9 @@ func resolveExisting(path string) (string, error) {
 		}
 		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(current) == current {
 			return "", err
+		}
+		if _, err := os.Lstat(current); err == nil {
+			return "", fmt.Errorf("fixture path %s crosses the dangling symlink %s", path, current)
 		}
 		missing = filepath.Join(filepath.Base(current), missing)
 	}
@@ -291,7 +266,7 @@ func (fixture *cliFixture) Exec() *testkit.ExecFake {
 }
 
 // New builds the CLI; RepositoryRoot, Environment and WorkingDir default to
-// the fixture's Root, Environment and Root.
+// the fixture's Root, Environment and WorkingDir.
 func (fixture *cliFixture) New(options Options) *CLI {
 	fixture.t.Helper()
 	if options.RepositoryRoot == "" {
@@ -301,7 +276,7 @@ func (fixture *cliFixture) New(options Options) *CLI {
 		options.Environment = fixture.Environment
 	}
 	if options.WorkingDir == "" {
-		options.WorkingDir = fixture.Root
+		options.WorkingDir = fixture.WorkingDir
 	}
 	program, err := New(options)
 	if err != nil {
@@ -386,74 +361,86 @@ func TestCLIFixtureNativeFlavour(t *testing.T) {
 	}
 }
 
-func TestCLIFixtureCheckoutFlavours(t *testing.T) {
-	checkout := newFixture(t, withCheckoutConfig())
-	if checkout.Root != repositoryRoot(t) || checkout.ConfigHome != filepath.Join(checkout.Home, ".config", "subyard") ||
-		checkout.DataHome != filepath.Join(checkout.Home, ".subyard") {
-		t.Fatalf("checkout homes: %#v", checkout)
+func TestCLIFixtureCheckoutConfigIsAnIsolatedCopy(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig())
+	checkout := repositoryRoot(t)
+	if fixture.Root == checkout || fixture.checkout != checkout || fixture.WorkingDir != fixture.Root ||
+		fixture.ConfigHome != filepath.Join(fixture.Home, ".config", "subyard") || fixture.DataHome != filepath.Join(fixture.Home, ".subyard") {
+		t.Fatalf("checkout fixture: %#v", fixture)
 	}
-	if info, err := os.Stat(filepath.Dir(checkout.Home)); err != nil || info.Mode().Perm() != 0o700 {
+	if info, err := os.Stat(filepath.Dir(fixture.Home)); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("private parent mode: %v %v", info, err)
 	}
-	mirror := newFixture(t, withCheckoutMirror())
-	if mirror.Root == checkout.Root || mirror.checkout != checkout.Root {
-		t.Fatalf("mirror root: %q", mirror.Root)
+	if info, err := os.Lstat(filepath.Join(fixture.Root, "config")); err != nil || !info.IsDir() {
+		t.Fatalf("config is not a copied directory: %v %v", info, err)
 	}
-	overlay := mirror.Write("private/yards/neighbor.env", "SSH_PORT=2399\n")
+	if _, err := os.Lstat(filepath.Join(fixture.Root, "private")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private/ is present in the copy: %v", err)
+	}
+	if fixture.Env("SUBYARD_CONFIG_DIR") != filepath.Join(fixture.Root, "config") {
+		t.Fatalf("SUBYARD_CONFIG_DIR=%q", fixture.Env("SUBYARD_CONFIG_DIR"))
+	}
+	// A shipped default changed in the copy is what the configuration load reads.
+	shipped := fixture.Read("config/subyard.env")
+	if !strings.Contains(shipped, `: "${YARD_INSTANCE_NAME:=yard}"`) {
+		t.Fatal("shipped YARD_INSTANCE_NAME default moved")
+	}
+	fixture.Write("config/subyard.env", strings.Replace(shipped, `: "${YARD_INSTANCE_NAME:=yard}"`, `: "${YARD_INSTANCE_NAME:=copied-yard}"`, 1))
+	loaded, err := fixture.New(Options{}).loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Context.YardInstanceName != "copied-yard" || loaded.Context.Paths.ConfigDir != filepath.Join(fixture.Root, "config") {
+		t.Fatalf("loaded instance=%q config=%q", loaded.Context.YardInstanceName, loaded.Context.Paths.ConfigDir)
+	}
+	overlay := fixture.Write("private/yards/neighbor.env", "SSH_PORT=2399\n")
+	dangling := filepath.Join(fixture.Root, "dangling")
+	if err := os.Symlink(filepath.Join(checkout, "config", "absent-fixture-target"), dangling); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		path   string
 		inside bool
+		err    bool
 	}{
-		{path: filepath.Join(checkout.Root, "config", "new", "file"), inside: true},
-		{path: filepath.Join(mirror.Root, "scripts", "new"), inside: true},
-		{path: checkout.Root, inside: true},
+		{path: filepath.Join(checkout, "config", "new", "file"), inside: true},
+		{path: filepath.Join(fixture.Root, "scripts", "new"), inside: true},
+		{path: checkout, inside: true},
 		{path: overlay},
-		{path: filepath.Join(mirror.Root, "config", "new")},
-		{path: filepath.Join(checkout.Home, "file")},
-		{path: checkout.Root + "-sibling"},
+		{path: filepath.Join(fixture.Root, "config", "new")},
+		{path: filepath.Join(fixture.Home, "file")},
+		{path: checkout + "-sibling"},
+		{path: dangling, err: true},
+		{path: filepath.Join(dangling, "below"), err: true},
 	} {
-		if inside, err := reachesInto(test.path, checkout.Root); err != nil || inside != test.inside {
+		if inside, err := reachesInto(test.path, checkout); (err != nil) != test.err || inside != test.inside {
 			t.Errorf("%s: inside=%t err=%v", test.path, inside, err)
 		}
 	}
 }
 
-func TestCLIFixtureCheckoutGuardSeesIgnoredAndPrivatePaths(t *testing.T) {
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
+func TestCLIFixtureResolvesHomesWhileApplyingOptions(t *testing.T) {
+	override := filepath.Join(testkit.TempDir(t), "config-home")
+	fixture := newFixture(t, withEnv("SUBYARD_CONFIG_HOME="+override), withYards("named"),
+		withoutEnv("SUBYARD_HOME"), withWorkingDir(""))
+	if fixture.ConfigHome != override || fixture.DataHome != filepath.Join(fixture.Home, ".subyard") || fixture.WorkingDir != "" {
+		t.Fatalf("homes: config=%q data=%q working=%q", fixture.ConfigHome, fixture.DataHome, fixture.WorkingDir)
 	}
-	root := testkit.TempDir(t)
-	for _, directory := range []string{root, filepath.Join(root, "private")} {
-		if output, err := exec.Command(git, "init", "-q", directory).CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v %s", err, output)
-		}
+	if info, err := os.Stat(filepath.Join(override, "yards", "named")); err != nil || !info.IsDir() {
+		t.Fatalf("yard registered outside the effective config home: %v %v", info, err)
 	}
-	testkit.WriteFile(t, filepath.Join(root, ".gitignore"), []byte("/private/\n/config/*.env\n"), 0o600)
-	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
-		t.Fatal(err)
+	if program := fixture.New(Options{}); program.options.WorkingDir != "" {
+		t.Fatalf("WorkingDir=%q", program.options.WorkingDir)
 	}
-	baseline := checkoutStatus(t, git, root)
-	for _, test := range []struct {
-		path    string
-		changes bool
-	}{
-		{path: "private/tasks/plan.md"},
-		{path: "private/notes.md"},
-		{path: "config/local.env", changes: true},
-		{path: "config/shipped", changes: true},
-		{path: "private/yards/x.env", changes: true},
+}
+
+func TestCLIFixtureCommandPathsStayBelowRoot(t *testing.T) {
+	for tool, local := range map[string]bool{
+		"scripts/e2e-lab/invoke.sh": true, "../outside/tool": false, "/usr/bin/tool": false,
+		"scripts/../tool": false, "scripts//tool": false, "./tool": false,
 	} {
-		path := filepath.Join(root, test.path)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, path, []byte("x\n"), 0o600)
-		if changed := checkoutStatus(t, git, root) != baseline; changed != test.changes {
-			t.Errorf("%s: changed=%t", test.path, changed)
-		}
-		if err := os.Remove(path); err != nil {
-			t.Fatal(err)
+		if got := localCommandPath(tool); got != local {
+			t.Errorf("%s: local=%t", tool, got)
 		}
 	}
 }
