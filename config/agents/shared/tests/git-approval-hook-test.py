@@ -123,3 +123,80 @@ for gates in (["sudo"], ["git", "sudo"]):
 for gates in ([], ["git"]):
     for command in ("/usr/bin/sudo id", "env sudo id", "bash -c 'sudo id'"):
         allowed(gates, command)
+
+# Compound starts, substitutions, heredoc tails and command-running operands are not direct.
+for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo", "sudo id"),
+                          (["git"], "git push", "git push"), (["git", "sudo"], "git commit", "git commit")):
+    for command in (
+        f"if {call}; then true; fi",
+        f"if true; then {call}; fi",
+        f"if false; then true; elif {call}; then true; fi",
+        f"if false; then true; else {call}; fi",
+        f"while {call}; do break; done",
+        f"until {call}; do break; done",
+        f"for x in 1; do {call}; done",
+        f"{{ {call}; }}",
+        f"! {call}",
+        f"f() {{ {call}; }}; f",
+        f"function f {{ {call}; }}",
+        f"({call})",
+        f"echo $({call})",
+        f'echo "result: $({call})"',
+        f"x=$({call})",
+        f"echo `{call}`",
+        f'echo "`{call}`"',
+        f"echo $(echo $({call}))",
+        f"cat > notes.txt <<'EOF'\nharmless text\nEOF\n/usr/bin/{call}",
+        f"cat > notes.txt <<EOF && env {call}\nharmless text\nEOF",
+        f"cat <<-EOF\n\tdata\n\tEOF\nenv {call}",
+        f"cat <<EOF\n$({call})\nEOF",
+        f"printf '%s\\n' a | xargs {call}",
+        f"xargs -I{{}} -n 1 {call} < list",
+        f"xargs -0 --max-args 1 {call} < list",
+        f"find . -name x -exec {call} \\;",
+        f"find . -execdir {call} {{}} +",
+        f"find . -ok {call} ';'",
+        f"find . -exec sh -c '{call}' \\;",
+        f"eval '{call}'",
+        f"eval {call}",
+        f"env -iu HOME {call}",
+        f"env -i -C /tmp {call}",
+        f"env -uHOME {call}",
+        f"env -iS '{call}'",
+        f"env --split-string='{call}'",
+        f"setsid {call}",
+        f"stdbuf -oL {call}",
+    ):
+        denied(gates, command, name)
+
+for gates in (["sudo"], ["git", "sudo"], ["git"]):
+    for command in (
+        "cat > notes.txt <<'EOF'\nsudo id; git push; $(sudo id); `git commit`\nEOF\ngit status",
+        "cat > script.sh <<'EOF'\nif sudo id; then git push; fi\nEOF",
+        "cat <<EOF\nplain $HOME text\nEOF\necho done",
+        "echo 'literal $(sudo id) and `git push`'",
+        "echo \"price: \\$(sudo id)\"",
+        "echo done # $(sudo id) `git push`",
+        "if true; then echo ok; fi",
+        "for x in a b; do echo $x; done",
+        "echo $(date) $(( 1 + 2 ))",
+        "x=$(git status)",
+        "printf '%s\\n' a | xargs echo",
+        "find . -name '*.go' -exec grep -n sudo {} +",
+        "find . -name 'git push'",
+        "eval 'echo git push sudo'",
+        "env -S 'printf %s' 'release note; /usr/bin/sudo'",
+        "env -S 'printf %s' 'note; git push'",
+        "env -iu HOME printf '%s' sudo",
+        "xargs -I{} echo sudo {} < list",
+        "{ echo sudo; }",
+        "! grep -q sudo /etc/group",
+        "echo then sudo",
+    ):
+        allowed(gates, command)
+
+# Direct escalation stays with the agent's own approval prompt.
+for gates in (["sudo"], ["git", "sudo"]):
+    for command in ("sudo id && echo ok", "echo x | sudo tee /tmp/x > /dev/null",
+                    "cat > f <<'EOF'\ndata\nEOF\nsudo install -m 0644 f /etc/f", "sudo $(which id)"):
+        allowed(gates, command)
