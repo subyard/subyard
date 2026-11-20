@@ -24,30 +24,34 @@ func publishedV030Registry(t *testing.T) RegistryV2 {
 	return registry
 }
 
-// retiringCandidateRegistry retires every completed v0.30.0 prefix except the
-// newest power-metadata step. Its later definition keeps its dependency on
-// retired history, which this engine's registry validation does not accept, so
-// it is decoded without validation.
-const retiringCandidateRegistry = `{"schemaVersion":2,` +
-	`"minimumEpochs":{"owner-registration":3,"power-metadata":3,"project-state":1,"settings":3},` +
-	`"currentEpochs":{"owner-registration":3,"power-metadata":4,"project-state":1,"settings":3},` +
-	`"migrations":[{"id":"introduce-nm-device-guard-v4","domain":"power-metadata","fromEpoch":3,"toEpoch":4,"kind":"nm-device-guard-v1","dependsOn":["complete-registered-guest-disk-tmp-v3"]}],` +
-	`"retiredPrefixes":{` +
-	`"owner-registration":{"throughEpoch":3,"digest":"f612c2a88cfb6a2f1f3194acf13b933d3009d8853c9f093e07e5cad491c1aab6"},` +
-	`"power-metadata":{"throughEpoch":3,"digest":"7692dc70c24e437966ba441be41204ec2642f3ceda004ef3492dd10c6826467d"},` +
-	`"settings":{"throughEpoch":3,"digest":"559acd8e21b67b9f4516f44ec2c67f655898a9094147d5686c3816990c47855e"}}}`
-
-func decodeRetiringCandidate(t *testing.T) RegistryV2 {
+// retiringCandidate is the registry of a successor that retires every
+// completed v0.30.0 prefix except the newest power-metadata step
+// (testdata/retiring-candidate-registry.json, sha256 474b7158...). Its
+// surviving NM guard definition depends on a retired migration, which the
+// v0.30.0 parser and this engine's do not accept, so it is decoded without
+// validation.
+func retiringCandidate(t *testing.T) RegistryV2 {
 	t.Helper()
 	var registry RegistryV2
-	if err := json.Unmarshal([]byte(retiringCandidateRegistry), &registry); err != nil {
+	if err := json.Unmarshal(mustReadTestdata(t, "retiring-candidate-registry.json"), &registry); err != nil {
 		t.Fatal(err)
 	}
 	return registry
 }
 
+func retire(t *testing.T, registry RegistryV2, floors map[string]int) RegistryV2 {
+	t.Helper()
+	retired, err := registry.RetirePrefixes(floors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return retired
+}
+
+// The candidate's retired digests are the v0.30.0 prefix digests, yet the
+// pair is refused: v0.30.0 cannot parse the candidate registry.
 func TestRetirePrefixesReproducesPublishedPrefixDigests(t *testing.T) {
-	v030, candidate := publishedV030Registry(t), decodeRetiringCandidate(t)
+	v030, candidate := publishedV030Registry(t), retiringCandidate(t)
 	floors := map[string]int{"owner-registration": 3, "power-metadata": 3, "settings": 3}
 	retired, err := v030.RetirePrefixes(floors)
 	if err != nil {
@@ -69,6 +73,11 @@ func TestRetirePrefixesReproducesPublishedPrefixDigests(t *testing.T) {
 	}
 	if len(v030.RetiredPrefixes) != 0 || v030.MinimumEpochs["settings"] != 1 || len(v030.Migrations) != 7 {
 		t.Fatal("retirement changed its source registry")
+	}
+	path, err := PlanDownPath(candidate, v030)
+	if err != nil || path.Kind != HistoryRefuse || path.Unreadable == nil ||
+		!strings.Contains(path.Unreadable.Error(), `"complete-registered-guest-disk-tmp-v3"`) {
+		t.Fatalf("candidate down path = %#v, %v", path, err)
 	}
 }
 
@@ -176,49 +185,52 @@ func TestV2RollbackRegistryComparesParsedRegistries(t *testing.T) {
 }
 
 func TestPlanDownPathAdmitsOnlyRetiredPrefixRepresentation(t *testing.T) {
-	v030, candidate := publishedV030Registry(t), decodeRetiringCandidate(t)
+	v030 := publishedV030Registry(t)
+	projectState := retire(t, v030, map[string]int{"project-state": 1})
 	mutated := func(change func(*RegistryV2)) RegistryV2 {
-		registry := decodeRetiringCandidate(t)
+		registry := retire(t, v030, map[string]int{"project-state": 1})
 		change(&registry)
 		return registry
 	}
-	retiredFurther, err := v030.RetirePrefixes(map[string]int{"settings": 3})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Retiring power-metadata through 4 leaves no definition that depends on
+	// retired history.
+	fullyRetired := retire(t, v030, map[string]int{"owner-registration": 3, "power-metadata": 4, "settings": 3})
+	powerOnly := retire(t, v030, map[string]int{"power-metadata": 4})
 	for _, test := range []struct {
-		name           string
-		active, target RegistryV2
-		kind           HistoryCompatibilityKind
+		name                  string
+		active, target        RegistryV2
+		kind                  HistoryCompatibilityKind
+		successor, unreadable bool
 	}{
 		{name: "one registry", active: v030, target: v030, kind: HistoryIdentity},
-		{name: "retired prefixes of the target", active: candidate, target: v030, kind: HistoryEquivalent},
+		{name: "retired prefixes of the target", active: projectState, target: v030, kind: HistoryEquivalent},
+		{name: "every prefix retired", active: fullyRetired, target: v030, kind: HistoryEquivalent},
+		{name: "successor retires prefixes", active: v030, target: projectState, kind: HistoryEquivalent, successor: true},
+		// The successor's own engine parses its registry; this release parses
+		// it only when it selects that target.
+		{name: "successor with retired dependencies", active: v030, target: retiringCandidate(t), kind: HistoryEquivalent, successor: true},
+		{name: "surviving dependency on retired history", active: retiringCandidate(t), target: v030, kind: HistoryRefuse, unreadable: true},
 		{name: "older target", active: v030, target: olderHistoryRegistry(v030), kind: HistoryRefuse},
 		{name: "retired digest differs", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
-			prefix := registry.RetiredPrefixes["settings"]
+			prefix := registry.RetiredPrefixes["project-state"]
 			prefix.Digest = Fingerprint(strings.Repeat("d", 64))
-			registry.RetiredPrefixes["settings"] = prefix
+			registry.RetiredPrefixes["project-state"] = prefix
 		})},
-		// Later definitions are chained into the prefix digests of later history.
 		{name: "later definition differs", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
-			registry.Migrations[0].DependsOn = nil
+			registry.Migrations[len(registry.Migrations)-1].DependsOn = nil
 		})},
-		{name: "later definition missing", kind: HistoryRefuse, target: v030, active: mutated(func(registry *RegistryV2) {
-			registry.Migrations, registry.CurrentEpochs["power-metadata"] = nil, 3
-		})},
-		{name: "floor beyond the target", kind: HistoryRefuse, target: olderHistoryRegistry(v030), active: candidate},
-		{name: "target retires more", kind: HistoryRefuse, active: candidate, target: mutated(func(registry *RegistryV2) {
-			registry.RetiredPrefixes["project-state"] = RetiredMigrationPrefixV2{ThroughEpoch: 1, Digest: Fingerprint(strings.Repeat("e", 64))}
-		})},
-		{name: "unretired active", kind: HistoryRefuse, active: v030, target: retiredFurther},
+		{name: "later definition missing", kind: HistoryRefuse, target: v030, active: olderHistoryRegistry(projectState)},
+		{name: "floor beyond the target", kind: HistoryRefuse, active: powerOnly, target: olderHistoryRegistry(v030)},
+		{name: "different retired domains", kind: HistoryRefuse, active: projectState, target: powerOnly},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path, err := PlanDownPath(test.active, test.target)
-			if err != nil || path.Kind != test.kind {
+			if err != nil || path.Kind != test.kind || path.Successor != test.successor || (path.Unreadable != nil) != test.unreadable {
 				t.Fatalf("down path = %#v, %v", path, err)
 			}
-			if want, _ := test.target.CanonicalDigest(); path.Target != want {
-				t.Fatalf("down path target %s, want %s", path.Target, want)
+			active, _ := test.active.CanonicalDigest()
+			if target, _ := test.target.CanonicalDigest(); path.Target != target || path.Active != active {
+				t.Fatalf("down path digests %s/%s, want %s/%s", path.Active, path.Target, active, target)
 			}
 		})
 	}
@@ -243,8 +255,15 @@ func publishedV030History(t *testing.T) (ProtectedSnapshot, ProtectedSnapshot) {
 
 // The v0.30.0 target reads history its retiring successor wrote: checkpoint
 // reading checks prefix digests and epochs, not the writer's registry digest.
-func TestHistoryCompatibilityAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
-	v030, candidate := publishedV030Registry(t), decodeRetiringCandidate(t)
+// The successor reads v0.30.0 history the same way after it returns.
+func TestHistoryCompatibilityAdmitsEquivalentWithinTheDeclaredPair(t *testing.T) {
+	v030 := publishedV030Registry(t)
+	retired := retire(t, v030, map[string]int{"project-state": 1})
+	retiredPayload, err := json.Marshal(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := retiringCandidate(t)
 	v030Digest := fingerprintPayload(mustReadTestdata(t, "v0.30.0-release-transition.json"))
 	predecessor, err := v030.CanonicalDigest()
 	if err != nil {
@@ -255,49 +274,60 @@ func TestHistoryCompatibilityAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
 	if err := json.Unmarshal(checkpoint.Payload, &written); err != nil {
 		t.Fatal(err)
 	}
-	written.RegistryDigest = fingerprintPayload([]byte(retiringCandidateRegistry))
+	written.RegistryDigest = fingerprintPayload(retiredPayload)
 	rewritten, err := json.Marshal(written)
 	if err != nil {
 		t.Fatal(err)
 	}
 	successor := protectedSnapshotFromPayload(append(rewritten, '\n'))
-	evidence := func(checkpoint ProtectedSnapshot) *HistoryEvidence {
-		return &HistoryEvidence{Registry: v030, RegistryDigest: v030Digest, Ledger: ledger, Checkpoint: checkpoint, CheckpointReader: true}
+	evidence := func(registry RegistryV2, digest Fingerprint, checkpoint ProtectedSnapshot) *HistoryEvidence {
+		return &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: ledger, Checkpoint: checkpoint, CheckpointReader: true}
 	}
+	v030History := func(checkpoint ProtectedSnapshot) *HistoryEvidence { return evidence(v030, v030Digest, checkpoint) }
 	missing := absentProtectedSnapshot()
 	corrupt := protectedSnapshotFromPayload([]byte("{}"))
+	other := Fingerprint(strings.Repeat("f", 64))
 	differs := "the selected release's migration registry differs from the active release's registry"
 	for _, test := range []struct {
-		name        string
-		input       HistoryCompatibilityInput
-		kind        HistoryCompatibilityKind
-		predecessor bool
-		reason      HistoryRefusalReason
-		message     string
+		name                   string
+		input                  HistoryCompatibilityInput
+		kind                   HistoryCompatibilityKind
+		predecessor, successor bool
+		reason                 HistoryRefusalReason
+		message                string
 	}{
 		{name: "v0.30.0 checkpoint", kind: HistoryEquivalent, predecessor: true,
-			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(checkpoint)}},
+			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: predecessor, History: v030History(checkpoint)}},
 		{name: "successor checkpoint", kind: HistoryEquivalent, predecessor: true,
-			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(successor)}},
+			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: predecessor, History: v030History(successor)}},
 		{name: "legacy ledger", kind: HistoryEquivalent, predecessor: true,
-			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(missing)}},
+			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: predecessor, History: v030History(missing)}},
 		{name: "undeclared skips history", kind: HistoryEquivalent, reason: HistoryRegistryDiffers, message: differs,
-			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: Fingerprint(strings.Repeat("f", 64)), History: evidence(corrupt)}},
+			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: other, History: v030History(corrupt)}},
 		{name: "no declaration", kind: HistoryEquivalent, reason: HistoryRegistryDiffers, message: differs,
-			input: HistoryCompatibilityInput{Active: &candidate, Target: &v030, History: evidence(checkpoint)}},
+			input: HistoryCompatibilityInput{Active: &retired, Target: &v030, History: v030History(checkpoint)}},
 		{name: "declared but unreadable history", kind: HistoryEquivalent, predecessor: true, reason: HistoryUnverifiable,
 			message: "the selected release cannot verify the authoritative active migration history",
-			input:   HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: evidence(corrupt)}},
+			input:   HistoryCompatibilityInput{Active: &retired, Target: &v030, Predecessor: predecessor, History: v030History(corrupt)}},
+		{name: "declared but unparseable active registry", kind: HistoryRefuse, predecessor: true, reason: HistoryRegistryUnreadable,
+			message: "the selected release cannot parse the active release's migration registry",
+			input:   HistoryCompatibilityInput{Active: &candidate, Target: &v030, Predecessor: predecessor, History: v030History(corrupt)}},
+		{name: "return to the declaring successor", kind: HistoryEquivalent, successor: true,
+			input: HistoryCompatibilityInput{Active: &v030, Target: &retired, TargetPredecessor: predecessor,
+				History: evidence(retired, fingerprintPayload(retiredPayload), successor)}},
+		{name: "successor that declares another predecessor", kind: HistoryEquivalent, reason: HistoryRegistryDiffers, message: differs,
+			input: HistoryCompatibilityInput{Active: &v030, Target: &retired, TargetPredecessor: other, Predecessor: predecessor}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			verdict := HistoryCompatibility(test.input)
-			if verdict.Kind != test.kind || verdict.Registry != RegistryDiffers || verdict.DeclaredPredecessor != test.predecessor {
+			if verdict.Kind != test.kind || verdict.Registry != RegistryDiffers || verdict.DeclaredPredecessor != test.predecessor ||
+				verdict.DeclaredSuccessor != test.successor {
 				t.Fatalf("verdict = %#v", verdict)
 			}
 			message, _ := verdict.Refusal()
 			if test.reason == "" {
 				if !verdict.Admitted() || message != "" {
-					t.Fatalf("equivalent predecessor refused: %#v", verdict)
+					t.Fatalf("equivalent pair refused: %#v", verdict)
 				}
 				return
 			}
@@ -306,10 +336,10 @@ func TestHistoryCompatibilityAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
 			}
 		})
 	}
-	// The declared predecessor alone admits nothing when the registries are not equivalent.
+	// A declaration alone admits nothing when the registries are not equivalent.
 	older := olderHistoryRegistry(v030)
 	olderDigest, _ := older.CanonicalDigest()
-	verdict := HistoryCompatibility(HistoryCompatibilityInput{Active: &candidate, Target: &older, Predecessor: olderDigest})
+	verdict := HistoryCompatibility(HistoryCompatibilityInput{Active: &retired, Target: &older, Predecessor: olderDigest})
 	if verdict.Admitted() || verdict.Kind != HistoryRefuse || !verdict.DeclaredPredecessor {
 		t.Fatalf("declared non-equivalent predecessor = %#v", verdict)
 	}

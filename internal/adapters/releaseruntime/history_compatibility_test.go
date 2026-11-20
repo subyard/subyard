@@ -285,6 +285,63 @@ func TestHistoryCompatibilityVerbAdmitsDeclaredEquivalent(t *testing.T) {
 	}
 }
 
+// A declaration that cannot be verified refuses only an Equivalent target, for
+// the verb as for the runtime selection and the engine. The verb reports that
+// refusal as a verification error.
+func TestHistoryCompatibilityVerbDeclarationErrorsRefuseOnlyEquivalent(t *testing.T) {
+	const active, target = "1.1.0-aaaaaaaaaaaa", "1.0.0-bbbbbbbbbbbb"
+	for _, test := range []struct {
+		name                       string
+		retireActive, retireTarget bool
+		unreadableTarget           bool
+		code                       int
+		kind                       releasetransition.HistoryCompatibilityKind
+	}{
+		{name: "identical", code: 0, kind: releasetransition.HistoryIdentity},
+		{name: "equivalent predecessor", retireActive: true, code: 2},
+		{name: "equivalent successor", retireTarget: true, unreadableTarget: true, code: 2},
+		{name: "equivalent successor with readable declaration", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHistoryFixture(t)
+			retired, _, canonical := fixture.retiredRegistry(t)
+			activeRegistry, targetRegistry := fixture.registry, fixture.registry
+			if test.retireActive {
+				activeRegistry = retired
+			}
+			targetFiles := map[string][]byte{}
+			if test.retireTarget {
+				targetRegistry = retired
+				targetFiles["config/release-rollback.json"] = rollbackDeclarationPayload(canonical)
+				if test.unreadableTarget {
+					targetFiles["config/release-rollback.json"] = rollbackDeclarationPayload("AAAA")
+				}
+			}
+			targetFiles["config/release-transition.json"] = targetRegistry
+			fixture.writeRelease(t, fixture.runtimeRoot, active, map[string][]byte{
+				"config/release-transition.json": activeRegistry,
+				"config/release-rollback.json":   rollbackDeclarationPayload("AAAA"),
+			}, nil)
+			fixture.activate(t, active)
+			fixture.writeCompleteLedger(t)
+			fixture.writeRelease(t, fixture.runtimeRoot, target, targetFiles, nil)
+			code, report, stderr := runHistoryVerb(t, fixture.runtimeRoot, fixture.configHome, target)
+			if code != test.code {
+				t.Fatalf("verdict %d %#v, stderr %q", code, report, stderr)
+			}
+			if code == 2 {
+				if !strings.Contains(stderr, "rollback declaration of the release pair cannot be verified") {
+					t.Fatalf("stderr = %q", stderr)
+				}
+				return
+			}
+			if !report.Admitted || report.Kind != test.kind || report.Successor != test.retireTarget || report.DeclaredSuccessor != test.retireTarget {
+				t.Fatalf("verdict %#v", report)
+			}
+		})
+	}
+}
+
 // The verb shares the runtime's input assembly: a sole published current
 // release without history is a first publication its own engine initializes.
 func TestHistoryCompatibilityVerbMatchesRuntimeSelection(t *testing.T) {
@@ -488,5 +545,29 @@ func TestRollbackDeclarationRequiresSealedManifest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEngineRollbackPredecessor(t *testing.T) {
+	root := testkit.TempDir(t)
+	if digest, err := EngineRollbackPredecessor(root); err != nil || digest != "" {
+		t.Fatalf("absent declaration = %q, %v", digest, err)
+	}
+	path := filepath.Join(root, "config", "release-rollback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := strings.Repeat("a", 64)
+	testkit.WriteFile(t, path, []byte(`{"schemaVersion":1,"predecessorRegistryDigest":"`+predecessor+`","migrations":[],"profileFormats":[]}`+"\n"), 0o600)
+	if digest, err := EngineRollbackPredecessor(root); err != nil || digest != releasetransition.Fingerprint(predecessor) {
+		t.Fatalf("declared predecessor = %q, %v", digest, err)
+	}
+	testkit.WriteFile(t, path, []byte(`{"schemaVersion":2}`), 0o600)
+	if digest, err := EngineRollbackPredecessor(root); err == nil || digest != "" {
+		t.Fatalf("invalid declaration = %q, %v", digest, err)
+	}
+	shipped, err := EngineRollbackPredecessor(filepath.Join("..", "..", ".."))
+	if err != nil || shipped == "" {
+		t.Fatalf("shipped declaration = %q, %v", shipped, err)
 	}
 }

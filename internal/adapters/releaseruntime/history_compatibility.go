@@ -25,7 +25,9 @@ type HistoryCompatibilityReport struct {
 	Kind                releasetransition.HistoryCompatibilityKind `json:"kind"`
 	Registry            releasetransition.HistoryRegistryRelation  `json:"registry"`
 	Admitted            bool                                       `json:"admitted"`
+	Successor           bool                                       `json:"successor"`
 	DeclaredPredecessor bool                                       `json:"declaredPredecessor"`
+	DeclaredSuccessor   bool                                       `json:"declaredSuccessor"`
 	Refusals            []HistoryCompatibilityRefusal              `json:"refusals"`
 }
 
@@ -98,16 +100,14 @@ func InspectHistoryCompatibility(runtimeRoot, configHome string, targetID releas
 	}
 	defer target.Close()
 	history, refusal, err := assembleHistorySelection(request, state.links, state, active, target)
-	if refusal == "" && history.declarationErr != nil {
-		refusal, err = rollbackDeclarationRefusal, history.declarationErr
-	}
 	if refusal != "" {
 		return HistoryCompatibilityReport{}, fmt.Errorf("%s: %w", refusal, err)
 	}
 	verdict := history.verdict
 	report := HistoryCompatibilityReport{
 		SchemaVersion: 1, Active: active.candidate.release, Target: targetID, Kind: verdict.Kind,
-		Registry: verdict.Registry, Admitted: verdict.Admitted(), DeclaredPredecessor: verdict.DeclaredPredecessor,
+		Registry: verdict.Registry, Admitted: verdict.Admitted(), Successor: verdict.Successor,
+		DeclaredPredecessor: verdict.DeclaredPredecessor, DeclaredSuccessor: verdict.DeclaredSuccessor,
 		Refusals: []HistoryCompatibilityRefusal{},
 	}
 	for _, refusal := range verdict.Refusals {
@@ -127,13 +127,10 @@ type historySelection struct {
 	missingHistory                 bool
 	firstPublication               bool
 	publicationErr                 error
-	// declarationErr is a failed read of the active release's rollback
-	// declaration. Only an Equivalent relation depends on it.
-	declarationErr error
-	verdict        releasetransition.HistoryCompatibilityVerdict
+	verdict                        releasetransition.HistoryCompatibilityVerdict
 }
 
-const rollbackDeclarationRefusal = "the active release's rollback declaration cannot be verified"
+const rollbackDeclarationRefusal = "a rollback declaration of the release pair cannot be verified"
 
 // assembleHistorySelection is shared by captureTransitionSelection and the
 // verb. A non-empty refusal reports a registry that cannot be verified, or an
@@ -153,13 +150,10 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		return history, "the selected release's sealed migration registry cannot be verified", err
 	}
 	history.targetRegistry = identity
-	var predecessor releasetransition.Fingerprint
-	declaration, err := verifiedRollbackDeclaration(active)
-	if err != nil {
-		history.declarationErr = err
-	} else if declaration != nil {
-		predecessor = declaration.PredecessorRegistryDigest
-	}
+	// Only an Equivalent relation depends on a declaration, so a read failure
+	// refuses only that relation.
+	predecessor, activeDeclarationErr := declaredPredecessor(active)
+	targetPredecessor, targetDeclarationErr := declaredPredecessor(target)
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -171,7 +165,7 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	if identity != "" && firstPublication {
 		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor}
+	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor, TargetPredecessor: targetPredecessor}
 	if activeIdentity != "" {
 		input.Active = &activeRegistry
 	}
@@ -182,10 +176,26 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
 	}
 	history.verdict = releasetransition.HistoryCompatibility(input)
-	if history.declarationErr != nil && history.verdict.Kind == releasetransition.HistoryEquivalent {
-		return history, rollbackDeclarationRefusal, history.declarationErr
+	// The older release of an Equivalent pair is named by the newer one's
+	// declaration, so only that declaration can refuse it.
+	declarationErr := activeDeclarationErr
+	if history.verdict.Successor {
+		declarationErr = targetDeclarationErr
+	}
+	if declarationErr != nil && history.verdict.Kind == releasetransition.HistoryEquivalent {
+		return history, rollbackDeclarationRefusal, declarationErr
 	}
 	return history, "", nil
+}
+
+// declaredPredecessor is the predecessor registry digest a verified release
+// declares, or empty when it declares none.
+func declaredPredecessor(verified *verifiedPublishedCandidate) (releasetransition.Fingerprint, error) {
+	declaration, err := verifiedRollbackDeclaration(verified)
+	if err != nil || declaration == nil {
+		return "", err
+	}
+	return declaration.PredecessorRegistryDigest, nil
 }
 
 // needsSourceFloor reports when the source floor's upgrade advice may replace
@@ -226,7 +236,18 @@ func verifiedRollbackDeclaration(verified *verifiedPublishedCandidate) (*release
 	if !verified.rollbackBound {
 		return nil, nil
 	}
-	file, err := openCandidateFile(int(verified.root.Fd()), "config/release-rollback.json")
+	return readRollbackDeclaration(int(verified.root.Fd()), func(payload []byte) error {
+		if sha256.Sum256(payload) != verified.rollbackDigest || !bytes.Equal(payload, verified.rollbackRaw) {
+			return errors.New("rollback declaration does not match its verified manifest")
+		}
+		return nil
+	})
+}
+
+// readRollbackDeclaration reads config/release-rollback.json below a release
+// root without following links, bounded, checks the bytes and parses them.
+func readRollbackDeclaration(rootFD int, check func([]byte) error) (*releasetransition.RollbackDeclaration, error) {
+	file, err := openCandidateFile(rootFD, "config/release-rollback.json")
 	if err != nil {
 		return nil, err
 	}
@@ -235,12 +256,31 @@ func verifiedRollbackDeclaration(verified *verifiedPublishedCandidate) (*release
 	if err != nil {
 		return nil, err
 	}
-	if sha256.Sum256(payload) != verified.rollbackDigest || !bytes.Equal(payload, verified.rollbackRaw) {
-		return nil, errors.New("rollback declaration does not match its verified manifest")
+	if err := check(payload); err != nil {
+		return nil, err
 	}
 	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
 	if err != nil {
 		return nil, err
 	}
 	return &declaration, nil
+}
+
+// EngineRollbackPredecessor reads the rollback declaration of the running
+// engine's own release root with the reader verified releases use; the engine
+// already trusts its root. A release without one declares no predecessor.
+func EngineRollbackPredecessor(releaseRoot string) (releasetransition.Fingerprint, error) {
+	root, err := os.Open(releaseRoot)
+	if err != nil {
+		return "", fmt.Errorf("open release root: %w", err)
+	}
+	defer root.Close()
+	declaration, err := readRollbackDeclaration(int(root.Fd()), func([]byte) error { return nil })
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read release rollback declaration: %w", err)
+	}
+	return declaration.PredecessorRegistryDigest, nil
 }

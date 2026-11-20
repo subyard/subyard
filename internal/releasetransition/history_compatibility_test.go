@@ -206,6 +206,8 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 func TestHistoryCompatibilityAdmitsIdentityAndDeclaredEquivalent(t *testing.T) {
 	for _, verdict := range []HistoryCompatibilityVerdict{
 		{Kind: HistoryEquivalent}, {Kind: HistorySteps, DeclaredPredecessor: true}, {Kind: HistoryRefuse, DeclaredPredecessor: true},
+		// Each direction of an Equivalent pair needs its own declaration.
+		{Kind: HistoryEquivalent, DeclaredSuccessor: true}, {Kind: HistoryEquivalent, Successor: true, DeclaredPredecessor: true},
 	} {
 		kind := verdict.Kind
 		verdict.Registry = RegistryDiffers
@@ -222,6 +224,9 @@ func TestHistoryCompatibilityAdmitsIdentityAndDeclaredEquivalent(t *testing.T) {
 	}
 	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryEquivalent, Registry: RegistryDiffers, DeclaredPredecessor: true}).sealed(); !verdict.Admitted() {
 		t.Fatalf("declared equivalent predecessor gained a refusal: %#v", verdict)
+	}
+	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryEquivalent, Registry: RegistryDiffers, Successor: true, DeclaredSuccessor: true}).sealed(); !verdict.Admitted() {
+		t.Fatalf("declaring equivalent successor gained a refusal: %#v", verdict)
 	}
 	first, second := errors.New("first cause"), errors.New("second cause")
 	verdict := HistoryCompatibilityVerdict{Kind: HistoryIdentity, Refusals: []HistoryRefusal{

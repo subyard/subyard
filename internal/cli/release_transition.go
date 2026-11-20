@@ -2155,11 +2155,10 @@ func executeReleaseTransitionRequest(
 	if err != nil {
 		return releasetransition.ProcessResponse{}, fmt.Errorf("read release transition registry: %w", err)
 	}
-	// Only a target with other registry bytes can depend on the declaration.
-	if rollbackTargetRegistry != nil && rollbackTarget.RegistryDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(registry))) {
-		if rollbackPredecessor, err = engineRollbackPredecessor(repositoryRoot); err != nil {
-			return releasetransition.ProcessResponse{}, err
-		}
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		// Only an Equivalent relation depends on the declaration: one that
+		// cannot be read declares no predecessor, which refuses only that.
+		rollbackPredecessor, _ = releaseruntime.EngineRollbackPredecessor(repositoryRoot)
 	}
 	if request.RegistryDigest != "" {
 		digest := sha256.Sum256(registry)
@@ -2323,28 +2322,6 @@ func candidateTransitionOptions(
 	options.Replacement = request.Replacement
 	options.CandidateVersion = Version
 	return options
-}
-
-// engineRollbackPredecessor reads this engine's sealed rollback declaration,
-// like its checkpoint capability. A release without one declares no predecessor.
-func engineRollbackPredecessor(repositoryRoot string) (releasetransition.Fingerprint, error) {
-	file, err := os.Open(filepath.Join(repositoryRoot, "config", "release-rollback.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("read release rollback declaration: %w", err)
-	}
-	defer file.Close()
-	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRollbackDeclarationBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("read release rollback declaration: %w", err)
-	}
-	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
-	if err != nil {
-		return "", err
-	}
-	return declaration.PredecessorRegistryDigest, nil
 }
 
 func readReleaseTransitionGrant() (releasetransition.Authorization, error) {

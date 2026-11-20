@@ -250,7 +250,7 @@ func retainedFixtureAtVersion(t *testing.T, version string) (*Runtime, published
 
 func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 	const live = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":3},"migrations":[{"id":"first","kind":"test-vms-settings-v1-to-v2","domain":"settings","fromEpoch":1,"toEpoch":2},{"id":"second","kind":"local-ssh-port-settings-v2-to-v3","domain":"settings","fromEpoch":2,"toEpoch":3}]}`
-	for _, name := range []string{"identical", "both registryless", "one registryless", "different ID", "swapped kinds", "retired target with unreadable projection", "identical retired registries with unreadable projection", "NetworkManager epoch crossing", "declared equivalent predecessor", "undeclared equivalent predecessor", "equivalent predecessor with unreadable declaration", "identical with unreadable declaration"} {
+	for _, name := range []string{"identical", "both registryless", "one registryless", "different ID", "swapped kinds", "retired target with unreadable projection", "identical retired registries with unreadable projection", "NetworkManager epoch crossing", "declared equivalent predecessor", "undeclared equivalent predecessor", "equivalent predecessor with unreadable declaration", "identical with unreadable declaration", "declared equivalent successor", "undeclared equivalent successor"} {
 		t.Run(name, func(t *testing.T) {
 			runtime, candidate, request, called, updateArgs := retainedVersionFixture(t)
 			active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
@@ -290,7 +290,14 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 				case "declared equivalent predecessor":
 					want = ""
 				case "equivalent predecessor with unreadable declaration":
-					want = "rollback declaration cannot be verified"
+					want = "rollback declaration of the release pair cannot be verified"
+				}
+			case "declared equivalent successor", "undeclared equivalent successor":
+				// The retained release retires the prefix the active one still defines.
+				retained = writeAppliedSettingsCheckpoint(t, request, source)
+				if name == "declared equivalent successor" {
+					// The registry relation is admitted, so the history is read.
+					want = "cannot read the legacy migration ledger projection"
 				}
 			case "identical with unreadable declaration":
 				// Only an equivalent relation depends on the declaration.
@@ -309,6 +316,8 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 				declareRollbackPredecessor(t, active, registryCanonicalDigest(t, retained))
 			case "equivalent predecessor with unreadable declaration", "identical with unreadable declaration":
 				declareRollbackPredecessor(t, active, "AAAA")
+			case "declared equivalent successor":
+				declareRollbackPredecessor(t, candidate, registryCanonicalDigest(t, source))
 			}
 			if retained != nil {
 				bindRollbackFixtureRegistry(t, candidate, retained)

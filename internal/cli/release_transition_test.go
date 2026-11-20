@@ -3765,26 +3765,3 @@ func TestRouteConsumerActivationKeepsUncertainFailuresBlocking(t *testing.T) {
 }
 
 // The engine reads its own sealed rollback declaration for an outgoing rollback.
-func TestEngineRollbackPredecessor(t *testing.T) {
-	root := testkit.TempDir(t)
-	if digest, err := engineRollbackPredecessor(root); err != nil || digest != "" {
-		t.Fatalf("absent declaration = %q, %v", digest, err)
-	}
-	path := filepath.Join(root, "config", "release-rollback.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	predecessor := strings.Repeat("a", 64)
-	testkit.WriteFile(t, path, []byte(`{"schemaVersion":1,"predecessorRegistryDigest":"`+predecessor+`","migrations":[],"profileFormats":[]}`+"\n"), 0o600)
-	if digest, err := engineRollbackPredecessor(root); err != nil || digest != releasetransition.Fingerprint(predecessor) {
-		t.Fatalf("declared predecessor = %q, %v", digest, err)
-	}
-	testkit.WriteFile(t, path, []byte(`{"schemaVersion":2}`), 0o600)
-	if digest, err := engineRollbackPredecessor(root); err == nil || digest != "" {
-		t.Fatalf("invalid declaration = %q, %v", digest, err)
-	}
-	shipped, err := engineRollbackPredecessor(filepath.Join("..", ".."))
-	if err != nil || shipped == "" {
-		t.Fatalf("shipped declaration = %q, %v", shipped, err)
-	}
-}

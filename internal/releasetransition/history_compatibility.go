@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -13,9 +14,11 @@ type HistoryCompatibilityKind string
 const (
 	// HistoryIdentity: the target registry is the active registry.
 	HistoryIdentity HistoryCompatibilityKind = "identity"
-	// HistoryEquivalent: the active registry is the target with completed
-	// prefixes retired, so the target reads the history unchanged. Admitted
-	// only for the declared predecessor, and nothing is written.
+	// HistoryEquivalent: one registry is the other with completed prefixes
+	// retired, so the target reads the history unchanged and nothing is
+	// written. Admitted only within a declared release pair: rollback to the
+	// active release's declared predecessor, or the return to a successor that
+	// declares the active release as its predecessor.
 	HistoryEquivalent HistoryCompatibilityKind = "equivalent"
 	// HistorySteps: the active release declares down steps to the target
 	// registry. Not produced or admitted yet.
@@ -40,6 +43,7 @@ type HistoryRefusalReason string
 
 const (
 	HistoryRegistryDiffers              HistoryRefusalReason = "registry-differs"
+	HistoryRegistryUnreadable           HistoryRefusalReason = "registry-unreadable"
 	HistoryUnverifiable                 HistoryRefusalReason = "history-unverifiable"
 	HistoryMissing                      HistoryRefusalReason = "history-missing"
 	HistoryCheckpointReaderUnverifiable HistoryRefusalReason = "checkpoint-reader-unverifiable"
@@ -58,8 +62,9 @@ type HistoryRefusal struct {
 type HistoryCompatibilityInput struct {
 	Active, Target *RegistryV2
 	// Predecessor is the canonical registry digest the active release declares
-	// for rollback; empty when it declares none.
-	Predecessor Fingerprint
+	// for rollback; empty when it declares none. TargetPredecessor is the one
+	// the target release declares.
+	Predecessor, TargetPredecessor Fingerprint
 	// History, when present, must be readable by the target registry.
 	History *HistoryEvidence
 }
@@ -78,10 +83,16 @@ type HistoryEvidence struct {
 type HistoryCompatibilityVerdict struct {
 	Kind     HistoryCompatibilityKind
 	Registry HistoryRegistryRelation
+	// Successor reports an Equivalent target that retires prefixes of the
+	// active registry, rather than the reverse.
+	Successor bool
 	// DeclaredPredecessor reports that the target registry is the active
-	// release's declared predecessor; it admits an Equivalent target.
-	DeclaredPredecessor bool
-	Refusals            []HistoryRefusal
+	// release's declared predecessor; it admits an Equivalent target that the
+	// active registry retires. DeclaredSuccessor reports that the target
+	// declares the active registry as its predecessor; it admits an Equivalent
+	// Successor.
+	DeclaredPredecessor, DeclaredSuccessor bool
+	Refusals                               []HistoryRefusal
 }
 
 // HistoryCompatibility is the single decision whether a target release may own
@@ -106,11 +117,18 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 		verdict.Refusals = []HistoryRefusal{{HistoryRegistryDiffers, "the migration registries cannot be identified", err}}
 		return verdict
 	}
-	verdict.Kind, verdict.Registry = path.Kind, RegistryDiffers
+	verdict.Kind, verdict.Registry, verdict.Successor = path.Kind, RegistryDiffers, path.Successor
 	if path.Kind == HistoryIdentity {
 		verdict.Registry = RegistryIdentical
 	}
 	verdict.DeclaredPredecessor = input.Predecessor != "" && path.Target == input.Predecessor
+	verdict.DeclaredSuccessor = input.TargetPredecessor != "" && path.Active == input.TargetPredecessor
+	if path.Unreadable != nil {
+		verdict.Refusals = []HistoryRefusal{{
+			HistoryRegistryUnreadable, "the selected release cannot parse the active release's migration registry", path.Unreadable,
+		}}
+		return verdict
+	}
 	if verdict.RegistryAdmitted() && input.History != nil {
 		if refusal := verifyHistoryEvidence(*input.History); refusal != nil {
 			verdict.Refusals = []HistoryRefusal{*refusal}
@@ -120,51 +138,89 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 }
 
 // DownPath relates the active registry to a target registry by canonical
-// digest. Target is the target's canonical digest.
+// digest. Active and Target are their canonical digests. Successor marks an
+// Equivalent target that retires prefixes of the active registry. Unreadable
+// explains a Refuse for a registry pair that would otherwise be Equivalent.
 type DownPath struct {
-	Kind   HistoryCompatibilityKind
-	Target Fingerprint
+	Kind           HistoryCompatibilityKind
+	Active, Target Fingerprint
+	Successor      bool
+	Unreadable     error
 }
 
 // PlanDownPath decides how the active migration history reaches a target
-// registry. Identity is one registry. Equivalent is the target retired through
-// the active registry's retired floors: the target then proves every retired
-// digest with its own MigrationPrefixDigest and chains the same later
-// definitions, so its checkpoint reader accepts the history unchanged. Every
-// other relation refuses.
+// registry. Identity is one registry. Equivalent is one registry retired
+// through the other's retired floors: the unretired registry proves every
+// retired digest with its own MigrationPrefixDigest and chains the same later
+// definitions, so either checkpoint reader accepts the history unchanged.
+// Every other relation refuses.
+//
+// A target that the active registry retires must also parse the active
+// registry: an older engine validates the active registry before any request,
+// and its rules require every dependency to be a migration defined earlier in
+// the same registry. A surviving definition that depends on a retired one
+// therefore refuses.
 func PlanDownPath(active, target RegistryV2) (DownPath, error) {
-	activeDigest, err := active.CanonicalDigest()
-	if err != nil {
+	var path DownPath
+	var err error
+	if path.Active, err = active.CanonicalDigest(); err != nil {
 		return DownPath{}, err
 	}
-	path := DownPath{Kind: HistoryRefuse}
 	if path.Target, err = target.CanonicalDigest(); err != nil {
 		return DownPath{}, err
 	}
-	if path.Target == activeDigest {
+	path.Kind = HistoryRefuse
+	if path.Target == path.Active {
 		path.Kind = HistoryIdentity
 		return path, nil
 	}
-	if len(active.RetiredPrefixes) == 0 {
-		return path, nil
+	if equivalent, err := retiresPrefixesOf(active, target, path.Active); err != nil || equivalent {
+		if err == nil {
+			if path.Unreadable = undefinedDependency(active); path.Unreadable == nil {
+				path.Kind = HistoryEquivalent
+			}
+		}
+		return path, err
 	}
-	floors := make(map[string]int, len(active.RetiredPrefixes))
-	for domain, retired := range active.RetiredPrefixes {
-		floors[domain] = retired.ThroughEpoch
+	equivalent, err := retiresPrefixesOf(target, active, path.Target)
+	if equivalent {
+		path.Kind, path.Successor = HistoryEquivalent, true
 	}
-	retired, err := target.RetirePrefixes(floors)
+	return path, err
+}
+
+// retiresPrefixesOf reports whether retired, with canonical digest digest, is
+// base retired through retired's floors.
+func retiresPrefixesOf(retired, base RegistryV2, digest Fingerprint) (bool, error) {
+	if len(retired.RetiredPrefixes) == 0 {
+		return false, nil
+	}
+	floors := make(map[string]int, len(retired.RetiredPrefixes))
+	for domain, prefix := range retired.RetiredPrefixes {
+		floors[domain] = prefix.ThroughEpoch
+	}
+	candidate, err := base.RetirePrefixes(floors)
 	if err != nil {
-		// The target registry cannot reach these floors.
-		return path, nil
+		// The base registry cannot reach these floors.
+		return false, nil
 	}
-	digest, err := retired.CanonicalDigest()
-	if err != nil {
-		return DownPath{}, err
+	candidateDigest, err := candidate.CanonicalDigest()
+	return err == nil && candidateDigest == digest, err
+}
+
+// undefinedDependency applies the dependency rule of registry parsers that
+// predate dependencies on retired migrations.
+func undefinedDependency(registry RegistryV2) error {
+	defined := make(map[string]bool, len(registry.Migrations))
+	for _, migration := range registry.Migrations {
+		for _, dependency := range migration.DependsOn {
+			if !defined[dependency] {
+				return fmt.Errorf("migration %q depends on %q, which the registry does not define before it", migration.ID, dependency)
+			}
+		}
+		defined[migration.ID] = true
 	}
-	if digest == activeDigest {
-		path.Kind = HistoryEquivalent
-	}
-	return path, nil
+	return nil
 }
 
 // sealed keeps the invariant that a verdict which is not admitted carries a
@@ -206,9 +262,12 @@ func verifyHistoryEvidence(history HistoryEvidence) *HistoryRefusal {
 }
 
 // RegistryAdmitted reports whether the registry relation lets the target own
-// the history, before any history finding: identity, or an Equivalent
-// declared predecessor. Steps are not admitted yet.
+// the history, before any history finding: identity, or an Equivalent target
+// within a declared release pair. Steps are not admitted yet.
 func (verdict HistoryCompatibilityVerdict) RegistryAdmitted() bool {
+	if verdict.Kind == HistoryEquivalent && verdict.Successor {
+		return verdict.DeclaredSuccessor
+	}
 	return verdict.Kind == HistoryIdentity || verdict.Kind == HistoryEquivalent && verdict.DeclaredPredecessor
 }
 
