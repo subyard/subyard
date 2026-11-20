@@ -6416,8 +6416,11 @@ mark_created_default_project() {
   printf 'mark owned project\n' >> "$trace"
 }
 p0_retry_init_after_plan_stale() { "$@"; }
+p0_container_image_reference() { [ "$1" = fixture-cached-cloud ] && printf 'fixture-fingerprint\n'; }
 operator_yard() {
   case "$*" in
+    '-Y test-yard config set YARD_IMAGE fixture-fingerprint YARD_IMAGE_FALLBACK fixture-fingerprint --scope yard --yes')
+      printf 'select fixture image\n' >> "$trace" ;;
     "config sync $CONFIG_CHECKOUT --yes")
       printf 'config sync checkout --yes\n' >> "$trace"
       [ "$scenario" != sync-failure ] || return 23
@@ -6450,6 +6453,7 @@ operator_yard() {
 recreate_legacy_test_owner
 expected=$'config sync checkout --yes\n-Y e2e-yard teardown --reset-config --yes\nservice install test-vms --yes\nmark owned project'
 if [ "$scenario" = image-miss ]; then expected+=$'\nshare owned cache\nverify shared image\nservice install test-vms --yes'; fi
+expected+=$'\nselect fixture image'
 [ "$(cat "$trace")" = "$expected" ]
 RECREATE
   case "$recreate_case" in
