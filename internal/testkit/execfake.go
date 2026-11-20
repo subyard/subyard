@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,20 +15,20 @@ import (
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
-// ExecFake replaces external tools with /bin/sh shims. A shim is written once
-// and sources its tool's rules from a file that On replaces by rename, so a
-// concurrent call runs either the previous or the new rules and never execs a
-// file that is being written. Each call claims the next sequence number with
-// mkdir and publishes its NUL-delimited record as a file of its own, so
-// concurrent records never interleave; a call that cannot record itself exits
-// 126. A call that matches no rule exits 127 and fails the test at cleanup
-// unless AllowUnexpected was set.
+// ExecFake replaces external tools with /bin/sh shims that use only shell
+// builtins, so a fake tool on PATH cannot change how another shim records. A
+// shim is written once and sources its tool's rules from a file that On
+// replaces by rename, so a concurrent call runs either the previous or the new
+// rules and never execs a file that is being written. Each call records itself
+// in the next free records/N file, which it creates exclusively under set -C;
+// a call that cannot write its record exits 126. A call that matches no rule
+// exits 127 and fails the test at cleanup unless AllowUnexpected was set.
+//
+// The check runs in a cleanup, and cleanups run in reverse order: create the
+// fake before anything that can still call a tool when its own cleanup runs.
 type ExecFake struct {
 	t               testing.TB
 	state           string
-	cat             string
-	mv              string
-	mkdir           string
 	mu              sync.Mutex
 	tools           map[string]string
 	order           []string
@@ -74,9 +73,8 @@ type execRule struct {
 // for the code under test.
 func NewExecFake(t testing.TB, dir string, tools ...string) *ExecFake {
 	t.Helper()
-	fake := &ExecFake{t: t, state: TempDir(t), cat: absoluteTool(t, "cat"), mv: absoluteTool(t, "mv"), mkdir: absoluteTool(t, "mkdir"),
-		tools: map[string]string{}}
-	for _, directory := range []string{"claims", "records", "replies", "rules"} {
+	fake := &ExecFake{t: t, state: TempDir(t), tools: map[string]string{}}
+	for _, directory := range []string{"records", "rules"} {
 		if err := os.Mkdir(filepath.Join(fake.state, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -89,18 +87,6 @@ func NewExecFake(t testing.TB, dir string, tools ...string) *ExecFake {
 	}
 	t.Cleanup(fake.reportUnexpected)
 	return fake
-}
-
-func absoluteTool(t testing.TB, name string) string {
-	t.Helper()
-	path, err := exec.LookPath(name)
-	if err == nil {
-		path, err = filepath.Abs(path)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 // Install places the shim for name at path, creating missing parents, and
@@ -157,17 +143,11 @@ func (fake *ExecFake) On(match Match, reply Reply) *ExecFake {
 	if reply.Exit < 0 || reply.Exit > 255 {
 		fake.t.Fatalf("execfake: exit status %d is out of range", reply.Exit)
 	}
-	if strings.ContainsRune(reply.Script, 0) || slices.ContainsFunc(slices.Concat([]string{match.Tool}, match.Args, match.Prefix, match.Contains),
+	if slices.ContainsFunc(slices.Concat([]string{match.Tool, reply.Stdout, reply.Stderr, reply.Script}, match.Args, match.Prefix, match.Contains),
 		func(value string) bool { return strings.ContainsRune(value, 0) }) {
-		fake.t.Fatal("execfake: a rule cannot contain NUL, which no argument can hold")
+		fake.t.Fatal("execfake: a rule cannot contain NUL, which neither an argument nor shell text can hold")
 	}
 	match = Match{Tool: match.Tool, Args: slices.Clone(match.Args), Prefix: slices.Clone(match.Prefix), Contains: slices.Clone(match.Contains)}
-	index := len(fake.rules)
-	for stream, content := range map[string]string{"stdout": reply.Stdout, "stderr": reply.Stderr} {
-		if content != "" {
-			WriteFile(fake.t, fake.replyPath(index, stream), []byte(content), 0o600)
-		}
-	}
 	fake.rules = append(fake.rules, execRule{match: match, reply: reply})
 	for _, name := range fake.order {
 		if match.Tool == "" || match.Tool == name {
@@ -217,15 +197,15 @@ type execRecord struct {
 }
 
 func (fake *ExecFake) records() ([]execRecord, error) {
-	claims, err := os.ReadDir(filepath.Join(fake.state, "claims"))
+	entries, err := os.ReadDir(filepath.Join(fake.state, "records"))
 	if err != nil {
 		return nil, err
 	}
-	sequence := make([]int, 0, len(claims))
-	for _, claim := range claims {
-		number, err := strconv.Atoi(claim.Name())
+	sequence := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		number, err := strconv.Atoi(entry.Name())
 		if err != nil || number < 0 {
-			return nil, fmt.Errorf("execfake: malformed call claim %q", claim.Name())
+			return nil, fmt.Errorf("execfake: malformed call record name %q", entry.Name())
 		}
 		sequence = append(sequence, number)
 	}
@@ -233,9 +213,6 @@ func (fake *ExecFake) records() ([]execRecord, error) {
 	records := make([]execRecord, 0, len(sequence))
 	for _, number := range sequence {
 		data, err := os.ReadFile(filepath.Join(fake.state, "records", strconv.Itoa(number)))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("execfake: call %d was claimed but its record was not published", number)
-		}
 		if err != nil {
 			return nil, err
 		}
@@ -283,10 +260,6 @@ func (fake *ExecFake) reportUnexpected() {
 	}
 }
 
-func (fake *ExecFake) replyPath(index int, stream string) string {
-	return filepath.Join(fake.state, "replies", fmt.Sprintf("%d.%s", index, stream))
-}
-
 func (fake *ExecFake) rulesPath(name string) string {
 	return filepath.Join(fake.state, "rules", strconv.Itoa(slices.Index(fake.order, name))+".sh")
 }
@@ -323,28 +296,30 @@ func (fake *ExecFake) render(name string) {
 		chain.WriteString("fi\n")
 	}
 	script.Write(chain.Bytes())
-	claims, records := shellquote.Word(filepath.Join(fake.state, "claims")), shellquote.Word(filepath.Join(fake.state, "records"))
-	// The claim count is only a starting point: mkdir is the exclusive claim,
-	// and a failed mkdir of a number that does not exist is a real failure.
-	fmt.Fprintf(&script, `execfake_claim() {
-  set -- %[1]s/*
-  execfake_call=0
-  [ -e "$1" ] && execfake_call=$#
-  while ! %[5]s %[1]s/"$execfake_call" 2>/dev/null; do
-    [ -d %[1]s/"$execfake_call" ] || return 1
-    execfake_call=$((execfake_call + 1))
-  done
-}
-if ! execfake_claim; then
-  printf 'execfake: cannot claim a record for a call to %%s\n' %[3]s >&2
+	records := shellquote.Word(filepath.Join(fake.state, "records"))
+	// Builtins only: counting existing records gives a starting number, the
+	// exclusive create under set -C is the claim, and a failed create of a
+	// number that does not exist is a real failure. The create uses true, a
+	// regular builtin, because a failed redirection of the special builtin :
+	// would exit the shell.
+	fmt.Fprintf(&script, `execfake_call=0
+for execfake_record in %[1]s/*; do
+  [ -e "$execfake_record" ] && execfake_call=$((execfake_call + 1))
+done
+set -C
+until { true >%[1]s/"$execfake_call"; } 2>/dev/null; do
+  if [ ! -e %[1]s/"$execfake_call" ]; then
+    printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
+    exit 126
+  fi
+  execfake_call=$((execfake_call + 1))
+done
+set +C
+if ! { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >>%[1]s/"$execfake_call"; } 2>/dev/null; then
+  printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
   exit 126
 fi
-if ! printf '%%s\000' %[3]s "$execfake_rule" "$#" "$@" >%[2]s/."$execfake_call" ||
-  ! %[4]s -f %[2]s/."$execfake_call" %[2]s/"$execfake_call"; then
-  printf 'execfake: cannot record a call to %%s\n' %[3]s >&2
-  exit 126
-fi
-`, claims, records, shellquote.Word(name), shellquote.Word(fake.mv), shellquote.Word(fake.mkdir))
+`, records, shellquote.Word(name))
 	script.WriteString("case $execfake_rule in\n")
 	script.Write(replies.Bytes())
 	fmt.Fprintf(&script, "*) printf 'execfake: unexpected call to %%s\\n' %s >&2; exit 127 ;;\nesac\n", shellquote.Word(name))
@@ -354,10 +329,10 @@ fi
 func (fake *ExecFake) renderReply(out *bytes.Buffer, index int, reply Reply) {
 	fmt.Fprintf(out, "%d)\n", index)
 	if reply.Stdout != "" {
-		fmt.Fprintf(out, "  %s %s\n", shellquote.Word(fake.cat), shellquote.Word(fake.replyPath(index, "stdout")))
+		fmt.Fprintf(out, "  printf '%%s' %s\n", shellquote.Word(reply.Stdout))
 	}
 	if reply.Stderr != "" {
-		fmt.Fprintf(out, "  %s %s >&2\n", shellquote.Word(fake.cat), shellquote.Word(fake.replyPath(index, "stderr")))
+		fmt.Fprintf(out, "  printf '%%s' %s >&2\n", shellquote.Word(reply.Stderr))
 	}
 	if reply.Script != "" {
 		fmt.Fprintf(out, "  execfake_reply_%d() {\n%s\n}\n  execfake_reply_%d \"$@\"\n  exit $?\n  ;;\n", index, reply.Script, index)

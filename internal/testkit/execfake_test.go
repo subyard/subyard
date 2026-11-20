@@ -264,25 +264,45 @@ func TestExecFakeChangesRulesWhileCallsRun(t *testing.T) {
 	}
 }
 
-func TestExecFakeFailsACallItCannotRecord(t *testing.T) {
+func TestExecFakeRecordsWithShellBuiltinsOnly(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only record directory")
 	}
 	recorder := &cleanupRecorder{TB: t}
 	bin := TempDir(t)
 	fake := NewExecFake(recorder, bin, "tool")
-	fake.On(Match{}, Reply{Stdout: "answered\n"})
+	fake.On(Match{Args: []string{"script"}}, Reply{Stdout: "out 'quoted'\n", Stderr: "err $HOME\n", Script: `printf '%s|' "$@"; exit 4`})
+	run := func(arguments ...string) (string, string, int) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		command := exec.Command(filepath.Join(bin, "tool"), arguments...)
+		command.Env, command.Stdout, command.Stderr = []string{"PATH=/nonexistent"}, &stdout, &stderr
+		err := command.Run()
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			t.Fatal(err)
+		}
+		return stdout.String(), stderr.String(), command.ProcessState.ExitCode()
+	}
+	if stdout, stderr, code := run("script"); stdout != "out 'quoted'\nscript|" || stderr != "err $HOME\n" || code != 4 {
+		t.Fatalf("builtin reply: stdout=%q stderr=%q code=%d", stdout, stderr, code)
+	}
 	records := filepath.Join(fake.state, "records")
 	if err := os.Chmod(records, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(records, 0o700) })
-	stdout, stderr, code := runShim(t, filepath.Join(bin, "tool"), "run")
-	if code != 126 || stdout != "" || !strings.Contains(stderr, "cannot record a call to tool") {
+	if stdout, stderr, code := run("script"); code != 126 || stdout != "" || !strings.Contains(stderr, "cannot record a call to tool") {
 		t.Fatalf("unrecorded call: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
+	if err := os.Chmod(records, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake.AssertCalls(Call{Tool: "tool", Args: []string{"script"}})
+	// A record whose write failed after its claim is reported, not dropped.
+	WriteFile(t, filepath.Join(records, "1"), nil, 0o600)
 	recorder.runCleanups()
-	if len(recorder.failures) != 1 || !strings.Contains(recorder.failures[0], "call 0 was claimed but its record was not published") {
+	if len(recorder.failures) != 1 || !strings.Contains(recorder.failures[0], "execfake: call 1: record does not end with NUL") {
 		t.Fatalf("cleanup failures: %q", recorder.failures)
 	}
 }
@@ -299,7 +319,7 @@ func TestExecFakeCopiesRulesAndRefusesNUL(t *testing.T) {
 		t.Fatalf("registered rule changed with its caller's slice: stdout=%q code=%d", stdout, code)
 	}
 	fake.On(Match{Contains: []string{"a\x00b"}}, Reply{})
-	fake.On(Match{}, Reply{Script: "exit 0\x00"})
+	fake.On(Match{}, Reply{Stdout: "a\x00b"})
 	if len(recorder.failures) != 2 {
 		t.Fatalf("NUL rules accepted: %q", recorder.failures)
 	}
