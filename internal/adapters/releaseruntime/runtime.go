@@ -1358,7 +1358,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 }
 
 type candidateVerification struct {
-	selection      *releaseSelection
 	candidate      publishedCandidate
 	digest         releasetransition.Fingerprint
 	version        string

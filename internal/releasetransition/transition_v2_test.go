@@ -1024,54 +1024,6 @@ func publishedV0111CatalogFixture(t *testing.T) CapabilityCatalog {
 	return catalog
 }
 
-func (fixture *v2PostActivationRecoveryFixture) rewriteJournal(change func(*JournalRecord)) {
-	fixture.t.Helper()
-	current, err := fixture.transition.store.ReadCurrentJournal()
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	journal, err := ParseJournal(current.Payload)
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	change(&journal)
-	journal.IntentDigest = bindJournalIntent(
-		journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps,
-	)
-	payload, err := MarshalJournal(journal)
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	if err := fixture.transition.store.CompareAndSwapCurrentJournal(current, payload); err != nil {
-		fixture.t.Fatal(err)
-	}
-	updated, err := fixture.transition.store.ReadCurrentJournal()
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	fixture.sourceJournal = journal
-	fixture.transition.options.Replacement.Transaction = journal.Transaction
-	fixture.transition.options.Replacement.Fingerprint = updated.Fingerprint
-}
-
-func (fixture *v2PostActivationRecoveryFixture) removeEvidence(
-	step string,
-	checkpoint EvidenceCheckpoint,
-) {
-	fixture.t.Helper()
-	name, err := checkpointEvidenceName(fixture.sourceJournal.Transaction, step, checkpoint)
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	path := filepath.Join(
-		fixture.configHome, "release-transition", "v2", "transactions",
-		string(fixture.sourceJournal.Transaction), "evidence", name,
-	)
-	if err := os.Remove(path); err != nil {
-		fixture.t.Fatal(err)
-	}
-}
-
 func snapshotV2ProtectedTree(t *testing.T, configHome string) []byte {
 	t.Helper()
 	root := filepath.Join(configHome, "release-transition", "v2")

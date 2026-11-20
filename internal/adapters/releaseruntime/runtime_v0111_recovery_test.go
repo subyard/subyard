@@ -1,7 +1,6 @@
 package releaseruntime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,30 +102,6 @@ func (v0111AbsentOwnerRegistration) Commit(
 	return nil
 }
 
-func inspectV0111ProcessRuntime(
-	t *testing.T,
-	repositoryRoot string,
-	request releasetransition.ProcessRequest,
-) releasetransition.ProcessResponse {
-	t.Helper()
-	payload, err := json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(filepath.Join(repositoryRoot, "bin", "yard-engine"), "_release-transition")
-	command.Stdin = bytes.NewReader(payload)
-	var output, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &output, &stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("read transition from %s: %v: %s", repositoryRoot, err, stderr.String())
-	}
-	var response releasetransition.ProcessResponse
-	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
-		t.Fatalf("decode transition read %q: %v", output.String(), err)
-	}
-	return response
-}
-
 func newV0111ProcessFixture(t *testing.T) (v0111ProcessFixture, v0111FixtureBindings) {
 	t.Helper()
 	root := t.TempDir()
@@ -168,129 +142,6 @@ func newV0111ProcessFixture(t *testing.T) (v0111ProcessFixture, v0111FixtureBind
 		catalog:           releasetransition.BuiltinCapabilityCatalog().Digest(),
 	}
 	return fixture, bindings
-}
-
-func seedV0111PostActivationScopeJournal(
-	t *testing.T,
-	fixture v0111ProcessFixture,
-	bindings v0111FixtureBindings,
-) v0111ProcessFixture {
-	t.Helper()
-	if fixture.source.release != bindings.sourceID ||
-		fixture.candidate.release != bindings.candidateID {
-		t.Fatal("fixture release IDs do not match the exact seed bindings")
-	}
-	links, err := releasetransition.NewRuntimeLinkStore(fixture.runtimeRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
-		ConfigHome: fixture.configHome,
-		Releases: releasetransition.ReleasePair{
-			From: fixture.previous, Target: fixture.source.release,
-		},
-		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-			return links.Observe()
-		},
-		ActivateLinks: func(
-			_ context.Context,
-			pair releasetransition.ReleasePair,
-		) (releasetransition.ReleaseLinks, error) {
-			return links.Activate(pair)
-		},
-		Reconcilers: []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{
-			statePath: fixture.statePath, desired: v0111FixtureFingerprint("source-scope"), fail: true,
-		}},
-		OwnerRegistration: v0111AbsentOwnerRegistration{},
-		RegistryPayload:   fixture.registry,
-		ArtifactDigest:    bindings.sourceArtifact,
-		CandidateVersion:  "0.11.1",
-		NewTransactionID:  func() releasetransition.TransactionID { return fixture.sourceTx },
-		VerifyAuthorization: func(
-			releasetransition.PlanToken,
-			releasetransition.Authorization,
-		) bool {
-			return true
-		},
-	})
-	if err != nil {
-		t.Fatalf("construct source transition: %v", err)
-	}
-	goal := releasetransition.Goal{
-		Target: fixture.source.release, Direction: releasetransition.DirectionActivateTarget,
-	}
-	inspection, err := transition.Inspect(context.Background(), goal)
-	if err != nil {
-		t.Fatalf("inspect source transition: %v", err)
-	}
-	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{
-		Plan: inspection.Plan, Authorization: "fixture-authorization",
-	})
-	if err != nil {
-		t.Fatalf("converge source transition: %v", err)
-	}
-	if outcome.Status != releasetransition.StatusRecovering {
-		t.Fatalf("source fixture outcome = %#v", outcome)
-	}
-	store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.journal, err = store.ReadCurrentJournal()
-	if err != nil {
-		t.Fatalf("read source journal: %v", err)
-	}
-	if !fixture.journal.Exists {
-		t.Fatalf("source fixture produced no journal; outcome = %#v", outcome)
-	}
-	journal, err := releasetransition.ParseJournal(fixture.journal.Payload)
-	if err != nil {
-		t.Fatalf("parse source journal: %v", err)
-	}
-	registry, _, err := releasetransition.ParseRegistryV2(fixture.registry, releasetransition.BuiltinCapabilityCatalog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending := make(map[string]bool)
-	for _, migration := range registry.Migrations {
-		pending[migration.ID+".ledger"] = true
-	}
-	if journal.Transaction != fixture.sourceTx ||
-		journal.Checkpoint != releasetransition.JournalReconciling || len(journal.Steps) != len(pending) ||
-		journal.ArtifactDigest != bindings.sourceArtifact ||
-		journal.RegistryDigest != bindings.registry || journal.CatalogDigest != bindings.catalog {
-		t.Fatalf("seeded source journal = %#v", journal)
-	}
-	expectedMigrations := map[string]string{
-		"canonicalize-test-vms-settings-v2": "ledger.settings",
-		"canonicalize-test-yard-owner-v2":   "ledger.owner-registration",
-	}
-	for _, step := range journal.Steps {
-		if !pending[step.ID] {
-			t.Fatalf("source journal lost the fixture's intended migration steps: %#v", step)
-		}
-		delete(pending, step.ID)
-		if expectedMigrations[string(step.Migration)] != step.Resource {
-			t.Fatalf("unexpected seeded source migration: %#v", step)
-		}
-		delete(expectedMigrations, string(step.Migration))
-		if step.Checkpoint != releasetransition.StepVerified || step.Evidence == nil ||
-			step.Evidence.Checkpoint != releasetransition.EvidenceVerified {
-			t.Fatalf("seeded source step = %#v", step)
-		}
-	}
-	if len(pending) != 0 || len(expectedMigrations) != 0 {
-		t.Fatalf("missing seeded source migrations: %v, %v", pending, expectedMigrations)
-	}
-	ledger, err := store.ReadLedger()
-	if err != nil || !ledger.Exists {
-		t.Fatalf("seeded ledger = %#v, %v", ledger, err)
-	}
-	fixture.ledger = append([]byte(nil), ledger.Payload...)
-	if err := os.WriteFile(fixture.installer, []byte("#!/bin/sh\n# --publish-only\nexit 97\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return fixture
 }
 
 func writeV0111ProcessRuntime(
