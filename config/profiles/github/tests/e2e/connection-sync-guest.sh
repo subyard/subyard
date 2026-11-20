@@ -21,7 +21,7 @@ SSH_SERVICE=subyard-github-connection-ssh-e2e.service
 AUTO_SERVICE=subyard-github-connection-auto-e2e.service
 BROKER_SERVICE=subyard-github-connection-e2e.service
 RELEASE="$ROOT/.build/github-connection-release"
-VERSION=0.21.2-github-connection-e2e
+VERSION=1.0.0-github-connection.e2e
 fail() { printf 'github-connection-e2e: %s\n' "$*" >&2; exit 1; }
 owned() { [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || fail 'fixture ownership differs'; }
 systemctl_user() {

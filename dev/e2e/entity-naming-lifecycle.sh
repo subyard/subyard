@@ -110,7 +110,7 @@ chmod 0600 "$root/.fixture-run"
 EOS
 } | remote /usr/sbin/runuser -u dev -- bash -s -- "$REMOTE_DATA" "$REMOTE" "$RUN_ID"
 
-VERSION=hostid-e2e
+VERSION=1.0.0-hostid.e2e
 phase package-runtime
 RELEASE="$LOCAL/release"
 "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE" --version "$VERSION" >/dev/null
