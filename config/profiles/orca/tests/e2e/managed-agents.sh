@@ -66,8 +66,10 @@ jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE/git-
   || die 'release readiness did not report ready before ordinary init'
 [ "$(package_records)" = "$prompt_packages" ] || die 'readiness changed the installed packages'
 yard init --yes || die 'ordinary init did not apply the new default'
-guest_root jq -e 'has("permissions") | not' "$claude_policy" >/dev/null \
+guest_root jq -e '[.permissions.ask[]? | select(startswith("Bash(git "))] == []' "$claude_policy" >/dev/null \
   || die 'ordinary init kept Claude Git prompts'
+guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \
+  || die 'the default DEV_SUDO=prompt did not install the Claude sudo ask rules'
 guest_root grep -Fxq 'git_approval=off' /usr/local/bin/codex-policy-check \
   || die 'ordinary init kept Codex Git prompts'
 guest_root cat "$inventory" | jq -e '.applied_settings.CODING_TOOL_GIT_APPROVAL == "off"' >/dev/null \
