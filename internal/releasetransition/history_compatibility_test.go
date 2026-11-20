@@ -233,6 +233,18 @@ func TestRollbackDeclarationContract(t *testing.T) {
 		older.ReadsRegistryFeature(RegistryFeatureRetiredPrefixDependencies) {
 		t.Fatalf("declaration without features: %v %v", older, err)
 	}
+	if err := CheckOwnRollbackDeclaration(shipped); err != nil {
+		t.Fatalf("own shipped declaration: %v", err)
+	}
+	own := `{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) + `","migrations":[],"profileFormats":[],"registryFeatures":`
+	for name, features := range map[string]string{
+		"unimplemented": `["a-later-form","retired-prefix-dependencies"]`,
+		"repeated":      `["retired-prefix-dependencies","retired-prefix-dependencies"]`,
+	} {
+		if err := CheckOwnRollbackDeclaration([]byte(own + features + "}")); err == nil {
+			t.Errorf("own declaration with %s features was accepted", name)
+		}
+	}
 	// Another release's features are read tolerantly: unknown ones are ignored.
 	newer, err := ParseRollbackDeclaration([]byte(`{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) +
 		`","migrations":[],"profileFormats":[],"registryFeatures":["a-later-form","retired-prefix-dependencies"]}`))

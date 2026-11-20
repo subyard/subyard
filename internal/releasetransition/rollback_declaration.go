@@ -60,3 +60,24 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 	}
 	return declaration, nil
 }
+
+// CheckOwnRollbackDeclaration is the packaging check of a release's own
+// declaration: it must parse and claim no registry feature this release's
+// compiled parser does not implement. Another release's declaration is read
+// tolerantly with ParseRollbackDeclaration instead.
+func CheckOwnRollbackDeclaration(payload []byte) error {
+	declaration, err := ParseRollbackDeclaration(payload)
+	if err != nil {
+		return err
+	}
+	implemented := RegistryReaderFeatures()
+	for index, feature := range declaration.RegistryFeatures {
+		if !slices.Contains(implemented, feature) {
+			return invalid("rollback declaration claims registry feature %q this release does not implement", feature)
+		}
+		if index > 0 && declaration.RegistryFeatures[index-1] >= feature {
+			return invalid("rollback declaration registry features must be sorted and unique")
+		}
+	}
+	return nil
+}

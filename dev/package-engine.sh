@@ -168,6 +168,10 @@ GOOS="$goos" GOARCH="$goarch" "$SCRIPT_DIR/build-profiles.sh" \
 install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-release.sh"
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
+# The release's own declaration claims only registry features its compiled parser implements.
+( cd "$REPO" && env -u GOOS -u GOARCH CGO_ENABLED=0 go run -buildvcs=false -mod=readonly \
+    ./dev/rollback-declaration-check "$bundle_stage/config/release-rollback.json" ) \
+  || { printf 'package-engine: invalid rollback declaration\n' >&2; exit 1; }
 for required in config/installation-capabilities.json \
   config/retired-components.json \
   internal/adapters/configmaterial/tomli_w.py \
