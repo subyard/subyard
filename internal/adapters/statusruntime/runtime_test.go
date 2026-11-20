@@ -1010,3 +1010,43 @@ func TestOldNativeSpaceWriterRefusesAdvancedEpochInRetainedRoot(t *testing.T) {
 		t.Fatal("old native writer published after full cleanup", err)
 	}
 }
+
+func TestProfileAdvisoryStatusShowsConvergedWarningWithDeclaredRemediation(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\n[ \"$1\" = --check ] && [ \"$SUBYARD_PROFILE_DIAGNOSTICS\" = 1 ] || exit 3\n"+
+		"[ -n \"$ADVISORY\" ] && printf 'subyard-profile-advisory-v1 %s\\n' \"$ADVISORY\" >&2\nexit \"${EXIT:-0}\"\n"), 0o700)
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "ADVISORY": "storage-capacity"},
+		Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Advisories: map[string]string{"storage-capacity": "inside the yard run cleanup"}}}}
+	yard := domain.Context{YardName: "demo", YardKind: domain.YardVM}
+	want := []domain.SharedResourceStatus{{Profile: "sample", Name: "storage-capacity", State: "warning", Hint: "inside the yard run cleanup"}}
+	if got := runtime.profileAdvisoryStatus(context.Background(), yard, true); !reflect.DeepEqual(got, want) {
+		t.Fatalf("advisory: %#v", got)
+	}
+	for _, change := range []struct{ name, key, value string }{
+		{"unconverged", "EXIT", "1"}, {"undeclared", "ADVISORY", "private-canary"}, {"unselected", "ENVIRONMENT_PROFILES", ""},
+	} {
+		environment := map[string]string{"ENVIRONMENT_PROFILES": "sample", "ADVISORY": "storage-capacity", change.key: change.value}
+		runtime.Environment = environment
+		if got := runtime.profileAdvisoryStatus(context.Background(), yard, true); len(got) != 0 {
+			t.Fatalf("%s profile showed an advisory: %#v", change.name, got)
+		}
+	}
+	if got := runtime.profileAdvisoryStatus(context.Background(), yard, false); len(got) != 0 {
+		t.Fatal("stopped yard ran an advisory check")
+	}
+}
+
+func TestDashboardProfileAdvisoryUsesOneProbe(t *testing.T) {
+	root := testkit.TempDir(t)
+	runs := filepath.Join(root, "runs")
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\necho run >> \"$RUNS\"\nprintf 'subyard-profile-advisory-v1 storage-capacity\\n' >&2\n"), 0o700)
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "SAMPLE_PORT": "22222", "RUNS": runs},
+		Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Advisories: map[string]string{"storage-capacity": "run cleanup"},
+			Dashboard: &profile.IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_PORT"}}}}
+	yard := domain.Context{YardName: "demo", YardKind: domain.YardVM}
+	got := append(runtime.profileDashboardStatus(context.Background(), yard, true), runtime.profileAdvisoryStatus(context.Background(), yard, true)...)
+	calls, _ := os.ReadFile(runs)
+	if len(got) != 2 || got[0].State != "up" || got[1] != (domain.SharedResourceStatus{Profile: "sample", Name: "storage-capacity", State: "warning", Hint: "run cleanup"}) || string(calls) != "run\n" {
+		t.Fatalf("status %#v after probes %q", got, calls)
+	}
+}

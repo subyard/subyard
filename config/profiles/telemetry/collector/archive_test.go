@@ -122,7 +122,7 @@ os._exit(0)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := active.prune(); err != nil {
+				if err := prune(active); err != nil {
 					t.Fatal(err)
 				}
 				stats, err := Stats(ctx, active.db)

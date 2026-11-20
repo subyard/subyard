@@ -76,7 +76,10 @@ class Runtime:
             self.assets[library/name] = (content, mode)
         prefix = '# Managed by Subyard telemetry profile.\n'
         common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
-        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}',
+        # The profile's TELEMETRY_DISK_BUDGET; the collector default applies without it.
+        budget = os.environ.get('SUBYARD_TELEMETRY_DISK_BYTES', '')
+        budget = ' --disk-bytes '+budget if re.fullmatch('[1-9][0-9]{0,18}', budget) else ''
+        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}{budget}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
         collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
         # Workloads inherit their caller's ceilings. Do not put a low collector
@@ -415,6 +418,27 @@ class Runtime:
                 diagnostics.append({'parameter': 'telemetry.runtime', 'installed': 'unknown', 'desired': 'current'})
             result['diagnostics'] = diagnostics
         return result
+
+    def raw_refused(self):
+        """Whether the collector's private marker says raw OTLP is refused for space."""
+        try:
+            directory = os.open(self.data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return False
+        try:
+            fd = os.open('raw-otlp-refused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(directory)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 128):
+                raise ValueError('foreign telemetry refusal marker')
+            return re.fullmatch(rb'raw_otlp_refused_since=[0-9TZ:.-]{1,40}\n', os.pread(fd, 129, 0)) is not None
+        finally:
+            os.close(fd)
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
@@ -835,6 +859,8 @@ def main():
             print('telemetry-drift')
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
+        elif observation['state'] == 'current' and runtime.selected and runtime.raw_refused():
+            print('telemetry-advisory storage-capacity')
         return
     if mode not in ('apply', 'refresh') or (mode == 'refresh' and bindings != [observation['actual'], observation['desired']]):
         raise ValueError('telemetry observation changed')

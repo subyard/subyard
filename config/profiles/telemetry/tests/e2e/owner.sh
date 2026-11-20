@@ -80,7 +80,7 @@ if [ -n "$native_agents" ]; then
 fi
 timeout 30 bash -c 'until test -S /var/lib/subyard/telemetry/control.sock && test -f /var/lib/subyard/telemetry/delegation.json; do sleep 0.2; done'
 python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 "$ROOT/config/profiles/telemetry" <<'PY_UNITS'
-import json, os, pathlib, re, sqlite3, struct, subprocess, sys, threading, time, urllib.error, urllib.request
+import base64, json, os, pathlib, re, sqlite3, struct, subprocess, sys, threading, time, urllib.error, urllib.request
 sys.path.insert(0, sys.argv[3])
 import forward
 
@@ -146,12 +146,15 @@ launched = subprocess.run(['subyard-telemetry-run', '--agent', 'other', '--scope
     '--project-id', 'telemetry-probe-project', '--yard-id', 'telemetry-probe-yard', '--task-id', email,
     '--', '/bin/true', prompt, output], capture_output=True, env=environment, check=True, timeout=15)
 run = next(line.partition(b'=')[2].decode() for line in launched.stderr.splitlines() if line.startswith(b'agent_run_id='))
+# The store compresses raw OTLP; its export returns the stored protobuf.
+rows = [json.loads(line) for line in subprocess.run([os.environ['SUBYARD_TELEMETRY_COLLECTOR'], 'export', '--data-dir', str(data),
+    '--limit', '10000'], capture_output=True, check=True, timeout=30).stdout.splitlines()]
+signals = {}
+for kind in ('logs', 'metrics', 'traces'):
+    signals[kind] = b''.join(base64.b64decode(row['protobuf']) for row in rows if row['encoding'] == 'otlp/'+kind and row.get('protobuf'))
+    assert signals[kind], 'installed collector did not commit a canary signal'
 with sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
     db.execute('PRAGMA query_only=ON')
-    signals = {}
-    for kind in ('logs', 'metrics', 'traces'):
-        signals[kind] = b''.join(row[0] for row in db.execute('SELECT protobuf FROM records WHERE encoding=?', ('otlp/'+kind,)))
-        assert signals[kind], 'installed collector did not commit a canary signal'
     deadline = time.monotonic()+15
     while True:
         row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run,)).fetchone()
@@ -166,6 +169,7 @@ assert all(value in signals['logs'] for value in (b'0b9f7d4e-1111-4222-8333-9444
 assert bytes.fromhex(trace_id) in signals['traces'], 'raw trace ID missing'
 assert run_body['project_id'] == 'telemetry-probe-project' and run_body['yard_id'] == 'telemetry-probe-yard'
 markers = (b'canary', account.encode(), token.encode())  # Every private fixture and probe value contains 'canary'.
+assert not any(marker in signal for marker in markers for signal in signals.values()), 'privacy canary persisted in raw OTLP'
 for path in data.rglob('*'):
     try:
         content = path.read_bytes() if path.is_file() else b''

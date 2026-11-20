@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 
 
@@ -84,6 +85,18 @@ def codex_arguments(args):
         else:
             arguments.append(arg)
     return arguments, sandbox
+
+
+def parent_session_hint(env, own):
+    """Name the starting agent's session as an OpenTelemetry resource attribute."""
+    parent = own.get('CLAUDE_CODE_SESSION_ID') or own.get('CODEX_THREAD_ID')
+    if not parent:
+        return env
+    key = 'subyard.parent_session.id'
+    # Resource attribute values are percent-encoded; a nested start replaces the inherited link.
+    kept = [item for item in env.get('OTEL_RESOURCE_ATTRIBUTES', '').split(',')
+            if item.strip() and item.split('=', 1)[0].strip() != key]
+    return {**env, 'OTEL_RESOURCE_ATTRIBUTES': ','.join([*kept, key + '=' + urllib.parse.quote(parent, safe='')])}
 
 
 def reviewer_scratch(env):
@@ -448,7 +461,7 @@ class Worker:
         elif self.config.get('role') == 'observer':
             self.task = 'Observe the assigned checks. Do not change repository sources.\n' + self.task
         self.task = STANDALONE + self.task
-        self.env = {**os.environ, **self.config.get('env', {})}
+        self.env = parent_session_hint({**os.environ, **self.config.get('env', {})}, os.environ)
         self.redact = event_redactor(self.env)
         self.pending = {}
         self.replying = set()

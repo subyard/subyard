@@ -98,7 +98,8 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
 
 def desired(agent, endpoint, token):
     if agent == 'codex':
-        result = {'log_user_prompt': False}
+        # Agent responses carry the only child-thread link; the collector keeps their IDs, not the text.
+        result = {'log_user_prompt': False, 'log_agent_responses': True}
         for key, path in [('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')]:
             result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary',
                                        'headers': {'Authorization': 'Bearer '+token if token else MISSING},

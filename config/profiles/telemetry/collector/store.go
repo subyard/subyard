@@ -14,11 +14,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
@@ -31,13 +33,19 @@ type Limits struct {
 	QueueRequests int
 	QueueBytes    int64
 	RequestBytes  int64
-	DiskBytes     int64
-	Retention     time.Duration
-	BatchDelay    time.Duration
+	// DiskBytes is a soft budget: raw OTLP stops a tenth below it, other
+	// records continue. Nothing expires automatically; see Prune.
+	DiskBytes  int64
+	BatchDelay time.Duration
+	// ReserveBytes is the free space kept on the data partition, at most a
+	// twentieth of it. Below it raw OTLP is refused as well.
+	ReserveBytes int64
 }
 
+const DefaultDiskBytes = 30 << 30
+
 func DefaultLimits() Limits {
-	return Limits{128, 16 << 20, 2 << 20, 1 << 30, 7 * 24 * time.Hour, 5 * time.Millisecond}
+	return Limits{128, 16 << 20, 2 << 20, DefaultDiskBytes, 5 * time.Millisecond, 1 << 30}
 }
 
 type writeRequest struct {
@@ -56,6 +64,8 @@ type Store struct {
 	pendingBytes    int64
 	pendingRequests int
 	closed          bool
+	markerMu        sync.Mutex
+	rawRefused      bool
 	queue           chan writeRequest
 	done            chan struct{}
 }
@@ -133,7 +143,7 @@ func openStore(dir string, limits Limits) (*Store, error) {
 	if absoluteErr != nil {
 		return nil, absoluteErr
 	}
-	if limits.QueueRequests < 1 || limits.QueueBytes < 1 || limits.RequestBytes < 1 || limits.DiskBytes < 1 || limits.Retention <= 0 || limits.BatchDelay <= 0 {
+	if limits.QueueRequests < 1 || limits.QueueBytes < 1 || limits.RequestBytes < 1 || limits.DiskBytes < 1 || limits.BatchDelay <= 0 {
 		return nil, errors.New("invalid telemetry bounds")
 	}
 	if err := privateDir(dir); err != nil {
@@ -177,20 +187,10 @@ func openStore(dir string, limits Limits) (*Store, error) {
 	if err = db.QueryRow("PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
 		return bad(errors.New("cannot enable FULL synchronization"))
 	}
-	var pageSize int64
-	if err = db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
-		return bad(err)
-	}
-	maxPages := limits.DiskBytes / 3 / pageSize
-	if maxPages < 64 {
+	// The budget is soft, so a lowered budget or a store above it still opens
+	// and keeps accepting usage and lifecycle records.
+	if limits.DiskBytes < 1<<20 {
 		return bad(errors.New("telemetry disk bound too small"))
-	}
-	var actualMax int64
-	if err = db.QueryRow(fmt.Sprintf("PRAGMA max_page_count=%d", maxPages)).Scan(&actualMax); err != nil {
-		return bad(err)
-	}
-	if actualMax > maxPages {
-		return bad(errors.New("existing database exceeds capacity bound"))
 	}
 	if _, err = db.Exec("PRAGMA wal_autocheckpoint=128"); err != nil {
 		return bad(err)
@@ -203,11 +203,16 @@ func openStore(dir string, limits Limits) (*Store, error) {
 			return bad(err)
 		}
 	}
+	if _, err = db.Exec(usageSchema); err != nil {
+		return bad(err)
+	}
 	var origin string
 	if err = db.QueryRow("SELECT value FROM metadata WHERE key='store_generation_id'").Scan(&origin); err != nil {
 		return bad(err)
 	}
 	s := &Store{db: db, dir: dir, origin: origin, limits: limits, lock: lock, queue: make(chan writeRequest, limits.QueueRequests), done: make(chan struct{})}
+	_, err = os.Lstat(filepath.Join(dir, RawRefusedMarker))
+	s.rawRefused = err == nil
 	go s.writer()
 	return s, nil
 }
@@ -293,7 +298,8 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 }
 
 func recordEnvelope(r Record) (Envelope, error) {
-	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
+	// collector:* sources are derived by the collector itself, never produced.
+	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) || strings.HasPrefix(r.SourceID, "collector:") {
 		return Envelope{}, errInvalidRecord
 	}
 	body, err := json.Marshal(r.Body)
@@ -408,8 +414,6 @@ func (s *Store) submit(ctx context.Context, entries []Envelope, replay bool, adv
 }
 func (s *Store) writer() {
 	defer close(s.done)
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
 	for {
 		var first writeRequest
 		select {
@@ -418,9 +422,6 @@ func (s *Store) writer() {
 				return
 			}
 			first = r
-		case <-ticker.C:
-			_ = s.prune()
-			continue
 		}
 		batch := []writeRequest{first}
 		timer := time.NewTimer(s.limits.BatchDelay)
@@ -437,11 +438,16 @@ func (s *Store) writer() {
 			}
 		}
 		timer.Stop()
-		err := s.commit(batch)
-		for _, r := range batch {
+		results, err := s.commit(batch)
+		for i, r := range batch {
 			result := err
-			if errors.Is(err, errInvalidRecord) && len(batch) > 1 {
-				result = s.commit([]writeRequest{r})
+			if err == nil {
+				result = results[i]
+			} else if errors.Is(err, errInvalidRecord) && len(batch) > 1 {
+				var single []error
+				if single, result = s.commit([]writeRequest{r}); result == nil {
+					result = single[0]
+				}
 			}
 			s.mu.Lock()
 			s.pendingBytes -= r.bytes
@@ -451,9 +457,39 @@ func (s *Store) writer() {
 		}
 	}
 }
-func (s *Store) diskSize() (int64, error) {
-	var total int64
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+
+// RawRefusedMarker names a small private file present while raw OTLP is
+// refused for space, so the profile can report it without opening SQLite.
+const RawRefusedMarker = "raw-otlp-refused"
+
+// markRawRefused publishes a changed refusal state; a failed update is retried
+// at the next commit or prune.
+func (s *Store) markRawRefused(refused bool) {
+	s.markerMu.Lock()
+	defer s.markerMu.Unlock()
+	if refused == s.rawRefused {
+		return
+	}
+	path := filepath.Join(s.dir, RawRefusedMarker)
+	var err error
+	if refused {
+		err = publishPrivate(path, []byte("raw_otlp_refused_since="+spoolTime()+"\n"))
+	} else if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+		err = syncDirectories(s.dir)
+	}
+	if err == nil {
+		s.rawRefused = refused
+	}
+}
+
+// usedBytes counts allocated database pages, so space freed by Prune is
+// reused, plus the WAL and its index.
+func (s *Store) usedBytes() (int64, error) {
+	var used int64
+	if err := s.db.QueryRow("SELECT (page_count-freelist_count)*page_size FROM pragma_page_count(),pragma_freelist_count(),pragma_page_size()").Scan(&used); err != nil {
+		return 0, err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
 		st, err := os.Stat(filepath.Join(s.dir, databaseName) + suffix)
 		if os.IsNotExist(err) {
 			continue
@@ -461,53 +497,76 @@ func (s *Store) diskSize() (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		total += st.Size()
+		used += st.Size()
 	}
-	return total, nil
+	return used, nil
 }
-func (s *Store) commit(batch []writeRequest) error {
-	// ponytail: one writer serializes bounded batches; shard only if measured throughput requires it.
-	size, err := s.diskSize()
+
+// rawCapacity reports whether raw OTLP still fits the budget minus a tenth
+// kept for other records, and the data partition keeps its reserve.
+func (s *Store) rawCapacity(incoming int64) (bool, error) {
+	used, err := s.usedBytes()
 	if err != nil {
-		return ErrStorage
+		return false, err
 	}
+	var fs unix.Statfs_t
+	if err = unix.Statfs(s.dir, &fs); err != nil {
+		return false, err
+	}
+	// A small partition keeps a twentieth of its size instead.
+	free, reserve := int64(fs.Bavail)*int64(fs.Bsize), min(s.limits.ReserveBytes, int64(fs.Blocks)*int64(fs.Bsize)/20)
+	return used+incoming <= s.limits.DiskBytes-s.limits.DiskBytes/10 && free >= reserve, nil
+}
+
+// raw reports whether an entry is raw OTLP or its per-request correlation,
+// the only data refused without raw capacity.
+func raw(e Envelope) bool {
+	return strings.HasPrefix(e.Kind, "otlp/") || e.SourceID == "collector:otlp-correlation"
+}
+
+// commit returns a batch error, or one result per request. Without raw
+// capacity it stores everything except raw OTLP and its correlations.
+func (s *Store) commit(batch []writeRequest) ([]error, error) {
+	// ponytail: one writer serializes bounded batches; shard only if measured throughput requires it.
 	var incoming int64
 	for _, r := range batch {
 		incoming += r.bytes
 	}
-	if size+incoming*8+128*1024 > s.limits.DiskBytes {
-		if err = s.prune(); err != nil {
-			return ErrStorage
-		}
-		size, err = s.diskSize()
-		if err != nil {
-			return ErrStorage
-		}
-		if size+incoming*8+128*1024 > s.limits.DiskBytes {
-			return ErrCapacity
-		}
+	fits, err := s.rawCapacity(incoming)
+	if err != nil {
+		return nil, ErrStorage
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
-		return ErrStorage
+		return nil, ErrStorage
 	}
 	defer tx.Rollback()
-	for _, r := range batch {
+	results := make([]error, len(batch))
+	for i, r := range batch {
+		entries := r.entries
+		// Producer frames carry no raw OTLP, so spool progress is never refused.
+		if !fits {
+			entries = slices.DeleteFunc(slices.Clone(entries), raw)
+		}
+		if len(entries) < len(r.entries) {
+			results[i] = ErrCapacity
+		}
 		if r.advance != nil {
 			if err = r.advance.apply(tx); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		for _, e := range r.entries {
+		for _, e := range entries {
 			if err = s.putRecord(tx, e); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
-		return ErrStorage
+		return nil, ErrStorage
 	}
-	return nil
+	s.markRawRefused(!fits)
+	return results, nil
 }
 
 func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
@@ -525,10 +584,12 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
 		return nil
 	}
 	if e.filtered {
+		// Markers live as long as records: expires_at holds the marker's
+		// receive time, and Prune removes it with records of the same age.
 		_, err := tx.Exec(`INSERT INTO filtered_events
 			SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM records WHERE origin_id=? AND event_id=?)
 			ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID,
-			time.Now().Add(s.limits.Retention).UTC().Format(timestampLayout), e.OriginID, e.EventID)
+			spoolTime(), e.OriginID, e.EventID)
 		if err != nil {
 			return ErrStorage
 		}
@@ -537,7 +598,7 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
 	res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version)
 		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM filtered_events WHERE origin_id=? AND event_id=?)
 		ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion,
-		e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion, e.OriginID, e.EventID)
+		e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), compressOTLP(e.Protobuf), e.ImportPolicyVersion, e.OriginID, e.EventID)
 	if err != nil {
 		return ErrStorage
 	}
@@ -554,49 +615,69 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
 	return nil
 }
 
-func (s *Store) prune() error {
-	cutoff := time.Now().Add(-s.limits.Retention).UTC().Format(timestampLayout)
+// Prune removes raw OTLP, per-request session correlations and samples
+// received before the cutoff, in bounded transactions. Usage and its bindings
+// are kept unless includeUsage is set; lifecycle records are always kept.
+func (s *Store) Prune(cutoff time.Time, includeUsage bool) (int64, error) {
+	var total int64
+	for {
+		n, err := s.pruneBatch(cutoff.UTC().Format(timestampLayout), includeUsage)
+		total += n
+		if err != nil || n == 0 {
+			if err == nil {
+				_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			}
+			// A prune that freed enough space clears the warning at once.
+			if fits, capacityErr := s.rawCapacity(0); err == nil && capacityErr == nil && fits {
+				s.markRawRefused(false)
+			}
+			return total, err
+		}
+	}
+}
+
+func (s *Store) pruneBatch(cutoff string, includeUsage bool) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	// Lifecycle responsibility outlives high-volume samples. In particular, an
 	// expired lease or exited agent is not evidence that its resource stopped.
-	if _, err = tx.Exec("DELETE FROM filtered_events WHERE expires_at<=?", spoolTime()); err != nil {
-		return err
+	if _, err = tx.Exec("DELETE FROM filtered_events WHERE expires_at<?", cutoff); err != nil {
+		return 0, err
 	}
-	_, err = tx.Exec(`WITH expired AS MATERIALIZED (
+	res, err := tx.Exec(`WITH expired AS MATERIALIZED (
 		SELECT sequence,origin_id,event_id FROM records WHERE received_time<?
-			AND (kind='sample' OR kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation')
+			AND (kind='sample' OR kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation' OR (? AND source_id=?))
 			ORDER BY sequence LIMIT 1000
 	) DELETE FROM records WHERE sequence IN (SELECT sequence FROM expired)
 		OR (source_id='collector:otlp-correlation' AND (origin_id,substr(event_id,1,instr(event_id,':')-1))
-			IN (SELECT origin_id,event_id FROM expired))`, cutoff)
+			IN (SELECT origin_id,event_id FROM expired))`, cutoff, includeUsage, usageSource)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
 	}
 	// Provisional receiver gaps have no canonical record and are resolved
 	// by run updates, independently of sample retention.
 	for _, table := range []string{"samples", "relations"} {
 		if _, err = tx.Exec("DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=" + table + ".origin_id AND r.event_id=" + table + ".event_id)"); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	for table, key := range map[string]string{"runs": "agent_run_id", "objects": "object_id", "allocations": "object_id"} {
 		query := "DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=" + table + ".origin_id AND r.encoding='json' AND json_extract(r.body,'$." + key + "')=" + table + "." + key + ")"
 		if _, err = tx.Exec(query); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if _, err = tx.Exec("DELETE FROM associations WHERE (origin_id,object_id) NOT IN(SELECT origin_id,object_id FROM objects)"); err != nil {
-		return err
+		return 0, err
 	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-	return err
+	return n, tx.Commit()
 }
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -766,6 +847,9 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 			return after, err
 		}
 		e.Body = body
+		if e.Protobuf, err = decompressOTLP(e.Protobuf); err != nil {
+			return after, err
+		}
 		if err = encoder.Encode(e); err != nil {
 			return after, err
 		}
@@ -883,4 +967,26 @@ func sanitizeEnvelope(e *Envelope, p Policy) ([]Envelope, error) {
 	}
 	e.filter = nil
 	return projected, nil
+}
+
+// Raw OTLP is stored as one zstd frame per record. Rows written before
+// compression start with the protobuf field tag and stay readable as-is.
+var (
+	zstdMagic      = []byte{0x28, 0xb5, 0x2f, 0xfd}
+	zstdEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
+	zstdDecoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(1<<28))
+)
+
+func compressOTLP(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	return zstdEncoder.EncodeAll(data, nil)
+}
+
+func decompressOTLP(data []byte) ([]byte, error) {
+	if !bytes.HasPrefix(data, zstdMagic) {
+		return data, nil
+	}
+	return zstdDecoder.DecodeAll(data, nil)
 }

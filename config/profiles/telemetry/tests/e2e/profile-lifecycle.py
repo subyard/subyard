@@ -27,7 +27,7 @@ unit['unit_sha256']=hashlib.sha256(pathlib.Path(unit['FragmentPath']).read_bytes
 print(json.dumps({'uid':account.pw_uid,'gid':account.pw_gid,'home':account.pw_dir,'pool':unit}))
 '''
 
-UNIT_FACTS = '''import json,pathlib,subprocess,sys
+UNIT_FACTS = '''import json,pathlib,re,subprocess,sys
 user,gid=sys.argv[1:]
 units=[]
 for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
@@ -47,7 +47,9 @@ for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
               'NoNewPrivileges':'yes','UMask':'0077','LimitCORE':'0','ExecStartPre':'','ExecStartPost':'','ExecStop':'','ExecStopPost':'','Environment':'','EnvironmentFiles':''}
     checks={key:fields.get(key,'')==value for key,value in expected.items()}
     checks['FragmentPath']=fields.get('FragmentPath')=='/etc/systemd/system/'+unit
-    checks['ExecStart']=start.startswith('{ path='+path+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=')==1
+    # The collector carries the profile's disk budget when the setting resolves.
+    budget='' if manager else '( --disk-bytes [1-9][0-9]*)?'
+    checks['ExecStart']=bool(re.match(re.escape('{ path='+path+' ; argv[]='+command)+budget+re.escape(' ; ignore_errors=no ; '),start)) and start.count('argv[]=')==1
     if not manager:
         checks.update(MemoryMax=fields.get('MemoryMax')=='268435456',TasksMax=fields.get('TasksMax')=='64',CPUQuota=fields.get('CPUQuotaPerSecUSec')=='250ms')
     else: checks['Delegate']=fields.get('Delegate')=='yes'
