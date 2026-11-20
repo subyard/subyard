@@ -907,6 +907,12 @@ func (runtime *Runtime) PrepareTransition(
 		parsed.selection.retry = "keep the current release active and rerun bootstrap with a different verified forward release"
 	}
 	ctx = selectionContext(ctx, parsed.selection)
+	// An explicitly selected older release keeps the rollback contract: it must
+	// still own every installed runtime activation.
+	older, err := runtime.admitOlderRelease(ctx, parsed.root, linksBefore, inspectionCandidate, configHome)
+	if err != nil {
+		return runtime.inspectionFailure(parsed, err)
+	}
 	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
 	if err == nil && completedAdmission != nil {
@@ -983,6 +989,12 @@ func (runtime *Runtime) PrepareTransition(
 					return err
 				}
 				defer fresh.Close()
+			}
+			if older != nil {
+				binding, err := runtime.retainedRuntimeBinding(ctx, older.activeRoot, older.targetRoot, configHome, older.owners)
+				if err != nil || binding != older.binding {
+					return fmt.Errorf("%w: installed runtime inputs changed", domain.ErrPlanStale)
+				}
 			}
 			if err := runtime.inspectRollbackCompatibility(ctx, fresh, request, parsed.selection); err != nil {
 				return err
@@ -1280,6 +1292,75 @@ func (runtime *Runtime) prepareProtectedTransition(
 	return prepared, err
 }
 
+// olderRuntimeRefusal is the diagnostic for an older target, retained or
+// explicitly selected, that loses an installed runtime activation owner.
+const olderRuntimeRefusal = "the retained release cannot verify installed runtime activation"
+
+// olderReleaseRuntimeBinding applies the retained runtime contract to an older
+// target. refused reports a target that would lose an installed profile runtime
+// or helper contract; err reports a failure to decide.
+func (runtime *Runtime) olderReleaseRuntimeBinding(
+	ctx context.Context,
+	runtimeRoot string,
+	verified *verifiedPublishedCandidate,
+	activeRoot, targetRoot, configHome string,
+) (binding string, targetOwners map[string]bool, refused bool, err error) {
+	// Absence of the optional query advertises no profile owners. Identical
+	// public core payloads retain their existing historical compatibility path.
+	targetOwners = map[string]bool{}
+	applicable, err := retainedRuntimeApplicable(activeRoot)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if applicable && verified.registryDigest != "" {
+		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, runtimeRoot, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
+		if capabilityErr == nil {
+			for _, id := range capabilities.ActivationOwners {
+				targetOwners[id] = true
+			}
+		} else if errors.Is(capabilityErr, domain.ErrPlanStale) || errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
+			return "", nil, false, capabilityErr
+		}
+	}
+	// A failed optional query grants no activation owners. The historical path
+	// still requires the independent runtime binding below AND a successful
+	// ordinary V1 inspection before returning a plan. Neither an exit status nor
+	// a version claim proves compatibility; execution rechecks both proofs.
+	binding, bindErr := runtime.retainedRuntimeBinding(ctx, activeRoot, targetRoot, configHome, targetOwners)
+	if bindErr != nil {
+		return "", targetOwners, true, nil
+	}
+	return binding, targetOwners, false, nil
+}
+
+// admitOlderRelease keeps the rollback contract for an explicitly selected
+// older release: it must still own every installed runtime activation. It
+// returns nil for a release that is not older than the active one.
+func (runtime *Runtime) admitOlderRelease(
+	ctx context.Context,
+	runtimeRoot string,
+	links runtimeLinkSnapshot,
+	target *verifiedPublishedCandidate,
+	configHome string,
+) (*olderReleaseRuntime, error) {
+	observed := releaseLinksFromRuntimeSnapshot(links)
+	if _, newer := installedVersionNewerThan(observed.Active, target.version); !newer {
+		return nil, nil
+	}
+	older := &olderReleaseRuntime{activeRoot: filepath.Join(runtimeRoot, links.current.target), targetRoot: target.candidate.root}
+	binding, owners, refused, err := runtime.olderReleaseRuntimeBinding(ctx, runtimeRoot, target, older.activeRoot, older.targetRoot, configHome)
+	if err != nil {
+		return nil, err
+	}
+	if refused {
+		outcome := publicReleaseOutcome(observed, target.candidate.release, nil, releasetransition.CodeRollbackIncompatible, olderRuntimeRefusal,
+			"keep the current release active or select a release with compatible component activation owners, then run yard update --check")
+		return nil, publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
+	}
+	older.binding, older.owners = binding, owners
+	return older, nil
+}
+
 func (runtime *Runtime) prepareRetainedTransition(
 	ctx context.Context,
 	parsed options,
@@ -1374,31 +1455,13 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(err)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
-	// Absence of the optional query advertises no profile owners. Identical
-	// public core payloads retain their existing historical compatibility path.
-	targetOwners := map[string]bool{}
-	applicable, err := retainedRuntimeApplicable(activeRoot)
+	runtimeBinding, targetOwners, refused, err := runtime.olderReleaseRuntimeBinding(ctx, parsed.root, verified, activeRoot, candidate.root, configHome)
 	if err != nil {
 		return Prepared{}, verifiedPreparation(err)
 	}
-	if applicable && verified.registryDigest != "" {
-		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, parsed.root, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
-		if capabilityErr == nil {
-			for _, id := range capabilities.ActivationOwners {
-				targetOwners[id] = true
-			}
-		} else if errors.Is(capabilityErr, domain.ErrPlanStale) || errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
-			return Prepared{}, verifiedPreparation(capabilityErr)
-		}
-	}
-	// A failed optional query grants no activation owners. The historical path
-	// still requires the independent runtime binding below AND a successful
-	// ordinary V1 inspection before returning a plan. Neither an exit status nor
-	// a version claim proves compatibility; execution rechecks both proofs.
-	runtimeBinding, err := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
-	if err != nil {
+	if refused {
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
-			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
+			releasetransition.CodeRollbackIncompatible, olderRuntimeRefusal, "retain a release with compatible component activation owners, then run yard update --check")))
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request, nil)
 	if err != nil {
@@ -1894,6 +1957,12 @@ func installerSupportsPublishOnly(path string) (bool, error) {
 		return false, errors.New("runtime installer is too large")
 	}
 	return bytes.Contains(payload, []byte("--publish-only")), nil
+}
+
+// olderReleaseRuntime is the approved runtime contract of an explicitly selected older release.
+type olderReleaseRuntime struct {
+	activeRoot, targetRoot, binding string
+	owners                          map[string]bool
 }
 
 type publishedCandidate struct {
