@@ -36,7 +36,6 @@ const (
 
 var (
 	tokenPattern    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	problemPattern  = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z ._-]{0,79}$`)
 	errUnobservable = errors.New("guest config files could not be observed")
 )
 
@@ -63,8 +62,8 @@ type File struct {
 	Converged bool
 	// Fingerprint is a structured file's observed fingerprint.
 	Fingerprint string
-	// Problem is ProblemChanged, or why a completed guest observation could
-	// not assess the file.
+	// Problem is ProblemChanged, or the fixed reason a completed guest
+	// observation could not assess the file.
 	Problem string
 }
 
@@ -145,7 +144,7 @@ func Observe(ctx context.Context, executor ports.InstanceExecutor, yard domain.C
 		observation, err := ParseObservation(result.Stdout)
 		switch {
 		case result.ExitCode != 0:
-			files[index].Problem = observationProblem(result.Stderr)
+			files[index].Problem = observationProblem(result.Stderr, item.Format)
 		case err != nil || observation.Raw == "":
 			files[index].Problem = "invalid structured configuration observation"
 		default:
@@ -170,11 +169,11 @@ func Observe(ctx context.Context, executor ports.InstanceExecutor, yard domain.C
 	return files, nil
 }
 
-// observationProblem is the guest's refusal category, when it is safe to print.
-func observationProblem(stderr []byte) string {
-	category, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(string(stderr)), "config materialization: "), ";")
-	if problemPattern.MatchString(category) && category != ProblemChanged {
-		return category
+// observationProblem is the host's fixed reason for a guest refusal; guest
+// text is matched, never rendered.
+func observationProblem(stderr []byte, format string) string {
+	if UnownedInvalidDestination(stderr, format) {
+		return "the document is not valid " + strings.ToUpper(format) + " and Subyard does not own it"
 	}
 	return "structured configuration observation failed"
 }

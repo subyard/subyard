@@ -63,7 +63,7 @@ Subyard-owned skill trees.
 Each guest config file is observed once per assessment (`configmaterial.Observe`): raw files
 together in one exec, each structured file through its own observation, which also reports the
 token of its exact bytes. The file's one state is `converged`, `drift`, `unreadable`, `unknown`
-(a completed guest refusal, with its category) or, after a refused write, `changed`;
+(a completed guest refusal, with a fixed host reason) or, after a refused write, `changed`;
 `configmaterial.Refusals` renders the last three with their next step: replace or remove an
 unreadable file and run `config apply`, inspect an unknown one with `config status`, rerun
 `config apply` for a changed one. `init`, `config status`, `config apply` and release readiness use

@@ -264,11 +264,13 @@ func TestCompareAndWriteRequests(t *testing.T) {
 	if _, err := Observe(context.Background(), nil, localYard, []Desired{{Destination: "/etc/passwd"}}); err == nil {
 		t.Fatal("observation outside the home accepted")
 	}
-	// A guest refusal names only its fixed category, never document details.
-	if problem := observationProblem([]byte("config materialization: unowned-invalid-destination-v1 JSON; private document details")); problem != "unowned-invalid-destination-v1 JSON" {
+	// A guest refusal renders only a fixed host reason, never guest text.
+	if problem := observationProblem([]byte("config materialization: unowned-invalid-destination-v1 JSON; private document details"), "json"); problem != "the document is not valid JSON and Subyard does not own it" {
 		t.Fatalf("problem %q", problem)
 	}
-	if problem := observationProblem([]byte("config materialization: changed")); problem == ProblemChanged {
-		t.Fatal("an observation refusal read as a changed write")
+	for _, stderr := range []string{"config materialization: changed", "config materialization: guest-chosen text"} {
+		if problem := observationProblem([]byte(stderr), "json"); problem != "structured configuration observation failed" {
+			t.Fatalf("guest text %q rendered as %q", stderr, problem)
+		}
 	}
 }
