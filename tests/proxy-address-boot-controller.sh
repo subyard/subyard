@@ -6,9 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-proxy-controller.XXXXXXXX)"
 on_exit find "$TMP" -depth -delete
-mkdir -p "$TMP/dev/e2e" "$TMP/tests/helpers"
+mkdir -p "$TMP/dev/e2e"
 cp "$ROOT/dev/e2e/proxy-address-boot.sh" "$TMP/dev/e2e/proxy-address-boot.sh"
-cp "$ROOT/tests/helpers/test-lib.sh" "$TMP/tests/helpers/"
 cat > "$TMP/dev/agent-e2e.sh" <<'CLIENT'
 set_requested_slot() { :; }
 build_bundle() { printf fixture > "$2"; }

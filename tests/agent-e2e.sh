@@ -4471,7 +4471,7 @@ set -e
   mkdir -p "$bootstrap_fixture/repo/tests/helpers" "$bootstrap_fixture/repo/config" \
     "$bootstrap_fixture/repo/scripts" "$bootstrap_fixture/repo/dev" \
     "$bootstrap_fixture/state" "$bootstrap_fixture/platform/incus"
-  cp "$ROOT/tests/helpers/"{test-context,test-lib}.sh "$bootstrap_fixture/repo/tests/helpers/"
+  cp "$ROOT/tests/helpers/test-context.sh" "$bootstrap_fixture/repo/tests/helpers/"
   cp "$ROOT/config/host.env" "$bootstrap_fixture/repo/config/"
   # shellcheck source=dev/e2e/lib-p0-capacity.sh
   . "$ROOT/dev/e2e/lib-p0-capacity.sh"

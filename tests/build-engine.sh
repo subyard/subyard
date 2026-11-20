@@ -38,7 +38,7 @@ grep -Fq 'Go is required' "$TMP/stderr" \
 # The standalone installer contract must consult freshness even with an executable cache.
 mkdir -p "$fixture/dev" "$fixture/tests/helpers"
 cp "$ROOT/tests/install-incus-data-home.sh" "$fixture/tests/"
-cp "$ROOT/tests/helpers/"{test-context,test-lib}.sh "$fixture/tests/helpers/"
+cp "$ROOT/tests/helpers/test-context.sh" "$fixture/tests/helpers/"
 cat > "$fixture/dev/build-engine.sh" <<'SH'
 printf 'installer consulted engine freshness\n' >&2
 exit 73

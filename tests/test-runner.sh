@@ -22,7 +22,6 @@ mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
 cp "$ROOT/tests/helpers/permission-umasks.sh" "$fixture/tests/helpers/permission-umasks.sh"
-cp "$ROOT/tests/helpers/test-lib.sh" "$fixture/tests/helpers/"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/go"
 cp "$tmp/tools/go" "$tmp/tools/gofmt"
