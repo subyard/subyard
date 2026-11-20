@@ -10,10 +10,12 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestCacheBlocksCountsSparseAllocationOnceAcrossHardlinks(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	file, err := os.Create(filepath.Join(root, "unknown-upstream.rootfs"))
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +50,7 @@ func TestCacheBlocksCountsSparseAllocationOnceAcrossHardlinks(t *testing.T) {
 }
 
 func TestCacheBlocksRejectsSymlinksAndMissingRoots(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	actual := filepath.Join(root, "actual")
 	if err := os.Mkdir(actual, 0700); err != nil {
 		t.Fatal(err)
@@ -76,14 +78,12 @@ func TestCacheBlocksRejectsSymlinksAndMissingRoots(t *testing.T) {
 func TestCacheAccountingIncludesUnknownArchivesAndNativeDriverUsage(t *testing.T) {
 	for _, driver := range []string{"dir", "btrfs", "zfs", "lvm"} {
 		t.Run(driver, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			archives := filepath.Join(root, "images")
 			if err := os.Mkdir(archives, 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(archives, "foreign-upstream.rootfs"), make([]byte, 8192), 0600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(archives, "foreign-upstream.rootfs"), make([]byte, 8192), 0600)
 			nativeCalls := 0
 			runtime := Runtime{Config: fixtureConfig(t), Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				command := strings.Join(args, " ")
@@ -125,7 +125,7 @@ func TestCacheAccountingIncludesUnknownArchivesAndNativeDriverUsage(t *testing.T
 }
 
 func TestCacheMeasurementFailsClosedAndBudgetIncludesNativeCache(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	runtime := Runtime{Config: fixtureConfig(t), Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		switch strings.Join(args, " ") {
 		case "query /1.0/storage-pools/default":
@@ -160,7 +160,7 @@ func TestCacheMeasurementFailsClosedAndBudgetIncludesNativeCache(t *testing.T) {
 }
 
 func TestDirCacheCountsMaterializedNativeCacheWithoutHardlinkDoubleCharge(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	archives := filepath.Join(root, "images")
 	native := filepath.Join(root, "storage-pools", "default", "images")
 	if err := os.MkdirAll(archives, 0700); err != nil {
@@ -169,9 +169,7 @@ func TestDirCacheCountsMaterializedNativeCacheWithoutHardlinkDoubleCharge(t *tes
 	if err := os.MkdirAll(native, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(archives, "upstream"), make([]byte, 8192), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(archives, "upstream"), make([]byte, 8192), 0600)
 	if err := os.Link(filepath.Join(archives, "upstream"), filepath.Join(native, "same-image")); err != nil {
 		t.Fatal(err)
 	}

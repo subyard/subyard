@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"golang.org/x/crypto/ssh"
 )
@@ -80,7 +81,7 @@ func (manager *Manager) temporaryFile(data []byte) (string, error) {
 	manager.temporary = append(manager.temporary, directory)
 	manager.mu.Unlock()
 	path := filepath.Join(directory, "known_hosts")
-	return path, os.WriteFile(path, data, 0o600)
+	return path, safefs.WriteFile(path, data, safefs.Options{Mode: 0o600, Durability: safefs.BestEffort})
 }
 
 func pinnedOptions(path string) []string {
@@ -361,6 +362,7 @@ func (manager *Manager) publish(ctx context.Context) error {
 	}
 	pending := append([]candidate(nil), manager.pending...)
 	paths := make(map[string]bool)
+	directories := make(map[string]bool)
 	for index := range pending {
 		path := pending[index].proposal.File
 		directory := filepath.Dir(path)
@@ -372,7 +374,12 @@ func (manager *Manager) publish(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		path = filepath.Join(directory, filepath.Base(path))
+		directories[directory] = true
+		path, err = resolveKnownHosts(path)
+		if err != nil {
+			return err
+		}
+		directories[filepath.Dir(path)] = true
 		pending[index].proposal.File = path
 		paths[path] = true
 	}
@@ -380,8 +387,6 @@ func (manager *Manager) publish(ctx context.Context) error {
 	for path := range paths {
 		ordered = append(ordered, path)
 	}
-	// The lock is per directory, so file-name ordering alone can deadlock
-	// concurrent routes whose stores live in nested directories.
 	sort.Slice(ordered, func(left, right int) bool {
 		leftDirectory, rightDirectory := filepath.Dir(ordered[left]), filepath.Dir(ordered[right])
 		if leftDirectory != rightDirectory {
@@ -389,18 +394,27 @@ func (manager *Manager) publish(ctx context.Context) error {
 		}
 		return ordered[left] < ordered[right]
 	})
-	lockedDirectories := make(map[string]bool)
-	for _, path := range ordered {
-		directory := filepath.Dir(path)
-		if lockedDirectories[directory] {
-			continue
-		}
-		unlock, err := LockKnownHosts(ctx, path)
+	// Lock both the configured and resolved directories in a common order.
+	lockOrder := make([]string, 0, len(directories))
+	for directory := range directories {
+		lockOrder = append(lockOrder, directory)
+	}
+	sort.Strings(lockOrder)
+	for _, directory := range lockOrder {
+		unlock, err := lockKnownHosts(ctx, directory)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-		lockedDirectories[directory] = true
+	}
+	for index, request := range manager.pending {
+		path, err := resolveKnownHosts(request.proposal.File)
+		if err != nil {
+			return err
+		}
+		if path != pending[index].proposal.File {
+			return fmt.Errorf("%w: SSH trust changed after assessment", domain.ErrPlanStale)
+		}
 	}
 	type snapshot struct {
 		data   []byte
@@ -453,11 +467,15 @@ func (manager *Manager) publish(ctx context.Context) error {
 		after[proposal.File] = append(data, []byte(candidate.line+"\n")...)
 	}
 	for index, path := range ordered {
-		if err := writeFile(path, after[path], 0o600); err != nil {
+		if published, err := writeFile(path, after[path], 0o600); err != nil {
+			if published {
+				index++
+			}
 			for _, written := range ordered[:index] {
 				snapshot := before[written]
 				if snapshot.exists {
-					err = errors.Join(err, writeFile(written, snapshot.data, snapshot.mode))
+					_, restoreErr := writeFile(written, snapshot.data, snapshot.mode)
+					err = errors.Join(err, restoreErr)
 				} else {
 					err = errors.Join(err, os.Remove(written))
 				}
@@ -468,24 +486,55 @@ func (manager *Manager) publish(ctx context.Context) error {
 	return nil
 }
 
-func writeFile(path string, data []byte, mode os.FileMode) error {
-	directory := filepath.Dir(path)
-	file, err := os.CreateTemp(directory, ".subyard-known-hosts-*")
+// resolveKnownHosts follows a final symlink even when the target file is absent.
+func resolveKnownHosts(path string) (string, error) {
+	for range 40 {
+		directory, name := filepath.Split(path)
+		if directory == "" {
+			directory = "."
+		}
+		directory, err := filepath.EvalSymlinks(directory)
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(directory, name)
+		target, err := os.Readlink(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EINVAL) {
+				return path, nil
+			}
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = directory + string(os.PathSeparator) + target
+		}
+		path = target
+	}
+	return "", errors.New("refusing non-regular SSH trust store")
+}
+
+func writeFile(path string, data []byte, mode os.FileMode) (published bool, err error) {
+	pending, err := safefs.Create(path, safefs.Options{
+		Mode: mode, ExactMode: true, TempPattern: ".subyard-known-hosts-*",
+	})
 	if err != nil {
-		return err
+		return false, knownHostsWriteError(err)
 	}
-	defer os.Remove(file.Name())
-	defer file.Close()
-	if err := file.Chmod(mode); err != nil {
-		return err
+	defer pending.Abort()
+	if _, err := pending.File().Write(data); err != nil {
+		return false, err
 	}
-	if _, err = file.Write(data); err != nil {
-		return err
+	if err := pending.Publish(); err != nil {
+		return false, knownHostsWriteError(err)
 	}
-	if err = file.Close(); err != nil {
-		return err
+	return true, pending.SyncParent()
+}
+
+func knownHostsWriteError(err error) error {
+	if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotRegular) {
+		return errors.New("refusing non-regular SSH trust store")
 	}
-	return os.Rename(file.Name(), path)
+	return err
 }
 
 // LockKnownHosts shares the shell SSH adapter's lock, so independent Subyard
@@ -498,26 +547,20 @@ func LockKnownHosts(ctx context.Context, path string) (func(), error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, err
 	}
-	fd, err := syscall.Open(filepath.Join(directory, ".subyard-known-hosts.lock"), syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
+	return lockKnownHosts(ctx, directory)
+}
+
+func lockKnownHosts(ctx context.Context, directory string) (func(), error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), "known-hosts-lock")
-	for {
-		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			_ = file.Close()
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, context.Cause(ctx)
-		case <-time.After(10 * time.Millisecond):
-		}
+	lock, err := safefs.OpenLock(filepath.Join(directory, ".subyard-known-hosts.lock"), 0o600)
+	if err != nil {
+		return nil, errors.Unwrap(err)
 	}
-	return func() { _ = syscall.Flock(fd, syscall.LOCK_UN); _ = file.Close() }, nil
+	if err := lock.Acquire(ctx, false, 10*time.Millisecond); err != nil {
+		lock.Release()
+		return nil, err
+	}
+	return lock.Release, nil
 }

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -338,22 +339,20 @@ func privateBrokerInputDirectory(root string, owner uint32) error {
 	if err := rejectSymlinkPath(filepath.Dir(root)); err != nil {
 		return errors.New("broker request directory is unsafe")
 	}
-	if err := os.Mkdir(root, 0700); err != nil {
-		if !os.IsExist(err) {
-			return errors.New("broker request directory is unavailable")
-		}
-	} else if os.Chmod(root, 0700) != nil {
-		return errors.New("broker request directory permissions cannot be set")
-	}
-	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		return errors.New("broker request directory permissions are unsafe")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != owner {
+	err := safefs.EnsureDir(root, safefs.DirOptions{Owner: &safefs.Ownership{UID: int(owner), GID: -1}})
+	var pathErr *os.PathError
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, safefs.ErrUnsafeOwner):
 		return errors.New("broker request directory ownership is unsafe")
+	case errors.Is(err, safefs.ErrSymlink), errors.Is(err, safefs.ErrNotDirectory), errors.Is(err, safefs.ErrUnsafeMode):
+		return errors.New("broker request directory permissions are unsafe")
+	case errors.As(err, &pathErr) && pathErr.Op == "chmod":
+		return errors.New("broker request directory permissions cannot be set")
+	default:
+		return errors.New("broker request directory is unavailable")
 	}
-	return nil
 }
 
 func readBrokerInputFile(path string) ([]byte, error) {
@@ -364,21 +363,23 @@ func readPrivateBrokerInputFile(path string, owner uint32) ([]byte, error) {
 	if err := rejectSymlinkPath(path); err != nil {
 		return nil, errors.Join(errors.New("broker request credential path is unsafe"), err)
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, errors.Join(errors.New("broker request credential is unavailable"), err)
-	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != owner || stat.Nlink != 1 || stat.Mode&0077 != 0 {
+	body, err := safefs.ReadRegular(path, safefs.ReadOptions{
+		OwnerUID: &owner, DenyPerm: 0o077, SingleLink: true, MaxBytes: 80 << 10,
+	})
+	var pathErr *os.PathError
+	switch {
+	case err == nil:
+		return body, nil
+	case errors.Is(err, safefs.ErrSymlink):
+		return nil, errors.Join(errors.New("broker request credential is unavailable"), unix.ELOOP)
+	case errors.As(err, &pathErr) && pathErr.Op == "open":
+		return nil, errors.Join(errors.New("broker request credential is unavailable"), pathErr.Err)
+	case errors.Is(err, safefs.ErrNotRegular), errors.Is(err, safefs.ErrUnsafeOwner), errors.Is(err, safefs.ErrUnsafeMode),
+		errors.Is(err, safefs.ErrMultipleLinks), errors.As(err, &pathErr) && pathErr.Op == "fstat":
 		return nil, errors.New("broker request credential permissions are unsafe")
-	}
-	body, err := io.ReadAll(io.LimitReader(file, (80<<10)+1))
-	if err != nil || len(body) > 80<<10 {
+	default:
 		return nil, errors.New("broker request credential exceeds its bound")
 	}
-	return body, nil
 }
 
 func writeBrokerInputs(inputs brokerInputs) error {
@@ -397,24 +398,29 @@ func writeBrokerInputs(inputs brokerInputs) error {
 }
 
 func publishBrokerInputs(path string, body []byte) error {
-	staging := path + ".tmp"
-	file, err := os.OpenFile(staging, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	pending, err := safefs.Create(path, safefs.Options{
+		Mode: 0o600, TempPattern: filepath.Base(path) + ".tmp", NoReplace: true,
+	})
 	if err != nil {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) && pathErr.Op == "chmod" {
+			return errors.New("broker request handoff permissions cannot be set")
+		}
 		return errors.New("broker request handoff cannot be created")
 	}
-	defer os.Remove(staging)
-	defer file.Close()
-	if file.Chmod(0600) != nil {
-		return errors.New("broker request handoff permissions cannot be set")
-	}
+	defer pending.Abort()
+	file := pending.File()
 	if _, err := file.Write(body); err != nil {
 		return errors.New("broker request handoff cannot be written")
 	}
 	if file.Sync() != nil || file.Close() != nil {
 		return errors.New("broker request handoff cannot be completed")
 	}
-	if unix.Renameat2(unix.AT_FDCWD, staging, unix.AT_FDCWD, path, unix.RENAME_NOREPLACE) != nil {
+	if err := pending.Publish(); err != nil {
 		return errors.New("broker request handoff cannot be published")
+	}
+	if err := pending.SyncParent(); err != nil {
+		return errors.New("broker request handoff cannot be completed")
 	}
 	return nil
 }

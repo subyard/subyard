@@ -20,9 +20,28 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestWritePrivateFileRefusesSymlink(t *testing.T) {
+	root := testkit.TempDir(t)
+	target, link := filepath.Join(root, "target"), filepath.Join(root, "state")
+	testkit.WriteFile(t, target, []byte("untouched"), 0o644)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateFile(link, []byte("changed")); !errors.Is(err, safefs.ErrSymlink) {
+		t.Fatalf("write through symlink = %v", err)
+	}
+	if destination, err := os.Readlink(link); err != nil || destination != target {
+		t.Fatalf("state symlink = %q, %v", destination, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "untouched" {
+		t.Fatalf("state symlink target = %q, %v", data, err)
+	}
+}
 
 type fakeRunner struct {
 	calls    [][]string
@@ -229,7 +248,7 @@ func (runner *fakeRunner) LookPath(name string) (string, error) {
 
 func fixtureConfig(t *testing.T) Config {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	cfg := Config{
 		Enabled: true, Project: "subyard-e2e-vms", Prefix: "e2e-vm",
 		Image: "images:debian/13/cloud", CPU: 2, Memory: "1GiB", Disk: "10GiB",
@@ -262,9 +281,7 @@ func TestCloudConfigLeavesToolchainToExplicitReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	publicKey := fixturePublicKey(t)
-	if err := os.WriteFile(cfg.keyPath()+".pub", []byte(publicKey+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub", []byte(publicKey+"\n"), 0o600)
 	payload := (&Runtime{Config: cfg}).cloudConfig()
 	if !strings.Contains(payload, "name: dev") ||
 		!strings.Contains(payload, publicKey) {
@@ -412,7 +429,7 @@ func TestEnsureGuestToolsRepairsHostKeysBeforeSSHReadiness(t *testing.T) {
 }
 
 func TestGuestToolchainTimeoutKillsTermIgnoringDescendant(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	pidFile := filepath.Join(testkit.TempDir(t), "child.pid")
 	const script = `trap '' TERM
 sleep 30 &
 child=$!
@@ -506,7 +523,7 @@ func TestAcquireSlotRejectsUntypedGrantBeforeMutation(t *testing.T) {
 		mutations++
 		return nil, nil, fmt.Errorf("unexpected mutation: %s", joined)
 	}}
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
 		t.Fatal(err)
@@ -679,10 +696,8 @@ func TestReleaseStopsRebootingGuestWhenKeyCleanupIsTemporarilyUnavailable(t *tes
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	stopped := false
 	runner := &fakeRunner{handler: func(
 		_ string, arguments, _ []string, _ io.Reader,
@@ -731,16 +746,12 @@ func TestReleaseTrimsRunningRetainedVMAfterCleanupBeforeVerifiedStop(t *testing.
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	if err := os.MkdirAll(filepath.Dir(cfg.AgentAuthorizedKeys), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.AgentAuthorizedKeys, []byte("still-reachable\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.AgentAuthorizedKeys, []byte("still-reachable\n"), 0o600)
 	stopped := false
 	trace := []string{}
 	runner := &fakeRunner{handler: func(
@@ -817,10 +828,8 @@ func TestReleaseContinuesAfterRetainedGuestTrimDeadlineWithoutGuestOutput(t *tes
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	stopped := false
 	runner := &fakeRunner{handler: func(
 		_ string, arguments, _ []string, _ io.Reader,
@@ -893,10 +902,8 @@ func TestRetainedGuestTrimTimeoutLeavesRequestContextForVerifiedStop(t *testing.
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	runner := &requestDeadlineRunner{project: cfg.Project}
 	runtime := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard}
 	requestDeadline := time.Now().Add(time.Minute)
@@ -930,10 +937,8 @@ func TestRetainedGuestPairTrimBudgetsLeaveTimeForBothVerifiedStops(t *testing.T)
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	runner := &pairRequestBudgetRunner{
 		project:     cfg.Project,
 		facadeLimit: time.Minute,
@@ -979,10 +984,8 @@ func TestReleaseSlotContinuesAfterOrdinaryRetainedGuestTrimCommandError(t *testi
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.keyPath()+".pub",
-		[]byte(fixturePublicKey(t)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.keyPath()+".pub",
+		[]byte(fixturePublicKey(t)+"\n"), 0o600)
 	store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
 	grant, err := store.AcquireSlot("client", "SHA256:key", "", "trim-command-error", "slot-001")
 	if err != nil {
@@ -1122,14 +1125,12 @@ func TestUnavailableInnerIncusIsNotTreatedAsAnAbsentProject(t *testing.T) {
 }
 
 func TestQuarantineLocalSpoolFailureBlocksDestructiveRecovery(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	stateRoot := filepath.Join(root, "state")
 	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateRoot, "spool"), []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(stateRoot, "spool"), []byte("fixture"), 0o600)
 	cfg := fixtureConfig(t)
 	cfg.StateDir = stateRoot
 	store := LeaseStore{
@@ -1531,9 +1532,7 @@ func TestReaperFatalErrorIsDurable(t *testing.T) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.leaseState(), []byte("{not-json\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cfg.leaseState(), []byte("{not-json\n"), 0o600)
 	runtime := &Runtime{
 		Config: cfg,
 		Runner: &fakeRunner{},

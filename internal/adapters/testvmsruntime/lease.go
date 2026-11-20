@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const provisioningSafetyMargin = 30 * time.Minute
@@ -1353,29 +1353,5 @@ func writeJSONAtomic(path string, value any) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	temp, err := os.CreateTemp(filepath.Dir(path), ".lease-state.*")
-	if err != nil {
-		return err
-	}
-	name := temp.Name()
-	defer os.Remove(name)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(payload); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
+	return safefs.WriteFile(path, payload, safefs.Options{Mode: 0o600, TempPattern: ".lease-state.*"})
 }

@@ -117,7 +117,7 @@ func TestLookupAndListRejectUnsafeRegisteredDataPlane(t *testing.T) {
 
 func TestLookupFallsBackFromSymlinkedHigherPrecedenceEntry(t *testing.T) {
 	runtime := remoteFixture(t)
-	target := filepath.Join(t.TempDir(), "target.env")
+	target := filepath.Join(testkit.TempDir(t), "target.env")
 	writeRemoteFile(t, target, "ACCESS_KIND=remote\nOWNER_ENDPOINT=unsafe.example\n", 0o600)
 	nested := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	if err := os.MkdirAll(filepath.Dir(nested), 0o700); err != nil {
@@ -175,9 +175,7 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload = append(payload, []byte("subyard-remote-demo "+fixturePublicKey+"\n")...)
-			if err := os.WriteFile(runtime.knownHostsPath(), payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, runtime.knownHostsPath(), payload, 0o600)
 		}
 		return nil, nil
 	}
@@ -434,7 +432,7 @@ func TestApplyRemoveDeletesOnlyTheSelectedRemote(t *testing.T) {
 }
 
 func TestTransactionalRestoresExistingFilesAndRemovesNewFiles(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	existing := filepath.Join(root, "existing")
 	created := filepath.Join(root, "created")
 	writeRemoteFile(t, existing, "before", 0o640)
@@ -539,7 +537,7 @@ func TestProbeDiagnosticsAndShellQuoting(t *testing.T) {
 
 func remoteFixture(t *testing.T) Runtime {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	public := filepath.Join(root, "controller.pub")
 	writeRemoteFile(t, public, fixturePublicKey+"\n", 0o600)
 	return Runtime{

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestKernelOOMEvidenceExcludesPrivatePathsAndCommands(t *testing.T) {
@@ -30,7 +32,7 @@ func TestKernelOOMEvidenceExcludesPrivatePathsAndCommands(t *testing.T) {
 
 func TestHostEvidencePersistsMissingMeasurementsAndDoesNotResampleRetry(t *testing.T) {
 	calls := 0
-	sink := HostSink{DataHome: t.TempDir(), Incus: "incus", OperatorGID: -1, Runner: &fakeRunner{handler: func(_ string, _, _ []string, _ io.Reader) ([]byte, []byte, error) {
+	sink := HostSink{DataHome: testkit.TempDir(t), Incus: "incus", OperatorGID: -1, Runner: &fakeRunner{handler: func(_ string, _, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		calls++
 		return nil, nil, errors.New("private transport path")
 	}}}

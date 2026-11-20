@@ -12,6 +12,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestCodexRulesProbe(t *testing.T) {
@@ -34,16 +35,14 @@ func TestCodexRulesProbe(t *testing.T) {
 		{name: "missing managed policy check", state: "missing", missingPolicy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			write := func(name, content string, mode os.FileMode) {
 				t.Helper()
 				path := filepath.Join(home, name)
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte(content), mode); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, path, []byte(content), mode)
 			}
 			if !tc.missingRules {
 				write(".codex/rules/a.rules", "", 0o600)

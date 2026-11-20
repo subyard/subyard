@@ -8,26 +8,22 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	for _, name := range recipeFiles {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("trusted recipe\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte("trusted recipe\n"), 0644)
 	}
-	if err := os.WriteFile(filepath.Join(root, "operator-private.env"), []byte("must never enter image"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "operator-private.env"), []byte("must never enter image"), 0600)
 	dispatcher := filepath.Join(root, "dispatcher")
-	if err := os.WriteFile(dispatcher, []byte("trusted engine"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, dispatcher, []byte("trusted engine"), 0755)
 	first, manifest, err := RecipeBundle(root, dispatcher)
 	if err != nil {
 		t.Fatal(err)

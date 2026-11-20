@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"os"
 	"os/exec"
@@ -20,7 +21,6 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
-	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type securityStub struct{ state string }
@@ -107,11 +107,9 @@ func TestRuntimeReadsAndRefreshesSpaceSynchronously(t *testing.T) {
 }
 
 func TestSpaceMeasureCommandFailsWhenDuFails(t *testing.T) {
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	du := filepath.Join(directory, "du")
-	if err := os.WriteFile(du, []byte("#!/bin/sh\nprintf '9\\t/\\n'\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, du, []byte("#!/bin/sh\nprintf '9\\t/\\n'\nexit 1\n"), 0o700)
 	command := exec.Command("sh", "-c", spaceMeasureCommand)
 	command.Env = append(os.Environ(), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
@@ -121,22 +119,16 @@ func TestSpaceMeasureCommandFailsWhenDuFails(t *testing.T) {
 }
 
 func TestSpaceMeasureCommandAddsMountedSrvSeparately(t *testing.T) {
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	calls := filepath.Join(directory, "calls")
-	if err := os.WriteFile(filepath.Join(directory, "grep"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(directory, "grep"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
 	statScript := "#!/bin/sh\ncase \"$*\" in */srv) printf '2\\n' ;; *) printf '1\\n' ;; esac\n"
-	if err := os.WriteFile(filepath.Join(directory, "stat"), []byte(statScript), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(directory, "stat"), []byte(statScript), 0o700)
 	duScript := `#!/bin/sh
 printf '%s\n' "$*" >>"$SPACE_CALLS"
 printf '512\tpath\n'
 `
-	if err := os.WriteFile(filepath.Join(directory, "du"), []byte(duScript), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(directory, "du"), []byte(duScript), 0o700)
 	command := exec.Command("sh", "-c", spaceMeasureCommand)
 	command.Env = append(os.Environ(),
 		"PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -154,16 +146,14 @@ printf '512\tpath\n'
 }
 
 func TestSpaceMeasureCommandDoesNotDoubleCountSameDeviceSrv(t *testing.T) {
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	calls := filepath.Join(directory, "calls")
 	for name, script := range map[string]string{
 		"grep": "#!/bin/sh\nexit 0\n",
 		"stat": "#!/bin/sh\nprintf '1\\n'\n",
 		"du":   "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$SPACE_CALLS\"\nprintf '1024\\tpath\\n'\n",
 	} {
-		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, filepath.Join(directory, name), []byte(script), 0o700)
 	}
 	command := exec.Command("sh", "-c", spaceMeasureCommand)
 	command.Env = append(os.Environ(),
@@ -181,7 +171,7 @@ func TestSpaceMeasureCommandDoesNotDoubleCountSameDeviceSrv(t *testing.T) {
 }
 
 func TestSpaceMeasureCommandExcludesOnlyVerifiedInnerIncusStorageAlias(t *testing.T) {
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	calls := filepath.Join(directory, "calls")
 	for name, script := range map[string]string{
 		"grep": "#!/bin/sh\nexit 0\n",
@@ -197,9 +187,7 @@ func TestSpaceMeasureCommandExcludesOnlyVerifiedInnerIncusStorageAlias(t *testin
 		printf '512\tpath\n'
 `,
 	} {
-		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, filepath.Join(directory, name), []byte(script), 0o700)
 	}
 	output, err := runSpaceMeasureCommand(directory, calls)
 	if err != nil || string(output) != "1M\n" {
@@ -241,16 +229,14 @@ func TestSpaceMeasureCommandDoesNotExcludeUnverifiedInnerIncusStorageAlias(t *te
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			directory := t.TempDir()
+			directory := testkit.TempDir(t)
 			calls := filepath.Join(directory, "calls")
 			for name, script := range map[string]string{
 				"grep": "#!/bin/sh\nexit 0\n",
 				"stat": test.statScript,
 				"du":   "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$SPACE_CALLS\"\nprintf '512\\tpath\\n'\n",
 			} {
-				if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(directory, name), []byte(script), 0o700)
 			}
 			output, err := runSpaceMeasureCommand(directory, calls)
 			if err != nil || string(output) != "1M\n" {
@@ -388,11 +374,9 @@ func TestSpaceRefreshPreservesCacheOnFailure(t *testing.T) {
 }
 
 func TestRuntimeSkipsRefreshWhenCacheCannotBeWritten(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	blocker := filepath.Join(root, "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, blocker, []byte("fixture"), 0o600)
 	facts, err := (Runtime{Environment: fakeIncusEnvironment(t, "printf '1G\\n'\n")}).
 		ReadStatusFacts(context.Background(), domain.Context{
 			YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
@@ -404,19 +388,15 @@ func TestRuntimeSkipsRefreshWhenCacheCannotBeWritten(t *testing.T) {
 }
 
 func TestRuntimeProbesPreparedResources(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	resources := filepath.Join(root, "config", "profiles", "demo", "resources")
 	if err := os.MkdirAll(filepath.Join(resources, "service"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(resources, "service.res"), []byte(
-		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nDASHBOARD=\"https SERVICE_HOST SERVICE_PORT /ui/\"\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(resources, "service.res"), []byte(
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nDASHBOARD=\"https SERVICE_HOST SERVICE_PORT /ui/\"\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600)
 	handler := filepath.Join(resources, "service", "handler.sh")
-	if err := os.WriteFile(handler, []byte("#!/bin/sh\n[ \"$1\" = is-up ]\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, handler, []byte("#!/bin/sh\n[ \"$1\" = is-up ]\n"), 0o700)
 	registry, err := resource.Load(root)
 	if err != nil {
 		t.Fatal(err)
@@ -497,7 +477,7 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 		{"100.101.102.103", "v2:100.101.102.103:18080"},
 	} {
 		t.Run(route.host, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			dataHome := filepath.Join(root, "data")
 			if err := writeSpaceCache(filepath.Join(dataHome, "space.cache"), "1G", time.Now()); err != nil {
 				t.Fatal(err)
@@ -592,7 +572,7 @@ func TestRuntimeDoesNotPublishUnverifiedIntegrationDashboard(t *testing.T) {
 			if yardKind == "" {
 				yardKind = domain.YardContainer
 			}
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			if err := writeSpaceCache(filepath.Join(root, "space.cache"), "1G", time.Now()); err != nil {
 				t.Fatal(err)
 			}
@@ -639,19 +619,15 @@ func TestRuntimeDoesNotPublishUnverifiedIntegrationDashboard(t *testing.T) {
 }
 
 func TestRuntimeBoundsProfileResourceProbe(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	resources := filepath.Join(root, "config", "profiles", "demo", "resources")
 	if err := os.MkdirAll(filepath.Join(resources, "service"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(resources, "service.res"), []byte(
-		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(resources, "service.res"), []byte(
+		"COMMAND=svc\nHANDLER=resources/service/handler.sh\nTITLE=Service\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"), 0o600)
 	handler := filepath.Join(resources, "service", "handler.sh")
-	if err := os.WriteFile(handler, []byte("#!/bin/sh\nsleep 2\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, handler, []byte("#!/bin/sh\nsleep 2\n"), 0o700)
 	registry, err := resource.Load(root)
 	if err != nil {
 		t.Fatal(err)
@@ -680,7 +656,7 @@ func TestRuntimeBoundsProfileResourceProbe(t *testing.T) {
 }
 
 func TestRuntimeRunsOnlyOneConcurrentSpaceRefresh(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	calls := filepath.Join(root, "calls")
 	environment := fakeIncusEnvironment(t, "printf 'x\\n' >>\"$SPACE_CALLS\"\nsleep 0.2\nprintf '3G\\n'\n")
 	environment["SPACE_CALLS"] = calls

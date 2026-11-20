@@ -9,10 +9,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPublishLocksNestedDirectoriesInConsistentOrder(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	parentStore := filepath.Join(root, "a", "key")
 	nestedStore := filepath.Join(root, "a", "x", "known")
 	otherParentStore := filepath.Join(root, "a", "z")
@@ -21,9 +23,7 @@ func TestPublishLocksNestedDirectoriesInConsistentOrder(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(unrelated), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte(unrelated), 0o600)
 	}
 	first := &Manager{Environment: os.Environ(), pending: []candidate{
 		publicationCandidate(t, parentStore, "first-owner.example"),
@@ -89,7 +89,7 @@ func TestPublishLocksNestedDirectoriesInConsistentOrder(t *testing.T) {
 }
 
 func TestPublishCoalescesParentSymlinkAliases(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	directory, alias := filepath.Join(root, "real"), filepath.Join(root, "alias")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -99,9 +99,7 @@ func TestPublishCoalescesParentSymlinkAliases(t *testing.T) {
 	}
 	store, aliasedStore := filepath.Join(directory, "known_hosts"), filepath.Join(alias, "known_hosts")
 	unrelated := keyLine(t, "unrelated.example")
-	if err := os.WriteFile(store, []byte(unrelated), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, store, []byte(unrelated), 0o600)
 	first := publicationCandidate(t, store, "owner.example")
 	second := publicationCandidate(t, aliasedStore, "yard.example")
 	manager := &Manager{Environment: os.Environ(), pending: []candidate{first, second}}
@@ -123,6 +121,45 @@ func TestPublishCoalescesParentSymlinkAliases(t *testing.T) {
 	}
 	if info, err := os.Lstat(alias); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("publication replaced the parent symlink: %v", err)
+	}
+}
+
+func TestPublishPreservesFinalSymlink(t *testing.T) {
+	for _, existing := range []bool{true, false} {
+		name := "new-target"
+		if existing {
+			name = "existing-target"
+		}
+		t.Run(name, func(t *testing.T) {
+			original := filepath.Join(testkit.TempDir(t), "known_hosts")
+			target := filepath.Join(testkit.TempDir(t), "managed-known-hosts")
+			link, err := filepath.Rel(filepath.Dir(original), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(link, original); err != nil {
+				t.Fatal(err)
+			}
+			var unrelated string
+			if existing {
+				unrelated = keyLine(t, "unrelated.example")
+				testkit.WriteFile(t, target, []byte(unrelated), 0o644)
+			}
+			first := publicationCandidate(t, original, "owner.example")
+			second := publicationCandidate(t, target, "yard.example")
+			manager := &Manager{Environment: os.Environ(), pending: []candidate{first, second}}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := manager.publish(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if result, err := os.Readlink(original); err != nil || result != link {
+				t.Fatalf("symlink = %q, %v, want %q", result, err, link)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != unrelated+first.line+"\n"+second.line+"\n" {
+				t.Fatalf("target contents = %q, %v", data, err)
+			}
+		})
 	}
 }
 

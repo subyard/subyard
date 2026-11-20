@@ -20,6 +20,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -40,7 +41,7 @@ func testOpenSSHCombinedTrustThroughProxyChain(t *testing.T, host string) {
 	second, _ := trustProbeServer(t, net.JoinHostPort(host, "0"), nil)
 	var denyFinal atomic.Bool
 	final, finalKey := trustProbeServer(t, "127.0.0.1:0", &denyFinal)
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	identity := filepath.Join(root, "identity")
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -50,9 +51,7 @@ func testOpenSSHCombinedTrustThroughProxyChain(t *testing.T, host string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(identity, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, identity, pem.EncodeToMemory(block), 0o600)
 	known, config, wrapper := filepath.Join(root, "known_hosts"), filepath.Join(root, "config"), filepath.Join(root, "ssh")
 	configuration := fmt.Sprintf(`Host final
     HostName 127.0.0.1
@@ -67,12 +66,8 @@ Host *
     StrictHostKeyChecking yes
 `, final.Addr().(*net.TCPAddr).Port, first.Addr().String(),
 		second.Addr().String(), identity, known)
-	if err := os.WriteFile(config, []byte(configuration), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec "+shellquote.Command([]string{program, "-F", config})+" \"$@\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, config, []byte(configuration), 0o600)
+	testkit.WriteFile(t, wrapper, []byte("#!/bin/sh\nexec "+shellquote.Command([]string{program, "-F", config})+" \"$@\"\n"), 0o700)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	manager := &Manager{Environment: os.Environ()}
@@ -85,9 +80,7 @@ Host *
 	// A known final endpoint failing authentication must not persist unknown
 	// proxy keys or even offer a trust prompt.
 	finalLine := fmt.Sprintf("[127.0.0.1]:%d %s", final.Addr().(*net.TCPAddr).Port, ssh.MarshalAuthorizedKey(finalKey))
-	if err := os.WriteFile(known, []byte(finalLine), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, known, []byte(finalLine), 0o600)
 	denyFinal.Store(true)
 	if _, err := manager.Options(ctx, wrapper, "final"); err == nil || prompts != 0 {
 		t.Fatalf("authentication failure: err=%v prompts=%d", err, prompts)
