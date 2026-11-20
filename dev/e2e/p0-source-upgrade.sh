@@ -954,13 +954,14 @@ prepare() {
   fi
   grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
-  grep -Fxq 'effective: yes' <<<"$(operator_yard config show DEV_SUDO)" \
-    || die 'updated runtime does not default DEV_SUDO to yes'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
     && [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
     || die 'update changed the retained legacy owner'
   recreate_legacy_test_owner
+  # Config commands follow the settings migration that recreation performs.
+  grep -Fxq 'effective: yes' <<<"$(operator_yard config show DEV_SUDO)" \
+    || die 'updated runtime does not default DEV_SUDO to yes'
   incus project set "$PROJECT" user.p0-source="$MARKER"
   [ "$(operator_yard version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
