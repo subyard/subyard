@@ -989,6 +989,7 @@ CLOUDOWNER
 prepare_supported_upgrade_owner() {
   local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state info
   local installer_sha settings settings_before session_config session_host session_pid route rolled_owner
+  local rollback_release rollback_owner rollback_compatible=0
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
@@ -1094,6 +1095,21 @@ PYBASELINE
   for suffix in '' .sha256 .manifest.json .provenance.json; do
     install -m 0600 "$ROOT/.subyard-acceptance/release/$name$suffix" "$SUBYARD_HOME/releases/$P0_OWNER_VERSION/$name$suffix"
   done
+  # Rollback needs a published release with the candidate's migration registry;
+  # the newest published release precedes the candidate on the way there.
+  rollback_release="$(tail -n 1 "$ROOT/dev/e2e/published-upgrade-baselines.tsv" | cut -f1)"
+  [[ "$rollback_release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'missing newest published release'
+  if [ "$rollback_release" != "$baseline" ]; then
+    rollback_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+    "$baseline_owner" update --version "$rollback_release" --yes
+    [ "$(runtime_yard --version)" = "yard $rollback_release" ] || die 'newest published release was not activated'
+    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$rollback_owner" ] \
+      && verify_broker_installation \
+      || die 'published update did not update the broker in place'
+    before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
+  fi
+  cmp -s "$SUBYARD_HOME/runtime/current/config/release-transition.json" \
+    "$ROOT/.subyard-acceptance/runtime/config/release-transition.json" && rollback_compatible=1
   # An agent shell through the broker must not block recreation: the update
   # interrupts it with the operator's consent to the update.
   session_config="$HOME/.ssh/subyard-test-yard.config"
@@ -1148,34 +1164,39 @@ PYBASELINE
   jq -e '.status=="ok" and (.pool.slots | length)==1 and
       .pool.slots[0].state=="available" and (.resources.bases | length)==0' <<<"$info" >/dev/null \
     || die 'recreated broker does not start with empty leases and bases'
-  printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","recreated":true}\n' \
-    "$baseline" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
-  # Rollback to the published release updates the recreated broker in place.
-  runtime_yard update --rollback --yes
-  [ "$(runtime_yard --version)" = "yard $baseline" ] || die 'rollback did not restore the published release'
-  [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$after_owner" ] \
-    && verify_broker_installation \
-    && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
-    && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
-    || die 'rollback did not update the recreated broker in place'
-  runtime_yard -Y test-yard test-vms status --json | jq -e '.status=="ok"' >/dev/null \
-    || die 'rolled-back broker status failed'
-  printf 'STAGING_PUBLISHED_ROLLBACK={"release":"%s","broker_owner":"%s","in_place":true}\n' "$baseline" "$after_owner"
-  # The next forward update recreates it again for the candidate.
-  rolled_owner="$after_owner"
-  env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
-    runtime_yard update --version "$P0_OWNER_VERSION" --offline --yes
-  [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not reactivated'
-  name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
-  [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'
-  incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
-  after_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
-  [[ "$after_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$after_owner" != "$rolled_owner" ] \
-    && verify_broker_installation \
-    && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
-    && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
-    || die 'forward update after rollback did not recreate the broker'
-  printf 'STAGING_FORWARD_AFTER_ROLLBACK={"broker_owner":"%s","recreated":true}\n' "$after_owner"
+  printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","via":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","recreated":true}\n' \
+    "$baseline" "$rollback_release" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
+  if [ "$rollback_compatible" = 0 ]; then
+    # The updater refuses rollback across a migration registry change.
+    printf 'STAGING_PUBLISHED_ROLLBACK={"release":"%s","skipped":"migration registry differs"}\n' "$rollback_release"
+  else
+    # Rollback to the published release updates the recreated broker in place.
+    runtime_yard update --rollback --yes
+    [ "$(runtime_yard --version)" = "yard $rollback_release" ] || die 'rollback did not restore the published release'
+    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$after_owner" ] \
+      && verify_broker_installation \
+      && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
+      && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
+      || die 'rollback did not update the recreated broker in place'
+    runtime_yard -Y test-yard test-vms status --json | jq -e '.status=="ok"' >/dev/null \
+      || die 'rolled-back broker status failed'
+    printf 'STAGING_PUBLISHED_ROLLBACK={"release":"%s","broker_owner":"%s","in_place":true}\n' "$rollback_release" "$after_owner"
+    # The next forward update recreates it again for the candidate.
+    rolled_owner="$after_owner"
+    env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
+      runtime_yard update --version "$P0_OWNER_VERSION" --offline --yes
+    [ "$(runtime_yard version)" = "yard $P0_OWNER_VERSION" ] || die 'candidate runtime was not reactivated'
+    name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
+    [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'
+    incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
+    after_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+    [[ "$after_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$after_owner" != "$rolled_owner" ] \
+      && verify_broker_installation \
+      && [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
+      && [ "$(jq -er .runtime_uuid "$route")" = "$after_owner" ] \
+      || die 'forward update after rollback did not recreate the broker'
+    printf 'STAGING_FORWARD_AFTER_ROLLBACK={"broker_owner":"%s","recreated":true}\n' "$after_owner"
+  fi
   outer_exec cat /usr/local/libexec/subyard/e2e-recipes/manifest.sha256 \
     | (cd "$ROOT/.subyard-acceptance/runtime" && sha256sum -c - >/dev/null) \
     || die 'installed recipe bytes differ from frozen candidate'
