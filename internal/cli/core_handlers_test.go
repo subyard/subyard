@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -240,7 +241,7 @@ func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
 			"SSH_PORT=4444\nNESTED_E2E_VMS=1\n")
 	owner := testkit.TempDir(t)
 	sshLog := writeStructuredOwnerFixture(t, owner, "test-vms", []string{"revoke", "--slot", "2", "--expect-owner", "fixture-owner"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
-	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: "exec '" + filepath.Join(owner, "ssh") + "' \"$@\""})
+	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: "exec " + shellquote.Word(filepath.Join(owner, "ssh")) + " \"$@\""})
 	environment := append(fixture.Environment,
 		"SUBYARD_TEST_SSH_LOG="+sshLog,
 		"SUBYARD_OPERATION_ID=remote-test-vms-revoke",

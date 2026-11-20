@@ -179,16 +179,20 @@ func TestExecFakeRecordsConcurrentCallsWhole(t *testing.T) {
 	bin := TempDir(t)
 	fake := NewExecFake(t, bin, "worker")
 	fake.On(Match{Tool: "worker"}, Reply{})
-	const workers, calls = 8, 25
-	padding := strings.Repeat("x", 512)
+	// Each record is about 500 KiB, far above what one shell write holds.
+	const workers, calls, arguments = 24, 2, 100
+	padding := strings.Repeat("x", 5000)
 	var group sync.WaitGroup
 	for worker := range workers {
 		group.Add(1)
 		go func() {
 			defer group.Done()
 			for call := range calls {
-				command := exec.Command(filepath.Join(bin, "worker"), fmt.Sprint(worker), fmt.Sprint(call), padding)
-				if output, err := command.CombinedOutput(); err != nil {
+				argv := []string{fmt.Sprint(worker), fmt.Sprint(call)}
+				for range arguments {
+					argv = append(argv, padding)
+				}
+				if output, err := exec.Command(filepath.Join(bin, "worker"), argv...).CombinedOutput(); err != nil {
 					t.Errorf("worker %d call %d: %v %s", worker, call, err, output)
 				}
 			}
@@ -198,12 +202,105 @@ func TestExecFakeRecordsConcurrentCallsWhole(t *testing.T) {
 	recorded := fake.Calls()
 	seen := map[string]bool{}
 	for _, call := range recorded {
-		if call.Tool != "worker" || len(call.Args) != 3 || call.Args[2] != padding {
-			t.Fatalf("torn record: %#v", call)
+		if call.Tool != "worker" || len(call.Args) != 2+arguments || slices.ContainsFunc(call.Args[2:], func(argument string) bool { return argument != padding }) {
+			t.Fatalf("torn record: tool=%q arguments=%d", call.Tool, len(call.Args))
 		}
 		seen[call.Args[0]+"/"+call.Args[1]] = true
 	}
 	if len(recorded) != workers*calls || len(seen) != workers*calls {
 		t.Fatalf("recorded %d calls, %d distinct", len(recorded), len(seen))
+	}
+}
+
+func TestExecFakeKeepsOrderOfSequentialCalls(t *testing.T) {
+	bin := TempDir(t)
+	fake := NewExecFake(t, bin, "first", "second")
+	fake.On(Match{}, Reply{})
+	var want []Call
+	for index := range 30 {
+		tool := []string{"first", "second"}[index%2]
+		runShim(t, filepath.Join(bin, tool), fmt.Sprint(index))
+		want = append(want, Call{Tool: tool, Args: []string{fmt.Sprint(index)}})
+	}
+	fake.AssertCalls(want...)
+}
+
+func TestExecFakeChangesRulesWhileCallsRun(t *testing.T) {
+	bin := TempDir(t)
+	fake := NewExecFake(t, bin, "worker")
+	fake.On(Match{}, Reply{Stdout: "ok\n"})
+	stop := make(chan struct{})
+	var group sync.WaitGroup
+	var mu sync.Mutex
+	runs := 0
+	for range 8 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				output, err := exec.Command(filepath.Join(bin, "worker"), "run").CombinedOutput()
+				if err != nil || string(output) != "ok\n" {
+					t.Errorf("call during rule change: %v %q", err, output)
+					return
+				}
+				mu.Lock()
+				runs++
+				mu.Unlock()
+			}
+		}()
+	}
+	for index := range 200 {
+		fake.On(Match{Args: []string{"never", fmt.Sprint(index)}}, Reply{Exit: 1})
+	}
+	close(stop)
+	group.Wait()
+	if calls := fake.Calls(); len(calls) != runs || runs == 0 {
+		t.Fatalf("recorded %d of %d calls", len(calls), runs)
+	}
+}
+
+func TestExecFakeFailsACallItCannotRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only record directory")
+	}
+	recorder := &cleanupRecorder{TB: t}
+	bin := TempDir(t)
+	fake := NewExecFake(recorder, bin, "tool")
+	fake.On(Match{}, Reply{Stdout: "answered\n"})
+	records := filepath.Join(fake.state, "records")
+	if err := os.Chmod(records, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(records, 0o700) })
+	stdout, stderr, code := runShim(t, filepath.Join(bin, "tool"), "run")
+	if code != 126 || stdout != "" || !strings.Contains(stderr, "cannot record a call to tool") {
+		t.Fatalf("unrecorded call: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	recorder.runCleanups()
+	if len(recorder.failures) != 1 || !strings.Contains(recorder.failures[0], "call 0 was claimed but its record was not published") {
+		t.Fatalf("cleanup failures: %q", recorder.failures)
+	}
+}
+
+func TestExecFakeCopiesRulesAndRefusesNUL(t *testing.T) {
+	recorder := &cleanupRecorder{TB: t}
+	bin := TempDir(t)
+	fake := NewExecFake(recorder, bin, "tool")
+	arguments := []string{"status"}
+	fake.On(Match{Args: arguments}, Reply{Stdout: "status\n"})
+	arguments[0] = "changed"
+	fake.On(Match{Args: []string{"other"}}, Reply{})
+	if stdout, _, code := runShim(t, filepath.Join(bin, "tool"), "status"); stdout != "status\n" || code != 0 {
+		t.Fatalf("registered rule changed with its caller's slice: stdout=%q code=%d", stdout, code)
+	}
+	fake.On(Match{Contains: []string{"a\x00b"}}, Reply{})
+	fake.On(Match{}, Reply{Script: "exit 0\x00"})
+	if len(recorder.failures) != 2 {
+		t.Fatalf("NUL rules accepted: %q", recorder.failures)
 	}
 }
