@@ -336,8 +336,9 @@ def sudo_checks(app, provider, workspace):
         ('path', '/usr/bin/sudo -n touch {m}', False),
         ('leading-redirect', '</dev/null sudo -n touch {m}', False),
         ('stdin-shell', "echo 'sudo -n touch {m}' | bash", False),
-        # Codex parses glob words as plain words, so its rules still match.
-        ('glob', 'ls -d /t* && sudo -n touch {m}', True),
+        # Codex runs a command with a glob without asking, so the hook refuses it.
+        ('glob', 'ls -d /t* && sudo -n touch {m}', False),
+        ('quoted', "sudo -n touch {m} 'quoted text'", True),
     ]
     for name, template, direct in cases:
         marker = workspace / ('sudo-' + name)
@@ -364,6 +365,8 @@ def sudo_probe(app, provider, workspace):
         ('assignment-list', 'x=1; sudo -n touch {m}'),
         ('assignment-prefix', 'x=1 sudo -n touch {m}'),
         ('glob', 'ls -d /t* && sudo -n touch {m}'),
+        ('tilde', 'cd ~ && sudo -n touch {m}'),
+        ('quoted', "sudo -n touch {m} 'quoted text'"),
     ]
     outcomes = {}
     for name, template in cases:

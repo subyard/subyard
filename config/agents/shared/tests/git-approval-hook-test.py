@@ -243,9 +243,14 @@ for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo
         allowed(CLAUDE + gates, command)
         denied(CODEX + gates, command, name)
     for command in (call, f"{call} | cat", f"true && {call}", f"{call}; echo ok", f"{call} || true",
-                    f"{call} 'quoted text'", f"ls -d /t* && {call}"):
+                    f"{call} 'quoted text'", f'{call} "quoted text"', f"cd ./a-b_c/d.e:f,g@h%i+j=k && {call}"):
         allowed(CLAUDE + gates, command)
         allowed(CODEX + gates, command)
+    # Codex runs these without asking even though they are plain to the shell.
+    for command in (f"ls -d /t* && {call}", f"cd ~ && {call}", f"ls {{a,b}} && {call}", f"{call} a\\ b",
+                    f"ls [ab] && {call}", f'{call} "a\\"b"', f"ls a!b && {call}"):
+        allowed(CLAUDE + gates, command)
+        denied(CODEX + gates, command, name)
     # A refused prefix is not rescued by a later direct command.
     for command in (f"echo $HOME; {call}", f"ls > f; {call}", f"x=1 {call}", f"echo '{call}' | bash; {call}"):
         denied(CLAUDE + gates, command, name)

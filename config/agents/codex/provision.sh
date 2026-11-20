@@ -58,6 +58,9 @@ RESERVED = {"!", "{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "
 INERT = {"echo", "printf", "grep", "rg", "which", "type", "ls", "cat", "head", "tail", "wc",
          "cut", "uniq", "cd", "true"}
 PLAIN_SEPARATORS = {";", "|", "&&", "||"}
+# Codex runs a command with a glob, tilde, brace or escape without asking, so its plain words
+# use only these characters outside quotes, and quotes without expansions or escapes.
+CODEX_WORD = re.compile(r"""(?:[A-Za-z0-9_@%+=:,./-]|'[^'\n]*'|"[^"\\$`\n]*")+""")
 RESCAN = re.compile(r"""[\s;&|()<>`$#'"\\]""")
 
 
@@ -185,6 +188,8 @@ def pipelines(command, gates, claude):
                 offset = token.end()
                 continue
             if raw[0] in "#;&|\n()`<>" or any(char in raw for char in "$`\n"):
+                return None
+            if not claude and not CODEX_WORD.fullmatch(raw):
                 return None
             words.append(raw)
             offset = token.end()

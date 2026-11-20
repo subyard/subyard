@@ -884,6 +884,8 @@ anything:
 Claude prompts once for a whole call, so the check ends at its first direct command. Codex
 matches its prompt rules only against a whole plain command, so for Codex the whole command must
 be plain: `git push 2>&1`, a variable or a `$(…)` substitution in the same command is refused.
+Codex also runs a command with a glob such as `*` without asking, so for Codex unquoted words use
+only letters, digits and `_@%+=:,./-`, and quoted words contain no `$`, backtick or backslash.
 Commands such as `git stash push`, `git log --grep commit` and `git rebase` mention neither
 action and continue through the normal permission flow. Expected false positives are commands
 that only name an action outside that list, such as `gh pr create --title 'git push fix'`,
