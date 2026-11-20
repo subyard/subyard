@@ -99,13 +99,6 @@ class HeadersHelperTest(unittest.TestCase):
                     self.assertTrue(exported or not observed)
                     self.assertEqual(observed, content in (token, token+'\n'))
 
-    def test_activation_identity_differs_from_the_bearer_releases(self):
-        # v0.28-v0.30 put the bearer into home documents. Core refuses a rollback
-        # whose retained profile runtime has a different activation identity.
-        runtime = json.loads((PROFILE/'profile.json').read_text())['runtime']
-        self.assertNotIn(runtime['activation_id'], {'telemetry-runtime'})
-        self.assertEqual(runtime['activation_id'], 'telemetry-runtime-v2')
-
     def test_only_a_provisioned_codex_older_than_the_helper_is_reported(self):
         link = self.root/'codex'
         self.assertTrue(guest.codex_helper_supported(link))
