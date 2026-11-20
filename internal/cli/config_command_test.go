@@ -405,6 +405,51 @@ func TestConfigApplyRefusesOnlyTheYardWithAnUnreadableFile(t *testing.T) {
 	}
 }
 
+// lostGuestExecutor observes every config file drifted until lost, and then
+// loses the transport of instance.
+type lostGuestExecutor struct {
+	instance string
+	lost     *bool
+}
+
+func (executor lostGuestExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if *executor.lost && instance == executor.instance {
+		return ports.InstanceExecResult{}, errors.New("guest transport lost")
+	}
+	return symlinkedSettingsExecutor{}.Exec(ctx, project, instance, request)
+}
+
+// A yard that can no longer be assessed after confirmation is refused alone:
+// the other yard of the plan is still refreshed.
+func TestConfigApplyRefusesOnlyTheYardThatFailsReassessment(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	var named config.Loaded
+	for _, yard := range []string{"default", "named"} {
+		loaded := loadConfigCommandContext(t, root, environment, yard)
+		fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": yard}}
+		named = loaded
+	}
+	lost := false
+	applier := &recordingConfigApplier{}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--all-local"},
+		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{callback: func() { lost = true }},
+		Incus: fake, Executor: lostGuestExecutor{instance: named.Context.YardInstanceName, lost: &lost}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := program.Run(context.Background())
+	output := stdout.String() + stderr.String()
+	if code == 0 || !slices.Equal(applier.yards, []string{"default"}) || !strings.Contains(output, "yard named materialized config") || !strings.Contains(output, "guest transport lost") {
+		t.Fatalf("code=%d refreshed %v\n%s", code, applier.yards, output)
+	}
+}
+
 func TestConfigStatusRendersProfileRuntimeDiagnostics(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")

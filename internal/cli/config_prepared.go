@@ -520,7 +520,8 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 	}
 	// Guest bytes are compared in the guest, by the exec that replaces them:
 	// only the host-side target, desired configuration and instance recheck
-	// here. A yard the plan refused is reported as planned.
+	// here. A yard the plan refused is reported as planned; a yard that can
+	// no longer be assessed is refused alone and the others proceed.
 	var current []configTargetAssessment
 	for _, initial := range execution.approved {
 		fresh, name := byName[initial.Target.Name], initial.Target.Name
@@ -529,7 +530,8 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 			current = append(current, initial)
 			continue
 		case failures[name] != nil:
-			return materializedConfigActivationError{failures[name], name, "materialized config", "config status", "verify", initial.Target.Loaded.Context.Paths.ConfigHome}
+			current = append(current, configTargetAssessment{Target: initial.Target, refusal: materializedConfigActivationError{failures[name], name, "materialized config", "config status", "verify", initial.Target.Loaded.Context.Paths.ConfigHome}})
+			continue
 		}
 		if initial.DesiredFingerprint != fresh.DesiredFingerprint {
 			return fmt.Errorf("%w: yard %s: desired configuration or target changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
@@ -591,6 +593,8 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		switch approved := execution.approved[index]; {
 		case approved.refusal != nil:
 			refusals = append(refusals, approved.refusal)
+		case assessment.refusal != nil:
+			refusals = append(refusals, assessment.refusal)
 		case approved.Changed && assessment.Changed:
 			targets = append(targets, approved)
 		case approved.Changed:
