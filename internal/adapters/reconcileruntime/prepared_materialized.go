@@ -243,21 +243,3 @@ func writeMaterializedMetadata(p *PreparedInstalledRuntime, value materializedRe
 	}
 	return nil
 }
-
-func readMaterializedMetadata(p *PreparedInstalledRuntime) ([]byte, map[string]bool, error) {
-	var raw []byte
-	allowed := map[string]bool{}
-	for index := 0; index < 2; index++ {
-		path := fmt.Sprintf("%s%04d", materializedMetadataPrefix, index)
-		part, exists := p.files[path]
-		if !exists {
-			break
-		}
-		if index != 0 && len(raw) != 32<<20 || len(part) > 32<<20 {
-			return nil, nil, errors.New("invalid materialized metadata chunks")
-		}
-		raw = append(raw, part...)
-		allowed[path] = true
-	}
-	return raw, allowed, nil
-}

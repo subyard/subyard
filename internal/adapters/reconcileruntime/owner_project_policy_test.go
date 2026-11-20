@@ -1,9 +1,6 @@
 package reconcileruntime
 
 import (
-	"bytes"
-	"encoding/json"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,60 +8,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
-
-func ownerProjectRendererFixture(t *testing.T, root string, create bool, reporting, nested string) Runtime {
-	t.Helper()
-	runtime, _ := materializedIntegrationFixture(t, root, create)
-	if create {
-		helper, err := os.ReadFile("../../../scripts/lib/project-config.sh")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Join(root, "scripts/lib"), 0700); err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, filepath.Join(root, ownerProjectRenderer), helper, 0644)
-	}
-	runtime.Yard.YardName = "test-yard"
-	runtime.Yard.Paths.RepositoryRoot = root
-	runtime.Yard.Paths.ConfigDir = filepath.Join(root, "config")
-	runtime.Yard.Paths.ConfigHome = filepath.Join(root, "operator-config")
-	runtime.Yard.Paths.DataHome = filepath.Join(root, "operator-data")
-	runtime.Yard.Paths.HostBase = filepath.Join(root, "host-\xff-data")
-	contextRaw, err := json.Marshal(runtime.Yard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.Environment = append(runtime.Environment,
-		"SUBYARD_HOME="+runtime.Yard.Paths.DataHome,
-		"SUBYARD_CONFIG_HOME="+runtime.Yard.Paths.ConfigHome,
-		"HOST_BASE="+runtime.Yard.Paths.HostBase,
-		"SUBYARD_INSTALLATION_CONTEXT="+string(contextRaw),
-		"YARD_NAME="+runtime.Yard.YardName,
-		"YARD_INSTANCE_NAME="+runtime.Yard.YardInstanceName,
-		"SRV_POOL=original-pool", "SRV_VOLUME=original-volume", "STORAGE_PATH="+filepath.Join(root, "storage"),
-		"INCUS_NETWORK=original-bridge", "YARD_KIND=vm", "VM_FREE_PAGE_REPORTING="+reporting, "NESTED_E2E_VMS="+nested)
-	return runtime
-}
-
-func ownerRenderedMap(t *testing.T, raw []byte) map[string]string {
-	t.Helper()
-	if len(raw) == 0 || raw[len(raw)-1] != 0 {
-		t.Fatal("renderer output is not bounded byte framing")
-	}
-	result := map[string]string{}
-	for _, row := range bytes.Split(raw[:len(raw)-1], []byte{0}) {
-		key, value, ok := strings.Cut(string(row), "=")
-		if !ok {
-			t.Fatal("renderer row is malformed")
-		}
-		if _, duplicate := result[key]; duplicate {
-			t.Fatal("renderer row is repeated")
-		}
-		result[key] = value
-	}
-	return result
-}
 
 func TestOwnerBlockVMPreInstancePortionPreservesOriginalRootDiskOrder(t *testing.T) {
 	repository, err := filepath.Abs("../../..")

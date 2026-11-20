@@ -10,8 +10,6 @@ import (
 
 const MaxInstalledRecipe = 96 << 20
 
-var installedRuntimeHelpers = []string{"download.sh", "engine-context.sh", "host-path-ownership.py", "host.sh", "native-install-custody.py", "native-install-custody.sh", "native-installed-stage.py", "native-installed-stage.sh", "owner-address.sh", "preview-proxy.sh", "runtime.sh", "ssh-config.sh", "ssh-listener.sh", "teardown-files.py", "teardown-plan.py", "teardown-profile-checks.py", "teardown-services.sh", "teardown-session.sh", "teardown-shared.py", "ui.sh"}
-
 type installedRecipeFile struct {
 	Path    string `json:"path"`
 	Content []byte `json:"content"`
