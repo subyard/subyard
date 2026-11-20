@@ -92,7 +92,20 @@ guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the pa
 guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 PARITY_SUDO=1 \
   bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
   || die 'native Claude sudo approval acceptance failed'
-sudo_prompt=1
+stage 'running native Codex sudo approval with installed DEV_SUDO=prompt'
+# A directory outside registered projects keeps the Codex fixture out of Orca's assessment.
+sudo_fixture=/home/dev/codex-sudo-fixture
+guest_root runuser -u dev -- mkdir -p "$sudo_fixture/one" "$sudo_fixture/two"
+incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
+guest_root runuser -u dev -- env \
+  HOME=/home/dev CODEX_HOME=/home/dev/.codex \
+  PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+  python3 -B "$guest_helper" --sudo "$sudo_fixture/one" "$sudo_fixture/two" \
+  || die 'native Codex sudo approval failed'
+guest_root rm -rf -- "$sudo_fixture"
+yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
+yard init --yes >/dev/null || die 'yard init did not restore the default sudo mode'
+if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'default sudo mode kept the sudo ask rules'; fi
 
 fi
 
@@ -105,17 +118,6 @@ done
 yard orca sync --yes >/dev/null
 
 incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
-if [ "${sudo_prompt:-0}" = 1 ]; then
-stage 'running native Codex sudo approval with installed DEV_SUDO=prompt'
-guest_root runuser -u dev -- env \
-  HOME=/home/dev CODEX_HOME=/home/dev/.codex \
-  PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
-  python3 -B "$guest_helper" --sudo "$workspace_one" "$workspace_two" \
-  || die 'native Codex sudo approval failed'
-yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
-yard init --yes >/dev/null || die 'yard init did not restore the default sudo mode'
-if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'default sudo mode kept the sudo ask rules'; fi
-fi
 if [ "${CODEX_APPROVALS_ONLY:-0}" = 0 ]; then
 stage 'repairing a legacy Codex chat launch environment through yard init'
 codex_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
