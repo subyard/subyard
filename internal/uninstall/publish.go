@@ -42,12 +42,12 @@ func writePending(parent int, name string, body []byte, mode, uid uint32) (Entry
 	if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07777 != 0600 && info.Mode&07777 != mode || info.Uid != uid {
 		return Entry{}, guardRefusal("unsafe interrupted file publication")
 	}
-	existing := make([]byte, len(body)+1)
-	size, err := io.ReadFull(file, existing)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+	// One byte past the body proves a longer sidecar is not its prefix.
+	existing, err := io.ReadAll(io.LimitReader(file, int64(len(body))+1))
+	if err != nil {
 		return Entry{}, err
 	}
-	if !bytes.HasPrefix(body, existing[:size]) {
+	if !bytes.HasPrefix(body, existing) {
 		return Entry{}, guardRefusal("unsafe interrupted file publication")
 	}
 	if _, err := file.WriteAt(body, 0); err != nil {

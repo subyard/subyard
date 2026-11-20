@@ -172,8 +172,9 @@ func TestRecoveryRefusesSpecialPublicationSidecarWithoutReading(t *testing.T) {
 }
 
 func TestRecoveryResumesExactInterruptedPublication(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "same plan", true: "foreign plan"}[changed], func(t *testing.T) {
+	for _, variant := range []string{"same plan", "foreign plan", "longer sidecar"} {
+		changed := variant != "same plan"
+		t.Run(variant, func(t *testing.T) {
 			store, plan := recoveryFixture(t)
 			binding, err := store.Save(plan, nil)
 			if err != nil {
@@ -190,6 +191,14 @@ func TestRecoveryResumesExactInterruptedPublication(t *testing.T) {
 			}
 			if !changed {
 				body = body[:len(body)/2]
+			}
+			if variant == "longer sidecar" {
+				// The exact plan plus one trailing byte is not a prefix of it.
+				pending.Installation.DataHome = plan.Installation.DataHome
+				if body, err = json.Marshal(pending); err != nil {
+					t.Fatal(err)
+				}
+				body = append(body, '\n')
 			}
 			testkit.WriteFile(t, filepath.Join(store.Directory, ".plan-next"), body, 0600)
 			_, err = store.Save(plan, &binding)
