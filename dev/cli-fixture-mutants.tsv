@@ -1,0 +1,2 @@
+# Mutants for dev/cli-fixture-slice-check.sh: each must make its migrated tests fail.
+# test file	-run regex	product file	old text	new text
