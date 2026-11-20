@@ -545,7 +545,8 @@ func TestRollbackDeclarationRequiresSealedManifest(t *testing.T) {
 			if scenario == "changed-after-verification" {
 				testkit.WriteFile(t, path, rollbackDeclarationPayload(releasetransition.Fingerprint(strings.Repeat("c", 64))), 0o600)
 			}
-			predecessor, err := declaredPredecessor(verified, strictRollbackPredecessor)
+			declared, err := declaredPredecessor(verified, strictRollbackPredecessor)
+			predecessor := declared.Digest
 			switch scenario {
 			case "absent":
 				if predecessor != "" || err != nil {

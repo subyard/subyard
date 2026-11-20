@@ -37,7 +37,7 @@ func TestRollbackPredecessorToleratesNewerDeclarations(t *testing.T) {
 				t.Fatalf("strict parse = %#v, %v", own, err)
 			}
 			predecessor, err := ParseRollbackPredecessor(test.payload)
-			if (err == nil) != test.forward || predecessor != map[bool]Fingerprint{true: digest}[test.forward] {
+			if (err == nil) != test.forward || predecessor.Digest != map[bool]Fingerprint{true: digest}[test.forward] {
 				t.Fatalf("forward parse = %q, %v", predecessor, err)
 			}
 		})

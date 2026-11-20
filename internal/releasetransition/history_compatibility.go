@@ -2,6 +2,7 @@ package releasetransition
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -65,6 +66,9 @@ type HistoryCompatibilityInput struct {
 	// for rollback; empty when it declares none. TargetPredecessor is the one
 	// the target release declares.
 	Predecessor, TargetPredecessor Fingerprint
+	// TargetRegistryFeatures are the registry forms the target declares it
+	// reads, from its sealed declaration; none means the v0.30.0 form only.
+	TargetRegistryFeatures []string
 	// History, when present, must be readable by the target registry.
 	History *HistoryEvidence
 }
@@ -111,7 +115,7 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
 		return verdict.sealed()
 	}
-	path, err := PlanDownPath(*input.Active, *input.Target)
+	path, err := PlanDownPath(*input.Active, *input.Target, input.TargetRegistryFeatures...)
 	if err != nil {
 		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
 		verdict.Refusals = []HistoryRefusal{{HistoryRegistryDiffers, "the migration registries cannot be identified", err}}
@@ -163,8 +167,11 @@ type DownPath struct {
 // registry: an older engine validates the active registry before any request,
 // and its rules require every dependency to be a migration defined earlier in
 // the same registry. A surviving definition that depends on a retired one
-// therefore refuses.
-func PlanDownPath(active, target RegistryV2) (DownPath, error) {
+// therefore refuses, unless targetFeatures say the target reads dependencies
+// on retired definitions: then each must be one the active registry's retired
+// prefixes prove, as that target's parser requires. Without targetFeatures the
+// v0.30.0 rule applies.
+func PlanDownPath(active, target RegistryV2, targetFeatures ...string) (DownPath, error) {
 	var path DownPath
 	var err error
 	if path.Active, err = active.CanonicalDigest(); err != nil {
@@ -180,7 +187,7 @@ func PlanDownPath(active, target RegistryV2) (DownPath, error) {
 	}
 	if equivalent, err := retiresPrefixesOf(active, target, path.Active); err != nil || equivalent {
 		if err == nil {
-			if path.Unreadable = undefinedDependency(active); path.Unreadable == nil {
+			if path.Unreadable = undefinedDependency(active, targetFeatures); path.Unreadable == nil {
 				path.Kind = HistoryEquivalent
 			}
 		}
@@ -212,10 +219,18 @@ func retiresPrefixesOf(retired, base RegistryV2, digest Fingerprint) (bool, erro
 	return err == nil && candidateDigest == digest, err
 }
 
-// undefinedDependency applies the dependency rule of registry parsers that
-// predate dependencies on retired migrations.
-func undefinedDependency(registry RegistryV2) error {
+// undefinedDependency applies the dependency rule of the target's registry
+// parser. One that predates dependencies on retired migrations requires each
+// dependency to be defined earlier; one that declares
+// RegistryFeatureRetiredPrefixDependencies also accepts a retired definition
+// the registry's prefixes prove.
+func undefinedDependency(registry RegistryV2, targetFeatures []string) error {
 	defined := make(map[string]bool, len(registry.Migrations))
+	if slices.Contains(targetFeatures, RegistryFeatureRetiredPrefixDependencies) {
+		for _, id := range registry.retiredMigrationIDs() {
+			defined[id] = true
+		}
+	}
 	for _, migration := range registry.Migrations {
 		for _, dependency := range migration.DependsOn {
 			if !defined[dependency] {

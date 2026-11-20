@@ -22,7 +22,7 @@ func main() {
 		var payload []byte
 		payload, err = io.ReadAll(io.LimitReader(file, releasetransition.MaxRollbackDeclarationBytes+1))
 		if err == nil {
-			err = releasetransition.CheckOwnRollbackDeclaration(payload)
+			_, err = releasetransition.ParseRollbackDeclaration(payload)
 		}
 	}
 	if err != nil {
