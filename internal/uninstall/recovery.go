@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -305,16 +306,27 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 // Remove deletes a completed store through the pinned remover, plan last: an
 // interruption leaves the plan for an exact retry of the same removal.
 func (store RecoveryStore) Remove() error {
-	rest, err := captureTree(Tree{Path: store.Directory, Entries: []Entry{}, Exclusions: []string{"plan.json"}}, false)
-	if err == nil {
-		err = rest.Remove()
-	}
+	whole, err := Capture(store.Directory)
 	if err != nil {
 		return err
 	}
-	whole, err := Capture(store.Directory)
-	if err == nil {
-		err = whole.Remove()
+	rest := whole
+	rest.Exclusions = []string{"plan.json"}
+	if err := rest.Remove(); err != nil {
+		return err
 	}
-	return err
+	// The final pass approves only the store and plan first observed: any
+	// other entry refuses before the plan is unlinked.
+	whole.Entries = slices.DeleteFunc(slices.Clone(whole.Entries), func(entry Entry) bool { return entry.Path != "." && entry.Path != "plan.json" })
+	return whole.Remove()
+}
+
+// ResumeCommand is the exact retry of an incomplete removal. Once the retained
+// launcher is gone, any engine of this or a newer release resumes the store.
+func (store RecoveryStore) ResumeCommand() string {
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	if _, err := os.Lstat(launcher); err != nil {
+		launcher = "yard"
+	}
+	return launcher + " _uninstall-resume " + store.Directory
 }

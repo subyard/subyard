@@ -436,27 +436,33 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 	}
 }
 
+func completedStore(t *testing.T) RecoveryStore {
+	t.Helper()
+	store, plan := recoveryFixture(t)
+	store.Directory = filepath.Join(store.Directory, "data.uninstall")
+	if err := os.Mkdir(store.Directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"runtime/bin/yard", "runtime/bin/yard-engine", "runtime/scripts/lib/host.sh"} {
+		path := filepath.Join(store.Directory, file)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, []byte(file), 0700)
+	}
+	return store
+}
+
 // Final store removal keeps the plan until last: an interruption at any
-// observation leaves the store absent, empty or still readable, and an exact
-// retry completes it.
+// observation leaves the store absent, empty or still readable, and the
+// printed retry names an existing retained launcher or any newer engine.
 func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
 	t.Cleanup(func() { statAt = factAt })
 	for limit := 1; ; limit++ {
-		store, plan := recoveryFixture(t)
-		store.Directory = filepath.Join(store.Directory, "data.uninstall")
-		if err := os.Mkdir(store.Directory, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Save(plan, nil); err != nil {
-			t.Fatal(err)
-		}
-		for _, file := range []string{"runtime/bin/yard", "runtime/bin/yard-engine", "runtime/scripts/lib/host.sh"} {
-			path := filepath.Join(store.Directory, file)
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, path, []byte(file), 0700)
-		}
+		store := completedStore(t)
 		calls := 0
 		statAt = func(fd int, name, relative string) (Entry, error) {
 			if calls++; calls > limit {
@@ -476,6 +482,13 @@ func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
 			}
 			return
 		}
+		command := strings.Fields(store.ResumeCommand())
+		if len(command) != 3 || command[1] != "_uninstall-resume" || command[2] != store.Directory {
+			t.Fatalf("observation %d: printed retry %q", limit, command)
+		}
+		if info, err := os.Stat(command[0]); command[0] != "yard" && (err != nil || info.Mode()&0100 == 0) {
+			t.Fatalf("observation %d: printed retry names a missing launcher: %v", limit, err)
+		}
 		if err := store.Remove(); err != nil {
 			t.Fatalf("observation %d: exact retry failed: %v", limit, err)
 		}
@@ -485,5 +498,25 @@ func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
 		if limit > 1000 {
 			t.Fatal("removal never completed")
 		}
+	}
+}
+
+// An entry that appears after the first pass refuses before the plan is unlinked.
+func TestStoreRemovalFinalPassRefusesUnexpectedEntry(t *testing.T) {
+	store := completedStore(t)
+	keep := filepath.Join(store.Directory, "z-keep")
+	t.Cleanup(func() { statAt = factAt })
+	statAt = func(fd int, name, relative string) (Entry, error) {
+		if _, err := os.Lstat(filepath.Join(store.Directory, "runtime")); errors.Is(err, os.ErrNotExist) && !lexists(keep) {
+			testkit.WriteFile(t, keep, []byte("foreign"), 0600)
+		}
+		return factAt(fd, name, relative)
+	}
+	if err := store.Remove(); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("final pass accepted an unexpected entry: %v", err)
+	}
+	statAt = factAt
+	if _, _, err := store.Read(); err != nil || !lexists(keep) {
+		t.Fatalf("unexpected entry or plan removed: %v", err)
 	}
 }

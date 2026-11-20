@@ -70,6 +70,7 @@ svcs += variants(s, "scope", [ABSENT, None, 7, "user", "bad", ""])
 svcs += variants(s, "units", [ABSENT, None, 7, "subyard-a.service", [], ["a.service"] * 4, ["a.service"] * 5, ["bad"], [7], [None], ["a.timer", "b.socket"], ["-a.service"]])
 svcs += variants(s, "Artifacts", [ABSENT, None, [], 7, "x", {}, [a], [e, e], [e, dict(e, Binding=H)], [dict(e, Scoped=True)], [7], [{}], [dict(e, Path=7)]])
 svcs += variants(s, "foo", [1])
+svcs += variants(s, "Artifacts", [[dict(e, Path=missing + "-\x7f\b\x01\u00e9\U0001f600\"\\ <&>"), dict(e, Path="/q", Binding=H)]])
 services = [json.dumps([x]) for x in svcs] + [json.dumps(x) for x in (None, {}, 7, [], [7], [None], [s, dict(s, Artifacts=[dict(e, Binding=H)])], [s, s], [m] * 129, [m] * 128)] + ["", "{"]
 for value in services + [None]:
     for mode in (["service-inventory"], ["producer-artifacts"], ["producer-artifacts-json"]):

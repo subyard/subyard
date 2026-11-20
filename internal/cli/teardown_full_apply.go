@@ -80,7 +80,7 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 	store := uninstall.RecoveryStore{Directory: directory, UID: uint32(os.Getuid())}
 	defer func() {
 		if err != nil {
-			fmt.Fprintf(diagnostics, "Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", directory, filepath.Join(directory, "runtime", "bin", "yard"), directory)
+			fmt.Fprintf(diagnostics, "Full removal is incomplete. Retain %s and resume with:\n  %s\n", directory, store.ResumeCommand())
 		}
 	}()
 	saved := &execution.RecoveryPlan

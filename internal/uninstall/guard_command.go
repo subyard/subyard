@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"golang.org/x/sys/unix"
@@ -111,7 +112,7 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		if err != nil {
 			return err
 		}
-		return printJSON(stdout, artifacts)
+		return printReleasedJSON(stdout, artifacts)
 	case "capture-artifact":
 		body, err := io.ReadAll(io.LimitReader(stdin, 65537))
 		if err != nil {
@@ -285,6 +286,68 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		return guardResource(matches[0], project)
 	}
 	return guardRefusal("invalid teardown guard mode")
+}
+
+var releasedEscapes = map[uint16]string{'"': `\"`, '\\': `\\`, '\b': `\b`, '\f': `\f`, '\n': `\n`, '\r': `\r`, '\t': `\t`}
+
+// printReleasedJSON writes a value as the released helper's json.dumps did:
+// ", " and ": " separators and ASCII-only strings, in marshal order.
+func printReleasedJSON(stdout io.Writer, value any) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var out strings.Builder
+	counts, objects := []int{}, []bool{}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if delim, ok := token.(json.Delim); ok && (delim == '}' || delim == ']') {
+			counts, objects = counts[:len(counts)-1], objects[:len(objects)-1]
+			out.WriteRune(rune(delim))
+			continue
+		}
+		if depth := len(counts) - 1; depth >= 0 {
+			if objects[depth] && counts[depth]%2 == 1 {
+				out.WriteString(": ")
+			} else if counts[depth] > 0 {
+				out.WriteString(", ")
+			}
+			counts[depth]++
+		}
+		switch item := token.(type) {
+		case json.Delim:
+			out.WriteRune(rune(item))
+			counts, objects = append(counts, 0), append(objects, item == '{')
+		case string:
+			out.WriteByte('"')
+			for _, unit := range utf16.Encode([]rune(item)) {
+				if escaped, short := releasedEscapes[unit]; short {
+					out.WriteString(escaped)
+				} else if unit >= 0x20 && unit < 0x7f {
+					out.WriteByte(byte(unit))
+				} else {
+					fmt.Fprintf(&out, `\u%04x`, unit)
+				}
+			}
+			out.WriteByte('"')
+		case json.Number:
+			out.WriteString(item.String())
+		case bool:
+			out.WriteString(strconv.FormatBool(item))
+		case nil:
+			out.WriteString("null")
+		}
+	}
+	_, err = fmt.Fprintln(stdout, out.String())
+	return err
 }
 
 func printJSON(stdout io.Writer, value any) error {
