@@ -17,25 +17,11 @@ export TMPDIR=/tmp
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
-# Tests keep disposable state outside the checkout: no path outside .build/ may appear
-# or disappear. Content and Git status changes of existing paths are concurrent edits.
-# In private/, the coordinator- and operator-owned documents may change during a run.
-checkout_paths() {
-  { git -C "$1" ls-files --cached --others --exclude-standard
-    git -C "$1" ls-files --others --ignored --exclude-standard --directory
-  } | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(git -C "$1" ls-files --deleted | LC_ALL=C sort -u)
-}
-checkout_state() {
-  checkout_paths "$ROOT" | { grep -vx '\.build/' || true; }
-  if [ -e "$ROOT/private/.git" ]; then
-    checkout_paths "$ROOT/private" \
-      | { grep -vE '^(tasks|questions|reference|spec)/|^[^/]*\.md$' || true; } | sed 's|^|private/|'
-  fi
-}
+# Tests keep disposable state outside the checkout; see tests/helpers/checkout-guard.sh.
 CHECKOUT_TRACKED=0
 if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
   CHECKOUT_TRACKED=1
-  CHECKOUT_BEFORE="$(checkout_state | LC_ALL=C sort)"
+  CHECKOUT_BEFORE="$(bash "$ROOT/tests/helpers/checkout-guard.sh" snapshot "$ROOT")"
 fi
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
@@ -70,8 +56,13 @@ finish() {
   local rc="$1" status=passed
   trap - EXIT
   set +e
+  local failed_check="$CHECK_NAME"
   [ -z "$CHECK_NAME" ] || record_check "$rc"
   [ "$rc" -eq 0 ] || status=failed
+  # A failed run still reports its leaks, which the next run's snapshot would accept.
+  if [ "$rc" -ne 0 ] && [ "$CHECKOUT_TRACKED" = 1 ] && [ "$failed_check" != checkout-unchanged ]; then
+    bash "$ROOT/tests/helpers/checkout-guard.sh" compare "$ROOT" <(printf '%s\n' "$CHECKOUT_BEFORE")
+  fi
   printf 'run\t%s\tall\t%s\t%s\t%s\t-\n' \
     "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
   printf 'SUMMARY status=%s checks=%s duration_seconds=%s exit_code=%s results=%s\n' \
@@ -160,13 +151,7 @@ check_go_race() {
 
 check_checkout_unchanged() {
   [ "$CHECKOUT_TRACKED" = 1 ] || { printf 'checkout is not a Git work tree root; skipped\n'; return 0; }
-  local changes
-  changes="$(LC_ALL=C comm -3 <(printf '%s\n' "$CHECKOUT_BEFORE") <(checkout_state | LC_ALL=C sort))"
-  [ -z "$changes" ] || {
-    printf 'FAIL: tests added (+) or removed (-) checkout paths outside .build/:\n' >&2
-    printf '%s\n' "$changes" | sed -e 's/^\t/+ /' -e '/^+ /!s/^/- /' >&2
-    exit 1
-  }
+  bash "$ROOT/tests/helpers/checkout-guard.sh" compare "$ROOT" <(printf '%s\n' "$CHECKOUT_BEFORE")
 }
 
 if [ "$selection" != go ]; then
