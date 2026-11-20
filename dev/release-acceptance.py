@@ -140,7 +140,8 @@ def control(output):
                 accepted, reason = respond(connection)
                 connection.sendall(json.dumps({"accepted": accepted, "reason": reason}).encode() + b"\n")
 
-    threading.Thread(target=serve, daemon=True).start()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
     try:
         yield
     finally:
@@ -148,7 +149,12 @@ def control(output):
             server.shutdown(socket.SHUT_RDWR)  # Wakes the blocked accept.
         except OSError:
             pass
-        server.close()
+        else:
+            # Close only after the server thread stops using the socket: an accept still
+            # in flight keeps the address bound past this exit or reaches a reused fd.
+            thread.join()
+        finally:
+            server.close()
 
 
 def control_request(output, request):
