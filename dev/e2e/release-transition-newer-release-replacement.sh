@@ -238,9 +238,15 @@ main_newer_release() {
   printf '%s\n' "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
   CLEANUP_ARMED=1
   fetch_source_assets
-  local version
+  # Candidates carry the source's own transition registry: an already published
+  # engine is selected only with the active registry, and this lane tests journal
+  # replacement, not migration work (the published-upgrade lanes own that).
+  local version source_registry="$ASSET_ROOT/source-registry"
+  install -d -m 0700 "$source_registry"
+  tar -xzf "$SOURCE_ASSETS/$SOURCE_BUNDLE" -C "$source_registry" ./config/release-transition.json
   for version in "${VERSIONS[@]}"; do
-    bash "$ROOT/dev/package-engine.sh" --version "$version" --output-dir "$ASSET_ROOT/$version" >/dev/null
+    bash "$ROOT/dev/package-engine.sh" --version "$version" --output-dir "$ASSET_ROOT/$version" \
+      --release-transition-registry "$source_registry/config/release-transition.json" >/dev/null
   done
   prepare_newer_fixture
   local installed="$SOURCE_ASSETS/$SOURCE_BUNDLE"
