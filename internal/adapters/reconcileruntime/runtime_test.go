@@ -2569,3 +2569,54 @@ func TestExtrasDetachPlannedNamesUnrequestedOwnedDevices(t *testing.T) {
 		t.Fatalf("absent yard detaches %#v, %v", detach, err)
 	}
 }
+
+// The runtime reports the test-vms engine of its exact broker instance; other
+// stages have no engine to report.
+func TestStageEngineChangedReadsTheBrokerEngine(t *testing.T) {
+	root := testkit.TempDir(t)
+	calls := filepath.Join(root, "calls")
+	engine := filepath.Join(root, "engine")
+	for _, name := range []string{"scripts/e2e-lab", "scripts/lib", "bin"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, engine, []byte("fixture engine\n"), 0700)
+	for _, name := range []string{
+		"scripts/e2e-lab/provision.sh", "scripts/e2e-lab/base.sh", "scripts/01-install-incus.sh",
+		"scripts/lib/runtime.sh", "scripts/lib/engine-context.sh", "scripts/lib/ui.sh",
+		"scripts/lib/host.sh", "scripts/lib/download.sh", "scripts/lib-power.sh",
+	} {
+		testkit.WriteFile(t, filepath.Join(root, name), []byte("fixture\n"), 0600)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "bin/incus"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$CALLS"
+printf '1:foreign-engine:images:debian/13/cloud\n'
+exit "$INCUS_RC"
+`), 0700)
+	// ProcessRunner resolves executable names through the process PATH.
+	t.Setenv("PATH", filepath.Join(root, "bin")+":"+os.Getenv("PATH"))
+	t.Setenv("CALLS", calls)
+	runtime := Runtime{RepositoryRoot: root,
+		Environment: []string{"PATH=" + os.Getenv("PATH"), "SUBYARD_DISPATCHER_PATH=" + engine, "NESTED_E2E_VMS=1", "INCUS_RC=0"},
+		Yard: domain.Context{YardName: "test", IncusProject: "subyard-test", YardInstanceName: "yard-test",
+			NestedE2EVMs: true, Paths: domain.RuntimePaths{DataHome: filepath.Join(root, "data")}},
+	}
+	if changed, err := runtime.StageEngineChanged(context.Background(), ports.ReconcileStageID("power")); err != nil || changed {
+		t.Fatalf("another stage reported an engine: %v %v", changed, err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("another stage read the broker: %v", err)
+	}
+	changed, err := runtime.StageEngineChanged(context.Background(), ports.ReconcileStageTestVMs)
+	if err != nil || !changed {
+		t.Fatalf("a foreign broker engine was not reported: %v %v", changed, err)
+	}
+	if got, err := os.ReadFile(calls); err != nil || string(got) != "config get yard-test user.subyard.test_vms_revision --project subyard-test\n" {
+		t.Fatalf("engine read: %q %v", got, err)
+	}
+	runtime.Environment[len(runtime.Environment)-1] = "INCUS_RC=1"
+	if _, err := runtime.StageEngineChanged(context.Background(), ports.ReconcileStageTestVMs); err == nil {
+		t.Fatal("an unreadable broker engine was treated as observed")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,6 +33,8 @@ type serviceRecreationCalls struct {
 	// sameEngine models drift other than an engine change.
 	sameEngine bool
 	engineErr  error
+	// halfInstall leaves the failed install's instance uninitialized.
+	halfInstall bool
 }
 
 func (fixture *serviceRecreationCalls) run(_ context.Context, yard string, _ io.Writer, arguments ...string) error {
@@ -47,6 +50,12 @@ func (fixture *serviceRecreationCalls) run(_ context.Context, yard string, _ io.
 		}
 	case "service":
 		if fixture.fail == "service" {
+			if fixture.halfInstall {
+				half := fixture.instance
+				half.Config = maps.Clone(half.Config)
+				half.Config["user.subyard.initialized"] = "false"
+				fixture.incus.Instances[fixture.key] = half
+			}
 			return errors.New("injected service failure")
 		}
 		fixture.incus.Instances[fixture.key] = fixture.instance
@@ -575,5 +584,24 @@ func TestServiceStageProspectiveRegistrationPreservesDesired(t *testing.T) {
 				t.Fatal("prospective observation mutated registration")
 			}
 		})
+	}
+}
+
+// A refused recreation names the commands for the registration's own pool.
+func TestRefusedRecreationNamesTheRegisteredPool(t *testing.T) {
+	_, _, selection, stage, calls := serviceRecreationFixture(t)
+	if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
+		t.Fatal(err)
+	}
+	foreign := selection.record
+	foreign.Owner, foreign.Pool = strings.Repeat("f", 32), "gpu"
+	if err := selection.registry.Save(foreign); err != nil {
+		t.Fatal(err)
+	}
+	releases := releasetransition.ReleasePair{From: "previous-release", Target: "next-release"}
+	observed, err := stage.Observe(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.From})
+	want := "recreate it with yard service remove fixture-service --pool gpu, then yard service install fixture-service --yard fixture-runtime --pool gpu"
+	if err != nil || len(observed.Warnings) != 1 || !strings.HasSuffix(observed.Warnings[0], want) || len(calls.calls) != 0 {
+		t.Fatalf("refusal for a named pool: %+v %v", observed, err)
 	}
 }
