@@ -170,7 +170,7 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				before := entry(local)
+				before, stateBefore := entry(local), entry(guest.state)
 				var observed File
 				for command, initOnly := range map[string]bool{"yard -Y named config apply": false, "yard -Y named init --configs": true} {
 					file.InitOnly = initOnly
@@ -207,9 +207,37 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 						t.Fatalf("failed write: %v, guest %s", err, entry(local))
 					}
 				}
-
+				// A write that did not happen leaves the materialization state as it was.
+				if test.write == "unreadable" || test.write == "failed" {
+					if state := entry(guest.state); state != stateBefore {
+						t.Fatalf("refused write left state %s, had %s", state, stateBefore)
+					}
+				}
 			})
 		}
+	}
+}
+
+// A structured write over a stale token keeps the guest's document and
+// creates no materialization state; one over the current token converges.
+func TestStructuredWriteOverStaleTokenCreatesNoState(t *testing.T) {
+	for format, payload := range map[string][]byte{"json": []byte(`{"managed":true}`), "toml": []byte("sandbox_mode = 'danger-full-access'\n")} {
+		t.Run(format, func(t *testing.T) {
+			guest := newLocalGuest(t)
+			desired := Desired{Label: "agent", Destination: "/home/dev/.config/agent." + format, Format: format, Payload: payload}
+			local := guest.path(desired.Destination)
+			testkit.WriteFile(t, local, []byte(map[string]string{"json": `{"other":1}`, "toml": "other = 1\n"}[format]), 0o644)
+			result, err := guest.write(t, desired, PayloadToken([]byte("planned")))
+			if refused, ok := Refused(File{Destination: desired.Destination}, result, err); !ok || refused.State() != "changed" {
+				t.Fatalf("stale write: %#v %v %s", refused, err, result.Stderr)
+			}
+			if entry(guest.state) != "missing" {
+				t.Fatalf("stale write created state %s", entry(guest.state))
+			}
+			if _, err := guest.write(t, desired, guest.observe(t, desired).Token); err != nil || guest.observe(t, desired).State() != "converged" {
+				t.Fatalf("write: %v", err)
+			}
+		})
 	}
 }
 

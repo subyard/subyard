@@ -740,6 +740,16 @@ def main():
         raise MaterializationError("retirement ownership evidence unavailable")
 
     if mode == "apply":
+        if not (state_exists and os.path.lexists(lock_path)):
+            # A refused write creates no state: the destination is compared
+            # before the state root and lock exist, and again under the lock.
+            unreadable()
+            if raw != expect:
+                raise CasRefusal("changed")  # noqa: F821
+            if (not os.path.lexists(baseline_path) and not os.path.lexists(receipt_path) and
+                    validate_destination_parent(destination, allowed_home, uid, False) and
+                    read_current(destination, allow_invalid=True)[0] is None):
+                raise unowned_invalid_destination(destination)
         if not state_exists:
             os.makedirs(STATE_ROOT, mode=0o700)
             os.chmod(STATE_ROOT, 0o700)
