@@ -227,13 +227,14 @@ func undefinedDependency(registry RegistryV2) error {
 	return nil
 }
 
-// sealed keeps the invariant that a verdict which is not admitted carries a
-// refusal. A relation that is not admitted keeps the identity refusal.
+// registryDiffersRefusal refuses a registry relation that is not admitted.
 var registryDiffersRefusal = HistoryRefusal{
 	Reason:  HistoryRegistryDiffers,
 	Message: "the selected release's migration registry differs from the active release's registry",
 }
 
+// sealed keeps the invariant that a verdict which is not admitted carries a
+// refusal. A relation that is not admitted keeps the identity refusal.
 func (verdict HistoryCompatibilityVerdict) sealed() HistoryCompatibilityVerdict {
 	if !verdict.RegistryAdmitted() && len(verdict.Refusals) == 0 {
 		verdict.Refusals = []HistoryRefusal{registryDiffersRefusal}
