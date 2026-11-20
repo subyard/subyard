@@ -321,13 +321,19 @@ JSON predecessors use `legacy-config/*.json` in the owning integration. A raw co
 historical digest in `legacy-config/<destination-basename>.sha256`; it is accepted only during
 confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
-Subyard serializes its own writes per asset and atomically replaces the destination before updating
-the baseline. Replacements preserve the existing file mode. New documents use mode
-`0644`. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
-fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
-Subyard's lock: application reads the current file and verifies its result, but cannot serialize
-arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
-the current document or printing its contents.
+Subyard serializes its own writes per asset and replaces a destination only when the guest still
+holds the bytes that the refresh was planned on, before updating the baseline. Replacements preserve
+the existing file mode. New documents use mode `0644`. An already converged file keeps its bytes and
+gets its owner and mode back, unless another name links the same file. Retrying an interrupted
+application converges. Invalid JSON or an invalid baseline fails without overwriting it; diagnostics omit
+configuration contents. Running tools do not share Subyard's lock: a file that a tool changed after
+the plan is kept and reported as changed, the other files of the refresh are still written, and
+`yard -Y NAME config apply` plans again on the new bytes. A destination that is not a readable
+regular file, such as a symlink, is kept; `yard -Y NAME config status` and the refused apply name it
+with the step to replace or remove it. Such a yard, or one whose files cannot be assessed, is refused
+alone: `config apply --all-local`, `config sync --apply` and a release activation repair still refresh
+the other yards and report the refused yard with its files and next step. Invalid TOML, like invalid JSON, fails
+without overwriting the current document or printing its contents.
 
 ## Per-yard coding tool selection
 

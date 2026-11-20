@@ -336,13 +336,16 @@ func (cli *CLI) refreshReleaseConfig(ctx context.Context, execution *releaseExec
 			stdout: cli.options.Stdout, stderr: cli.options.Stderr, applyDrift: true,
 		}
 	}
-	if applyErr := applier.ApplyConfig(ctx, execution.yard); applyErr != nil {
+	if applyErr := applier.ApplyConfig(ctx, execution.yard, nil); applyErr != nil {
 		execution.failurePhase = "refresh"
 		execution.failureCode = "refresh_failed"
-		retry := "yard config apply"
-		if execution.yard != "" && execution.yard != "default" {
-			retry = "yard -Y " + execution.yard + " config apply"
+		yard := execution.yard
+		if yard == "default" {
+			yard = ""
 		}
+		// Only release targets without activation reconcilers refresh here
+		// (Prepared.RefreshConfigs), through a config apply child.
+		retry := domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})
 		refreshErr = errors.Join(refreshErr, fmt.Errorf(
 			"runtime activation completed, but refreshing materialized agent configuration failed: %w; retry with: %s",
 			applyErr, retry,

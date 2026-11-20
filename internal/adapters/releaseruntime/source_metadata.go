@@ -89,6 +89,10 @@ func (err sourceAdmissionError) Error() string {
 }
 func (err sourceAdmissionError) Unwrap() error { return err.cause }
 
+func (err sourceAdmissionError) ActivationDiagnostic() (string, string) {
+	return "installed release source proof failed " + err.phase + " verification", ""
+}
+
 // InspectSourceAdmission validates protected history through the production Go owner.
 func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (SourceAdmission, error) {
 	return runtime.inspectGoSourceAdmission(ctx, root, configHome)

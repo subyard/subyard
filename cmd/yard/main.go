@@ -53,6 +53,7 @@ func bootIncusClient(socket string) *incusclient.Client {
 }
 
 func main() {
+	cli.CloseConfigRefusalsOnExec()
 	// Bootstrap runs this probe from an already verified engine before it has a repository.
 	if len(os.Args) == 2 && os.Args[1] == "_bootstrap-draft-capability" {
 		if _, err := fmt.Fprintln(os.Stdout, "private-release-draft-v1"); err != nil {
@@ -424,6 +425,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "yard: initialize engine: %v\n", err)
 		os.Exit(2)
 	}
+	// The engine holds the refusal report descriptor; no subprocess sees its name.
+	_ = os.Unsetenv(cli.ConfigRefusalsFDVariable)
 	os.Exit(program.Run(ctx))
 }
 

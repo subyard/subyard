@@ -559,6 +559,56 @@ verify_config_workflow() {
   [ "$host_hash" = "$guest_hash" ] || die 'configured Codex rules were not applied to the yard'
 }
 
+guest_dev() {
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- "$@"
+}
+
+# A guest instruction file that only the runtime refreshes, replaced by a
+# symlink in an existing yard: the master writer replaced the link. Now the
+# update or init refuses it by name with the operator's step, either the
+# integration ownership preservation or the compare-and-write replacement,
+# keeps the link and its target, and converges once the operator removes it.
+# Plain init also repairs a default yard started past an update, which other
+# init modes wait for.
+verify_symlinked_instruction_file() { # <update command...>
+  local guest=/home/dev/.codex/AGENTS.md output rc=0
+  local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
+  local preserve="'mv' '-T' '--backup=numbered' '--' '$guest'"
+  operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
+  printf 'p0 source-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
+  operator_yard init --yes
+  guest_dev test -f "$guest" -a ! -L "$guest" || die 'the instruction file was not refreshed as a regular file'
+  guest_dev sh -c 'mv "$1" "$1.real" && ln -s AGENTS.md.real "$1"' _ "$guest"
+  set +e
+  output="$("$@" 2>&1)"
+  rc=$?
+  set -e
+  printf '%s\n' "$output"
+  printf 'p0-source-upgrade: update over a symlinked instruction file exited %s\n' "$rc"
+  if [ "$rc" -eq 0 ]; then
+    set +e
+    output="$(operator_yard init --yes 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "$output"
+    [ "$rc" -ne 0 ] || die 'init replaced the symlinked instruction file'
+    rc=0
+  fi
+  grep -Fq "$guest is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output" \
+    || grep -Fq "$preserve" <<<"$output" \
+    || die 'the symlinked instruction file was refused without its path and step'
+  guest_dev test -L "$guest" && [ "$(guest_dev cat "$guest.real")" = 'p0 source-upgrade instructions' ] \
+    || die 'the refusal changed the symlinked instruction file or its target'
+  guest_dev rm "$guest" "$guest.real"
+  # A refused update first repairs the current release, then runs again.
+  [ "$rc" -eq 0 ] || operator_yard migrate --yes
+  operator_yard init --yes
+  guest_dev test -f "$guest" -a ! -L "$guest" && guest_dev grep -Fqx 'p0 source-upgrade instructions' "$guest" \
+    || die 'the replaced instruction file did not converge'
+  [ "$rc" -eq 0 ] || "$@"
+  # The host instructions stay: removing them would leave the guest copy as drift.
+}
+
 wait_for_desired_yards() {
   local expected_named="$1" expected_default="$2" _ named_state='' default_state=''
   for _ in $(seq 1 60); do
@@ -1163,7 +1213,7 @@ finish() {
   verify_v2_release_transition "$VERSION_B"
   verify_config_workflow
 
-  operator_yard update --rollback --yes
+  verify_symlinked_instruction_file operator_yard update --rollback --yes
   verify_v2_release_transition "$VERSION_A"
   verify_config_workflow
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \

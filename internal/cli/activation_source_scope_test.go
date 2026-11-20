@@ -28,17 +28,20 @@ type sourceScopeConfigBoundary struct {
 func (boundary *sourceScopeConfigBoundary) Exec(
 	_ context.Context, project, instance string, request ports.InstanceExecRequest,
 ) (ports.InstanceExecResult, error) {
+	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok {
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
 	digest, err := configmaterial.DesiredDigest(request.Stdin)
 	if err != nil {
 		return ports.InstanceExecResult{}, err
 	}
 	payload, err := json.Marshal(configmaterial.Observation{
-		Converged: boundary.converged[project+"/"+instance], Fingerprint: digest,
+		Converged: boundary.converged[project+"/"+instance], Fingerprint: digest, Raw: configmaterial.TokenAbsent,
 	})
 	return ports.InstanceExecResult{Stdout: payload}, err
 }
 
-func (boundary *sourceScopeConfigBoundary) ApplyConfig(_ context.Context, yard string) error {
+func (boundary *sourceScopeConfigBoundary) ApplyConfig(_ context.Context, yard string, _ *ports.ConfigConsent) error {
 	boundary.applied = append(boundary.applied, yard)
 	key := "subyard/yard"
 	if yard != "default" {
