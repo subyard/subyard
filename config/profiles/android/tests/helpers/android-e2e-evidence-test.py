@@ -86,11 +86,56 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
     assert result.stderr.splitlines()[-1] == 'x' * 4096
 
 
-# The connected child captures all sections over run's ADB_SERVER_SOCKET before
-# run releases its lease. A broken adb query or relay must preserve the test
-# failure and collect the other sections; one TCP probe only reports relay health.
+# The connected child watches the device over run's ADB_SERVER_SOCKET from the start of
+# the lease, and on failure reports bounded sections from those files before run releases
+# it. A broken adb query or relay must preserve the test failure and the other sections;
+# one TCP probe only reports relay health.
 gradle_source = (E2E / 'android-gradle.sh').read_text()
-connected = gradle_source[gradle_source.index('connected() {'):gradle_source.index('not_writable "$work/connected.log"')]
+connected = gradle_source[gradle_source.index("stage='connected'\n"):gradle_source.index('not_writable "$work/connected.log"')]
+watch_source = connected.split("cat > \"$work/watch.py\" <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+
+
+def live_processes(marker):
+    found = []
+    for entry in Path('/proc').iterdir():
+        if entry.name.isdigit() and entry.name != str(os.getpid()):
+            with contextlib.suppress(OSError):
+                if marker.encode() in (entry / 'cmdline').read_bytes():
+                    found.append(entry.name)
+    return found
+
+
+# Watchers keep only the newest bytes in two rotating files, record unanswered samples,
+# and stop with their command on TERM.
+with tempfile.TemporaryDirectory(prefix='android-gradle-watch-', dir='/tmp') as name:
+    watch = Path(name, 'watch.py')
+    watch.write_text(watch_source)
+    stream = Path(name, 'stream.log')
+    result = subprocess.run([sys.executable, str(watch), str(stream), '1000', '0', sys.executable, '-c',
+                             'for index in range(5000): print("record", index)'], capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    newest, older = stream.read_text(), Path(str(stream) + '.1').read_text()
+    assert len(newest) <= 1000 and len(older) <= 1000, (len(newest), len(older))
+    assert newest.endswith('record 4999\nwatch: stream ended exit=0\n'), newest[-100:]
+    assert older.startswith('record ') and int(older.splitlines()[-1].split()[1]) + 1 == int(newest.split()[1])
+    sample = Path(name, 'sample.log')
+    started = time.monotonic()
+    sampler = subprocess.Popen([sys.executable, str(watch), str(sample), '4096', '1', 'bash', '-c',
+                                'echo sampled; exec sleep 30', name])
+    for _ in range(100):
+        if '--- exit=timeout' in (sample.read_text() if sample.exists() else ''):
+            break
+        time.sleep(0.05)
+    sampler.terminate()
+    assert sampler.wait(timeout=5) == 0 and time.monotonic() - started < 5
+    assert sample.read_text().startswith('--- sample time='), sample.read_text()
+    assert 'sampled\n\n--- exit=timeout\n' in sample.read_text(), sample.read_text()
+    assert not live_processes(name)
+    for size, expected in ((10, 'tail\n' * 10), (20000, 'tail\n' * 9830)):
+        result = subprocess.run([sys.executable, str(watch), '--newest'], input='head\n' + 'tail\n' * size,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and result.stdout == ('head\n' + expected if size == 10 else expected), \
+            (len(result.stdout), result.stdout[:20])
 
 
 def fake_relay(mode, requests):
@@ -111,16 +156,31 @@ def fake_relay(mode, requests):
     return listener
 
 
+logcat_records = ('--------- beginning of main\n'
+                  '11-19 19:30:17.000   100   100 I Startup : quiet\n'
+                  '--------- beginning of crash\n'
+                  '11-19 19:30:18.317   612   750 F libc    : Fatal signal 6 token=canary\n'
+                  '--------- switch to main\n'
+                  '11-19 19:30:19.019   228   228 I vold    : Killing all processes referencing /storage/emulated/0\n'
+                  '11-19 19:30:19.100   300   300 E Other   : failure from 192.0.2.1\n')
+watch_commands = ('shell dumpsys meminfo', 'logcat -b main -b system -b crash -v threadtime',
+                  'logcat -b events -v threadtime', 'logcat -b kernel -v threadtime')
 # (23, 7): a fast adb failure and a relay closed by the UID guard still keep every capture.
-# 137: meminfo ignores TERM and is killed after the grace period.
+# 124 and 137: the meminfo snapshot hangs and, for 137, ignores TERM until the kill grace.
 for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), (23, 7, 'closed'),
-                                         (23, 124, 'healthy'), (23, 137, 'healthy')):
+                                         (23, 124, 'healthy'), (0, 137, 'healthy'), (23, 137, 'healthy')):
     with tempfile.TemporaryDirectory(prefix='android-gradle-evidence-', dir='/tmp') as name:
         directory = Path(name)
         tools = directory / 'platform-tools'
         tools.mkdir()
         adb = tools / 'adb'
         adb.write_text('#!/bin/bash\nprintf "%s %s\\n" "$ADB_SERVER_SOCKET" "$*" >> "$CALLS"\n'
+                       'case "$*" in\n'
+                       f'  "logcat -b main -b system -b crash -v threadtime") printf %s {shlex.quote(logcat_records)} ;;\n'
+                       '  "logcat -b events -v threadtime") printf "11-19 19:30:18.000   612   750 I am_kill : '
+                       '[0,1838,com.example,900,stale]\\n11-19 19:30:18.001   612   750 I am_pss  : noise\\n" ;;\n'
+                       '  "logcat -b kernel -v threadtime") printf "kernel record\\n" ;;\n'
+                       'esac\n'
                        'printf "guest 12:34:56.789 192.0.2.1 2001:db8::1 2001:db8:0:1:2:3:4:5 aa:bb:cc:dd:ee:ff token=canary\\n"\n'
                        'case "$ADB_EXIT" in 124|137) ;; *) printf "1.1.1.1\\n%.0s" {1..10000} ;; esac\n'
                        'if [ "${2:-}" = dumpsys ]; then\n'
@@ -131,7 +191,7 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         adb.chmod(0o755)
         requests = []
         relay = fake_relay(relay_mode, requests)
-        script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
+        script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "sleep 1; exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT="$3" '
                   'ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
@@ -143,59 +203,106 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
                                      str(relay.getsockname()[1])],
                                     env=dict(os.environ, PATH=name + os.pathsep + os.environ['PATH'],
                                              CALLS=str(calls), ADB_EXIT=str(adb_exit)),
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=60)
         finally:
             relay.close()
         elapsed = time.monotonic() - started
         assert result.returncode == child_exit, result.stderr
-        evidence = (directory / 'emulator-evidence.log').read_text()
-        if child_exit == 0:
-            assert evidence == '' and calls.read_text() == 'released\n' and requests == []
-            continue
-        # The hung meminfo capture keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
-        bound = {124: 5, 137: 5 + 2}.get(adb_exit, 0)
-        assert bound <= elapsed < bound + 3, elapsed
-        assert len(evidence) < 3 * 66000 + 1000 and 'emulator' not in evidence
-        assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
-                                                      'aa:bb:cc:dd:ee:ff', 'canary'))
-        assert '12:34:56.789' in evidence
-        probe_label = 'android-gradle evidence: relay host:version transport=tcp\n'
-        assert evidence.count(probe_label) == 1, evidence[:500]
-        probe, marker, remainder = evidence.split(probe_label, 1)[1].partition('\ncapture_exit=')
-        if relay_mode == 'healthy':
-            assert requests == [b'000chost:version'] and probe == "relay=healthy reply=b'OKAY0004002b'\n", probe
-            assert marker and remainder.splitlines()[0] == '0'
-        else:
-            assert probe.startswith('relay=unhealthy ') and marker and remainder.splitlines()[0] == '1', probe
-        for section in ('logcat', 'meminfo', 'lowmemory'):
-            payload = evidence.split(f'android-gradle evidence: {section}\n', 1)[1]
-            payload, marker, remainder = payload.partition('\ncapture_exit=')
-            assert marker and remainder.splitlines()[0] == str(adb_exit)
-            assert len(payload.encode()) <= 65536
-            if adb_exit not in (124, 137):
-                assert len(payload.encode()) >= 65528 and '1.1.1.1' not in payload
+        # Watchers stop with the leased child, before run releases the lease.
+        assert not live_processes(name)
         observed = calls.read_text().splitlines()
-        assert observed[-1] == 'released' and len(observed) == 4, observed
+        assert observed[-1] == 'released' and 'released' not in observed[:-1], observed
         assert all(line.startswith('localfilesystem:/fixture.sock ') and ' -H ' not in line and ' -L ' not in line
                    for line in observed[:-1]), observed
-        assert 'logcat -b main -b system -b crash -d -t 512' in observed[0]
-        assert 'shell dumpsys meminfo' in observed[1] and 'dmesg; logcat' in observed[2]
+        commands = [line.split(' ', 1)[1] for line in observed[:-1]]
+        assert all(command in commands for command in watch_commands), commands
+        assert commands[0] == 'shell dumpsys meminfo', commands
+        assert any(command.startswith('shell cat /proc/loadavg /proc/meminfo') for command in commands), commands
+        # The hung meminfo snapshot keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
+        bound = 1 + {124: 5, 137: 5 + 2}.get(adb_exit, 0)
+        assert bound <= elapsed < bound + 4, elapsed
+        evidence = (directory / 'emulator-evidence.log').read_text()
+        if child_exit == 0:
+            assert evidence == '' and requests == []
+            continue
+        assert len(evidence) < 8 * 66000 and 'emulator' not in evidence
+        assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
+                                                      'aa:bb:cc:dd:ee:ff', 'canary', '1.1.1.1'))
+        assert '12:34:56.789' in evidence
+        sections = {}
+        for section in ('before connected meminfo', 'relay host:version transport=tcp', 'logcat-notable',
+                        'logcat-crash', 'logcat', 'events-notable', 'kernel', 'memory'):
+            label = f'android-gradle evidence: {section}\n'
+            assert evidence.count(label) == 1, (section, evidence[:500])
+            payload, marker, remainder = evidence.split(label, 1)[1].partition('\ncapture_exit=')
+            assert marker and len(payload.encode()) <= 65536, section
+            sections[section] = (payload, remainder.splitlines()[0])
+        assert sections['before connected meminfo'][1] == str(adb_exit)
+        probe, probe_exit = sections['relay host:version transport=tcp']
+        if relay_mode == 'healthy':
+            assert requests == [b'000chost:version'] and probe == "relay=healthy reply=b'OKAY0004002b'\n", probe
+            assert probe_exit == '0'
+        else:
+            assert probe.startswith('relay=unhealthy ') and probe_exit == '1', probe
+        for section in ('logcat-notable', 'logcat-crash', 'logcat', 'events-notable', 'kernel', 'memory'):
+            assert sections[section][1] == '0', (section, sections[section])
+        notable = sections['logcat-notable'][0]
+        assert 'F libc    : Fatal signal 6 [redacted]' in notable and 'I vold    : Killing all processes' in notable
+        assert 'E Other   : failure from [address]' in notable and 'Startup' not in notable, notable
+        crash = sections['logcat-crash'][0]
+        assert crash == '11-19 19:30:18.317   612   750 F libc    : Fatal signal 6 [redacted]\n', crash
+        raw = sections['logcat'][0]
+        assert raw.endswith(f'watch: stream ended exit={adb_exit}\n'), raw[-100:]
+        if adb_exit not in (124, 137):
+            assert len(raw.encode()) >= 49144 and '[address]' in raw
+        events = sections['events-notable'][0]
+        assert events == '11-19 19:30:18.000   612   750 I am_kill : [0,1838,com.example,900,stale]\n', events
+        kernel = sections['kernel'][0]
+        assert kernel.endswith(f'watch: stream ended exit={adb_exit}\n'), kernel[-100:]
+        assert ('kernel record\n' in kernel) == (adb_exit in (124, 137)), kernel[:100]
+        memory = sections['memory'][0]
+        assert memory.startswith('--- sample time=') and f'\n--- exit={adb_exit}\n' in memory, memory[:200]
 
-# A failed run labels the first relay refusal before the log tails.
-gradle_cleanup = gradle_source[gradle_source.index('cleanup() {'):gradle_source.index('trap cleanup EXIT')]
+# Every relay refusal and their total are reported on failure, before the log tails, and on success.
+gradle_cleanup = gradle_source[gradle_source.index('# Every relay refusal'):gradle_source.index('trap cleanup EXIT')]
+refusal = 'Android ADB relay: refused a loopback connection owned by another account peer_uid=1001'
+for outcome in ('exit 23', 'relay_refusals; exit 0'):
+    with tempfile.TemporaryDirectory(prefix='android-gradle-cleanup-', dir='/tmp') as directory:
+        work = Path(directory, 'work')
+        work.mkdir(mode=0o700)
+        (work / '.marker').write_text('subyard-android-gradle-v1\n')
+        (work / 'connected.log').write_text(f'start\n{refusal}\n{refusal} again\nend\n')
+        result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + gradle_cleanup
+                                 + f'\ntrap cleanup EXIT\nstage=connected\n{outcome}\n', '_', str(work)],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == (23 if outcome == 'exit 23' else 0) and not work.exists(), result.stderr
+        lines = (result.stderr if outcome == 'exit 23' else result.stdout).splitlines()
+        reported = ['android-gradle: relay refusals=2', f'android-gradle: relay refusal: {refusal}',
+                    f'android-gradle: relay refusal: {refusal} again']
+        start = lines.index(reported[0])
+        assert lines[start:start + 3] == reported, lines
+        if outcome == 'exit 23':
+            assert start < lines.index('android-gradle: connected.log (last 80 lines)')
+# Without refusals the total is still reported.
 with tempfile.TemporaryDirectory(prefix='android-gradle-cleanup-', dir='/tmp') as directory:
-    work = Path(directory, 'work')
-    work.mkdir(mode=0o700)
-    (work / '.marker').write_text('subyard-android-gradle-v1\n')
-    refusal = 'Android ADB relay: refused a loopback connection owned by another account peer_uid=1001'
-    (work / 'connected.log').write_text(f'start\n{refusal}\n{refusal} again\nend\n')
+    Path(directory, 'connected.log').write_text('start\nend\n')
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + gradle_cleanup
-                             + '\ntrap cleanup EXIT\nstage=connected\nexit 23\n', '_', str(work)],
+                             + '\nrelay_refusals\n', '_', directory], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout == 'android-gradle: relay refusals=0\n', result
+
+
+# Every run starts with an empty Gradle cache, so the fixture project resolves Maven Central
+# artifacts only through the mirror; Maven Central answers shared CI addresses with HTTP 429.
+project_stage = gradle_source[gradle_source.index("stage='project'\n"):gradle_source.index('not_writable() {')]
+with tempfile.TemporaryDirectory(prefix='android-gradle-project-', dir='/tmp') as directory:
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\ncd "$1"\n' + project_stage, '_', directory],
                             capture_output=True, text=True, timeout=10)
-    assert result.returncode == 23 and not work.exists(), result.stderr
-    lines = result.stderr.splitlines()
-    assert lines.count(f'android-gradle: relay refusal: {refusal}') == 1, result.stderr
-    assert lines.index(f'android-gradle: relay refusal: {refusal}') < lines.index('android-gradle: connected.log (last 80 lines)')
+    assert result.returncode == 0, result.stderr
+    settings = Path(directory, 'project/settings.gradle.kts').read_text()
+    mirror = 'maven("https://maven-central.storage-download.googleapis.com/maven2/")'
+    blocks = re.findall(r'repositories \{([^}]*)\}', settings)
+    assert len(blocks) == 2 and all(mirror in block for block in blocks), settings
+    assert 'mavenCentral' not in settings and 'repo.maven.apache.org' not in settings, settings
 
 
 # After the Gradle exec fails, root cleanup captures the retained journal without

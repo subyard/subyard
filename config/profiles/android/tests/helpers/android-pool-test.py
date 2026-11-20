@@ -10,6 +10,7 @@ import secrets
 import signal
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1755,28 +1756,38 @@ os.write(1, result.stdout)
         self.assertEqual(client.proc_address('0100007F:1F90'), ('127.0.0.1', 8080))
         self.assertEqual(client.proc_address('0000000000000000FFFF00000100007F:0035'), ('127.0.0.1', 53))
         table = self.root / 'tcp'
-        class Stream:
-            def getsockname(self):
-                return ('127.0.0.1', 5037)
-            def getpeername(self):
-                return ('127.0.0.1', 40000)
+        local, peer = ('127.0.0.1', 5037), ('127.0.0.1', 40000)
         header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
         row = '   1: 0100007F:9C40 0100007F:13AD {state} 00000000:00000000 00:00000000 00000000  {uid}        0 {inode} 1\n'
-        cases = [([dict(state='01', uid=1234, inode=77)], 1234),
+        cases = [([dict(state='01', uid=1234, inode=77)], (1234, ['ESTABLISHED'])),
                  # Server-side and timewait rows never identify the connecting owner.
-                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)], 1234),
-                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)], None),
-                 ([], None)]
+                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)],
+                  (1234, ['TIME_WAIT/orphan', 'ESTABLISHED'])),
+                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)],
+                  (None, ['ESTABLISHED', 'ESTABLISHED'])),
+                 # A peer that closed first leaves an orphaned row with uid 0; it is never the owner.
+                 ([dict(state='05', uid=0, inode=0)], (None, ['FIN_WAIT2/orphan'])),
+                 ([dict(state='08', uid=1234, inode=77)], (None, ['CLOSE_WAIT'])),
+                 ([], (None, []))]
         for rows, expected in cases:
             table.write_text(header + ''.join(row.format(**values) for values in rows))
-            self.assertEqual(client.loopback_peer_uid(Stream(), (str(table), str(self.root / 'missing'))), expected)
-        # The real kernel table resolves this process as the owner of its loopback connection.
+            self.assertEqual(client.loopback_peer(local, peer, (str(table), str(self.root / 'missing'))), expected)
+        # The real kernel table resolves this process as the owner of its loopback connection,
+        # and reports a peer that closed before the lookup without naming an owner.
         listener = client.tcp_listener()
         try:
             own = socket.create_connection(listener.getsockname(), timeout=2)
-            accepted, _ = listener.accept()
+            accepted, address = listener.accept()
             try:
-                self.assertEqual(client.loopback_peer_uid(accepted), os.getuid())
+                self.assertEqual(client.loopback_peer(accepted.getsockname(), address),
+                                 (os.getuid(), ['ESTABLISHED']))
+                own.close()
+                for _ in range(100):
+                    owner, states = client.loopback_peer(accepted.getsockname(), address)
+                    if states == ['FIN_WAIT2/orphan']:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual((owner, states), (None, ['FIN_WAIT2/orphan']))
             finally:
                 own.close()
                 accepted.close()
@@ -1795,18 +1806,45 @@ os.write(1, result.stdout)
                     own.settimeout(2)
                     self.assertEqual(own.recv(1), b'')
                 # Another local account's connection is closed before any lease tunnel opens.
-                with patch.object(client, 'loopback_peer_uid', return_value=os.getuid() + 1), \
+                with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])), \
                         contextlib.redirect_stderr(io.StringIO()) as output:
                     with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
                         foreign.settimeout(2)
                         peer_port = foreign.getsockname()[1]
                         self.assertEqual(foreign.recv(1), b'')
-                self.assertIn(f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()}', output.getvalue())
-                self.assertIn(f'peer_port={peer_port} relay_port={port}', output.getvalue())
+                self.assertIn('refused a loopback connection owned by another account '
+                              f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()} peer_state=ESTABLISHED '
+                              f'peer_port={peer_port} relay_port={port} refusals=1 ', output.getvalue())
+                # A peer that resets before verification is refused as unknown, counted, and the
+                # relay keeps serving its owner.
+                accept = relay.get_request
+                def late_accept():
+                    request = accept()
+                    for _ in range(100):
+                        states = client.loopback_peer(request[0].getsockname(), request[1])[1]
+                        if not states:
+                            break
+                        time.sleep(0.01)
+                    return request
+                with patch.object(relay, 'get_request', side_effect=late_accept), \
+                        contextlib.redirect_stderr(io.StringIO()) as output:
+                    reset = socket.create_connection(('127.0.0.1', port), timeout=2)
+                    reset.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                    reset.close()
+                    for _ in range(100):
+                        if 'refusals=2 ' in output.getvalue():
+                            break
+                        time.sleep(0.01)
+                self.assertIn('refused a loopback connection whose owner is unknown peer_uid=unknown '
+                              f'expected_uid={os.getuid()} peer_state=', output.getvalue())
+                self.assertIn('refusals=2 ', output.getvalue())
+                with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                    own.settimeout(2)
+                    self.assertEqual(own.recv(1), b'')
             finally:
                 relay.shutdown()
                 relay.server_close()
-        self.assertEqual(tunnels, ['tunnel'])
+        self.assertEqual(tunnels, ['tunnel', 'tunnel'])
         self.assertTrue(self.refused(port))
 
     def test_acquire_retains_tcp_relay_until_release(self):

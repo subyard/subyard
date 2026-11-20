@@ -157,10 +157,14 @@ def proc_address(value):
     return str(address), int(port, 16)
 
 
-def loopback_peer_uid(stream, tables=('/proc/net/tcp', '/proc/net/tcp6')):
-    """Owner uid of the connecting loopback socket, or None when it is not uniquely known."""
-    local, peer = stream.getsockname()[:2], stream.getpeername()[:2]
-    owners = set()
+TCP_STATES = {'01': 'ESTABLISHED', '02': 'SYN_SENT', '03': 'SYN_RECV', '04': 'FIN_WAIT1', '05': 'FIN_WAIT2',
+              '06': 'TIME_WAIT', '07': 'CLOSE', '08': 'CLOSE_WAIT', '09': 'LAST_ACK', '0A': 'LISTEN', '0B': 'CLOSING'}
+
+
+def loopback_peer(local, peer, tables=('/proc/net/tcp', '/proc/net/tcp6')):
+    """Owner uid of the connecting loopback socket, or None when it is not uniquely known,
+    and the kernel states of the rows naming that socket."""
+    owners, states = set(), []
     for table in tables:
         try:
             rows = Path(table).read_text().splitlines()[1:]
@@ -168,15 +172,19 @@ def loopback_peer_uid(stream, tables=('/proc/net/tcp', '/proc/net/tcp6')):
             continue
         for row in rows:
             fields = row.split()
-            # Only the established connecting socket identifies its owner; timewait rows have no inode.
-            if len(fields) < 10 or fields[3] != '01' or fields[9] == '0':
+            if len(fields) < 10:
                 continue
             try:
-                if proc_address(fields[1]) == tuple(peer) and proc_address(fields[2]) == tuple(local):
-                    owners.add(int(fields[7]))
+                if proc_address(fields[1]) != tuple(peer) or proc_address(fields[2]) != tuple(local):
+                    continue
             except ValueError:
                 continue
-    return owners.pop() if len(owners) == 1 else None
+            # A closed connection's orphaned or timewait row has no inode and no owner.
+            states.append(TCP_STATES.get(fields[3], fields[3]) + ('/orphan' if fields[9] == '0' else ''))
+            # Only the established connecting socket identifies its owner.
+            if fields[3] == '01' and fields[9] != '0':
+                owners.add(int(fields[7]))
+    return (owners.pop() if len(owners) == 1 else None), states
 
 
 class TcpRelay(socketserver.ThreadingTCPServer):
@@ -186,16 +194,24 @@ class TcpRelay(socketserver.ThreadingTCPServer):
 
     def verify_request(self, request, client_address):
         # Loopback is shared by every local account; accept only this client's own uid.
-        peer_uid = loopback_peer_uid(request)
+        # accept() already named the peer; a peer reset since then must not stop this server.
+        try:
+            local = request.getsockname()[:2]
+        except OSError:
+            peer_uid, states = None, ['unreadable']
+        else:
+            peer_uid, states = loopback_peer(local, client_address[:2])
         expected_uid = os.getuid()
         if peer_uid == expected_uid:
             return True
-        if not self.rejected:
-            self.rejected = True
-            print('Android ADB relay: refused a loopback connection owned by another account '
+        self.refusals += 1
+        reason = 'whose owner is unknown' if peer_uid is None else 'owned by another account'
+        with contextlib.suppress(OSError, ValueError):
+            print(f'Android ADB relay: refused a loopback connection {reason} '
                   f'peer_uid={peer_uid if peer_uid is not None else "unknown"} expected_uid={expected_uid} '
-                  f'peer_port={client_address[1]} relay_port={self.server_address[1]} time={time.time():.3f}',
-                  file=sys.stderr)
+                  f'peer_state={",".join(states) or "absent"} '
+                  f'peer_port={client_address[1]} relay_port={self.server_address[1]} '
+                  f'refusals={self.refusals} time={time.time():.3f}', file=sys.stderr, flush=True)
         return False
 
 
@@ -517,7 +533,7 @@ def start_tcp_relay(token, listener):
     server = TcpRelay(listener.getsockname(), RelayHandler, bind_and_activate=False)
     server.socket.close()
     server.socket, server.server_address = listener, listener.getsockname()
-    server.token, server.rejected = token, False
+    server.token, server.refusals = token, 0
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
