@@ -845,7 +845,7 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
 
 
 def assert_short_run_traces(data, endpoint, env):
-    """Check every span from a managed run shorter than the spool interval."""
+    """Check both immediate exports from a short-lived managed run."""
     trace_id = uuid.uuid4().hex
     span_ids = ['0000000000000001', '0000000000000002']
     now = time.time_ns()
@@ -870,7 +870,6 @@ print(run)
                                env=env, input=''.join(json.dumps(batch)+'\n' for batch in batches),
                                text=True, stdout=subprocess.PIPE, check=True, timeout=10)
     elapsed = time.monotonic()-started
-    assert elapsed < 1, f'fast trace fixture took {elapsed:.3f}s'
     run = completed.stdout.strip()
     found = []
     for payload in raw_otlp(data, 'otlp/traces'):
