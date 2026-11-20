@@ -1,4 +1,10 @@
-// Package safefs provides descriptor-relative filesystem operations for local state.
+// Package safefs atomically publishes files, resolving every name in the
+// publication through one pinned parent descriptor. It never follows a
+// final-component symlink and sets the staging file's owner and mode through
+// its descriptor before publication.
+//
+// The trust boundary is the host. A principal with write access to the parent
+// directory can replace its entries at any time. Ancestor paths are trusted.
 package safefs
 
 import (
@@ -24,16 +30,14 @@ const (
 type Ownership struct{ UID, GID int }
 
 type Options struct {
-	Mode         fs.FileMode // Zero defaults to 0600 unless ExactMode is set.
-	ExactMode    bool
-	PreserveMode bool
-	TempPattern  string      // An explicit pattern without '*' is a fixed staging name.
-	ParentMode   fs.FileMode // Zero requires the parent to exist.
-	Root         string      // Optional trusted starting point for a nofollow walk.
-	Owner        *Ownership
-	NoReplace    bool
-	Durability   Durability
-	Fault        func(Point) error // Test-only interruption hook.
+	Mode        fs.FileMode // Zero defaults to 0600 unless ExactMode is set.
+	ExactMode   bool
+	TempPattern string      // An explicit pattern without '*' is a fixed staging name.
+	ParentMode  fs.FileMode // Zero requires the parent to exist.
+	Owner       *Ownership
+	NoReplace   bool
+	Durability  Durability
+	Fault       func(Point) error // Test-only interruption hook.
 }
 
 type Point string
@@ -54,10 +58,8 @@ var (
 	ErrNotDirectory  = errors.New("not a directory")
 	ErrUnsafeOwner   = errors.New("unsafe ownership")
 	ErrUnsafeMode    = errors.New("unsafe permissions")
-	ErrEscapesRoot   = errors.New("path escapes root")
 	ErrMultipleLinks = errors.New("multiple hard links")
 	ErrTooLarge      = errors.New("file exceeds size limit")
-	ErrStageChanged  = errors.New("staged file identity changed")
 )
 
 func pathError(op, path string, err error) error {
@@ -107,7 +109,7 @@ func WriteFrom(path string, o Options, fill func(*os.File) error) error {
 }
 
 func Create(path string, o Options) (*Pending, error) {
-	parent, name, err := openParent(path, o.Root, o.ParentMode, o.Durability, o.Owner)
+	parent, name, err := openParent(path, o.ParentMode, o.Durability)
 	if err != nil {
 		return nil, err
 	}
@@ -135,12 +137,8 @@ func (p *Pending) create() error {
 		return err
 	}
 	if !p.options.NoReplace {
-		target, err := p.targetMode()
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := p.checkTarget(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
-		}
-		if err == nil && p.options.PreserveMode {
-			mode = fs.FileMode(target & 0o777)
 		}
 	}
 	if owner := p.options.Owner; owner != nil {
@@ -185,8 +183,8 @@ func (p *Pending) stageFile(pattern string) error {
 func (p *Pending) File() *os.File { return p.file }
 func (p *Pending) Name() string   { return p.file.Name() }
 
-// Publish syncs the staging file before making it visible. Callers that close
-// File themselves are responsible for its final mode and sync.
+// Publish syncs and closes the staging file before making it visible. Callers
+// that close File themselves are responsible for its final mode and sync.
 func (p *Pending) Publish() error {
 	if p.published {
 		return nil
@@ -209,20 +207,15 @@ func (p *Pending) Publish() error {
 				return err
 			}
 		}
+		if err := p.file.Close(); err != nil {
+			return err
+		}
 	}
 	if err := p.fault(BeforePublish); err != nil {
 		return err
 	}
-	if !p.matchesStage(p.stage) {
-		return refusal(p.Name(), ErrStageChanged)
-	}
 	if err := p.rename(); err != nil {
 		return err
-	}
-	if p.file.Fd() != ^uintptr(0) {
-		if err := p.file.Close(); err != nil {
-			return err
-		}
 	}
 	return p.fault(AfterPublish)
 }
@@ -235,12 +228,7 @@ func (p *Pending) rename() error {
 			if err := unix.Linkat(fd, p.stage, fd, p.name, 0); err != nil {
 				return &os.LinkError{Op: "link", Old: p.Name(), New: p.path, Err: err}
 			}
-			if err := p.verifyPublished(); err != nil {
-				return err
-			}
-			if !p.matchesStage(p.stage) {
-				return refusal(p.Name(), ErrStageChanged)
-			}
+			p.published = true
 			if err := unix.Unlinkat(fd, p.stage, 0); err != nil {
 				return pathError("remove", p.Name(), err)
 			}
@@ -252,15 +240,15 @@ func (p *Pending) rename() error {
 		}
 	} else {
 		// Recheck after filling: a new symlink is never followed, even if it races rename.
-		if _, err := p.targetMode(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := p.checkTarget(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		if err := unix.Renameat(fd, p.stage, fd, p.name); err != nil {
 			return &os.LinkError{Op: "rename", Old: p.Name(), New: p.path, Err: err}
 		}
 	}
-	p.stage = ""
-	return p.verifyPublished()
+	p.published, p.stage = true, ""
+	return nil
 }
 
 func (p *Pending) matchesStage(name string) bool {
@@ -269,15 +257,7 @@ func (p *Pending) matchesStage(name string) bool {
 		stat.Dev == p.identity.Dev && stat.Ino == p.identity.Ino
 }
 
-func (p *Pending) verifyPublished() error {
-	if !p.matchesStage(p.name) {
-		return refusal(p.path, ErrStageChanged)
-	}
-	p.published = true
-	return nil
-}
-
-// Published reports whether the staged inode was published, even if Commit
+// Published reports whether the publication succeeded, even if Commit
 // subsequently failed to sync the parent.
 func (p *Pending) Published() bool { return p.published }
 
@@ -287,19 +267,19 @@ func (directoryDestinationError) Error() string        { return unix.EEXIST.Erro
 func (directoryDestinationError) Unwrap() error        { return unix.EEXIST }
 func (directoryDestinationError) Is(target error) bool { return target == ErrNotRegular }
 
-func (p *Pending) targetMode() (uint32, error) {
+func (p *Pending) checkTarget() error {
 	var target unix.Stat_t
 	if err := unix.Fstatat(p.parent.fd, p.name, &target, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return 0, pathError("lstat", p.path, err)
+		return pathError("lstat", p.path, err)
 	}
 	if target.Mode&unix.S_IFMT == unix.S_IFDIR {
 		// os.Rename reports EEXIST when replacing a directory with a file.
-		return 0, &os.LinkError{Op: "rename", Old: p.Name(), New: p.path, Err: directoryDestinationError{}}
+		return &os.LinkError{Op: "rename", Old: p.Name(), New: p.path, Err: directoryDestinationError{}}
 	}
 	if err := regular(target.Mode); err != nil {
-		return 0, refusal(p.path, err)
+		return refusal(p.path, err)
 	}
-	return target.Mode, nil
+	return nil
 }
 
 func (p *Pending) SyncParent() error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestPublishLocksNestedDirectoriesInConsistentOrder(t *testing.T) {
@@ -160,6 +162,64 @@ func TestPublishPreservesFinalSymlink(t *testing.T) {
 				t.Fatalf("target contents = %q, %v", data, err)
 			}
 		})
+	}
+}
+
+func TestPublishCoalescesBindMountedStoreAliases(t *testing.T) {
+	const inNamespace = "SUBYARD_TEST_SSH_BIND_MOUNT"
+	if os.Getenv(inNamespace) == "" {
+		unshare, err := exec.LookPath("unshare")
+		if err != nil {
+			t.Skip("unshare is unavailable")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, unshare, "--user", "--map-root-user", "--mount",
+			os.Args[0], "-test.v", "-test.run=^TestPublishCoalescesBindMountedStoreAliases$")
+		command.Env = append(os.Environ(), inNamespace+"=1")
+		output, err := command.CombinedOutput()
+		if strings.HasPrefix(string(output), "unshare: unshare failed: Operation not permitted") ||
+			strings.Contains(string(output), "--- SKIP: TestPublishCoalescesBindMountedStoreAliases") {
+			t.Skipf("private bind mount unavailable: %s", output)
+		}
+		if err != nil {
+			t.Fatalf("bind-mount regression: %v\n%s", err, output)
+		}
+		return
+	}
+
+	root := testkit.TempDir(t)
+	real, alias := filepath.Join(root, "real"), filepath.Join(root, "alias")
+	for _, directory := range []string{real, alias} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Mount(real, alias, "", unix.MS_BIND, ""); errors.Is(err, unix.EPERM) {
+		t.Skip("mount permission unavailable in the private namespace")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount(alias, 0); err != nil {
+			t.Error(err)
+		}
+	})
+	first := publicationCandidate(t, filepath.Join(real, "known_hosts"), "first.example")
+	second := publicationCandidate(t, filepath.Join(alias, "known_hosts"), "second.example")
+	unrelated := keyLine(t, "unrelated.example")
+	testkit.WriteFile(t, first.proposal.File, []byte(unrelated), 0o600)
+	manager := &Manager{Environment: os.Environ(), pending: []candidate{first, second}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := manager.publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := unrelated + first.line + "\n" + second.line + "\n"
+	for _, path := range []string{first.proposal.File, second.proposal.File} {
+		if data, err := os.ReadFile(path); err != nil || string(data) != want {
+			t.Fatalf("trust store through %s = %q, %v, want both approved keys", path, data, err)
+		}
 	}
 }
 

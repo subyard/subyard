@@ -40,6 +40,37 @@ func TestCapturedRemotePlanRejectsControllerIdentityReplacementBeforeAuthorizati
 	}
 }
 
+func TestCapturedRemotePlanSurvivesCreatingSSHDirectoryThroughHomeAlias(t *testing.T) {
+	runtime := remoteFixture(t)
+	realHome := runtime.Home + "-real"
+	if err := os.Mkdir(realHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realHome, runtime.Home); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	prepared, err := runtime.CapturePrepared(ctx, domain.RemotePrepared{
+		Action:  domain.RemoteAdd,
+		Spec:    domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"},
+		Owner:   domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"},
+		Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.processCall = func(_ context.Context, _ string, arguments []string, _ []byte) ([]byte, error) {
+		if strings.Contains(strings.Join(arguments, " "), "yard-demo") {
+			testkit.WriteFile(t, runtime.knownHostsPath(), []byte("subyard-remote-demo "+fixturePublicKey+"\n"), 0o600)
+		}
+		return nil, nil
+	}
+	if _, err := runtime.Apply(ctx, prepared); err != nil {
+		t.Fatalf("creating .ssh invalidated the prepared plan: %v", err)
+	}
+	assertRemoteFileContains(t, filepath.Join(realHome, ".ssh", "config"), "Include subyard-demo.config")
+}
+
 func TestRemoteSSHOptionsPreserveTransportWithoutPreview(t *testing.T) {
 	runtime := remoteFixture(t)
 	prepared := domain.RemotePrepared{Spec: domain.RemoteSpec{

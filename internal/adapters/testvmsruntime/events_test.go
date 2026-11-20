@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -32,6 +34,54 @@ func TestImmutableRetrySyncsRecordDirectory(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != string(payload) {
 		t.Fatalf("equal-content retry changed the record: %q, %v", data, err)
+	}
+}
+
+func TestImmutableAdoptionChangesGroupOnOpenRecord(t *testing.T) {
+	currentGID := os.Getegid()
+	var newGID int
+	if os.Geteuid() == 0 {
+		newGID = currentGID + 1
+	} else {
+		newGID = currentGID
+		groups, err := os.Getgroups()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, gid := range groups {
+			if gid != currentGID {
+				newGID = gid
+				break
+			}
+		}
+		if newGID == currentGID {
+			t.Skip("a second permitted gid is required")
+		}
+	}
+	path := filepath.Join(testkit.TempDir(t), "record.json")
+	payload := []byte("original")
+	testkit.WriteFile(t, path, payload, 0o600)
+	record, err := safefs.OpenRegular(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer record.Close()
+	moved := path + ".moved"
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("replacement"), 0o600)
+	if err := compareImmutable(record, payload, &safefs.Ownership{UID: -1, GID: newGID}, false); err != nil {
+		t.Fatal(err)
+	}
+	for path, gid := range map[string]int{moved: newGID, path: currentGID} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group := int(info.Sys().(*syscall.Stat_t).Gid); group != gid {
+			t.Fatalf("record %s group = %d, want %d", path, group, gid)
+		}
 	}
 }
 

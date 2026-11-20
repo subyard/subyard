@@ -360,39 +360,49 @@ func (manager *Manager) publish(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	pending := append([]candidate(nil), manager.pending...)
-	paths := make(map[string]bool)
+	type store struct {
+		path          string
+		before, after []byte
+		mode          os.FileMode
+		exists        bool
+	}
+	entries := make([]safefs.EntryID, len(manager.pending))
+	stores := make(map[safefs.EntryID]*store)
+	var ordered []*store
 	directories := make(map[string]bool)
-	for index := range pending {
-		path := pending[index].proposal.File
+	for index, request := range manager.pending {
+		path := request.proposal.File
 		directory := filepath.Dir(path)
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return err
 		}
-		// Directory aliases must share both one lock and one output buffer.
 		directory, err := filepath.EvalSymlinks(directory)
 		if err != nil {
 			return err
 		}
 		directories[directory] = true
-		path, err = resolveKnownHosts(path)
+		path, err = resolveKnownHosts(filepath.Join(directory, filepath.Base(path)))
 		if err != nil {
 			return err
 		}
 		directories[filepath.Dir(path)] = true
-		pending[index].proposal.File = path
-		paths[path] = true
-	}
-	ordered := make([]string, 0, len(paths))
-	for path := range paths {
-		ordered = append(ordered, path)
+		entry, err := safefs.EntryIdentity(path)
+		if err != nil {
+			return err
+		}
+		entries[index] = entry
+		if stores[entry] == nil {
+			destination := &store{path: path}
+			stores[entry] = destination
+			ordered = append(ordered, destination)
+		}
 	}
 	sort.Slice(ordered, func(left, right int) bool {
-		leftDirectory, rightDirectory := filepath.Dir(ordered[left]), filepath.Dir(ordered[right])
+		leftDirectory, rightDirectory := filepath.Dir(ordered[left].path), filepath.Dir(ordered[right].path)
 		if leftDirectory != rightDirectory {
 			return leftDirectory < rightDirectory
 		}
-		return ordered[left] < ordered[right]
+		return ordered[left].path < ordered[right].path
 	})
 	// Lock both the configured and resolved directories in a common order.
 	lockOrder := make([]string, 0, len(directories))
@@ -425,21 +435,17 @@ func (manager *Manager) publish(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if path != pending[index].proposal.File {
+		entry, err := safefs.EntryIdentity(path)
+		if err != nil {
+			return err
+		}
+		if entry != entries[index] {
 			return fmt.Errorf("%w: SSH trust changed after assessment", domain.ErrPlanStale)
 		}
 	}
-	type snapshot struct {
-		data   []byte
-		mode   os.FileMode
-		exists bool
-	}
-	before := make(map[string]snapshot)
-	after := make(map[string][]byte)
-	for _, path := range ordered {
-		info, err := os.Lstat(path)
+	for _, destination := range ordered {
+		info, err := os.Lstat(destination.path)
 		if errors.Is(err, os.ErrNotExist) {
-			before[path] = snapshot{}
 			continue
 		}
 		if err != nil {
@@ -448,17 +454,21 @@ func (manager *Manager) publish(ctx context.Context) error {
 		if !info.Mode().IsRegular() {
 			return errors.New("refusing non-regular SSH trust store")
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(destination.path)
 		if err != nil {
 			return err
 		}
-		before[path] = snapshot{data: data, mode: info.Mode().Perm(), exists: true}
-		after[path] = append([]byte(nil), data...)
+		destination.before, destination.mode, destination.exists = data, info.Mode().Perm(), true
+		destination.after = bytes.Clone(data)
 	}
-	seen := make(map[string]string)
-	for _, candidate := range pending {
+	type trustKey struct {
+		entry     safefs.EntryID
+		namespace string
+	}
+	seen := make(map[trustKey]string)
+	for index, candidate := range manager.pending {
 		proposal := candidate.proposal
-		identity := proposal.File + "\x00" + proposal.Namespace
+		identity := trustKey{entry: entries[index], namespace: proposal.Namespace}
 		if line, ok := seen[identity]; ok {
 			if line != candidate.line {
 				return fmt.Errorf("%w: conflicting SSH keys for %s", domain.ErrPlanStale, proposal.Namespace)
@@ -473,24 +483,24 @@ func (manager *Manager) publish(ctx context.Context) error {
 		if known {
 			return fmt.Errorf("%w: SSH trust changed after assessment", domain.ErrPlanStale)
 		}
-		data := after[proposal.File]
+		destination := stores[entries[index]]
+		data := destination.after
 		if len(data) > 0 && data[len(data)-1] != '\n' {
 			data = append(data, '\n')
 		}
-		after[proposal.File] = append(data, []byte(candidate.line+"\n")...)
+		destination.after = append(data, candidate.line+"\n"...)
 	}
-	for index, path := range ordered {
-		if published, err := writeFile(path, after[path], 0o600); err != nil {
+	for index, destination := range ordered {
+		if published, err := writeFile(destination.path, destination.after, 0o600); err != nil {
 			if published {
 				index++
 			}
 			for _, written := range ordered[:index] {
-				snapshot := before[written]
-				if snapshot.exists {
-					_, restoreErr := writeFile(written, snapshot.data, snapshot.mode)
+				if written.exists {
+					_, restoreErr := writeFile(written.path, written.before, written.mode)
 					err = errors.Join(err, restoreErr)
 				} else {
-					err = errors.Join(err, removeKnownHosts(written))
+					err = errors.Join(err, removeKnownHosts(written.path))
 				}
 			}
 			return err

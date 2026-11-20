@@ -16,15 +16,13 @@ type ExistingDir uint8
 const (
 	Finish ExistingDir = iota // Finish narrower modes on owned directories.
 	Repair                    // Also repair broader modes on owned directories.
-	Exact                     // Require exact metadata on existing directories.
 )
 
 type DirOptions struct {
 	Mode       fs.FileMode // Zero defaults to 0700.
-	Owner      *Ownership
+	Owner      *Ownership  // UID is an expectation. GID may be set.
 	Existing   ExistingDir
 	ParentMode fs.FileMode
-	Root       string
 	Durability Durability
 	Fault      func(Point) error // Test-only interruption hook.
 }
@@ -41,10 +39,13 @@ func (e *DirStateError) Error() string { return e.err.Error() }
 func (e *DirStateError) Unwrap() error { return e.err }
 
 func EnsureDir(path string, o DirOptions) error {
+	if expectedUID(o.Owner) != os.Geteuid() {
+		return refusal(path, ErrUnsafeOwner)
+	}
 	if o.Mode == 0 {
 		o.Mode = 0o700
 	}
-	parent, name, err := openParent(path, o.Root, o.ParentMode, o.Durability, o.Owner)
+	parent, name, err := openParent(path, o.ParentMode, o.Durability)
 	if err != nil {
 		return err
 	}
@@ -88,61 +89,13 @@ func (d *directory) sync(durability Durability) error {
 	return file.Sync()
 }
 
-func openParent(path, root string, parentMode fs.FileMode, durability Durability, owner *Ownership) (*directory, string, error) {
+func openParent(path string, parentMode fs.FileMode, durability Durability) (*directory, string, error) {
 	name := filepath.Base(path)
 	if name == "." || name == ".." || name == string(filepath.Separator) || strings.HasSuffix(path, string(filepath.Separator)) {
 		return nil, "", pathError("open", path, fs.ErrInvalid)
 	}
-	parentPath := filepath.Dir(path)
-	if root == "" {
-		dir, err := openDirectory(parentPath, parentMode, durability)
-		return dir, name, err
-	}
-	absoluteRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, "", err
-	}
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return nil, "", err
-	}
-	relative, err := filepath.Rel(absoluteRoot, absolutePath)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, "", refusal(path, ErrEscapesRoot)
-	}
-	// The caller supplies a trusted root. Validate only its descendants.
-	dir, _, err := openDirectoryAt(unix.AT_FDCWD, absoluteRoot, absoluteRoot)
-	if err != nil {
-		return nil, "", err
-	}
-	parts := strings.Split(relative, string(filepath.Separator))
-	for _, part := range parts[:len(parts)-1] {
-		childPath := filepath.Join(dir.path, part)
-		child, stat, err := openDirectoryAt(dir.fd, part, childPath)
-		if errors.Is(err, fs.ErrNotExist) && parentMode != 0 {
-			if parentMode&0o022 != 0 {
-				err = refusal(childPath, ErrUnsafeMode)
-			} else {
-				child, err = dir.ensure(part, DirOptions{Mode: parentMode, Owner: owner, Durability: durability})
-			}
-		} else if err == nil {
-			switch {
-			case stat.Uid != uint32(expectedUID(owner)):
-				err = dirRefusal(childPath, stat, ErrUnsafeOwner)
-			case stat.Mode&0o022 != 0:
-				err = dirRefusal(childPath, stat, ErrUnsafeMode)
-			}
-			if err != nil {
-				child.close()
-			}
-		}
-		dir.close()
-		if err != nil {
-			return nil, "", err
-		}
-		dir = child
-	}
-	return dir, name, nil
+	dir, err := openDirectory(filepath.Dir(path), parentMode, durability)
+	return dir, name, err
 }
 
 func openDirectory(path string, mode fs.FileMode, durability Durability) (*directory, error) {
@@ -193,18 +146,16 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	path := filepath.Join(d.path, name)
 	mode := unixMode(o.Mode)
 	dir, stat, err := openDirectoryAt(d.fd, name, path)
-	created := false
 	if errors.Is(err, fs.ErrNotExist) {
 		initialMode := mode
-		if o.Owner != nil && (o.Owner.UID != -1 || o.Owner.GID != -1) {
+		if o.Owner != nil && o.Owner.GID != -1 {
 			initialMode &= 0o700
 		}
 		mkdirErr := unix.Mkdirat(d.fd, name, initialMode)
-		created = mkdirErr == nil
 		if mkdirErr != nil && mkdirErr != unix.EEXIST {
 			return nil, pathError("mkdir", path, mkdirErr)
 		}
-		if created {
+		if mkdirErr == nil {
 			if err := faultAt(o.Fault, AfterDirCreate); err != nil {
 				return nil, err
 			}
@@ -216,7 +167,7 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	if err := dir.finish(stat, mode, created, o); err != nil {
+	if err := dir.finish(stat, mode, o); err != nil {
 		dir.close()
 		return nil, err
 	}
@@ -233,33 +184,22 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	return dir, nil
 }
 
-func (d *directory) finish(stat unix.Stat_t, mode uint32, created bool, o DirOptions) error {
-	uid, gid := expectedUID(o.Owner), -1
-	if o.Owner != nil {
-		gid = o.Owner.GID
+func (d *directory) finish(stat unix.Stat_t, mode uint32, o DirOptions) error {
+	if stat.Uid != uint32(expectedUID(o.Owner)) {
+		return dirRefusal(d.path, stat, ErrUnsafeOwner)
 	}
 	actualMode := stat.Mode & 0o7777
-	changeUID := stat.Uid != uint32(uid)
-	changeGID := gid != -1 && stat.Gid != uint32(gid)
-	if changeUID && (!created || os.Geteuid() != 0 || stat.Uid != 0) {
-		return dirRefusal(d.path, stat, ErrUnsafeOwner)
-	}
-	if !created && (o.Existing == Exact && actualMode != mode || o.Existing == Finish && actualMode&^mode != 0) {
+	if o.Existing == Finish && actualMode&0o777&^mode != 0 {
 		return dirRefusal(d.path, stat, ErrUnsafeMode)
 	}
-	if !created && o.Existing == Exact && changeGID {
-		return dirRefusal(d.path, stat, ErrUnsafeOwner)
-	}
-	if changeUID || changeGID {
-		if !changeUID {
-			uid = -1
-		}
-		if err := unix.Fchownat(d.fd, "", uid, gid, unix.AT_EMPTY_PATH); err != nil {
+	changeGroup := o.Owner != nil && o.Owner.GID != -1 && stat.Gid != uint32(o.Owner.GID)
+	if changeGroup {
+		if err := unix.Fchownat(d.fd, "", -1, o.Owner.GID, unix.AT_EMPTY_PATH); err != nil {
 			return pathError("chown", d.path, err)
 		}
 	}
 	// The descriptor pins the actual directory, including when its mode is 0000.
-	if created || actualMode != mode || ((changeUID || changeGID) && mode&0o7000 != 0) {
+	if actualMode != mode || (changeGroup && mode&0o7000 != 0) {
 		if err := d.chmod(mode); err != nil {
 			return err
 		}

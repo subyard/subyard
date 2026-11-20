@@ -71,10 +71,6 @@ func TestEnsureDirPolicies(t *testing.T) {
 	if err := os.Chmod(path, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Exact}); !errors.Is(err, safefs.ErrUnsafeMode) {
-		t.Fatalf("exact directory with narrow mode = %v", err)
-	}
-	checkMode(t, path, 0o000)
 	if err := safefs.EnsurePrivateDir(path); err != nil {
 		t.Fatal(err)
 	}
@@ -119,30 +115,72 @@ func TestOwnershipBeforePublishAndForeignDirectoryRefusal(t *testing.T) {
 
 	directory := filepath.Join(root, "directory")
 	dirOptions := safefs.DirOptions{Owner: &owner, Fault: func(point safefs.Point) error {
-		if point == safefs.AfterDirCreate {
-			return safefs.ErrCrash
-		}
+		t.Fatalf("foreign UID reached %s", point)
 		return nil
 	}}
-	if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrCrash) {
-		t.Fatalf("interrupt after mkdir = %v", err)
+	for range 2 {
+		if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrUnsafeOwner) {
+			t.Fatalf("create with foreign UID = %v", err)
+		}
+		if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("refused UID left a directory behind: %v", err)
+		}
 	}
-	rootOwner := safefs.Ownership{UID: 0, GID: os.Getegid()}
-	checkOwner(t, directory, rootOwner)
-	dirOptions.Fault = nil
-	if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrUnsafeOwner) {
-		t.Fatalf("retry transferred a foreign directory: %v", err)
+	absentParent := filepath.Join(root, "absent")
+	dirOptions.ParentMode = 0o700
+	if err := safefs.EnsureDir(filepath.Join(absentParent, "child"), dirOptions); !errors.Is(err, safefs.ErrUnsafeOwner) {
+		t.Fatalf("create with foreign UID and missing parent = %v", err)
 	}
-	checkOwner(t, directory, rootOwner)
-	newDirectory := filepath.Join(root, "fresh")
-	if err := safefs.EnsureDir(newDirectory, dirOptions); err != nil {
+	if _, err := os.Lstat(absentParent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused UID left a parent directory behind: %v", err)
+	}
+	if err := safefs.EnsurePrivateDir(directory); err != nil {
 		t.Fatal(err)
 	}
-	checkOwner(t, newDirectory, owner)
-	if err := safefs.EnsurePrivateDir(newDirectory); !errors.Is(err, safefs.ErrUnsafeOwner) {
-		t.Fatalf("refusal for foreign directory = %v", err)
+	rootOwner := safefs.Ownership{UID: 0, GID: os.Getegid()}
+	if err := safefs.EnsureDir(directory, dirOptions); !errors.Is(err, safefs.ErrUnsafeOwner) {
+		t.Fatalf("existing directory accepted a different UID: %v", err)
 	}
-	checkOwner(t, newDirectory, owner)
+	checkOwner(t, directory, rootOwner)
+	if err := os.Chown(directory, owner.UID, owner.GID); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefs.EnsurePrivateDir(directory); !errors.Is(err, safefs.ErrUnsafeOwner) {
+		t.Fatalf("foreign directory was accepted: %v", err)
+	}
+	checkOwner(t, directory, owner)
+}
+
+func TestEnsureDirChecksModeAfterMkdir(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "directory")
+	options := safefs.DirOptions{Fault: func(point safefs.Point) error {
+		if point != safefs.AfterDirCreate {
+			return nil
+		}
+		if err := os.Rename(path, path+".original"); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			return err
+		}
+		return os.Chmod(path, 0o750)
+	}}
+	if err := safefs.EnsureDir(path, options); !errors.Is(err, safefs.ErrUnsafeMode) {
+		t.Fatalf("ensure accepted broader directory after mkdir: %v", err)
+	}
+	checkMode(t, path, 0o750)
+}
+
+func TestEnsureDirFinishesUnderSetgidParent(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Chmod(root, os.ModeSetgid|0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "directory")
+	if err := safefs.EnsurePrivateDir(path); err != nil {
+		t.Fatal(err)
+	}
+	checkMode(t, path, 0o700)
 }
 
 func TestEnsureDirChangesGroupBeforeWidening(t *testing.T) {

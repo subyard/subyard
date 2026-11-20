@@ -1,10 +1,12 @@
 package testvmsruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -606,9 +608,9 @@ func writeImmutableDurable(path string, payload []byte, mode os.FileMode) error 
 }
 
 func writeImmutableOwned(path string, payload []byte, mode os.FileMode, owner *safefs.Ownership) error {
-	current, err := safefs.ReadRegular(path, safefs.ReadOptions{})
+	file, err := safefs.OpenRegular(path)
 	if err == nil {
-		return compareImmutable(path, current, payload, owner)
+		return compareImmutable(file, payload, owner, false)
 	}
 	if !os.IsNotExist(err) {
 		return err
@@ -620,24 +622,29 @@ func writeImmutableOwned(path string, payload []byte, mode os.FileMode, owner *s
 	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	current, err = safefs.ReadRegular(path, safefs.ReadOptions{})
+	file, err = safefs.OpenRegular(path)
 	if err != nil {
 		return errors.New("immutable broker record already exists with different contents")
 	}
-	return compareImmutable(path, current, payload, owner)
+	return compareImmutable(file, payload, owner, true)
 }
 
-func compareImmutable(path string, current, payload []byte, owner *safefs.Ownership) error {
-	if string(current) != string(payload) {
+func compareImmutable(file *os.File, payload []byte, owner *safefs.Ownership, collision bool) error {
+	defer file.Close()
+	current, err := io.ReadAll(file)
+	if err != nil && !collision {
+		return err
+	}
+	if err != nil || !bytes.Equal(current, payload) {
 		return errors.New("immutable broker record already exists with different contents")
 	}
 	if owner != nil {
 		// Adopt matching records left by an older writer that set the group after publish.
-		if err := os.Lchown(path, owner.UID, owner.GID); err != nil {
+		if err := file.Chown(owner.UID, owner.GID); err != nil {
 			return err
 		}
 	}
-	return safefs.SyncDir(filepath.Dir(path))
+	return safefs.SyncDir(filepath.Dir(file.Name()))
 }
 
 func withFileLock(path string, operation func() error) error {

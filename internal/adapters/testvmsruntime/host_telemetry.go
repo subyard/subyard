@@ -148,10 +148,15 @@ func (sink *HostSink) saveHostEvidence(ctx context.Context, instance outerBroker
 		// distinct from the original incident timestamp.
 		err := withFileLock(filepath.Join(directory, ".host-evidence.lock"), func() error {
 			if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-				if owner != nil {
-					return os.Lchown(path, owner.UID, owner.GID)
+				if owner == nil {
+					return nil
 				}
-				return nil
+				file, err := safefs.OpenRegular(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				return file.Chown(owner.UID, owner.GID)
 			} else if err != nil && !os.IsNotExist(err) {
 				return err
 			}

@@ -18,23 +18,38 @@ type ReadOptions struct {
 	SingleLink bool
 }
 
-func ReadRegular(path string, o ReadOptions) ([]byte, error) {
+// OpenRegular opens a regular file without following its final component.
+func OpenRegular(path string) (*os.File, error) {
+	file, _, err := openRegular(path)
+	return file, err
+}
+
+func openRegular(path string) (*os.File, unix.Stat_t, error) {
+	var stat unix.Stat_t
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err == unix.ELOOP {
-		return nil, refusal(path, ErrSymlink)
+		return nil, stat, refusal(path, ErrSymlink)
 	}
 	if err != nil {
-		return nil, pathError("open", path, err)
+		return nil, stat, pathError("open", path, err)
 	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, pathError("fstat", path, err)
+		_ = unix.Close(fd)
+		return nil, stat, pathError("fstat", path, err)
 	}
 	if err := regular(stat.Mode); err != nil {
-		return nil, refusal(path, err)
+		_ = unix.Close(fd)
+		return nil, stat, refusal(path, err)
 	}
+	return os.NewFile(uintptr(fd), path), stat, nil
+}
+
+func ReadRegular(path string, o ReadOptions) ([]byte, error) {
+	file, stat, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
 	if o.OwnerUID != nil && stat.Uid != *o.OwnerUID {
 		return nil, refusal(path, ErrUnsafeOwner)
 	}

@@ -207,11 +207,6 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if err := os.MkdirAll(generation, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, directory := range []string{state.clientDirectory, generation} {
-		if err := os.Chmod(directory, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
 	testkit.WriteFile(t, filepath.Join(generation, "route.tsv"), []byte(
 		"subyard-e2e-route-v1\nhostname\t10.10.0.4\nport\t22\n"+
 			"host_key_alias\tsubyard-e2e-bastion\n",
@@ -255,18 +250,14 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if !converged {
 		t.Fatal("exact stopped backend was not converged")
 	}
-	for _, directory := range []string{state.clientDirectory, generation} {
-		for _, mode := range []os.FileMode{0o600, 0o700, 0o775} {
-			if err := os.Chmod(directory, mode); err != nil {
-				t.Fatal(err)
-			}
-			if ready, err := backend.Converged(context.Background()); err != nil || ready {
-				t.Fatalf("route directory mode %o reported converged: %t, %v", mode, ready, err)
-			}
-		}
-		if err := os.Chmod(directory, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Chmod(generation, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := backend.Converged(context.Background()); err != nil || !ready {
+		t.Fatalf("active route mode alone scheduled route replacement: %t, %v", ready, err)
+	}
+	if active, err := PublishedRouteDirectory(state.clientDirectory); err != nil || active != generation {
+		t.Fatalf("active route = %q, %v", active, err)
 	}
 	delete(memory.Devices, hostMemoryDevice)
 	delete(memory.ExpandedDevices, hostMemoryDevice)

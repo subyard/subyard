@@ -24,24 +24,7 @@ func (failure routeConflictError) Error() string    { return failure.message }
 func (routeConflictError) ActivationConflict() bool { return true }
 
 func ReadPublishedRoute(root string) (RouteIdentity, bool, error) {
-	return readPublishedRoute(root, false)
-}
-
-func readPublishedRoute(root string, requirePublicMode bool) (RouteIdentity, bool, error) {
 	identity := RouteIdentity{}
-	const routeMode = os.ModeDir | 0o755
-	if requirePublicMode {
-		parent, err := os.Lstat(root)
-		if errors.Is(err, os.ErrNotExist) {
-			return identity, false, nil
-		}
-		if err != nil {
-			return identity, false, err
-		}
-		if parent.Mode() != routeMode {
-			return identity, false, nil
-		}
-	}
 	generation, err := PublishedRouteDirectory(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return identity, false, nil
@@ -55,9 +38,6 @@ func readPublishedRoute(root string, requirePublicMode bool) (RouteIdentity, boo
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return identity, false, errors.New("route generation is not a directory")
-	}
-	if requirePublicMode && info.Mode() != routeMode {
-		return identity, false, nil
 	}
 	route, err := readRegular(filepath.Join(generation, "route.tsv"))
 	if err != nil {

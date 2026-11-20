@@ -102,11 +102,11 @@ func TestWriteModesUnderUmask(t *testing.T) {
 			checkMode(t, filepath.Dir(parent), 0o755)
 			checkMode(t, parent, 0o755)
 			checkMode(t, path, 0o640)
-			if err := safefs.WriteFile(path, []byte("new"), safefs.Options{PreserveMode: true}); err != nil {
+			if err := safefs.WriteFile(path, []byte("new"), safefs.Options{Mode: 0o644}); err != nil {
 				t.Fatal(err)
 			}
 			checkContents(t, path, "new")
-			checkMode(t, path, 0o640)
+			checkMode(t, path, 0o644)
 			if err := safefs.EnsurePrivateDir(filepath.Join(root, "private")); err != nil {
 				t.Fatal(err)
 			}
@@ -155,29 +155,9 @@ func TestWriteRefusesSpecialTargetsAndBreaksHardlink(t *testing.T) {
 	}
 }
 
-func TestWriteWithRootAndPinnedParent(t *testing.T) {
+func TestWriteUsesPinnedParent(t *testing.T) {
 	root, outside := testkit.TempDir(t), testkit.TempDir(t)
-	link := filepath.Join(root, "link")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Fatal(err)
-	}
-	broad := filepath.Join(root, "broad")
-	if err := os.Mkdir(broad, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(broad, 0o772); err != nil {
-		t.Fatal(err)
-	}
-	o := safefs.Options{Root: root, ParentMode: 0o700}
-	for path, want := range map[string]error{
-		filepath.Join(link, "new", "file"): safefs.ErrSymlink,
-		filepath.Join(outside, "file"):     safefs.ErrEscapesRoot,
-		filepath.Join(broad, "file"):       safefs.ErrUnsafeMode,
-	} {
-		if err := safefs.WriteFile(path, nil, o); !errors.Is(err, want) {
-			t.Errorf("write %s = %v, want %v", path, err, want)
-		}
-	}
+	o := safefs.Options{ParentMode: 0o700}
 	for _, noReplace := range []bool{false, true} {
 		name := fmt.Sprintf("no-replace=%t", noReplace)
 		t.Run(name, func(t *testing.T) {
@@ -210,39 +190,67 @@ func TestWriteWithRootAndPinnedParent(t *testing.T) {
 	}
 }
 
-func TestWriteRefusesSubstitutedStagingInode(t *testing.T) {
-	for _, noReplace := range []bool{false, true} {
-		t.Run(fmt.Sprintf("no-replace=%t", noReplace), func(t *testing.T) {
-			root := testkit.TempDir(t)
-			if err := os.Chmod(root, 0o770); err != nil {
-				t.Fatal(err)
-			}
-			path, stage := filepath.Join(root, "record"), filepath.Join(root, ".stage")
-			if !noReplace {
-				testkit.WriteFile(t, path, []byte("previous"), 0o600)
-			}
-			o := safefs.Options{NoReplace: noReplace, TempPattern: ".stage", Fault: func(point safefs.Point) error {
-				if point == safefs.BeforePublish {
-					if err := os.Rename(stage, stage+".moved"); err != nil {
-						return err
-					}
-					testkit.WriteFile(t, stage, []byte("different inode"), 0o600)
-				}
-				return nil
-			}}
-			if err := safefs.WriteFile(path, []byte("intended"), o); !errors.Is(err, safefs.ErrStageChanged) {
-				t.Fatalf("publish substituted staging inode: %v", err)
-			}
-			if noReplace {
-				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("substituted inode was published: %v", err)
-				}
-			} else {
-				checkContents(t, path, "previous")
-			}
-			checkContents(t, stage, "different inode")
-		})
+func TestConcurrentReplaceWritersBothSucceed(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "record")
+	ready := make(chan struct{}, 2)
+	resume := make(chan struct{})
+	results := make(chan error, 2)
+	for _, body := range []string{"first", "second"} {
+		go func() {
+			result := safefs.WriteFrom(path, safefs.Options{}, func(file *os.File) error {
+				ready <- struct{}{}
+				<-resume
+				_, err := file.WriteString(body)
+				return err
+			})
+			results <- result
+		}()
 	}
+	for range 2 {
+		select {
+		case <-ready:
+		case err := <-results:
+			close(resume)
+			t.Fatalf("writer failed before both were staged: %v", err)
+		}
+	}
+	close(resume)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Errorf("concurrent replacement: %v", err)
+		}
+	}
+	if body, err := os.ReadFile(path); err != nil || (string(body) != "first" && string(body) != "second") {
+		t.Fatalf("record = %q, %v", body, err)
+	}
+}
+
+func TestStagingFileIsClosedBeforePublish(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "record")
+	testkit.WriteFile(t, path, []byte("previous"), 0o600)
+	var pending *safefs.Pending
+	o := safefs.Options{Fault: func(point safefs.Point) error {
+		if point == safefs.BeforePublish {
+			if _, err := pending.File().Stat(); !errors.Is(err, fs.ErrClosed) {
+				t.Errorf("staging file is open before rename: %v", err)
+			}
+			return safefs.ErrCrash
+		}
+		return nil
+	}}
+	var err error
+	pending, err = safefs.Create(path, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Abort()
+	if _, err := pending.File().WriteString("replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pending.Commit(); !errors.Is(err, safefs.ErrCrash) || pending.Published() {
+		t.Fatalf("interrupted commit = %v, published = %t", err, pending.Published())
+	}
+	checkContents(t, path, "previous")
 }
 
 func TestNoReplaceConcurrentWriters(t *testing.T) {
