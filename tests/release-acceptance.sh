@@ -3533,6 +3533,18 @@ class LiveRetry(unittest.TestCase):
                 pass  # A refused peer can get its reply before the collector reads the request.
             return m.read_message(client)
 
+    def test_control_exit_stops_its_server_before_releasing_the_address(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            for _ in range(20):
+                before = set(threading.enumerate())
+                with m.control(output):
+                    pass
+                # A server thread still in accept would hold the socket and fail the next bind.
+                self.assertEqual(set(threading.enumerate()) - before, set())
+                with m.socket.socket(m.socket.AF_UNIX, m.socket.SOCK_STREAM) as probe:
+                    probe.bind(m.control_address(output))
+
     def test_second_process_retries_one_lane_while_sibling_runs_and_idle_retry_runs_it(self):
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         self.enterContext(patch.object(m, "SLOT_POLL_SECONDS", 0.2))
