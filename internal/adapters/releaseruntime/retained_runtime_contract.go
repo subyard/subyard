@@ -73,10 +73,7 @@ func (runtime *Runtime) retainedRuntimeBinding(ctx context.Context, activeRoot, 
 			if loses && (consumer.ManagedPathsPresent || consumer.ManagedPaths == 0 && consumer.Selected) {
 				return "", fmt.Errorf("retained release cannot activate installed profile runtime %s", consumer.Owner)
 			}
-			// An absent runtime, or a converged one that owns nothing or is deactivated,
-			// leaves the retained release no installed activation to take over.
-			if loses && (consumer.Observation == nil || consumer.Observation.State != ports.RuntimeStateAbsent &&
-				!(consumer.Observation.State == ports.RuntimeStateCurrent && (consumer.Observation.OwnershipAbsent || consumer.Observation.Deactivated))) {
+			if loses && (consumer.Observation == nil || consumer.Observation.State != ports.RuntimeStateAbsent && !(consumer.Observation.State == ports.RuntimeStateCurrent && consumer.Observation.OwnershipAbsent)) {
 				return "", fmt.Errorf("retained release cannot activate installed profile runtime %s", consumer.Owner)
 			}
 		} else if !targetOwners[consumer.Owner] {

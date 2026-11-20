@@ -250,29 +250,6 @@ func TestRetainedMixedProfileRequiresNativeAbsenceWithoutHostReceipts(t *testing
 	if err := prepared.Execute(context.Background()); err != nil || effects != 1 {
 		t.Fatalf("unchanged native ownership absence refused: %v", err)
 	}
-	// A converged deactivated runtime may keep owned files; it is admitted the
-	// same way, and the approved binding still names the deactivation proof.
-	observation = ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("a", 64), Deactivated: true}
-	approved, err = runtime.retainedRuntimeBinding(context.Background(), active, target, home, nil)
-	if err != nil {
-		t.Fatalf("current deactivated runtime refused: %v", err)
-	}
-	prepared = runtime.guardRetainedRuntimeInputs(Prepared{run: func(context.Context) error { effects++; return nil }}, approved, active, target, home, nil)
-	observation.Deactivated = false
-	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, nil); err == nil {
-		t.Fatal("current runtime without a deactivation proof was admitted")
-	}
-	if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) || effects != 1 {
-		t.Fatalf("current without deactivation proof crossed consent: %v", err)
-	}
-	observation.Deactivated = true
-	if err := prepared.Execute(context.Background()); err != nil || effects != 2 {
-		t.Fatalf("unchanged deactivated runtime refused: %v", err)
-	}
-	observation.State, observation.Actual = ports.RuntimeStateStale, strings.Repeat("b", 64)
-	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, nil); err == nil {
-		t.Fatal("stale runtime claiming deactivation was admitted")
-	}
 }
 
 func TestRetainedGuestOnlyLeftoversAndNativePresenceCAS(t *testing.T) {

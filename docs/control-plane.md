@@ -2580,8 +2580,8 @@ Optional `failure_scope: "yard"` declares that a typed failure of the hook leave
 pending init; see [yard-scoped runtime failures](#yard-scoped-runtime-failures). Custody runtimes
 and profiles with host owner or infrastructure services cannot declare it.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
-bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding`, optional
-`ownership_absent` and optional `deactivated`. States are `absent`, `deferred`, `current` and `stale`. Installed states
+bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
+`ownership_absent`. States are `absent`, `deferred`, `current` and `stale`. Installed states
 carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 A `stale` observation may add one `consequence`: a short sentence of at most 200 bytes from a
 plain-text alphabet, such as a service restart that apply performs. Update, migrate and `yard init`
@@ -2602,9 +2602,6 @@ The Orca profile retains its existing `orca-runtime` identity and wire fingerpri
 `ownership_absent: true` is valid only with `current` and its ordinary equal SHA-256
 digests. It proves no owned artifacts remain for retained-owner admission; successful
 cleanup still converges to the approved desired digest. It does not relax apply verification.
-`deactivated: true` has the same validity rules. It proves that no service of the installed
-runtime is loaded and no client is configured for it, while owned files and data may remain.
-Retained-owner admission accepts it like `ownership_absent`.
 
 A manifest may still declare `runtime.custody: true`, and a declaring handler may still accept
 `custody-observe`, `custody-apply` and `custody-fence`. These actions belonged to the removed
@@ -2676,9 +2673,8 @@ IDs. It leaves frozen recovery capability responses unchanged. Rollback, and an 
 explicitly selected older release, refuse a target that loses an installed profile's runtime
 owner, including deselected owner or guest artifacts, or a selected guest-only runtime contract.
 When host receipts are absent, before
-losing an owner admission asks that one native observer to prove guest absence or
-deactivation; stopped, missing or failed observations prove neither. That observation is
-rechecked before effects.
+losing an owner admission asks that one native observer to prove guest absence; stopped, missing or failed
+observations cannot prove absence. That observation is rechecked before effects.
 A historical owner without the new probe may retain
 the identical installed core helper payloads, timer templates and native archive pins; different
 installed contracts require an explicitly advertised target activation owner. Proven absent
