@@ -355,6 +355,10 @@ func decodeExact(payload []byte, target any, refusal guardRefusal, allowed ...[]
 		return err
 	}
 	for _, item := range raw {
+		// The released helper refused null artifact identities.
+		if string(item["Path"]) == "null" || string(item["Binding"]) == "null" {
+			return refusal
+		}
 		keys := make([]string, 0, len(item))
 		for key := range item {
 			keys = append(keys, key)
@@ -405,6 +409,9 @@ func ownerArtifacts(services []RecoveryService, snapshots ...[]ports.TeardownArt
 	result := []ports.TeardownArtifact{}
 	for _, group := range append(groups, snapshots...) {
 		for _, artifact := range group {
+			if artifact.Path == "" {
+				return nil, guardRefusal("invalid approved artifact path")
+			}
 			index := slices.IndexFunc(result, func(item ports.TeardownArtifact) bool { return item.Path == artifact.Path })
 			if index < 0 {
 				result = append(result, artifact)
@@ -439,33 +446,35 @@ func producerOwner() (uint32, error) {
 
 // approvedArtifacts resolves bindings from the bounded transport or the
 // protected plan; a full plan never accepts facts outside its originals.
-// Only the environment transport is raw JSON; plan facts stay typed.
 func approvedArtifacts() ([]ports.TeardownArtifact, error) {
 	plan, err := optionalPlan()
 	if err != nil {
 		return nil, err
 	}
-	var approved []ports.TeardownArtifact
-	if value, present := os.LookupEnv("SUBYARD_TEARDOWN_ARTIFACTS"); present {
-		if len(value) > 65536 {
-			return nil, guardRefusal("missing or oversized teardown artifacts")
-		}
-		if err := decodeExact([]byte(value), &approved, "invalid teardown artifact fields", []string{"Binding", "Path"}, []string{"Binding", "Entries", "Path"}); err != nil {
-			return nil, err
-		}
-		if approved == nil {
-			return nil, guardRefusal("invalid teardown artifacts")
-		}
-	} else if plan == nil {
-		return nil, guardRefusal("missing or oversized teardown artifacts")
-	} else {
+	value, present := os.LookupEnv("SUBYARD_TEARDOWN_ARTIFACTS")
+	payload := []byte(value)
+	if !present && plan != nil {
 		services, err := approvedServices(plan)
 		if err != nil {
 			return nil, err
 		}
-		if approved, err = ownerArtifacts(services); err != nil {
+		artifacts, err := ownerArtifacts(services)
+		if err != nil {
 			return nil, err
 		}
+		// The round trip is the field validation: tree-only facts refuse.
+		if payload, err = json.Marshal(artifacts); err != nil {
+			return nil, err
+		}
+	} else if !present || len(payload) > 65536 {
+		return nil, guardRefusal("missing or oversized teardown artifacts")
+	}
+	var approved []ports.TeardownArtifact
+	if err := decodeExact(payload, &approved, "invalid teardown artifact fields", []string{"Binding", "Path"}, []string{"Binding", "Entries", "Path"}); err != nil {
+		return nil, err
+	}
+	if approved == nil {
+		return nil, guardRefusal("invalid teardown artifacts")
 	}
 	if err := validateArtifacts(approved); err != nil {
 		return nil, err

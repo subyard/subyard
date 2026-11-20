@@ -377,6 +377,9 @@ func captureArtifact(path string) (ports.TeardownArtifact, error) {
 // RemoveArtifact deletes one approved selected-teardown artifact by binding.
 // Cancellation is checked before every unlink and returned unclassified.
 func RemoveArtifact(ctx context.Context, path string, approved []ports.TeardownArtifactBinding) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	items, err := approvedBindings(approved)
 	if err == nil {
 		err = guardSelected(items, path, ctx.Err)

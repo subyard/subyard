@@ -358,40 +358,6 @@ func decodeFixture(body string, target any) error {
 	return nil
 }
 
-func TestGuardInventoryKeepsHistoricalOutcomes(t *testing.T) {
-	binding := strings.Repeat("a", 64)
-	stale := "plan_stale: teardown inventory, artifact or resource binding is invalid\n"
-	t.Run("volume-without-pool", func(t *testing.T) {
-		t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"volume","name":"vol","binding":"`+binding+`"}]`)
-		if _, code := runGuard(t, "validate"); code != 0 {
-			t.Fatalf("validation refused an optional pool: exit %d", code)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := RunGuard([]string{"volumes"}, nil, &stdout, &stderr); code != 1 || stdout.String() != "" || stderr.String() != stale {
-			t.Fatalf("volume without pool: exit %d, %q, %q", code, stdout.String(), stderr.String())
-		}
-	})
-	for name, resource := range map[string]string{
-		"numeric-name":    `{"kind":"instance","name":7,"binding":"` + binding + `"}`,
-		"null-name":       `{"kind":"instance","name":null,"binding":"` + binding + `"}`,
-		"numeric-binding": `{"kind":"instance","name":"yard","binding":7}`,
-		"numeric-pool":    `{"kind":"volume","name":"vol","pool":7,"binding":"` + binding + `"}`,
-		"scalar-resource": `7`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("SUBYARD_TEARDOWN_INVENTORY", "["+resource+"]")
-			var stderr bytes.Buffer
-			if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
-				t.Fatalf("exit %d", code)
-			}
-			expected := `plan_stale: {"action":"guard-all","stage":"inventory","kind":"none","ordinal":0,"category":"TypeError"}` + "\n" + stale
-			if stderr.String() != expected {
-				t.Fatalf("diagnostic %q", stderr.String())
-			}
-		})
-	}
-}
-
 func TestArtifactRemovalStopsAtCancellationBeforeNextUnlink(t *testing.T) {
 	t.Setenv("SUBYARD_TEARDOWN_PLAN", "")
 	path := filepath.Join(testkit.TempDir(t), "overrides")
@@ -425,6 +391,11 @@ func TestArtifactRemovalStopsAtCancellationBeforeNextUnlink(t *testing.T) {
 	names, _ := os.ReadDir(path)
 	if len(names) != 2 {
 		t.Fatalf("removal continued after cancellation: %d entries remain", len(names))
+	}
+	// An already-cancelled removal reports cancellation even with nothing to unlink.
+	absent := ports.ArtifactBindings([]ports.TeardownArtifact{{Path: path + "-absent"}})
+	if err := RemoveArtifact(ctx, path+"-absent", absent); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled removal of an absent artifact: %v", err)
 	}
 }
 

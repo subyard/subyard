@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -303,31 +302,19 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 	return body, nil
 }
 
-// beforeRetiredRemoval is a fixture seam after the store left its routed name.
-var beforeRetiredRemoval func() error
-
-// Retire removes a completed store. It first moves the whole store to a fresh
-// name, so an interruption leaves either the complete resumable store or none
-// where recovery routes the next run. It returns the retired name once the
-// store has left its routed name, even when removing it fails.
-func (store RecoveryStore) Retire() (string, error) {
-	retired := fmt.Sprintf("%s.removed-%d", store.Directory, time.Now().UnixNano())
-	if err := os.Rename(store.Directory, retired); err != nil {
-		return "", err
-	}
-	var err error
-	if beforeRetiredRemoval != nil {
-		err = beforeRetiredRemoval()
-	}
-	var tree Tree
+// Remove deletes a completed store through the pinned remover, plan last: an
+// interruption leaves the plan for an exact retry of the same removal.
+func (store RecoveryStore) Remove() error {
+	rest, err := captureTree(Tree{Path: store.Directory, Entries: []Entry{}, Exclusions: []string{"plan.json"}}, false)
 	if err == nil {
-		tree, err = Capture(retired)
-	}
-	if err == nil {
-		err = tree.Remove()
+		err = rest.Remove()
 	}
 	if err != nil {
-		return retired, fmt.Errorf("remove retired full uninstall recovery store %s: %w", retired, err)
+		return err
 	}
-	return retired, nil
+	whole, err := Capture(store.Directory)
+	if err == nil {
+		err = whole.Remove()
+	}
+	return err
 }

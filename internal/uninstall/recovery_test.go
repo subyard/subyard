@@ -436,51 +436,54 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 	}
 }
 
-func TestRetiredStoreInterruptionNeverStrandsARoutedPartialStore(t *testing.T) {
-	store, plan := recoveryFixture(t)
-	store.Directory = filepath.Join(store.Directory, "data.uninstall")
-	if err := os.Mkdir(store.Directory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Save(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	engine := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	if err := os.MkdirAll(filepath.Dir(engine), 0700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, engine, []byte("retained engine"), 0700)
-	// The caller dies after the store left its routed name, before any unlink.
-	t.Cleanup(func() { beforeRetiredRemoval = nil })
-	beforeRetiredRemoval = func() error { return errors.New("intentional interruption") }
-	retired, err := store.Retire()
-	if err == nil || retired == "" {
-		t.Fatalf("fixture interruption did not happen: %q %v", retired, err)
-	}
-	if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("interrupted retirement left a routed store", err)
-	}
-	if _, _, err := (RecoveryStore{Directory: retired, UID: store.UID}).Read(); err != nil {
-		t.Fatal("retired store was not complete when it left its routed name", err)
-	}
-	beforeRetiredRemoval = nil
-	retired, err = store.Retire()
-	if !errors.Is(err, os.ErrNotExist) || retired != "" {
-		t.Fatalf("absent store retired again: %q %v", retired, err)
-	}
-	// An uninterrupted retirement removes the whole store.
-	if err := os.Mkdir(store.Directory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Save(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	if retired, err = store.Retire(); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{store.Directory, retired} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("%s remains: %v", path, err)
+// Final store removal keeps the plan until last: an interruption at any
+// observation leaves the store absent, empty or still readable, and an exact
+// retry completes it.
+func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
+	t.Cleanup(func() { statAt = factAt })
+	for limit := 1; ; limit++ {
+		store, plan := recoveryFixture(t)
+		store.Directory = filepath.Join(store.Directory, "data.uninstall")
+		if err := os.Mkdir(store.Directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Save(plan, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range []string{"runtime/bin/yard", "runtime/bin/yard-engine", "runtime/scripts/lib/host.sh"} {
+			path := filepath.Join(store.Directory, file)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, []byte(file), 0700)
+		}
+		calls := 0
+		statAt = func(fd int, name, relative string) (Entry, error) {
+			if calls++; calls > limit {
+				return Entry{}, errors.New("intentional interruption")
+			}
+			return factAt(fd, name, relative)
+		}
+		err := store.Remove()
+		statAt = factAt
+		names, statErr := os.ReadDir(store.Directory)
+		if _, _, readErr := store.Read(); statErr == nil && len(names) > 0 && readErr != nil {
+			t.Fatalf("observation %d stranded store content without a plan: %v", limit, readErr)
+		}
+		if err == nil {
+			if !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatal("completed removal left the store")
+			}
+			return
+		}
+		if err := store.Remove(); err != nil {
+			t.Fatalf("observation %d: exact retry failed: %v", limit, err)
+		}
+		if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("observation %d: exact retry left the store", limit)
+		}
+		if limit > 1000 {
+			t.Fatal("removal never completed")
 		}
 	}
 }

@@ -120,6 +120,5 @@ printf "released data\n" > "$1/released-data/state"; chmod 600 "$1/released-data
   for suffix in runtime config data data.uninstall; do
     [ ! -e "$state/released-$suffix" ] || fail "released checkpoint resume left $suffix"
   done
-  ! compgen -G "$state/released-data.uninstall.removed-*" >/dev/null || fail 'released recovery store was not retired'
   printf 'ok: candidate resumed an actual v0.30.0 checkpoint with its retained runtime\n'
 }

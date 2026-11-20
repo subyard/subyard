@@ -78,9 +78,8 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 		}
 	}
 	store := uninstall.RecoveryStore{Directory: directory, UID: uint32(os.Getuid())}
-	retired := ""
 	defer func() {
-		if err != nil && retired == "" {
+		if err != nil {
 			fmt.Fprintf(diagnostics, "Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", directory, filepath.Join(directory, "runtime", "bin", "yard"), directory)
 		}
 	}()
@@ -294,7 +293,7 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 	if err = uninstall.AdvanceOwnerEpoch(saved.Installation.DataHome, saved.EpochBefore, saved.EpochBefore+1); err != nil {
 		return result, err
 	}
-	if retired, err = store.Retire(); err != nil {
+	if err = store.Remove(); err != nil {
 		return result, err
 	}
 	fmt.Fprintln(diagnostics, "Fully removed this Subyard installation and its local yards.")
