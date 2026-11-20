@@ -23,6 +23,17 @@ const (
 	HistoryRefuse HistoryCompatibilityKind = "refuse"
 )
 
+// HistoryRegistryRelation compares registry identities only, independently of
+// whether the target is admitted.
+type HistoryRegistryRelation string
+
+const (
+	RegistryIdentical HistoryRegistryRelation = "identical"
+	RegistryDiffers   HistoryRegistryRelation = "differs"
+	// RegistryAbsent: neither release has a v2 registry.
+	RegistryAbsent HistoryRegistryRelation = "absent"
+)
+
 // HistoryRefusalReason is a stable machine-readable refusal class.
 type HistoryRefusalReason string
 
@@ -64,8 +75,10 @@ type HistoryEvidence struct {
 	CheckpointReaderErr error
 }
 
+// A verdict that is not admitted always carries at least one refusal.
 type HistoryCompatibilityVerdict struct {
-	Kind HistoryCompatibilityKind
+	Kind     HistoryCompatibilityKind
+	Registry HistoryRegistryRelation
 	// DeclaredPredecessor reports that the target registry is the active
 	// release's declared predecessor. It does not admit the target yet.
 	DeclaredPredecessor bool
@@ -81,21 +94,32 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 	verdict := HistoryCompatibilityVerdict{
 		DeclaredPredecessor: input.Predecessor != "" && input.TargetRegistry == input.Predecessor,
 	}
-	if input.ActiveRegistry != input.TargetRegistry {
-		verdict.Kind = HistoryRefuse
+	switch {
+	case input.ActiveRegistry != input.TargetRegistry:
+		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
+		return verdict.sealed()
+	case input.TargetRegistry == "":
+		// A registryless pair has no protected migration history to read.
+		verdict.Kind, verdict.Registry = HistoryIdentity, RegistryAbsent
+		return verdict.sealed()
+	}
+	verdict.Kind, verdict.Registry = HistoryIdentity, RegistryIdentical
+	if input.History != nil {
+		if refusal := verifyHistoryEvidence(*input.History); refusal != nil {
+			verdict.Refusals = []HistoryRefusal{*refusal}
+		}
+	}
+	return verdict.sealed()
+}
+
+// sealed keeps the invariant that a verdict which is not admitted carries a
+// refusal. A relation this slice does not admit keeps the identity refusal.
+func (verdict HistoryCompatibilityVerdict) sealed() HistoryCompatibilityVerdict {
+	if verdict.Kind != HistoryIdentity && len(verdict.Refusals) == 0 {
 		verdict.Refusals = []HistoryRefusal{{
 			Reason:  HistoryRegistryDiffers,
 			Message: "the selected release's migration registry differs from the active release's registry",
 		}}
-		return verdict
-	}
-	verdict.Kind = HistoryIdentity
-	// A registryless pair has no protected migration history to read.
-	if input.TargetRegistry == "" || input.History == nil {
-		return verdict
-	}
-	if refusal := verifyHistoryEvidence(*input.History); refusal != nil {
-		verdict.Refusals = []HistoryRefusal{*refusal}
 	}
 	return verdict
 }

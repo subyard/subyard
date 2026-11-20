@@ -110,7 +110,7 @@ func bootstrapBundleManifest(parsed options, expected string) (releasetransition
 func unapprovedBootstrapPublication(selection *releaseSelection) bool {
 	target := "releases/" + string(selection.request.Target)
 	if selection.links.current.target == target || selection.links.previous.target == target ||
-		selection.compatibility == nil || selection.compatibility.Kind != releasetransition.HistoryRefuse || selection.cause != nil {
+		selection.compatibility == nil || selection.compatibility.Registry != releasetransition.RegistryDiffers || selection.cause != nil {
 		return false
 	}
 	if !selection.state.journal.Exists {

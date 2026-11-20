@@ -106,8 +106,9 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 		message     string
 		cause       error
 		predecessor bool
+		registry    HistoryRegistryRelation
 	}{
-		{name: "registryless pair", input: HistoryCompatibilityInput{}, kind: HistoryIdentity},
+		{name: "registryless pair", input: HistoryCompatibilityInput{}, kind: HistoryIdentity, registry: RegistryAbsent},
 		{name: "identity without history", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical}, kind: HistoryIdentity},
 		{name: "identity ledger", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("ledger", false, nil)}, kind: HistoryIdentity},
 		{name: "identity checkpoint reader", input: HistoryCompatibilityInput{ActiveRegistry: canonical, TargetRegistry: canonical, History: evidence("advanced", true, nil)}, kind: HistoryIdentity},
@@ -116,19 +117,19 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 		{
 			name:  "registry differs skips history",
 			input: HistoryCompatibilityInput{ActiveRegistry: other, TargetRegistry: canonical, History: &HistoryEvidence{Registry: registry, RegistryDigest: digest, Ledger: corrupt}},
-			kind:  HistoryRefuse, reason: HistoryRegistryDiffers,
+			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
 			name:  "registryless target differs",
 			input: HistoryCompatibilityInput{ActiveRegistry: canonical},
-			kind:  HistoryRefuse, reason: HistoryRegistryDiffers,
+			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
 			name:  "declared predecessor is not admitted yet",
 			input: HistoryCompatibilityInput{ActiveRegistry: other, TargetRegistry: canonical, Predecessor: canonical},
-			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, predecessor: true,
+			kind:  HistoryRefuse, reason: HistoryRegistryDiffers, predecessor: true, registry: RegistryDiffers,
 			message: "the selected release's migration registry differs from the active release's registry",
 		},
 		{
@@ -163,7 +164,10 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			verdict := HistoryCompatibility(test.input)
-			if verdict.Kind != test.kind || verdict.DeclaredPredecessor != test.predecessor {
+			if test.registry == "" {
+				test.registry = RegistryIdentical
+			}
+			if verdict.Kind != test.kind || verdict.Registry != test.registry || verdict.DeclaredPredecessor != test.predecessor {
 				t.Fatalf("verdict = %#v", verdict)
 			}
 			message, cause := verdict.Refusal()
@@ -188,9 +192,16 @@ func TestHistoryCompatibilityVerdicts(t *testing.T) {
 
 func TestHistoryCompatibilityAdmitsOnlyIdentity(t *testing.T) {
 	for _, kind := range []HistoryCompatibilityKind{HistoryEquivalent, HistorySteps, HistoryRefuse} {
-		if (HistoryCompatibilityVerdict{Kind: kind}).Admitted() {
-			t.Fatalf("%s is admitted before its slice", kind)
+		verdict := HistoryCompatibilityVerdict{Kind: kind, Registry: RegistryDiffers}.sealed()
+		message, _ := verdict.Refusal()
+		// Callers that read only the refusal text must still see a refusal.
+		if verdict.Admitted() || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != HistoryRegistryDiffers ||
+			message != "the selected release's migration registry differs from the active release's registry" {
+			t.Fatalf("%s is admitted or unrefused before its slice: %#v", kind, verdict)
 		}
+	}
+	if verdict := (HistoryCompatibilityVerdict{Kind: HistoryIdentity, Registry: RegistryIdentical}).sealed(); !verdict.Admitted() {
+		t.Fatalf("identity gained a refusal: %#v", verdict)
 	}
 	first, second := errors.New("first cause"), errors.New("second cause")
 	verdict := HistoryCompatibilityVerdict{Kind: HistoryIdentity, Refusals: []HistoryRefusal{

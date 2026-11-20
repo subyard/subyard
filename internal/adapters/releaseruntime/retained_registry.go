@@ -138,45 +138,19 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 	if freshDraft {
 		return selection, nil
 	}
-	_, selection.activeRegistry, err = selectedRegistry(active)
-	if err != nil {
-		selection.refusal, selection.cause = "the active release's sealed migration registry cannot be verified", err
+	history, refusal, err := assembleHistorySelection(request, links, selection.state, active, target, "")
+	selection.activeRegistry, selection.targetRegistry = history.activeRegistry, history.targetRegistry
+	if refusal != "" {
+		selection.refusal, selection.cause = refusal, err
 		return selection, nil
 	}
-	retained, identity, err := selectedRegistry(target)
-	if err != nil {
-		selection.refusal, selection.cause = "the selected release's sealed migration registry cannot be verified", err
-		return selection, nil
-	}
-	selection.targetRegistry = identity
-	missingHistory := !selection.state.ledger.Exists && !selection.state.checkpoint.Exists
-	// The installer can publish the first current link before the native
-	// transition creates protected history. Let that same engine initialize it.
-	// Current then names the target, so its registry is the active one.
-	firstPublication := request.Direction == releasetransition.DirectionActivateTarget &&
-		request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
-		links.current.target == "releases/"+string(request.Target) && !links.previous.present &&
-		!selection.state.journal.Exists && missingHistory
-	var publicationErr error
-	if identity != "" && firstPublication {
-		selection.firstPublication, publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
-	}
-	input := releasetransition.HistoryCompatibilityInput{ActiveRegistry: selection.activeRegistry, TargetRegistry: identity}
-	if !selection.firstPublication {
-		input.History = retainedHistoryEvidence(target, retained, selection.state.ledger, selection.state.checkpoint)
-	}
-	verdict := releasetransition.HistoryCompatibility(input)
-	selection.compatibility = &verdict
-	registryRefused := verdict.Kind == releasetransition.HistoryRefuse
-	if registryRefused || (identity != "" && missingHistory) {
+	selection.firstPublication, selection.compatibility = history.firstPublication, &history.verdict
+	if history.needsSourceFloor() {
 		if err := runtime.stagedSourceRefusal(ctx, selection, active); err != nil {
 			return nil, err
 		}
 	}
-	selection.refusal, selection.cause = verdict.Refusal()
-	if !registryRefused {
-		selection.cause = domain.CollectRefusals(selection.cause, publicationErr)
-	}
+	selection.refusal, selection.cause = history.refusal()
 	return selection, nil
 }
 

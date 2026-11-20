@@ -190,7 +190,9 @@ func verifyOpenCandidateFiles(verified *verifiedPublishedCandidate, expectedDige
 			}
 			if err == nil && entry.path == "config/release-rollback.json" {
 				verified.rollbackRaw, err = io.ReadAll(io.NewSectionReader(file, 0, releasetransition.MaxRollbackDeclarationBytes+1))
-				if err == nil && (len(verified.rollbackRaw) > releasetransition.MaxRollbackDeclarationBytes || sha256.Sum256(verified.rollbackRaw) != entry.digest) {
+				if err == nil && len(verified.rollbackRaw) > releasetransition.MaxRollbackDeclarationBytes {
+					err = errors.New("published runtime rollback declaration exceeds its size bound")
+				} else if err == nil && sha256.Sum256(verified.rollbackRaw) != entry.digest {
 					err = errors.New("published runtime rollback declaration changed")
 				}
 				verified.rollbackDigest, verified.rollbackBound = entry.digest, true

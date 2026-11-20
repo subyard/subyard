@@ -748,9 +748,9 @@ cp "$TMP/full-inventory.before" "$full_inventory"
   # The sealed engine answers the read-only history verdict without a repository.
   active_release="$(readlink -f -- "$YARD_RUNTIME_ROOT/current")"
   (cd / && env -i "PATH=$native_tools" "$active_release/bin/yard-engine" _history-compatibility \
-    "$YARD_RUNTIME_ROOT" "$SUBYARD_CONFIG_HOME" "$active_release") > "$TMP/bootstrap-cold-history.json" \
+    "$YARD_RUNTIME_ROOT" "$SUBYARD_CONFIG_HOME" "$(basename -- "$active_release")") > "$TMP/bootstrap-cold-history.json" \
     || fail 'sealed engine did not admit its own active history'
-  jq -e '.schemaVersion == 1 and .kind == "identity" and .admitted == true and .refusals == []' \
+  jq -e '.schemaVersion == 1 and .kind == "identity" and .registry == "identical" and .admitted == true and .refusals == []' \
     "$TMP/bootstrap-cold-history.json" >/dev/null || fail 'sealed history verdict is not identity'
 )
 # An installed Incus this account cannot reach (no incus-admin, or membership not

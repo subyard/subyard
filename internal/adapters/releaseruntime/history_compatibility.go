@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -21,6 +23,7 @@ type HistoryCompatibilityReport struct {
 	Active              releasetransition.ReleaseID                `json:"active"`
 	Target              releasetransition.ReleaseID                `json:"target"`
 	Kind                releasetransition.HistoryCompatibilityKind `json:"kind"`
+	Registry            releasetransition.HistoryRegistryRelation  `json:"registry"`
 	Admitted            bool                                       `json:"admitted"`
 	DeclaredPredecessor bool                                       `json:"declaredPredecessor"`
 	Refusals            []HistoryCompatibilityRefusal              `json:"refusals"`
@@ -29,6 +32,7 @@ type HistoryCompatibilityReport struct {
 type HistoryCompatibilityRefusal struct {
 	Reason  releasetransition.HistoryRefusalReason `json:"reason"`
 	Message string                                 `json:"message"`
+	Cause   string                                 `json:"cause,omitempty"`
 }
 
 // RunHistoryCompatibility prints the verdict as JSON. It exits 0 when the
@@ -37,10 +41,10 @@ type HistoryCompatibilityRefusal struct {
 // verdict reselects under the owner barrier.
 func RunHistoryCompatibility(arguments []string, stdout, stderr io.Writer) int {
 	if len(arguments) != 3 {
-		fmt.Fprintln(stderr, "usage: "+HistoryCompatibilityVerb+" RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE_DIR")
+		fmt.Fprintln(stderr, "usage: "+HistoryCompatibilityVerb+" RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE")
 		return 2
 	}
-	report, err := InspectHistoryCompatibility(arguments[0], arguments[1], arguments[2])
+	report, err := InspectHistoryCompatibility(arguments[0], arguments[1], releasetransition.ReleaseID(arguments[2]))
 	if err != nil {
 		fmt.Fprintf(stderr, "history compatibility: %v\n", err)
 		return 2
@@ -58,69 +62,131 @@ func RunHistoryCompatibility(arguments []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// InspectHistoryCompatibility evaluates whether the sealed release at
-// targetRoot, published or in a private draft runtime, may own the active
-// migration history of runtimeRoot and configHome.
-func InspectHistoryCompatibility(runtimeRoot, configHome, targetRoot string) (HistoryCompatibilityReport, error) {
-	if !filepath.IsAbs(runtimeRoot) || !filepath.IsAbs(configHome) || !filepath.IsAbs(targetRoot) {
-		return HistoryCompatibilityReport{}, errors.New("runtime root, config home and target release must be absolute")
+// InspectHistoryCompatibility evaluates whether the published release target
+// may own the active migration history of runtimeRoot and configHome, with the
+// same input assembly as the runtime's installed-engine selection.
+func InspectHistoryCompatibility(runtimeRoot, configHome string, targetID releasetransition.ReleaseID) (HistoryCompatibilityReport, error) {
+	if !filepath.IsAbs(runtimeRoot) || !filepath.IsAbs(configHome) {
+		return HistoryCompatibilityReport{}, errors.New("runtime root and config home must be absolute")
 	}
-	runtimeRoot, targetRoot = filepath.Clean(runtimeRoot), filepath.Clean(targetRoot)
-	if filepath.Base(filepath.Dir(targetRoot)) != "releases" {
-		return HistoryCompatibilityReport{}, errors.New("target must be a release directory under releases/")
+	runtimeRoot, configHome = filepath.Clean(runtimeRoot), filepath.Clean(configHome)
+	if info, err := os.Stat(configHome); err != nil || !info.IsDir() {
+		return HistoryCompatibilityReport{}, errors.New("config home is not an existing directory")
 	}
 	runtime := New(Config{})
 	state, err := runtime.readCurrentSnapshot(runtimeRoot, configHome)
 	if err != nil {
 		return HistoryCompatibilityReport{}, fmt.Errorf("read active migration history: %w", err)
 	}
-	if !state.links.current.present {
-		return HistoryCompatibilityReport{}, errors.New("active release is unavailable")
+	request := releasetransition.ProcessRequest{
+		RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: targetID,
+		Direction: releasetransition.DirectionActivateTarget,
 	}
-	activeID := releaseLinksFromRuntimeSnapshot(state.links).Active
-	active, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{
-		release: activeID, root: filepath.Join(runtimeRoot, state.links.current.target),
-	}, runtimeRoot, nil, false)
+	if state.links.previous.present && state.links.previous.target == "releases/"+string(targetID) {
+		request.Direction = releasetransition.DirectionActivatePrevious
+	}
+	active, err := runtime.verifySelectedActive(&releaseSelection{request: request, links: state.links}, nil)
 	if err != nil {
 		return HistoryCompatibilityReport{}, fmt.Errorf("verify active release: %w", err)
 	}
 	defer active.Close()
-	targetID := releasetransition.ReleaseID(filepath.Base(targetRoot))
-	target, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{release: targetID, root: targetRoot},
-		filepath.Dir(filepath.Dir(targetRoot)), nil, false)
+	target, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{
+		release: targetID, root: filepath.Join(runtimeRoot, "releases", string(targetID)),
+	}, runtimeRoot, nil, false)
 	if err != nil {
 		return HistoryCompatibilityReport{}, fmt.Errorf("verify target release: %w", err)
 	}
 	defer target.Close()
-	_, activeRegistry, err := selectedRegistry(active)
-	if err != nil {
-		return HistoryCompatibilityReport{}, fmt.Errorf("the active release's sealed migration registry cannot be verified: %w", err)
-	}
-	registry, targetRegistry, err := selectedRegistry(target)
-	if err != nil {
-		return HistoryCompatibilityReport{}, fmt.Errorf("the selected release's sealed migration registry cannot be verified: %w", err)
-	}
 	declaration, err := verifiedRollbackDeclaration(active)
 	if err != nil {
 		return HistoryCompatibilityReport{}, fmt.Errorf("the active release's rollback declaration cannot be verified: %w", err)
 	}
-	input := releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: activeRegistry, TargetRegistry: targetRegistry,
-		History: retainedHistoryEvidence(target, registry, state.ledger, state.checkpoint),
-	}
+	var predecessor releasetransition.Fingerprint
 	if declaration != nil {
-		input.Predecessor = declaration.PredecessorRegistryDigest
+		predecessor = declaration.PredecessorRegistryDigest
 	}
-	verdict := releasetransition.HistoryCompatibility(input)
+	history, refusal, err := assembleHistorySelection(request, state.links, state, active, target, predecessor)
+	if refusal != "" {
+		return HistoryCompatibilityReport{}, fmt.Errorf("%s: %w", refusal, err)
+	}
+	verdict := history.verdict
 	report := HistoryCompatibilityReport{
-		SchemaVersion: 1, Active: activeID, Target: targetID, Kind: verdict.Kind,
-		Admitted: verdict.Admitted(), DeclaredPredecessor: verdict.DeclaredPredecessor,
+		SchemaVersion: 1, Active: active.candidate.release, Target: targetID, Kind: verdict.Kind,
+		Registry: verdict.Registry, Admitted: verdict.Admitted(), DeclaredPredecessor: verdict.DeclaredPredecessor,
 		Refusals: []HistoryCompatibilityRefusal{},
 	}
 	for _, refusal := range verdict.Refusals {
-		report.Refusals = append(report.Refusals, HistoryCompatibilityRefusal{Reason: refusal.Reason, Message: refusal.Message})
+		entry := HistoryCompatibilityRefusal{Reason: refusal.Reason, Message: refusal.Message}
+		if refusal.Cause != nil {
+			entry.Cause = refusal.Cause.Error()
+		}
+		report.Refusals = append(report.Refusals, entry)
 	}
 	return report, nil
+}
+
+// historySelection is the HistoryCompatibility input the runtime boundary
+// assembles for an installed target engine.
+type historySelection struct {
+	activeRegistry, targetRegistry releasetransition.Fingerprint
+	missingHistory                 bool
+	firstPublication               bool
+	publicationErr                 error
+	verdict                        releasetransition.HistoryCompatibilityVerdict
+}
+
+// assembleHistorySelection is shared by captureTransitionSelection and the
+// verb. A non-empty refusal reports a registry that cannot be verified.
+func assembleHistorySelection(request releasetransition.ProcessRequest, links runtimeLinkSnapshot, state currentSnapshot,
+	active, target *verifiedPublishedCandidate, predecessor releasetransition.Fingerprint,
+) (historySelection, string, error) {
+	var history historySelection
+	var err error
+	_, history.activeRegistry, err = selectedRegistry(active)
+	if err != nil {
+		return history, "the active release's sealed migration registry cannot be verified", err
+	}
+	retained, identity, err := selectedRegistry(target)
+	if err != nil {
+		return history, "the selected release's sealed migration registry cannot be verified", err
+	}
+	history.targetRegistry = identity
+	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
+	// The installer can publish the first current link before the native
+	// transition creates protected history. Let that same engine initialize it.
+	// Current then names the target, so its registry is the active one.
+	firstPublication := request.Direction == releasetransition.DirectionActivateTarget &&
+		request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
+		links.current.target == "releases/"+string(request.Target) && !links.previous.present &&
+		!state.journal.Exists && history.missingHistory
+	if identity != "" && firstPublication {
+		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
+	}
+	input := releasetransition.HistoryCompatibilityInput{
+		ActiveRegistry: history.activeRegistry, TargetRegistry: identity, Predecessor: predecessor,
+	}
+	if !history.firstPublication {
+		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
+	}
+	history.verdict = releasetransition.HistoryCompatibility(input)
+	return history, "", nil
+}
+
+// needsSourceFloor reports when the source floor's upgrade advice may replace
+// the selection: differing registries, or an installed registry without history.
+func (history historySelection) needsSourceFloor() bool {
+	return history.verdict.Registry == releasetransition.RegistryDiffers ||
+		(history.targetRegistry != "" && history.missingHistory)
+}
+
+// refusal is the selection's refusal. A registry difference is decided before
+// first-publication evidence, so that evidence's error is not reported then.
+func (history historySelection) refusal() (string, error) {
+	message, cause := history.verdict.Refusal()
+	if history.verdict.Registry != releasetransition.RegistryDiffers {
+		cause = domain.CollectRefusals(cause, history.publicationErr)
+	}
+	return message, cause
 }
 
 // retainedHistoryEvidence binds the authoritative history to the target's
