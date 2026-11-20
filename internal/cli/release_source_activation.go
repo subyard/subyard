@@ -201,15 +201,15 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 }
 
 // The broker's projected Desired observes its yard through the prepared
-// settings, exactly as its native observation does after they are imported,
-// and derives Desired through the same owner.
+// settings with the same applicability as its native observation after they
+// are imported, and derives Desired through the same owner.
 func (cli *CLI) prepareBrokerSourceActivation(request releasetransition.ProcessRequest, owner *activationStageReconciler) func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
 	return func(ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
 		draft, err := cli.prepareSourceActivationDraft(request.ConfigHome, view)
 		if err != nil {
 			return releasetransition.V2SourceActivationPlan{}, err
 		}
-		applicability, err := cli.serviceStageApplicability(ctx, owner.id, draft.names, draft.load)
+		applicability, err := cli.brokerApplicability(ctx, owner.id, draft.names, draft.load)
 		if err != nil {
 			return releasetransition.V2SourceActivationPlan{}, err
 		}

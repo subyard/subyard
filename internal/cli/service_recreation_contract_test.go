@@ -330,10 +330,17 @@ func brokerUpdate(t *testing.T, program *CLI, broker *activationStageReconciler,
 	}
 }
 
+// deferBrokerYard models release repair with pending configuration of the
+// broker yard, which leaves that yard to its own decision.
+func deferBrokerYard(program *CLI) {
+	program.activation = &releaseConfiguration{repair: true, yards: map[string]releaseYardConfiguration{}}
+	program.activation.pending.record(map[string]bool{"fixture-runtime": true})
+}
+
 // The projection of prepared settings and the native observation derive the
 // same Desired for every broker yard state.
 func TestBrokerProjectionMatchesNativeDesired(t *testing.T) {
-	for _, state := range []string{"absent", "unfinished-init", "running"} {
+	for _, state := range []string{"absent", "unfinished-init", "running", "deferred"} {
 		t.Run(state, func(t *testing.T) {
 			program, broker, calls, projections := productionBroker(t)
 			home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
@@ -345,6 +352,8 @@ func TestBrokerProjectionMatchesNativeDesired(t *testing.T) {
 				half.Config = maps.Clone(half.Config)
 				half.Config["user.subyard.initialized"] = "false"
 				calls.incus.Instances[calls.key] = half
+			case "deferred":
+				deferBrokerYard(program)
 			}
 			names, err := config.YardNames(home)
 			if err != nil {
@@ -403,7 +412,7 @@ func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T)
 // yard is in: the engine verifies the projected Desired against the native one.
 func TestUpdateWithPendingSourceWorkEndsReadyForEveryBrokerState(t *testing.T) {
 	install := "yard service install fixture-service --yard fixture-runtime"
-	for _, state := range []string{"absent", "unfinished-init", "running"} {
+	for _, state := range []string{"absent", "unfinished-init", "running", "deferred"} {
 		t.Run(state, func(t *testing.T) {
 			program, broker, calls, projections := productionBroker(t)
 			switch state {
@@ -416,12 +425,14 @@ func TestUpdateWithPendingSourceWorkEndsReadyForEveryBrokerState(t *testing.T) {
 				calls.incus.Instances[calls.key] = half
 			case "running":
 				calls.sameEngine = true
+			case "deferred":
+				deferBrokerYard(program)
 			}
 			outcome := brokerUpdate(t, program, broker, true)().Outcome
 			if outcome.Status != releasetransition.StatusReady || *projections == 0 {
 				t.Fatalf("update with pending source work: %+v (%d projections)", outcome, *projections)
 			}
-			if named := slices.ContainsFunc(outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }); named != (state != "running") {
+			if named := slices.ContainsFunc(outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }); named != (state == "absent" || state == "unfinished-init") {
 				t.Fatalf("reinstall warning: %v", outcome.Warnings)
 			}
 			if len(calls.calls) != 0 {

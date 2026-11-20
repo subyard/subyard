@@ -492,6 +492,24 @@ func (cli *CLI) brokerActivationReconciler(
 	return cli.brokerActivationWithFiles(request, nil)
 }
 
+// brokerApplicability is the broker stage's applicability over a set of yard
+// names and their settings. The native observation and the projection of
+// prepared settings both use it, so both see the same deferral and state.
+func (cli *CLI) brokerApplicability(ctx context.Context, id string, names []string, load func(string) (config.Loaded, error)) (activationApplicability, error) {
+	// Release repair leaves a deferred broker yard unread and untouched,
+	// like the materialized configuration of that yard.
+	if definition, ok := cli.activationService(id); ok && cli.activation != nil && cli.activation.repair &&
+		slices.Contains(names, definition.InfrastructureService.DefaultYard) &&
+		cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[definition.InfrastructureService.DefaultYard] {
+		return activationApplicability{state: "deferred", target: definition.InfrastructureService.DefaultYard}, nil
+	}
+	applicability, err := cli.serviceStageApplicability(ctx, id, names, load)
+	if err == nil && slices.Contains(names, legacyTestYardName) {
+		applicability.warnings = append(applicability.warnings, legacyTestYardWarning)
+	}
+	return applicability, err
+}
+
 func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessRequest, files *config.ProspectiveFiles) *activationStageReconciler {
 	const id = "test-vm-broker"
 	reconciler := &activationStageReconciler{
@@ -512,20 +530,9 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 			if files != nil {
 				names = append(names, files.Yards...)
 			}
-			// Release repair leaves a deferred broker yard unread and untouched,
-			// like the materialized configuration of that yard.
-			if definition, ok := cli.activationService(id); ok && cli.activation != nil && cli.activation.repair &&
-				slices.Contains(names, definition.InfrastructureService.DefaultYard) &&
-				cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[definition.InfrastructureService.DefaultYard] {
-				return activationApplicability{state: "deferred", target: definition.InfrastructureService.DefaultYard}, nil
-			}
-			applicability, err := cli.serviceStageApplicability(ctx, id, names, func(name string) (config.Loaded, error) {
+			return cli.brokerApplicability(ctx, id, names, func(name string) (config.Loaded, error) {
 				return cli.resolveReleaseTransitionContext(ctx, name, request.ConfigHome, files)
 			})
-			if err == nil && slices.Contains(names, legacyTestYardName) {
-				applicability.warnings = append(applicability.warnings, legacyTestYardWarning)
-			}
-			return applicability, err
 		},
 		platform: func(ctx context.Context, applicability activationApplicability) (ports.ReconcileStageRunner, error) {
 			if applicability.target == "" {
