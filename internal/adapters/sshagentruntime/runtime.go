@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/sys/unix"
@@ -97,7 +98,13 @@ func validateDirectory(dir string, create bool) error {
 	}
 	for _, path := range []string{parent, dir} {
 		if create {
-			if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
+			// An owned directory left narrower by umask is finished to 0700.
+			err := safefs.EnsureDir(path, safefs.DirOptions{Durability: safefs.BestEffort})
+			if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
+				errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
+				return errors.New("SSH agent runtime directory and parent must be owned by the operator with mode 0700")
+			}
+			if err != nil {
 				return errors.New("cannot create SSH agent runtime directory")
 			}
 		}
@@ -136,6 +143,24 @@ func protectedFile(path string, flags int) (*os.File, error) {
 		}
 	}
 	return f, nil
+}
+
+// writeWorkerConfig keeps the checks of an existing control file, then replaces it atomically.
+func writeWorkerConfig(path string, raw []byte) error {
+	existing, err := protectedFile(path, unix.O_RDONLY)
+	if err == nil {
+		existing.Close()
+	} else if !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	err = safefs.WriteFile(path, raw, safefs.Options{Mode: 0600, Durability: safefs.BestEffort})
+	if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotRegular) {
+		return errors.New("unsafe SSH agent control file")
+	}
+	if err != nil {
+		return errors.New("cannot prepare SSH agent worker")
+	}
+	return nil
 }
 
 func acquireLock(ctx context.Context, path string) (*os.File, error) {
@@ -284,14 +309,8 @@ func (m Manager) Unlock(ctx context.Context, key string, ttl time.Duration) (Sta
 	}
 	cfg := daemonConfig{Config: m.Config, TTL: ttl}
 	raw, _ := json.Marshal(cfg)
-	file, err := protectedFile(filepath.Join(m.Config.Directory, "worker.json"), unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC)
-	if err != nil {
+	if err := writeWorkerConfig(filepath.Join(m.Config.Directory, "worker.json"), raw); err != nil {
 		return Status{}, err
-	}
-	_, writeErr := file.Write(raw)
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		return Status{}, errors.New("cannot prepare SSH agent worker")
 	}
 	executable := m.Config.Executable
 	if executable == "" {
