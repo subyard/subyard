@@ -434,8 +434,9 @@ at the current migration epochs, which since `power-metadata` epoch 4 excludes v
 Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.1`, then
 `yard update` again. The hop is a separate fix release of the anchor series because published
 0.28.0 can stop with a running VM yard; installs completed on 0.28.0 stay accepted. The published
-anchor, the hop and their assets remain available; there is no automatic chain, new bridge
-release, state format or epoch-floor increase. This explicitly retires fresh
+anchor, the hop and their assets remain available. After later boundary moves the refusal
+prints every hop from the installed version; `yard update` does not walk that chain, and there is
+no new bridge release, state format or epoch-floor increase. This explicitly retires fresh
 pre-anchor migration coverage from later candidates; its full matrix stays in the v0.28.0 tag.
 Accepted history readers and exact unfinished-owner recovery remain supported. The first boundary
 release retains two physical chains through the hop and separate refusal cases. Follow

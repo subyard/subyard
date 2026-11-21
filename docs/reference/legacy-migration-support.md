@@ -1,7 +1,7 @@
 ---
 title: Legacy migration support and reinstall policy
 status: accepted policy
-updated: 2026-11-15
+updated: 2026-11-21
 ---
 
 # Legacy migration support and reinstall policy
@@ -16,6 +16,9 @@ Run the published hop release, then retry the latest release:
 yard update --version 0.28.1
 yard update
 ```
+
+After later boundary moves the refusal prints every hop from the installed version in order,
+for example `yard update --version 0.28.1 && yard update --version <next hop> && yard update`.
 
 The **anchor** (v0.28.0, `UpdateAnchorVersion`) is the oldest accepted update source;
 installs that completed on v0.28.0 update directly. The **hop** (v0.28.1, `UpdateHopVersion`) is the
@@ -43,7 +46,8 @@ The anchor does not change `minimumEpochs`, persistent formats or retained histo
 
 Sources before **v0.11.0** retain full uninstall followed by the user's separate clean installation.
 This removal route deletes owned data only after its existing explicit confirmation; an update
-refusal never authorizes deletion. There is no automatic update chain or new bridge release.
+refusal never authorizes deletion. `yard update` prints the hop chain but does not walk it;
+there is no new bridge release.
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
 recovery. Source-version admission must refuse before changing the active installation and explain the full
@@ -140,10 +144,11 @@ each asserting the hop command and unchanged protected state using temporary hom
 `file://` candidate. The focused `--only-source-anchor` verifier records Incus API reads and
 rejects API mutations; an Incus CLI stub rejects every invocation. Pinned downloads are cached
 in CI and rechecked against immutable archive hashes. These refusals need no VM lanes.
-Pre-v0.11.0 removal retains its own pinned harness and full-uninstall lane. The one-time hop chains belong
-to the first boundary release, v0.29.0, whose acceptance runs from its release branch; master no
-longer includes them. Fixtures that step an older install through the boundary use the hop;
-fixtures whose subject starts at an accepted source use the anchor. The complete old-source
+Pre-v0.11.0 removal retains its own pinned harness and full-uninstall lane. The one-time physical hop
+chains belong to the first boundary release, v0.29.0, whose acceptance runs from its release branch;
+master no longer includes them. The printed chain is permanent. Fixtures that step an older
+install through the boundary use the hop; fixtures whose subject starts at an accepted source use
+the anchor. The complete old-source
 matrix remains frozen in the v0.28.0 tag; later candidate acceptance does not repeat it.
 
 ## Moving the update boundary
@@ -151,27 +156,36 @@ matrix remains frozen in the v0.28.0 tag; later candidate acceptance does not re
 Move the boundary when the supported matrix's cost or age justifies retiring a source path.
 
 1. Publish the new anchor first. Keep the complete published asset sets (installer, archives,
-   checksums, manifests and provenance) of the anchor, the hop and every release a documented
-   recovery route names available permanently: an install whose only supported path crosses a
-   missing release is stranded.
-2. Change `UpdateAnchorVersion` and mark its verified TSV row `anchor` (exactly one).
-   The anchor also supplies the direct baseline; retain a `direct` row for the previous release
-   when it is neither the anchor nor the hop, and choose representative below-anchor `refusal` rows.
-   Set `UpdateHopVersion` to the published fix release of the anchor series that completes the
-   hop from older sources, and mark its own verified row `hop` (exactly one, at or above the anchor).
-   Refusals print the hop; admission and rollback use the anchor.
-3. Add one-time chain catalog entries through the hop for the first boundary release, then
-   remove them after that release. Each release refuses with its own hop: successive boundaries
-   require operator-directed hops, one by one.
-4. Review each fixture: is its subject reachable from an install at the new anchor? Rebase
+   checksums, manifests and provenance) of every anchor and hop in the boundary table and every
+   release a documented recovery route names available permanently: an install whose only
+   supported path crosses a missing release is stranded.
+2. Choose the new hop: a published fix release of the new anchor series that completes the hop
+   from older sources. Publish it while the previous boundary is still current, so that it admits
+   every source of the previous epoch and its own release acceptance covers the update from the
+   previous anchor and hop.
+3. Append the current pair to `priorUpdateBoundaries` (rows are never removed), then change
+   `UpdateAnchorVersion` and `UpdateHopVersion`. Mark their verified TSV rows `anchor` and `hop`
+   (exactly one each, hop at or above the anchor); re-mark the previous anchor and hop rows
+   `refusal` or `pin`. The anchor also supplies the direct baseline; retain a `direct` row for the
+   previous release when it is neither the anchor nor the hop, and choose representative
+   `refusal` rows in each epoch below the anchor. Refusals print the whole chain of hops from the
+   installed version; admission and rollback use the current anchor. Older releases stay frozen:
+   their own refusals name their own hop, and the plain `yard update` that ends each printed step
+   reaches a release that prints the remaining chain.
+4. Add one-time chain catalog entries through the hop for the first boundary release, then
+   remove them after that release.
+5. Review each fixture: is its subject reachable from an install at the new anchor? Rebase
    reachable subjects onto the anchor, retain older creation pins only for retained-state
    subjects, and remove frozen paths. Run the owning host-free and physical checks.
-5. Remove obsolete product code later as a separate measured change; changing the source
+6. Remove obsolete product code later as a separate measured change; changing the source
    boundary alone neither deletes history readers nor raises epoch floors.
 
 The TSV/constant contract (`tests/release-acceptance.sh`: one anchor and one hop row, each equal to
-its constant, hop at or above the anchor) and the shared fixture readers `published_anchor` and
-`published_hop` keep both selections synchronized.
+its constant, hop at or above the anchor, and a `refusal` or `pin` row for every prior anchor and
+hop) and the shared fixture readers `published_anchor` and `published_hop` keep both selections
+synchronized. A Go test checks the chain rules of the boundary table: ascending anchors, each hop
+at or above its anchor and below the next one. That each hop admits the previous epoch follows
+from step 2.
 Post-activation takeover of an anchor-series journal relies on the candidate still reconciling the
 anchor's activated state and on intact migration authority; removing that code makes takeover a
 refusal again. A defective hop is repaired by an anchor-series fix release, not a bridge release.

@@ -76,6 +76,33 @@ def published_hop(root):
     return published_role(root, "hop")
 
 
+SOURCE_POLICY = "internal/adapters/releaseruntime/source_policy.go"
+
+
+def update_boundaries(root):
+    """Every update boundary as (anchor, hop), ascending, the current constants last."""
+    policy = (root / SOURCE_POLICY).read_text()
+    version = r"[0-9]+\.[0-9]+\.[0-9]+"
+    row = r'\{anchor: "(' + version + r')", hop: "(' + version + r')"\},'
+    prior = re.search(r"^var priorUpdateBoundaries = \[\]updateBoundary\{((?:\n\t" + row + r")*)\n?\}$", policy, re.M)
+    current = [re.search(r"^const " + name + r' = "(' + version + r')"$', policy, re.M)
+               for name in ("UpdateAnchorVersion", "UpdateHopVersion")]
+    if prior is None or None in current:
+        raise ValueError(f"cannot parse the update boundaries in {SOURCE_POLICY}")
+    return re.findall(row, prior[1]) + [(current[0][1], current[1][1])]
+
+
+def update_chain(root, version):
+    """The command a below-anchor refusal prints for this installed version."""
+    key = lambda value: tuple(map(int, value.split(".")))
+    hops = []
+    for anchor, hop in update_boundaries(root):
+        if key(version) < key(anchor):
+            hops.append(hop)
+            version = hop
+    return " && ".join([f"yard update --version {hop}" for hop in hops] + ["yard update"])
+
+
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
@@ -585,7 +612,7 @@ def verify_source_anchor_refusal(fixture, installer=None):
                                 and isinstance(outcome.get("status"), str)
                                 and outcome["status"] not in ("", "ready"))
         require(reported_refusal and "source-anchor-required" in refused.stderr
-                and f"next: yard update --version {published_hop(Path(__file__).resolve().parent.parent)[0]} && yard update" in refused.stderr
+                and f"next: {update_chain(Path(__file__).resolve().parent.parent, fixture.baseline_version)}" in refused.stderr
                 and "uninstall --full" not in refused.stderr,
                 f"released {fixture.baseline_version} update {arguments} lost hop guidance "
                 f"(exit={refused.returncode}): "

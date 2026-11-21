@@ -13,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/blang/semver/v4"
 )
 
 const v0173ProcessEnvironment = "SUBYARD_TEST_V0173_TRANSITION_PROCESS"
@@ -39,7 +40,7 @@ func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
 	// Explicit selection reports the owner's unchanged blocker with the source-anchor refusal.
 	blocker := "release transition blocker: code=precondition-blocked resource=" + protected.inspection.Blockers[0].Resource +
 		"; the yard template is not supported by this migration; next: repair the named yard settings, then run yard update"
-	if want := blocker + "; " + unfinishedBelowAnchorError(protected.journal).Error(); err == nil || err.Error() != want {
+	if want := blocker + "; " + unfinishedBelowAnchorError(protected.journal, semver.MustParse("0.17.3")).Error(); err == nil || err.Error() != want {
 		t.Fatalf("explicit selection lost a refusal: %v, want %q", err, want)
 	}
 	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)

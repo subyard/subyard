@@ -192,7 +192,7 @@ func (runtime *Runtime) stagedSourceRefusal(ctx context.Context, selection *rele
 	if source.version != version.String() {
 		return nil
 	}
-	message, retry := sourceAnchorGuidance(source.version)
+	message, retry := sourceAnchorGuidance(source.version, version)
 	if version.LT(semver.MustParse(MinimumSourceVersion)) {
 		message, retry = "the installed source predates v"+MinimumSourceVersion, LegacyReinstallGuidance
 	}
