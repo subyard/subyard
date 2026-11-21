@@ -1008,20 +1008,29 @@ class Leases(unittest.TestCase):
                   request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
             (dict(slot_id='002', generation=1,
                   request=dict(api=35, variant='google_apis', abi='x86_64', device='tablet')), 2560),
+            (dict(slot_id='003', generation=1,
+                  request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
+            (dict(slot_id='004', generation=1,
+                  request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
         ]
+        modes = [('', 4, 2, 1024), ('default', 3, 3, 1024), ('raised', 4, 3, 2048), ('raised', 1, 1, 2048)]
         with patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3)), \
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
              patch.object(poolmod.pwd, 'getpwnam', return_value=account), \
              patch.object(poolmod.os, 'chown'), patch.object(poolmod, 'run', side_effect=record), \
-             patch.object(poolmod.Runtime, 'start_network'), patch.object(poolmod.Runtime, 'pid', return_value=1), \
-             patch.object(poolmod.Runtime, 'connect'), patch.object(poolmod.Runtime, 'adb_ready', return_value=(True, False)), \
+             patch.object(poolmod.Runtime, 'start_network'), patch.object(runtime, 'wait_for_boot') as wait_for_boot, \
              patch.object(poolmod.Runtime, 'NETNS_ROOT', netns):
-            for slot, _ in slots:
-                runtime.start(slot, image, threading.Event())
-        for slot, memory in slots:
+            for (slot, _), (mode, available, cores, _) in zip(slots, modes, strict=True):
+                cancel = threading.Event()
+                with patch.dict(os.environ, SUBYARD_ANDROID_E2E_GRADLE=mode), \
+                     patch.object(poolmod.os, 'sched_getaffinity', return_value=set(range(available))):
+                    runtime.start(slot, image, cancel)
+                wait_for_boot.assert_called_with(slot, cancel, cores, settle=bool(mode))
+        for (slot, memory), (_, _, cores, headroom) in zip(slots, modes, strict=True):
             avd = runtime.root / runtime.unit(slot).removesuffix('.service') / 'home/avd/managed.avd/config.ini'
             self.assertIn('hw.gpu.mode=swiftshader\n', avd.read_text())
             self.assertIn(f'hw.ramSize={memory}\n', avd.read_text())
+            self.assertIn(f'hw.cpu.ncore={cores}\n', avd.read_text())
             if slot['request']['device'] == 'tablet':
                 self.assertIn('hw.lcd.width=800\n', avd.read_text())
                 self.assertIn('hw.lcd.height=1280\n', avd.read_text())
@@ -1030,9 +1039,42 @@ class Leases(unittest.TestCase):
                            and command[command.index('--unit') + 1] == runtime.unit(slot))
             self.assertIn('--setenv=EMULATOR_GPU=software', command)
             self.assertNotIn('SUBYARD_ANDROID_E2E_SHOW_KERNEL', ' '.join(command))
-            self.assertIn(f'--property=MemoryMax={memory + poolmod.RUNTIME_OVERHEAD_MIB}M', command)
+            self.assertNotIn('SUBYARD_ANDROID_E2E_GRADLE', ' '.join(command))
+            self.assertIn(f'--property=MemoryMax={memory + headroom}M', command)
             self.assertIn('--property=NetworkNamespacePath=' + str(netns / runtime.namespace_name(slot)), command)
             self.assertNotIn('--property=PrivateNetwork=yes', command)
+
+    def test_gradle_boot_wait_resets_until_pressure_and_framework_stay_stable(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        quiet = (b'101', 10.0)
+        restart = (b'102', 10.0)
+        cases = [
+            ([quiet, (b'101', 70.0), quiet, quiet, quiet], [0] * 5, 8, None),
+            ([quiet] * 5, [0, 30, 0, 0, 0], 8, None),
+            ([quiet] * 5, [0, None, 0, 0, 0], 8, None),
+            ([quiet, None, quiet, quiet, quiet], [0] * 4, 8, None),
+            ([quiet, quiet, restart, restart, restart], [0] * 5, 8, None),
+            ([None] * 5, [], 10, 'boot_timeout'),
+        ]
+        for samples, memory, elapsed, failure in cases:
+            with self.subTest(samples=samples, memory=memory):
+                now = [0]
+                def advance(seconds):
+                    now[0] += seconds
+                cancel = SimpleNamespace(is_set=lambda: False, wait=advance)
+                with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now[0]), \
+                     patch.object(poolmod, 'BOOT_TIMEOUT', 10), patch.object(poolmod, 'BOOT_SETTLE_SECONDS', 4), \
+                     patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
+                     patch.object(runtime, 'adb_ready', side_effect=[(sample, False) for sample in samples]), \
+                     patch.object(runtime, 'boot_memory_pressure', side_effect=memory), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    if failure:
+                        with self.assertRaises(poolmod.PoolError) as error:
+                            runtime.wait_for_boot({}, cancel, 3, settle=True)
+                        self.assertEqual(error.exception.code, failure)
+                    else:
+                        runtime.wait_for_boot({}, cancel, 3, settle=True)
+                self.assertEqual(now[0], elapsed)
 
     def test_runtime_namespace_rejects_collisions_and_cleans_only_its_name(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root='/unused'))
@@ -1157,10 +1199,10 @@ if not request().startswith(b'shell:'):
 out.write(b'OKAY101:ready\n')
 out.flush()
 '''
-        cases = [(protocol, True, 1, 0),
-                 (protocol.replace("b'OKAY101:ready\\n'", "b'OKAY101:pending\\n'"), False, 1, 0),
-                 ('import os; os.read(0, 64)', False, 0.1, 0),
-                 ('import sys; sys.stdin.buffer.read()', False, 0.1, None)]
+        cases = [(protocol, (b'101', None), 1, 0),
+                 (protocol.replace("b'OKAY101:ready\\n'", "b'OKAY101:pending\\n'"), None, 1, 0),
+                 ('import os; os.read(0, 64)', None, 0.1, 0),
+                 ('import sys; sys.stdin.buffer.read()', None, 0.1, None)]
         for program, expected, timeout, exit_code in cases:
             process = subprocess.Popen([sys.executable, '-c', program], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             try:
@@ -1195,8 +1237,12 @@ out.flush()
         command.write_text('#!/bin/sh\ncase "$*" in\n'
                            '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
                            '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" > "$CONNECT_CALL"; '
-                           'exit "$CONNECT_EXIT";;\n*) exit 2;;\nesac\n')
+                           'exit "$CONNECT_EXIT";;\n'
+                           '"package path android") printf "%s\\n" "$PACKAGE_REPLY";;\n*) exit 2;;\nesac\n')
         command.chmod(0o755)
+        pressure = commands / 'cat'
+        pressure.write_text('#!/bin/sh\n[ "$1" = /proc/pressure/cpu ] && printf "%s\\n" "$CPU_PSI"\n')
+        pressure.chmod(0o755)
         protocol = r'''
 import os, subprocess
 
@@ -1223,17 +1269,17 @@ os.write(1, result.stdout)
         address = '    inet 10.0.2.16/24 scope global wlan0'
         cases = [
             # A configured address is ready and never creates another saved network.
-            ('1', '1', address, '0', '0', True, (True, False), False, False),
+            ('1', '1', address, '0', '0', True, ((b'101', None), False), False, False),
             # A visible but unconfigured network asks for one connection per framework lifetime.
-            ('1', '1', '', '0', '0', True, (False, True), False, True),
+            ('1', '1', '', '0', '0', True, (None, True), False, True),
             # A failed connection does not claim either readiness or configuration.
-            ('1', '1', '', '0', '1', True, (False, False), False, True),
+            ('1', '1', '', '0', '1', True, (None, False), False, True),
             # Later polling must not reconnect repeatedly.
-            ('1', '1', '', '0', '0', False, (False, False), False, False),
+            ('1', '1', '', '0', '0', False, (None, False), False, False),
             # Wi-Fi is enabled first when Android reports it disabled.
-            ('1', '0', '', '0', '0', True, (False, True), True, True),
-            ('1', '0', address, '1', '0', True, (False, False), True, False),
-            ('0', '0', address, '0', '0', True, (False, False), False, False),
+            ('1', '0', '', '0', '0', True, (None, True), True, True),
+            ('1', '0', address, '1', '0', True, (None, False), True, False),
+            ('0', '0', address, '0', '0', True, (None, False), False, False),
         ]
         for boot, wifi, address, wifi_exit, connect_exit, configure, expected, enable, connect in cases:
             with self.subTest(boot=boot, wifi=wifi, network=bool(address), configure=configure,
@@ -1262,6 +1308,15 @@ os.write(1, result.stdout)
                 self.assertEqual(connect_call.exists(), connect)
                 if connect:
                     self.assertEqual(connect_call.read_text(), 'wifi connect-network AndroidWifi open\n')
+                if expected == ((b'101', None), False):
+                    for package, psi, settled in (
+                            ('package:/system/framework/framework-res.apk', 'some avg10=12.34', (b'101', 12.34)),
+                            ('', 'some avg10=12.34', None),
+                            ('package:/system/framework/framework-res.apk', 'some avg10=180.00', None)):
+                        with subprocess.Popen([sys.executable, '-c', protocol], env=dict(env, PACKAGE_REPLY=package,
+                                              CPU_PSI=psi), stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
+                            self.assertEqual(poolmod.Runtime.adb_ready(process, timeout=1, settle=True),
+                                             (settled, False))
 
     def test_wifi_submission_recovers_only_after_framework_or_service_change(self):
         commands = self.root / 'framework-readiness-bin'
@@ -1317,29 +1372,29 @@ os.write(1, result.stdout)
 
         # Desired wifi_on=1 precedes an actually enabled radio; status is disabled
         # while Android is enabling. No accepted connection may be cached yet.
-        self.assertEqual(probe(radio='Wifi is disabled'), (False, False))
-        self.assertEqual(probe(radio='Wifi is disabled\nWifi is enabled'), (False, False))
+        self.assertEqual(probe(radio='Wifi is disabled'), (None, False))
+        self.assertEqual(probe(radio='Wifi is disabled\nWifi is enabled'), (None, False))
         self.assertEqual(state, {})
         self.assertEqual(count(), 0)
-        self.assertEqual(probe(), (False, True))
+        self.assertEqual(probe(), (None, True))
         self.assertEqual(state, {'submitted_for': '101'})
-        self.assertEqual(probe(), (False, False))
+        self.assertEqual(probe(), (None, False))
         self.assertEqual(count(), 1, 'pending DHCP must not trigger another connection')
-        self.assertEqual(probe(pid='202'), (False, True))
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202'), (None, True))
+        self.assertEqual(probe(pid='202'), (None, False))
         self.assertEqual(count(), 2, 'new framework must receive one connection')
-        self.assertEqual(probe(pid='202', address='    inet 10.0.2.16/24'), (True, False))
-        self.assertEqual(probe(pid='202', service='Service wifi: not found'), (False, False))
-        self.assertEqual(probe(pid='202'), (False, True))
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202', address='    inet 10.0.2.16/24'), ((b'202', None), False))
+        self.assertEqual(probe(pid='202', service='Service wifi: not found'), (None, False))
+        self.assertEqual(probe(pid='202'), (None, True))
+        self.assertEqual(probe(pid='202'), (None, False))
         self.assertEqual(count(), 3, 'returning service must receive one connection')
         for pid, service in [('garbage', 'Service wifi: found'), ('0', 'Service wifi: found'),
                              ('202 303', 'Service wifi: found'),
                              ('12345678901', 'Service wifi: found'), ('202', 'unexpected')]:
             self.assertEqual(probe(pid=pid, service=service, address='    inet 10.0.2.16/24'),
-                             (False, False))
+                             (None, False))
         self.assertEqual(count(), 3, 'malformed identity must not submit a connection')
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202'), (None, False))
 
     def test_viewer_relay_selects_scrcpy_forward_and_fences_clients(self):
         endpoint = str(self.root / 'viewer-adb.sock')
