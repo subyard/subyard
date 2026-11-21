@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -293,17 +294,114 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 	}
 }
 
-// The printed hop must itself be an admitted source, so its own next update is direct.
-func TestUpdateHopVersionIsAdmittedAtOrAboveAnchor(t *testing.T) {
-	hop, err := semver.Parse(UpdateHopVersion)
-	if err != nil || hop.String() != UpdateHopVersion || len(hop.Pre) != 0 {
-		t.Fatalf("hop must be a plain release version: %q %v", UpdateHopVersion, err)
+// updateBoundaryViolations checks the rules that make every printed hop admit
+// the step before it and lead to the next epoch: plain versions, strictly
+// ascending anchors above the source floor, each hop at or above its anchor and
+// below the next one.
+func updateBoundaryViolations(boundaries []updateBoundary) []string {
+	var violations []string
+	previous := semver.MustParse(MinimumSourceVersion)
+	for index, boundary := range boundaries {
+		anchor, anchorErr := semver.Parse(boundary.anchor)
+		hop, hopErr := semver.Parse(boundary.hop)
+		if anchorErr != nil || hopErr != nil || anchor.String() != boundary.anchor || hop.String() != boundary.hop ||
+			len(anchor.Pre) != 0 || len(hop.Pre) != 0 {
+			violations = append(violations, fmt.Sprintf("row %d: anchor %q and hop %q must be plain release versions", index, boundary.anchor, boundary.hop))
+			continue
+		}
+		if !anchor.GT(previous) {
+			violations = append(violations, fmt.Sprintf("row %d: anchor v%s is not above v%s", index, anchor, previous))
+		}
+		if hop.LT(anchor) {
+			violations = append(violations, fmt.Sprintf("row %d: hop v%s is below its anchor v%s", index, hop, anchor))
+		}
+		if index+1 < len(boundaries) {
+			if next, err := semver.Parse(boundaries[index+1].anchor); err == nil && !hop.LT(next) {
+				violations = append(violations, fmt.Sprintf("row %d: hop v%s is not below the next anchor v%s", index, hop, next))
+			}
+		}
+		previous = anchor
 	}
-	if hop.LT(semver.MustParse(UpdateAnchorVersion)) {
-		t.Fatalf("hop v%s is below the anchor v%s", UpdateHopVersion, UpdateAnchorVersion)
+	return violations
+}
+
+func TestUpdateBoundariesFollowTheChainRules(t *testing.T) {
+	boundaries := updateBoundaries()
+	if violations := updateBoundaryViolations(boundaries); len(violations) != 0 {
+		t.Fatalf("update boundaries break the chain rules: %q", violations)
 	}
+	if current := boundaries[len(boundaries)-1]; current != (updateBoundary{UpdateAnchorVersion, UpdateHopVersion}) {
+		t.Fatalf("the current boundary is %v, want the constants last", current)
+	}
+	// The printed hop must itself be an admitted source, so its own next update is direct.
 	if err := sourceVersionError(UpdateHopVersion); err != nil {
 		t.Fatalf("hop is not an admitted source: %v", err)
+	}
+	broken := []updateBoundary{{"0.10.0", "0.10.1"}, {"2.0.0", "1.9.0"}, {"1.0.0", "1.0.0-rc.1"}, {"1.5.0", "1.6.0"}, {"1.6.0", "1.7.0"}}
+	want := []string{
+		"row 0: anchor v0.10.0 is not above v0.11.0",
+		"row 1: hop v1.9.0 is below its anchor v2.0.0",
+		"row 1: hop v1.9.0 is not below the next anchor v1.0.0",
+		`row 2: anchor "1.0.0" and hop "1.0.0-rc.1" must be plain release versions`,
+		"row 3: anchor v1.5.0 is not above v2.0.0",
+		"row 3: hop v1.6.0 is not below the next anchor v1.6.0",
+	}
+	if got := updateBoundaryViolations(broken); !slices.Equal(got, want) {
+		t.Fatalf("violations = %q, want %q", got, want)
+	}
+}
+
+func TestSourceAnchorRefusalsPrintTheFullChain(t *testing.T) {
+	boundaries := []updateBoundary{{"1.0.0", "1.0.1"}, {"2.0.0", "2.1.0"}, {"3.0.0", "3.0.2"}}
+	if violations := updateBoundaryViolations(boundaries); len(violations) != 0 {
+		t.Fatalf("synthetic boundaries break the chain rules: %q", violations)
+	}
+	const (
+		first  = "yard update --version 1.0.1 && "
+		second = "yard update --version 2.1.0 && "
+		third  = "yard update --version 3.0.2 && "
+	)
+	for version, want := range map[string]string{
+		"0.11.0":      first + second + third + "yard update",
+		"1.0.0-rc.1":  first + second + third + "yard update",
+		"1.0.0":       second + third + "yard update",
+		"1.0.1":       second + third + "yard update",
+		"1.9.9":       second + third + "yard update",
+		"2.0.0":       third + "yard update",
+		"2.1.0":       third + "yard update",
+		"3.0.0-rc.1":  third + "yard update",
+		"3.0.0":       "yard update",
+		"3.0.0+build": "yard update",
+	} {
+		message, retry := sourceAnchorRefusal(version, semver.MustParse(version), boundaries)
+		if wantMessage := "source-anchor-required: installed v" + version + ". Direct update requires installed v3.0.0 or newer"; message != wantMessage || retry != want {
+			t.Errorf("v%s: %q; next: %q, want %q; next: %q", version, message, retry, wantMessage, want)
+		}
+	}
+	journal := func(target string, direction releasetransition.Direction) releasetransition.JournalRecord {
+		return releasetransition.JournalRecord{Goal: releasetransition.Goal{
+			Target: releasetransition.ReleaseID(target + "-bbbbbbbbbbbb"), Direction: direction,
+		}}
+	}
+	for _, scenario := range []struct {
+		name, active, next, installer string
+		journal                       releasetransition.JournalRecord
+	}{
+		{"target in a later epoch", "1.5.0", third + "yard update", "2.1.0", journal("2.5.0", releasetransition.DirectionActivateTarget)},
+		{"target at the current anchor", "0.11.0", "yard update", "1.0.1", journal("3.0.0", releasetransition.DirectionActivateTarget)},
+		{"target in the same epoch", "1.5.0", second + third + "yard update", "2.1.0", journal("1.6.0", releasetransition.DirectionActivateTarget)},
+		{"rollback within the epoch continues from its target", "2.5.0", third + "yard update", "3.0.2", journal("2.2.0", releasetransition.DirectionActivatePrevious)},
+		{"rollback across an anchor continues from its target", "2.5.0", second + third + "yard update", "3.0.2", journal("1.5.0", releasetransition.DirectionActivatePrevious)},
+		{"rollback to a newer target continues from the active release", "1.5.0", second + third + "yard update", "2.1.0", journal("2.5.0", releasetransition.DirectionActivatePrevious)},
+		{"unversioned rollback continues from the active release", "2.5.0", third + "yard update", "3.0.2", journal("development", releasetransition.DirectionActivatePrevious)},
+		{"unversioned target continues from the active release", "0.11.0", first + second + third + "yard update", "1.0.1", journal("development", releasetransition.DirectionActivateTarget)},
+	} {
+		installer := semver.MustParse(scenario.installer)
+		want := fmt.Sprintf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: yard update && %s\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.",
+			scenario.next, scenario.installer, installer.Major, installer.Minor)
+		if err := unfinishedBelowAnchorRefusal(scenario.journal, semver.MustParse(scenario.active), boundaries); err.Error() != want {
+			t.Errorf("%s: %v\nwant %s", scenario.name, err, want)
+		}
 	}
 }
 

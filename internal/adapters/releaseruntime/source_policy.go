@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -29,6 +30,40 @@ const UpdateAnchorVersion = "0.28.0"
 // itself can stop.
 const UpdateHopVersion = "0.28.1"
 
+// updateBoundary is one epoch of the update chain: sources below anchor first
+// update to hop, a published release that still admits the previous epoch.
+type updateBoundary struct{ anchor, hop string }
+
+// priorUpdateBoundaries keeps every retired boundary in ascending order. A move
+// appends the current pair here before changing the constants; rows are never
+// removed, so a refusal can print the whole chain from any supported source.
+var priorUpdateBoundaries = []updateBoundary{}
+
+func updateBoundaries() []updateBoundary {
+	return append(slices.Clone(priorUpdateBoundaries), updateBoundary{UpdateAnchorVersion, UpdateHopVersion})
+}
+
+// updateHops returns the hops that take version to the current anchor.
+func updateHops(version semver.Version, boundaries []updateBoundary) []string {
+	var hops []string
+	for _, boundary := range boundaries {
+		if version.LT(semver.MustParse(boundary.anchor)) {
+			hops = append(hops, boundary.hop)
+			version = semver.MustParse(boundary.hop)
+		}
+	}
+	return hops
+}
+
+// updateCommand renders the hops as one shell chain ending in a plain update.
+func updateCommand(hops []string) string {
+	var command strings.Builder
+	for _, hop := range hops {
+		command.WriteString("yard update --version " + hop + " && ")
+	}
+	return command.String() + "yard update"
+}
+
 const LegacyReinstallGuidance = "Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately."
 
 func sourceVersionError(version string) error {
@@ -40,28 +75,47 @@ func sourceVersionError(version string) error {
 		return errors.New(LegacyReinstallGuidance)
 	}
 	if parsed.LT(semver.MustParse(UpdateAnchorVersion)) {
-		message, retry := sourceAnchorGuidance(version)
+		message, retry := sourceAnchorGuidance(version, parsed)
 		return fmt.Errorf("%s; next: %s", message, retry)
 	}
 	return nil
 }
 
-func sourceAnchorGuidance(version string) (message, retry string) {
-	return fmt.Sprintf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer", version, UpdateAnchorVersion),
-		"yard update --version " + UpdateHopVersion + " && yard update"
+// sourceAnchorGuidance names the full hop chain from a below-anchor source.
+func sourceAnchorGuidance(version string, parsed semver.Version) (message, retry string) {
+	return sourceAnchorRefusal(version, parsed, updateBoundaries())
+}
+
+func sourceAnchorRefusal(version string, parsed semver.Version, boundaries []updateBoundary) (message, retry string) {
+	return fmt.Sprintf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer", version, boundaries[len(boundaries)-1].anchor),
+		updateCommand(updateHops(parsed, boundaries))
 }
 
 // unfinishedBelowAnchorError routes an unfinished transition only through the
 // release that started it: plain yard update resumes its own journal on every
 // supported release. It never predicts which journals another release replaces.
-func unfinishedBelowAnchorError(journal releasetransition.JournalRecord) error {
-	anchor, hop := semver.MustParse(UpdateAnchorVersion), semver.MustParse(UpdateHopVersion)
-	next := "yard update && yard update --version " + UpdateHopVersion + " && yard update"
+func unfinishedBelowAnchorError(journal releasetransition.JournalRecord, active semver.Version) error {
+	return unfinishedBelowAnchorRefusal(journal, active, updateBoundaries())
+}
+
+// unfinishedBelowAnchorRefusal continues the chain from the release a finished
+// journal leaves active, and names the first hop from the active release as
+// the installer that can replace a journal its owner cannot finish. A forward
+// journal leaves its target; any other starts from the lower of the active
+// release and its target, so no printed hop is below the resulting release.
+func unfinishedBelowAnchorRefusal(journal releasetransition.JournalRecord, active semver.Version, boundaries []updateBoundary) error {
+	after := active
 	if target, err := releasetransition.ReleaseIDVersion(journal.Goal.Target); err == nil &&
-		journal.Goal.Direction == releasetransition.DirectionActivateTarget && target.GTE(anchor) {
-		next = "yard update && yard update"
+		(journal.Goal.Direction == releasetransition.DirectionActivateTarget || target.LT(active)) {
+		after = target
 	}
-	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.", next, UpdateHopVersion, hop.Major, hop.Minor)
+	next := "yard update && " + updateCommand(updateHops(after, boundaries))
+	installer := boundaries[len(boundaries)-1].hop
+	if hops := updateHops(active, boundaries); len(hops) != 0 {
+		installer = hops[0]
+	}
+	hop := semver.MustParse(installer)
+	return fmt.Errorf("source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: %s\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v%s installer or use a later v%d.%d.x fix release. Do not uninstall.", next, installer, hop.Major, hop.Minor)
 }
 
 // VerifyLegacyUninstallSource recognizes the sealed historical project-creator
@@ -220,7 +274,7 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		if err := activeErr; err == nil && active.LT(anchor) {
 			// This continuation replaces the version-only refusal for the same
 			// cause; unrelated identity and provenance findings remain independent.
-			unfinishedErr, admissionErr = unfinishedBelowAnchorError(*unfinished), nil
+			unfinishedErr, admissionErr = unfinishedBelowAnchorError(*unfinished, active), nil
 		} else if err == nil && unfinished.Goal.Direction == releasetransition.DirectionActivateTarget {
 			// Match activatedReleaseLinks: the switch may have succeeded before
 			// activation-intent advanced. The engine still owns replacement checks,
@@ -328,7 +382,7 @@ func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtime
 	version, err := semver.Parse(verified.version)
 	if err == nil && strings.HasPrefix(string(observed.Active), verified.version+"-") &&
 		version.GTE(semver.MustParse(MinimumSourceVersion)) && version.LT(semver.MustParse(UpdateAnchorVersion)) {
-		return unfinishedBelowAnchorError(journal)
+		return unfinishedBelowAnchorError(journal, version)
 	}
 	return nil
 }

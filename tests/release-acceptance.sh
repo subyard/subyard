@@ -74,17 +74,23 @@ def published_baseline_refusals(source, catalog, previous=None):
     for role, versions in unique.items():
         if len(versions) != 1:
             errors.append(f"expected exactly one {role} row")
-    policy = (source / "internal/adapters/releaseruntime/source_policy.go").read_text()
     constants = {}
-    for role, name in (("anchor", "UpdateAnchorVersion"), ("hop", "UpdateHopVersion")):
-        match = re.search(r'const ' + name + r' = "([0-9]+\.[0-9]+\.[0-9]+)"', policy)
-        if match is None:
-            errors.append(f"cannot parse {name}")
-            continue
-        constants[role] = match[1]
-        for version in unique[role]:
-            if version != match[1]:
-                errors.append(f"{role} {version}: differs from {name} {match[1]}")
+    try:
+        *prior, current = upgrade_verifier.update_boundaries(source)
+    except ValueError as error:
+        errors.append(str(error))
+        prior = []
+    else:
+        for role, name, value in zip(("anchor", "hop"), ("UpdateAnchorVersion", "UpdateHopVersion"), current):
+            constants[role] = value
+            for version in unique[role]:
+                if version != value:
+                    errors.append(f"{role} {version}: differs from {name} {value}")
+    # Retired boundaries stay pinned so every hop a refusal chain names keeps its immutable assets.
+    for boundary in prior:
+        for role, version in zip(("anchor", "hop"), boundary):
+            if pins.get(version) not in ("refusal", "pin"):
+                errors.append(f"prior {role} {version}: expected a refusal or pin baseline, has role {pins.get(version)}")
     key = lambda version: tuple(map(int, version.split(".")))
     if "anchor" in constants and "hop" in constants and key(constants["hop"]) < key(constants["anchor"]):
         errors.append(f"hop {constants['hop']}: below anchor {constants['anchor']}")
@@ -118,6 +124,10 @@ sys.argv = [sys.argv[0]]
 spec = importlib.util.spec_from_file_location("acceptance", root / "dev/release-acceptance.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+verifier_spec = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
+upgrade_verifier = importlib.util.module_from_spec(verifier_spec)
+sys.modules[verifier_spec.name] = upgrade_verifier
+verifier_spec.loader.exec_module(upgrade_verifier)
 
 
 def fixture_checkout(directory, optional_vms=False):
@@ -3329,12 +3339,8 @@ while True: time.sleep(1)
             "published-upgrade/0.29.0": ["0.29.0", "all"],
             "published-upgrade/0.30.0": ["0.30.0", "all"],
         })
-        verifier = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
-        module = importlib.util.module_from_spec(verifier)
-        sys.modules[verifier.name] = module
-        verifier.loader.exec_module(module)
         for role in ("anchor", "hop"):
-            pin = getattr(module, "published_" + role)(root)
+            pin = getattr(upgrade_verifier, "published_" + role)(root)
             shell = subprocess.check_output(["bash", "-c",
                 '. "$1/dev/e2e/lib-power-upgrade-contracts.sh"; ROOT="$1"; published_' + role, "_", str(root)], text=True)
             self.assertEqual(shell.strip().split("\t"), pin)
@@ -3345,8 +3351,9 @@ while True: time.sleep(1)
             source = Path(temporary)
             (source / "dev/e2e").mkdir(parents=True)
             (source / "internal/adapters/releaseruntime").mkdir(parents=True)
-            (source / "internal/adapters/releaseruntime/source_policy.go").write_text(
-                'const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "1.5.0"\n')
+            policy = source / "internal/adapters/releaseruntime/source_policy.go"
+            policy.write_text('const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "1.5.0"\n'
+                              'var priorUpdateBoundaries = []updateBoundary{}\n')
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text(
                 "1.0.0\t"+"a"*64+"\t"+"b"*64+"\tanchor\n"+
                 "1.1.0\t"+"a"*64+"\t"+"b"*64+"\thop\n"+
@@ -3371,6 +3378,28 @@ while True: time.sleep(1)
                 "anchor-refusal: refusal source 1.0.0 has role None",
                 "hop-refusal: refusal source 1.1.0 has role None",
                 "hop-direct: hop baseline is unavailable"])
+            # A second boundary: the retired pair stays pinned and refusals print the whole chain.
+            policy.write_text('const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "2.0.1"\n'
+                              'var priorUpdateBoundaries = []updateBoundary{\n\t{anchor: "1.0.0", hop: "1.1.0"},\n}\n')
+            (source / "dev/e2e/published-upgrade-baselines.tsv").write_text(
+                "0.12.0\t"+"a"*64+"\t"+"b"*64+"\trefusal\n"+
+                "1.1.0\t"+"a"*64+"\t"+"b"*64+"\tdirect\n"+
+                "2.0.0\t"+"a"*64+"\t"+"b"*64+"\tanchor\n"+
+                "2.0.1\t"+"a"*64+"\t"+"b"*64+"\thop\n")
+            self.assertEqual(published_baseline_refusals(source, {"checks": []}), [
+                "prior anchor 1.0.0: expected a refusal or pin baseline, has role None",
+                "prior hop 1.1.0: expected a refusal or pin baseline, has role direct"])
+            (source / "dev/e2e/published-upgrade-baselines.tsv").write_text("".join(
+                f"{version}\t{'a'*64}\t{'b'*64}\t{role}\n" for version, role in
+                (("0.12.0", "refusal"), ("1.0.0", "pin"), ("1.1.0", "refusal"), ("2.0.0", "anchor"), ("2.0.1", "hop"))))
+            self.assertEqual(published_baseline_refusals(source, {"checks": []}), [])
+            self.assertEqual(upgrade_verifier.update_boundaries(source), [("1.0.0", "1.1.0"), ("2.0.0", "2.0.1")])
+            self.assertEqual([upgrade_verifier.update_chain(source, version) for version in ("0.12.0", "1.0.0", "2.0.0")], [
+                "yard update --version 1.1.0 && yard update --version 2.0.1 && yard update",
+                "yard update --version 2.0.1 && yard update", "yard update"])
+            policy.write_text('const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "2.0.1"\n')
+            self.assertEqual(published_baseline_refusals(source, {"checks": []}), [
+                "cannot parse the update boundaries in internal/adapters/releaseruntime/source_policy.go"])
 
     def test_previous_release_requires_direct_row_and_all_agent_check(self):
         catalog = json.loads((root / m.CORE_VM_CATALOG).read_text())
