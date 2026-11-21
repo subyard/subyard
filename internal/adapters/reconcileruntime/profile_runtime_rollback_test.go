@@ -101,28 +101,31 @@ func TestProfileRuntimeRollbackObservesANeverProvisionedGuestAsAbsent(t *testing
 }
 
 // A failing rollback-apply keeps its owner's public refusal and next step;
-// any other stderr stays private.
+// any other stderr stays private, also from the operator's stderr.
 func TestProfileRuntimeRollbackApplyKeepsAnOwnersPublicRefusal(t *testing.T) {
+	const canary = "private-stderr-canary /home/owner/secret"
 	for _, test := range []struct {
 		name, stderr, message, retry string
 	}{
 		{"public refusal", `subyard-profile-observation-refusal-v1 {"message":"sample store unavailable","retry":"run yard -Y default config paths"}`, "sample store unavailable", "run yard -Y default config paths"},
-		{"private text", `sample store unavailable: /home/owner/secret`, "", ""},
+		{"private text", `sample store unavailable`, "", ""},
 		{"no executable step", `subyard-profile-observation-refusal-v1 {"message":"sample store unavailable","retry":"ask the owner"}`, "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, _ := rollbackRuntimeFixture(t)
+			var operator strings.Builder
+			runtime.Stderr = &operator
 			script := `#!/bin/sh
 case "$1" in
-rollback-observe) printf '{"state":"stale","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeOldDigest + `"}\n' ;;
-rollback-apply) printf '%s\n' '` + test.stderr + `' >&2; exit 2 ;;
+rollback-observe) printf '%s\n' '` + canary + `' >&2; printf '{"state":"stale","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeOldDigest + `"}\n' ;;
+rollback-apply) printf '%s\n' '` + canary + `' '` + test.stderr + `' >&2; exit 2 ;;
 *) exit 9 ;;
 esac
 `
 			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/synthetic/runtime.sh"), []byte(script), 0o700)
 			err := runtime.ApplyProfileRuntimeRollback(context.Background(), "synthetic-runtime", "op-1", testRuntimeNewDigest, testRuntimeOldDigest, "")
-			if err == nil || strings.Contains(err.Error(), "secret") {
-				t.Fatalf("rollback apply error = %v", err)
+			if err == nil || strings.Contains(err.Error(), "canary") || strings.Contains(operator.String(), "canary") {
+				t.Fatalf("rollback apply error = %v, operator stderr %q", err, operator.String())
 			}
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }
 			if !errors.As(err, &diagnostic) {

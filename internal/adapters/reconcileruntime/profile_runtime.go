@@ -448,12 +448,16 @@ func (runtime Runtime) applyProfileRuntimeWith(
 	environment := append(slices.Clone(runtime.Environment), profileRuntimeNonceVariable+"="+nonce)
 	stdout, stderr, err := runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, environment, profileRuntimeApplyLimit, actions.apply, operationID, actual, desired)
 	if err != nil {
+		// Rollback hook stderr stays private, as an observation's does: only
+		// the owner's parsed public refusal and the generic failure show.
+		if actions == profileRuntimeRollback {
+			if message, retry, ok := publicOwnerRefusal(stderr); ok {
+				return &integrationLifecycleError{cause: err, message: message, retry: retry}
+			}
+			return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
+		}
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
-		}
-		// A rollback preparation keeps its owner's public refusal and next step.
-		if message, retry, ok := publicOwnerRefusal(stderr); ok && actions == profileRuntimeRollback {
-			return &integrationLifecycleError{cause: err, message: message, retry: retry}
 		}
 		return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
 	}
