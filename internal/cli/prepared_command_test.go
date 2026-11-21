@@ -23,24 +23,17 @@ import (
 
 func TestDirectPreparedCommandPreservesFailurePhaseDiagnostics(t *testing.T) {
 	t.Run("plan", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=invalid operation id"))
 		incus := lifecycleIncus()
 		instance := incus.Instances["subyard/yard"]
 		instance.Status = "Running"
 		incus.Instances["subyard/yard"] = instance
 		var stderr bytes.Buffer
-		program, err := New(Options{
-			InitPlatform:   newInitPlatformFixture(),
-			RepositoryRoot: root, Program: "yard",
-			Arguments: []string{"stop", "--force", "--yes"},
-			Environment: append(environment,
-				"SUBYARD_OPERATION_ID=invalid operation id",
-			),
-			WorkingDir: root, Incus: incus, Stderr: &stderr,
+		program := fixture.New(Options{
+			InitPlatform: newInitPlatformFixture(),
+			Arguments:    []string{"stop", "--force", "--yes"},
+			Incus:        incus, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 1 ||
 			!strings.Contains(stderr.String(), "yard: plan stop: ID source returned an invalid operation ID") {
 			t.Fatalf("plan failure diagnostic: code=%d stderr=%q", code, stderr.String())
@@ -69,14 +62,9 @@ func TestDirectPreparedCommandPreservesFailurePhaseDiagnostics(t *testing.T) {
 }
 
 func TestPreparedCommandResolverContract(t *testing.T) {
-	root := repositoryRoot(t)
-	program, err := New(Options{
-		RepositoryRoot: root,
-		WorkingDir:     root,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withCheckoutConfig())
+	root := fixture.Root
+	program := fixture.New(Options{})
 
 	tests := []struct {
 		name     string
@@ -144,24 +132,16 @@ func TestPreparedCommandResolverContract(t *testing.T) {
 }
 
 func TestPrepareCommandOwnsCanonicalStopPlan(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=prepared-stop"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
-	program, err := New(Options{
-		InitPlatform:   newInitPlatformFixture(),
-		RepositoryRoot: root,
-		Environment: append(environment,
-			"SUBYARD_OPERATION_ID=prepared-stop",
-		),
-		WorkingDir: root,
-		Incus:      incus,
-		Clock:      testkit.NewManualClock(time.Unix(100, 0)),
+	program := fixture.New(Options{
+		InitPlatform: newInitPlatformFixture(),
+		Incus:        incus,
+		Clock:        testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +170,7 @@ func TestPrepareCommandOwnsCanonicalStopPlan(t *testing.T) {
 }
 
 func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=prepared-execute"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -199,20 +179,12 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 		Result: domain.AdapterResult{Schema: 1, OperationID: "prepared-execute", Status: "ok"},
 	}}}
 	powerScriptedIncus(runner, incus)
-	program, err := New(Options{
-		InitPlatform:   newInitPlatformFixture(),
-		RepositoryRoot: root,
-		Environment: append(environment,
-			"SUBYARD_OPERATION_ID=prepared-execute",
-		),
-		WorkingDir:    root,
+	program := fixture.New(Options{
+		InitPlatform:  newInitPlatformFixture(),
 		Incus:         incus,
 		AdapterRunner: runner,
 		Clock:         testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +212,7 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 }
 
 func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=prepared-commit"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -249,17 +221,10 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 		Result: domain.AdapterResult{Schema: 1, OperationID: "prepared-commit", Status: "ok"},
 	}}}
 	powerScriptedIncus(runner, incus)
-	program, err := New(Options{
-		InitPlatform:   newInitPlatformFixture(),
-		RepositoryRoot: root,
-		Environment: append(environment,
-			"SUBYARD_OPERATION_ID=prepared-commit",
-		),
-		WorkingDir: root, Incus: incus, AdapterRunner: runner,
+	program := fixture.New(Options{
+		InitPlatform: newInitPlatformFixture(),
+		Incus:        incus, AdapterRunner: runner,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -394,10 +359,8 @@ func TestPreparedCommandManifestCompletenessRejectsUnownedMutation(t *testing.T)
 }
 
 func TestRepositoryPreparedCommandManifestIsComplete(t *testing.T) {
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	program := fixture.New(Options{})
 	for _, definition := range program.manifest.Commands() {
 		if _, err := resolveCoreCommand(definition); err != nil {
 			t.Fatalf("command %q: %v", definition.Name, err)
@@ -408,11 +371,8 @@ func TestRepositoryPreparedCommandManifestIsComplete(t *testing.T) {
 func TestPreparedPlanUsesOneStepsSnapshot(t *testing.T) {
 	for _, assessed := range []bool{false, true} {
 		t.Run(strconv.FormatBool(assessed), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			fixture := newFixture(t)
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)

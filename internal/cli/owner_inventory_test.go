@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -149,13 +150,8 @@ func TestCanonicalYardIdentityRejectsUnknownRemoteOwner(t *testing.T) {
 }
 
 func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t)
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -210,24 +206,18 @@ func TestReadOnlyOwnerInventoriesDoNotRefreshOrMigrateConnections(t *testing.T) 
 func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing.T) {
 	for _, ownerYard := range []string{"default", "build"} {
 		t.Run(ownerYard, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-			aliasDirectory := filepath.Join(configHome, "yards", "preview-remote")
-			if err := os.MkdirAll(aliasDirectory, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=local-owner"), withCommands("ssh"))
+			root := fixture.Root
+			fixture.Exec().
+				On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+				On(testkit.Match{Tool: "ssh", Contains: []string{"-T", "dev@remote.example", "--", "bash", "-lc"}}, testkit.Reply{})
 			ownerAssignment := ""
 			if ownerYard != "default" {
 				ownerAssignment = "OWNER_YARD_NAME=" + ownerYard + "\n"
 			}
-			testkit.WriteFile(t, filepath.Join(aliasDirectory, "config.env"), []byte(
-				"ACCESS_KIND=remote\nOWNER_ENDPOINT=dev@remote.example\nSSH_HOST=yard-preview-remote\n"+ownerAssignment), 0o600)
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=local-owner"), WorkingDir: root,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			fixture.Write("state/yards/preview-remote/config.env",
+				"ACCESS_KIND=remote\nOWNER_ENDPOINT=dev@remote.example\nSSH_HOST=yard-preview-remote\n"+ownerAssignment)
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("preview-remote")
 			if err != nil {
 				t.Fatal(err)
@@ -271,12 +261,6 @@ func TestNamedCodePreservesExplicitRemoteAliasWithoutOwnerRouteWrites(t *testing
 			if err != nil || selected.Context != loaded.Context || selected.Environment["SSH_HOST"] != "yard-preview-remote" {
 				t.Fatalf("selected alias changed: selected=%#v err=%v", selected.Context, err)
 			}
-			bin := filepath.Join(root, "fake-bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(bin, "ssh"), []byte("#!/bin/sh\n"+trustedSSHMock(t)+"exit 0\n"), 0o700)
-			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 			if err := program.recheckProjectRole(context.Background(), &projectExecution{Loaded: selected, RequiresProjects: true}); err != nil {
 				t.Fatalf("role recheck treated the owner yard as a controller registration: %v", err)
 			}
@@ -326,9 +310,9 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 		{name: "live forces refresh", arguments: []string{"list", "--live"}, wantSSH: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=owner-a"), withCommands("ssh"))
 			now := time.Unix(1_000, 0).UTC()
-			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+			ownerRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 			connections := ownerinventory.Connections{Root: ownerRoot}
 			if err := connections.Write(ownerinventory.Connection{
 				HostID: "remote-owner", Destination: "dev@remote.example",
@@ -348,11 +332,6 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			bin := filepath.Join(root, "fake-bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			sshLog := filepath.Join(root, "ssh-called")
 			liveInventory := inventoryResult("remote-owner", "default", "Live").inventory
 			var response bytes.Buffer
 			codec := rpc.NewCodec(bytes.NewReader(nil), &response)
@@ -367,23 +346,17 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			encodedResponse := base64.StdEncoding.EncodeToString(response.Bytes())
-			writeCLIFile(t, filepath.Join(bin, "ssh"),
-				"#!/bin/sh\n"+trustedSSHMock(t)+"printf x >> \"$SUBYARD_TEST_SSH_LOG\"\nprintf '%s' '"+encodedResponse+"' | /usr/bin/base64 -d\n",
-				0o700,
-			)
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("SUBYARD_TEST_SSH_LOG", sshLog)
+			reply := fixture.Write("inventory.reply", response.String())
+			fixture.Exec().
+				On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+				On(testkit.Match{Tool: "ssh", Contains: []string{"dev@remote.example", "--", "bash", "-lc"}},
+					testkit.Reply{Script: "exec /bin/cat " + shellquote.Word(reply)})
 
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
-				Environment: append(environment, "SUBYARD_HOST_ID=owner-a"), WorkingDir: root,
-				Stdout: &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now),
+			program := fixture.New(Options{
+				Arguments: test.arguments,
+				Stdout:    &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
 			}
@@ -399,12 +372,19 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 					t.Fatalf("yard overview lost cached project count: %s", stdout.String())
 				}
 			}
-			_, sshErr := os.Lstat(sshLog)
-			if test.wantSSH && sshErr != nil {
-				t.Fatalf("--live did not force an owner inventory fetch: %v", sshErr)
-			}
-			if !test.wantSSH && !errors.Is(sshErr, os.ErrNotExist) {
-				t.Fatalf("default list fetched despite a fresh cache: %v", sshErr)
+			if test.wantSSH {
+				fixture.Exec().AssertCalls(
+					testkit.Call{Tool: "ssh", Args: []string{"-G", "dev@remote.example"}},
+					testkit.Call{Tool: "ssh", Args: []string{
+						"-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
+						"-o", "ControlMaster=no", "-o", "ControlPath=none",
+						"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+						"dev@remote.example", "--", "bash", "-lc",
+						shellquote.Word("exec 'yard' 'rpc' '--stdio'"),
+					}},
+				)
+			} else {
+				fixture.Exec().AssertCalls()
 			}
 			if test.wantSSH && !strings.Contains(stdout.String(), "Live") {
 				t.Fatalf("--live did not use the fetched inventory:\n%s", stdout.String())
@@ -421,8 +401,8 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 }
 
 func TestCanonicalReadOnlyInvocationDoesNotRecoverOwnerRoute(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+	fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=owner-a"))
+	environment := fixture.Environment
 	ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
 	if err := (ownerinventory.Connections{Root: ownerRoot}).Write(ownerinventory.Connection{
 		HostID: "remote-owner", Destination: "dev@remote.example",
@@ -440,14 +420,10 @@ func TestCanonicalReadOnlyInvocationDoesNotRecoverOwnerRoute(t *testing.T) {
 	writeCLIFile(t, journalPath, string(journal), 0o600)
 
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"-Y", "remote-owner/default", "space", "--help"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"-Y", "remote-owner/default", "space", "--help"},
+		Stdout:    &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("canonical read failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -464,11 +440,8 @@ func TestCanonicalReadOnlyInvocationDoesNotRecoverOwnerRoute(t *testing.T) {
 }
 
 func TestRemoteYardStatusAllowsFullProfileChecksOnBothRoutes(t *testing.T) {
-	root := testkit.TempDir(t)
-	bin := filepath.Join(root, "bin")
-	if err := os.Mkdir(bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withCommands("ssh"))
+	root := fixture.Root
 	var response bytes.Buffer
 	codec := rpc.NewCodec(bytes.NewReader(nil), &response)
 	for _, frame := range []rpc.Response{
@@ -479,10 +452,11 @@ func TestRemoteYardStatusAllowsFullProfileChecksOnBothRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeCLIFile(t, filepath.Join(root, "reply"), response.String(), 0o600)
-	writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"sleep 9\nexec cat \"$SUBYARD_TEST_STATUS_REPLY\"\n", 0o700)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("SUBYARD_TEST_STATUS_REPLY", filepath.Join(root, "reply"))
+	reply := fixture.Write("status.reply", response.String())
+	fixture.Exec().
+		On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+		On(testkit.Match{Tool: "ssh", Contains: []string{"dev@remote.example", "--", "bash", "-lc"}},
+			testkit.Reply{Script: "sleep 9\nexec /bin/cat " + shellquote.Word(reply)})
 	loaded := config.Loaded{Context: domain.Context{Paths: domain.RuntimePaths{DataHome: root}}}
 	if err := (ownerinventory.Connections{Root: filepath.Join(root, "owner-inventory")}).Write(ownerinventory.Connection{HostID: "remote-owner", Destination: "dev@remote.example"}); err != nil {
 		t.Fatal(err)
@@ -511,7 +485,8 @@ func TestRemoteYardStatusAllowsFullProfileChecksOnBothRoutes(t *testing.T) {
 }
 
 func TestRPCOwnerInventoryPreservesLegacyProjectState(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	stateDirectory := filepath.Join(fixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -532,13 +507,9 @@ func TestRPCOwnerInventoryPreservesLegacyProjectState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+	program := fixture.New(Options{
 		Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -663,19 +634,14 @@ func TestCanonicalProjectSelectorKeepsProjectPrefix(t *testing.T) {
 func TestOwnerProjectStateConvergesWithoutLosingLocalSource(t *testing.T) {
 	for _, yard := range []string{"default", "inner"} {
 		t.Run(yard, func(t *testing.T) {
-			root, environment, directory := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, directory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 			if yard != "default" {
-				if err := os.MkdirAll(filepath.Join(root, "state/yards"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, filepath.Join(root, "state/yards/inner.env"), "SSH_PORT=3333\n", 0600)
+				fixture.Write("state/yards/inner.env", "SSH_PORT=3333\n")
 				directory = filepath.Join(root, "state/yards/inner/projects")
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Stdout: &stdout, Stderr: &stderr})
 			loaded, err := program.loadContext(yard)
 			if err != nil {
 				t.Fatal(err)

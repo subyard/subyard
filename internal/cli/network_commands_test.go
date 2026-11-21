@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,15 +19,11 @@ import (
 )
 
 func TestNetworkHelpDoesNotRequireAnInitializedYard(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := t.TempDir()
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	home := fixture.Home
 	var stdout, stderr bytes.Buffer
-	engine, err := New(Options{
-		RepositoryRoot: root,
-		Arguments:      []string{"network", "--help"},
+	engine := fixture.New(Options{
+		Arguments: []string{"network", "--help"},
 		Environment: []string{
 			"HOME=" + home,
 			"SUBYARD_CONFIG_HOME=" + filepath.Join(home, "config"),
@@ -36,9 +31,6 @@ func TestNetworkHelpDoesNotRequireAnInitializedYard(t *testing.T) {
 		},
 		Incus: &testkit.Incus{}, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := engine.Run(context.Background()); code != 0 {
 		t.Fatalf("network help returned %d: %s", code, stderr.String())
 	}
@@ -87,17 +79,14 @@ func (h *networkCLIHost) InspectNetwork(_ context.Context, yards []yardnetwork.Y
 func TestNetworkRestartRequiresTypedConsentBeforeMutation(t *testing.T) {
 	for _, args := range [][]string{{"isolation", "on"}, {"reconcile"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
 			p, _ := yardnetwork.Decode(nil)
 			host := &networkCLIHost{policy: p, ready: true}
 			if args[0] == "reconcile" {
 				host.policy.PendingStart = []string{"default"}
 				host.instances = map[string]ports.InstanceInfo{"default": {Type: domain.YardVM, Status: "Stopped"}}
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host}})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -131,9 +120,6 @@ func (h *networkCLIHost) WritePolicy(_ context.Context, _ yardnetwork.StoredPoli
 }
 
 func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
-	commands := testkit.TempDir(t)
-	writeCLIFile(t, filepath.Join(commands, "sudo"), "#!/bin/sh\nexit 1\n", 0o700)
-	t.Setenv("PATH", commands)
 	for _, tc := range []struct {
 		name       string
 		kind       domain.YardKind
@@ -153,7 +139,8 @@ func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
 		{"no-op weighted VM", domain.YardVM, "Running", "1000", false, false, "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withCommands("sudo"))
+			fixture.Exec().On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}}, testkit.Reply{Exit: 1})
 			p, _ := yardnetwork.Decode(nil)
 			if tc.pending {
 				p.PendingStart = []string{"default"}
@@ -161,13 +148,9 @@ func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
 			host := &networkCLIHost{policy: p, ready: true,
 				instances: map[string]ports.InstanceInfo{"default": {Type: tc.kind, Status: tc.status,
 					Config: map[string]string{"user.subyard.vm_cpu_weight": tc.weight}}}}
-			program, err := New(Options{RepositoryRoot: root, WorkingDir: root,
-				Environment: append(environment, "PATH="+commands), Incus: &testkit.Incus{},
+			program := fixture.New(Options{Incus: &testkit.Incus{},
 				NetworkPolicy: &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{},
 					Guard: func(context.Context) error { return nil }}})
-			if err != nil {
-				t.Fatal(err)
-			}
 			program.effectiveUID = func() int { return 1000 }
 			program.operatorTerminal = func() bool { return false }
 			loaded, err := program.loadContext("default")
@@ -201,24 +184,14 @@ func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
 }
 
 func TestNetworkLinkExecutesThroughAuthorizedOperation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	if err := os.MkdirAll(filepath.Join(root, "state", "yards"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(root, "state", "yards", "beta.env"), "SSH_PORT=2233\n", 0600)
-	manifestPath := filepath.Join(root, "config", "commands.registry")
-	manifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, manifestPath, string(manifest)+"network||@network||local|mutate|dynamic|public|lifecycle|simple|network <command>|network|--json --yes --help|status link unlink isolation reconcile\n", 0600)
+	fixture := newFixture(t)
+	fixture.Write("state/yards/beta.env", "SSH_PORT=2233\n")
+	const manifestPath = "config/commands.registry"
+	fixture.Write(manifestPath, fixture.Read(manifestPath)+"network||@network||local|mutate|dynamic|public|lifecycle|simple|network <command>|network|--json --yes --help|status link unlink isolation reconcile\n")
 	p, _ := yardnetwork.Decode(nil)
 	host := &networkCLIHost{policy: p, allowWrites: true}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"network", "link", "default", "beta"}, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"network", "link", "default", "beta"}, Stdout: &stdout, Stderr: &stderr, Incus: &testkit.Incus{}, NetworkPolicy: &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("link exit=%d stderr=%s", code, stderr.String())
 	}
@@ -230,18 +203,12 @@ func TestNetworkLinkExecutesThroughAuthorizedOperation(t *testing.T) {
 func TestNetworkPreparationIsReadOnlyAndRejectsForeignHost(t *testing.T) {
 	for _, args := range [][]string{{"link", "default", "beta"}, {"link", "remote-host/default", "beta"}, {"status", "--json"}, {"isolation", "sometimes"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			if err := os.MkdirAll(filepath.Join(root, "state", "yards"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIFile(t, filepath.Join(root, "state", "yards", "beta.env"), "SSH_PORT=2233\n", 0600)
+			fixture := newFixture(t)
+			fixture.Write("state/yards/beta.env", "SSH_PORT=2233\n")
 			p, _ := yardnetwork.Decode(nil)
 			host := &networkCLIHost{policy: p}
 			var stdout bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Stdout: &stdout, NetworkPolicy: &yardnetwork.Service{Host: host}, Incus: &testkit.Incus{}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Stdout: &stdout, NetworkPolicy: &yardnetwork.Service{Host: host}, Incus: &testkit.Incus{}})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
