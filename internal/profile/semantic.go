@@ -403,6 +403,12 @@ func (definition *Definition) validateExtensions() error {
 			definition.Runtime.Custody || definition.OwnerService != "" || definition.InfrastructureService != nil) {
 			return errors.New("runtime failure scope must be yard on a yard-local runtime")
 		}
+		if definition.Runtime.Format < 0 || definition.Runtime.PreparesRollbackTo < 0 {
+			return errors.New("runtime formats must be positive")
+		}
+		if target := definition.Runtime.PreparesRollbackTo; target != 0 && target == definition.Runtime.EffectiveFormat() {
+			return errors.New("runtime cannot prepare rollback to its own format")
+		}
 		seen := map[string]bool{}
 		for _, path := range definition.Runtime.ProjectsChangedHooks {
 			if !strings.HasPrefix(path, "/usr/local/libexec/subyard/projects-changed.d/") || filepath.Clean(path) != path || filepath.Dir(path) != "/usr/local/libexec/subyard/projects-changed.d" || strings.ContainsAny(path, "\r\n\x00") || seen[path] {

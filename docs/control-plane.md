@@ -1235,6 +1235,24 @@ release's declaration, which can come from a newer release, is read only for
 tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
 well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
+When a profile runtime must be prepared for the rollback target, the active release runs a down
+transaction before the target owns the rollback. Planning runs `rollback-observe` for each prepared
+owner in every local yard; a stopped yard refuses with `yard -Y NAME start`, and every independent
+refusal is reported beside the rollback compatibility refusals. The one confirmation covers the
+preparation and the target's own plan, which exists only after preparation. Execution rechecks the
+confirmed observations and the exact active and target artifacts, then records the authorized
+transaction as a completed `rollback-prep-v1-` journal of the active release with no steps, before
+the first hook. It then runs `rollback-apply` for each stale owner. The gate observes every
+prepared owner with the target's own handler from the target's root and checks the history
+verdict again. Finally the active release inspects the target afresh, admits that plan, and
+dispatches the ordinary retained execution, which switches the links. Data is not converted.
+
+Every hook is an idempotent observe/apply pair, so an interrupted down transaction resumes by
+observing again: rerunning `yard update --rollback` skips converted owners, and the fault points
+`after-rollback-hook` and `before-target-dispatch` cover both interruptions. Any failure leaves the
+active release active. Its own runtime owners then report the prepared state as drift, the
+completed down journal is ordinary history, and `yard migrate` repairs forward.
+
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the
 runtime's installed-engine selection, including first publication. Run it from the active
@@ -2737,6 +2755,17 @@ Core bounds execution and output, checks the assessment before apply, and verifi
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
 Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
+
+A runtime may declare an integer `format` of its installed state; a runtime without one, including
+every runtime up to v0.30, has format 1. A release that changes that format declares a new one,
+and `prepares_rollback_to` names the one earlier format its handler converts state back to. Such a
+handler also accepts `rollback-observe` and `rollback-apply OPERATION_ID ACTUAL_SHA256
+DESIRED_SHA256`, with the output, assessment and verification contract of `observe` and `apply`,
+reported against the prepared format. `yard update --rollback` compares each active runtime's
+format with the format the retained release's own profile declares for the same activation ID.
+Equal formats need nothing. A different format that the active runtime does not prepare refuses
+with `rollback-incompatible`. Otherwise the rollback becomes a down transaction of the active
+release, described under [release migrations](#release-migrations).
 Release activation reconciles the approved owners in one pass. Stale runtimes can provide
 validated configuration diagnostics when config status requests them.
 

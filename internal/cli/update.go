@@ -160,7 +160,38 @@ func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContex
 			}
 			return observation, nil
 		},
+		ProfileRuntimeRollbackObservation: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+			hooks, err := cli.profileRuntimeRollbackHooks(root, loaded)
+			if err != nil {
+				return ports.RuntimeObservation{}, err
+			}
+			return hooks.ObserveProfileRuntimeRollback(ctx, id)
+		},
+		ProfileRuntimeRollbackApply: func(ctx context.Context, root string, loaded config.Loaded, id, operation, actual, desired string) error {
+			hooks, err := cli.profileRuntimeRollbackHooks(root, loaded)
+			if err != nil {
+				return err
+			}
+			return hooks.ApplyProfileRuntimeRollback(ctx, id, operation, actual, desired)
+		},
 	}
+}
+
+type profileRuntimeRollbackHooks interface {
+	ObserveProfileRuntimeRollback(context.Context, string) (ports.RuntimeObservation, error)
+	ApplyProfileRuntimeRollback(ctx context.Context, id, operation, actual, desired string) error
+}
+
+// profileRuntimeRollbackHooks runs one release root's rollback actions for one yard.
+func (cli *CLI) profileRuntimeRollbackHooks(root string, loaded config.Loaded) (profileRuntimeRollbackHooks, error) {
+	operation := cli.releaseActivationOperation()
+	operation.options.RepositoryRoot = root
+	platform := operation.initPlatformWithDispatcher(loaded, nil, filepath.Join(root, "bin", "yard-engine"))
+	hooks, ok := platform.(profileRuntimeRollbackHooks)
+	if !ok {
+		return nil, errors.New("profile runtime rollback actions are unavailable")
+	}
+	return hooks, nil
 }
 
 func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
