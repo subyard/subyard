@@ -1004,7 +1004,8 @@ this validated location and names the read-only `yard -Y NAME config paths` comm
 for inspecting configuration while ordinary mutation admission remains blocked.
 An owner may explicitly publish one `subyard-profile-observation-refusal-v1` JSON
 record with public `message` and `retry` fields (each at most 480 bytes, no control
-characters; retry starts with `run `); a failing `rollback-apply` may publish one too. Unknown fields, duplicate records and malformed
+characters; retry starts with `run `); a failing `rollback-apply` may publish one too, and
+other stderr of the rollback actions is not shown. Unknown fields, duplicate records and malformed
 values are ignored. This deliberate public record may name a configuration file and
 a preservation command; ordinary stderr and exception text remain private.
 State-drift refusals identify each affected yard and each independently known
@@ -1254,11 +1255,14 @@ release's installed-runtime check.
 
 Rollback through a profile hook takes two commands. When every other rollback admission passes and
 only owners that need preparation remain, the first `yard update --rollback` plans the
-`update.prepare-rollback` action. That plan shows one conversion step per owner, naming its yards
-and declared consequences, and nothing else; the confirmation binds every yard. Before the first conversion, execution reruns the same rollback admission, which must
-offer exactly the confirmed plan; a refusal converts nothing and keeps its own next step, such as
-`yard -Y NAME start`. It then runs each `rollback-apply` under the yard's integration lock. The apply
-assessment also binds the confirmed consequence. Afterwards the admission runs once more as the gate,
+`update.prepare-rollback` action. That plan shows one conversion step per owner and declared
+consequence, and nothing else. Each step shows its consequence whole and names its yards, shortening
+only a long yard list; the confirmation binds every yard. A preparation with more steps than a plan
+can show is refused before any conversion. Before the first conversion, execution reruns the same
+rollback admission, which must offer exactly the confirmed plan; a refusal converts nothing and keeps
+its own next step, such as `yard -Y NAME start`. It then runs each `rollback-apply` that this
+admission observed, under the yard's integration lock. The apply assessment also binds the confirmed
+consequence. Afterwards the admission runs once more as the gate,
 and must offer the ordinary rollback that the second command would plan. The command keeps no journal
 or update history and stops with the active release active. It reports `migration-required` with the
 next step `yard update --rollback`.

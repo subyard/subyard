@@ -351,45 +351,36 @@ func staleAfterConfirmation(request releasetransition.ProcessRequest, refusal er
 	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(cause, outcomeDetails(refusal)), outcome: stale}
 }
 
-// ownerPreparationSteps is one step per owner with stale yards, in the
-// order observed: a step's text names its yards and effects within the
-// operation step limits, and the plan binding covers every yard exactly.
+// ownerPreparationSteps is one step per owner and distinct declared
+// consequence, in the order observed. A step shows its consequence whole and
+// names its yards as far as the step text allows; the plan binding covers
+// every yard exactly.
 func ownerPreparationSteps(items []formatItem, target releasetransition.ReleaseID) []domain.OperationStep {
-	var owners []string
-	yards, effects := map[string][]string{}, map[string][]string{}
+	type group struct{ owner, consequence string }
+	var groups []group
+	yards := map[group][]string{}
 	for _, item := range items {
 		if item.state != ports.RuntimeStateStale {
 			continue
 		}
-		if _, seen := yards[item.owner]; !seen {
-			owners = append(owners, item.owner)
+		key := group{item.owner, item.consequence}
+		if _, seen := yards[key]; !seen {
+			groups = append(groups, key)
 		}
-		yards[item.owner] = append(yards[item.owner], item.yard)
-		if item.consequence != "" && !slices.Contains(effects[item.owner], item.consequence) {
-			effects[item.owner] = append(effects[item.owner], item.consequence)
-		}
+		yards[key] = append(yards[key], item.yard)
 	}
 	steps := []domain.OperationStep{}
-	for _, owner := range owners {
-		named := yards[owner]
-		where := "yard " + named[0]
-		if len(named) > 1 {
-			where = boundedList(fmt.Sprintf("%d yards: ", len(named)), named, ", ", 200, "yards")
+	for _, key := range groups {
+		named := yards[key]
+		prefix, effect := fmt.Sprintf("prepare profile runtime %s for release %s in ", key.owner, target), ""
+		if key.consequence != "" {
+			effect = ": " + key.consequence
 		}
-		consequence := fmt.Sprintf("prepare profile runtime %s for release %s in %s", owner, target, where)
-		if len(effects[owner]) != 0 {
-			consequence = boundedList(consequence+": ", effects[owner], "; ", 512, "effects")
-		}
-		if len(consequence) > 512 {
-			consequence = fmt.Sprintf("prepare profile runtime %s for release %s in %d yards", owner, target, len(named))
-		}
-		step := domain.OperationStep{ID: fmt.Sprintf("release.prepare-rollback.%d", len(steps)), Target: "activation." + owner,
-			Observed: fmt.Sprintf("rollback-observe stale in %d yards", len(named)), Desired: "format of release " + string(target), Decision: domain.StepApply,
+		where := yardList(named, min(200, 512-len(prefix)-len(effect)))
+		step := domain.OperationStep{ID: fmt.Sprintf("release.prepare-rollback.%d", len(steps)), Target: "activation." + key.owner,
+			Observed: "rollback-observe stale in " + yardList(named, 200), Desired: "format of release " + string(target), Decision: domain.StepApply,
 			Preconditions: []string{"a rerun of the rollback admission offers this same plan"},
-			Verify:        "rollback-observe reports current in each yard, then the retained release accepts the owner", Consequence: consequence}
-		if len(named) == 1 {
-			step.Observed = "rollback-observe stale in yard " + named[0]
-		}
+			Verify:        "rollback-observe reports current in each yard, then the retained release accepts the owner", Consequence: prefix + where + effect}
 		if len(steps) != 0 {
 			step.DependsOn = []string{steps[len(steps)-1].ID}
 		}
@@ -398,24 +389,29 @@ func ownerPreparationSteps(items []formatItem, target releasetransition.ReleaseI
 	return steps
 }
 
-// boundedList appends values to prefix within limit bytes, naming how many
-// it leaves out.
-func boundedList(prefix string, values []string, separator string, limit int, noun string) string {
-	text := prefix
-	for index, value := range values {
-		next := text + value
+// yardList names the yards within limit bytes, counting those it leaves out.
+func yardList(yards []string, limit int) string {
+	if len(yards) == 1 {
+		if text := "yard " + yards[0]; len(text) <= limit {
+			return text
+		}
+		return "1 yard"
+	}
+	text := fmt.Sprintf("%d yards: ", len(yards))
+	for index, yard := range yards {
+		next := text + yard
 		if index != 0 {
-			next = text + separator + value
+			next = text + ", " + yard
 		}
 		rest := ""
-		if left := len(values) - index - 1; left != 0 {
-			rest = fmt.Sprintf(" and %d more %s", left, noun)
+		if left := len(yards) - index - 1; left != 0 {
+			rest = fmt.Sprintf(" and %d more", left)
 		}
 		if len(next)+len(rest) > limit {
 			if index == 0 {
-				return fmt.Sprintf("%s (%d %s not listed)", strings.TrimSuffix(prefix, ": "), len(values), noun)
+				return fmt.Sprintf("%d yards", len(yards))
 			}
-			return fmt.Sprintf("%s and %d more %s", text, len(values)-index, noun)
+			return fmt.Sprintf("%s and %d more", text, len(yards)-index)
 		}
 		text = next
 	}
@@ -437,17 +433,27 @@ func boundItems(items []formatItem) []string {
 // the gate, which must offer the ordinary rollback. It keeps no record: a
 // rerun resumes, and yard migrate undoes it.
 func (runtime *Runtime) prepareRollbackPreparation(parsed options, request releasetransition.ProcessRequest, target *verifiedPublishedCandidate,
-	items []formatItem, retained string,
-) Prepared {
+	observation formatObservation, retained string,
+) (Prepared, error) {
 	selection := parsed.selection
 	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
 	activeVerification := candidateVerification{candidate: publishedCandidate{release: links.Active}, digest: selection.activeArtifact}
 	targetVerification := verificationOf(target)
+	items := observation.items
 	steps := ownerPreparationSteps(items, request.Target)
 	steps = append(steps, domain.OperationStep{ID: "release.prepare-rollback.gate", Target: "release." + string(links.Active),
 		Observed: "active", Desired: "active", Decision: domain.StepApply, DependsOn: []string{steps[len(steps)-1].ID},
 		Verify:      "a rerun of the rollback admission offers the rollback to release " + string(request.Target),
 		Consequence: fmt.Sprintf("keep release %s active; then run yard update --rollback to review and confirm the rollback", links.Active)})
+	// A plan that cannot show every consequence is refused, never shortened.
+	if err := domain.ValidateOperationSteps(steps); err != nil {
+		message := fmt.Sprintf("rollback preparation needs %d confirmation steps, more than the %d a plan can show; nothing was converted", len(steps), domain.MaxOperationSteps)
+		if len(steps) <= domain.MaxOperationSteps {
+			message = "rollback preparation cannot show every profile runtime conversion in its plan; nothing was converted"
+		}
+		outcome := publicReleaseOutcome(links, request.Target, nil, releasetransition.CodeRollbackIncompatible, message, keepActiveRetry)
+		return Prepared{}, publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(transitionOutcomeError(outcome), err), outcome: outcome}
+	}
 	consequences := domain.OperationStepConsequences(steps)
 	prepared := false
 	plan := Prepared{
@@ -461,6 +467,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 				Items    []string
 				Retained string
 			}{parsed.expectedLinks, steps, boundItems(items), retained}),
+		preparation: &observation,
 	}
 	plan.check = func(context.Context) (releasetransition.Inspection, error) {
 		if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
@@ -475,46 +482,41 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 			Code: releasetransition.CodeTransitionRequired, Message: message, Retry: rollbackRetry,
 		}}, nil
 	}
-	// readmit is the rollback admission a rerun of this command makes.
-	readmit := func(ctx context.Context) (domain.ActionID, string, error) {
+	// readmit is the rollback admission a rerun of this command makes, with
+	// the observation it binds when it again offers the preparation. The
+	// plan, each conversion and the gate use only this admission, so owner
+	// refusals, next steps and causes reach each the same way.
+	readmit := func(ctx context.Context) (domain.ActionID, string, *formatObservation, error) {
 		if parsed.rerun == nil {
-			return "", "", errors.New("the rollback admission cannot be rerun")
+			return "", "", nil, errors.New("the rollback admission cannot be rerun")
 		}
 		fresh, err := parsed.rerun(ctx)
 		if fresh.Close != nil {
 			_ = fresh.Close()
 		}
-		return fresh.Action, fresh.Binding, err
+		return fresh.Action, fresh.Binding, fresh.preparation, err
 	}
 	plan.run = func(outer context.Context) error {
 		ctx := outer
-		if action, binding, err := readmit(ctx); err != nil {
+		action, binding, now, err := readmit(ctx)
+		if err != nil {
 			return staleAfterConfirmation(request, err)
-		} else if action != PrepareRollbackAction || binding != plan.Binding {
+		}
+		// The binding covers every observed item, so an equal one is the
+		// confirmed plan.
+		if action != PrepareRollbackAction || binding != plan.Binding || now == nil {
 			return staleReleaseState(request.RuntimeRoot, request.Target, "release state changed after confirmation; nothing was converted", rollbackRetry)
 		}
 		ctx = selectionContext(ctx, selection)
 		if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 			return err
 		}
-		// The hooks run from these pinned roots.
-		targetNow, err := runtime.verifyPublishedCandidate(ctx, targetVerification.candidate, request.RuntimeRoot, &targetVerification.digest)
-		if err != nil {
-			return staleRetainedSelection(request.RuntimeRoot, request.Target)
-		}
-		defer targetNow.Close()
+		// The hooks run from this pinned root.
 		activeNow, err := runtime.verifySelectedActive(selection, &selection.activeArtifact)
 		if err != nil {
 			return staleRetainedSelection(request.RuntimeRoot, request.Target)
 		}
 		defer activeNow.Close()
-		now, err := runtime.observeFormatOwners(ctx, activeNow, targetNow, request.ConfigHome, selection.formatOwners)
-		if err != nil {
-			return err
-		}
-		if len(now.messages) != 0 || !slices.Equal(now.items, items) {
-			return staleReleaseState(request.RuntimeRoot, request.Target, "profile runtime state changed after confirmation; nothing was converted", rollbackRetry)
-		}
 		var operation [12]byte
 		if _, err := crand.Read(operation[:]); err != nil {
 			return err
@@ -526,7 +528,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 			}
 		}
 		// The gate is the second command's own admission.
-		if action, _, err := readmit(outer); err != nil {
+		if action, _, _, err := readmit(outer); err != nil {
 			return partialPreparation(links, request.Target, err)
 		} else if action != rollbackAction {
 			return partialPreparation(links, request.Target, errors.New("the rollback admission still requires preparation"))
@@ -534,7 +536,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 		prepared = true
 		return nil
 	}
-	return plan
+	return plan, nil
 }
 
 // partialPreparation reports a failure after the first conversion could

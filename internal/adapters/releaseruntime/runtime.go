@@ -83,6 +83,8 @@ type Prepared struct {
 	convergedOutcome *releasetransition.Outcome
 	// Set only for an ordinary resume of an unfinished journal.
 	newerRelease func(context.Context) NewerRelease
+	// Set only for a rollback preparation: the observation its plan binds.
+	preparation *formatObservation
 }
 
 type verifiedPreparationError struct {
@@ -1384,8 +1386,12 @@ func (runtime *Runtime) prepareRetainedTransition(
 	if bindingErr != nil {
 		return Prepared{}, verifiedPreparation(retainedBindingRefusal(observed, release, bindingErr))
 	}
-	if len(pending) != 0 {
-		return runtime.prepareRollbackPreparation(parsed, request, verified, pending, runtimeBinding), nil
+	if pending != nil {
+		prepared, err := runtime.prepareRollbackPreparation(parsed, request, verified, *pending, runtimeBinding)
+		if refusal := (publicReleaseInspectionError{}); errors.As(err, &refusal) {
+			return refused(err, refusal.outcome)
+		}
+		return prepared, err
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {

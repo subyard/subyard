@@ -69,10 +69,10 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	return err
 }
 
-// rollbackCompatibility also returns every observed profile runtime item
-// when an owner is still to be prepared for the rollback; when preparing,
-// such an owner is not a refusal.
-func (runtime *Runtime) rollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selection *releaseSelection, preparing bool) ([]formatItem, error) {
+// rollbackCompatibility also returns the profile runtime observation when
+// an owner is still to be prepared for the rollback; when preparing, such
+// an owner is not a refusal.
+func (runtime *Runtime) rollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selection *releaseSelection, preparing bool) (*formatObservation, error) {
 	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
 	if selection != nil && (err != nil || links != selection.links) {
 		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
@@ -96,9 +96,9 @@ func (runtime *Runtime) rollbackCompatibility(ctx context.Context, target *verif
 	if err != nil {
 		return nil, err
 	}
-	var pending []formatItem
+	var pending *formatObservation
 	if len(format.pending()) != 0 {
-		pending = format.items
+		pending = &format
 	}
 	if !preparing {
 		for _, item := range format.pending() {
