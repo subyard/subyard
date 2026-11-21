@@ -2445,7 +2445,7 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 }
 
 func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *testing.T) {
-	for _, branch := range []string{"reobserve", "release observation", "settings blocker", "unknown state", "bounded diagnostic"} {
+	for _, branch := range []string{"reobserve", "release observation", "settings blocker", "bounded diagnostic"} {
 		for _, public := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/public=%t", branch, public), func(t *testing.T) {
 				transition, configHome, _ := v2TransitionFixture(t, nil)
@@ -2461,7 +2461,7 @@ func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *te
 					post: V2ActivationObservation{Actual: digestB, Desired: digestA}, reconcileErr: cause,
 				}
 				wantCode := CodeRecoveryAmbiguous
-				wantRecovery := "unknown state"
+				var wantRecovery string
 				switch branch {
 				case "reobserve", "bounded diagnostic":
 					reconciler.postErr = errors.New("private secondary sentinel")
@@ -2481,8 +2481,6 @@ func TestV2TransitionPreservesPublicCauseAcrossSecondaryActivationFailures(t *te
 					}
 					wantCode = CodePreconditionBlocked
 					wantRecovery = "yards/ordinary.env:1: YARD_TEMPLATE"
-				case "unknown state":
-					reconciler.post.Actual = digestC
 				}
 				transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 				goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -2905,11 +2903,11 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 			wantCode:   CodeDependencyUnavailable,
 		},
 		{
-			name:       "public diagnostic does not override third state guard",
+			name:       "partially applied valid state remains retryable",
 			post:       V2ActivationObservation{Actual: digestC, Desired: digestA},
-			failure:    v2PublicActivationError{"public reconcile detail", "run yard -Y demo integration status"},
-			wantStatus: StatusOperatorActionRequired,
-			wantCode:   CodeRecoveryAmbiguous,
+			failure:    v2PublicActivationError{"public reconcile detail", "run yard migrate"},
+			wantStatus: StatusRecovering,
+			wantCode:   CodeDependencyUnavailable,
 		},
 	}
 	for _, test := range tests {
@@ -2932,13 +2930,75 @@ func TestV2TransitionReobservesFailedActivationReconcilerResult(t *testing.T) {
 					outcome, err, reconciler.postErrorObservations,
 				)
 			}
-			if test.failure != nil && (!strings.Contains(outcome.Message, "public reconcile detail") ||
-				!strings.Contains(outcome.Message, "unknown state") ||
-				outcome.Retry != "run yard update --check") {
-				t.Fatalf("reconcile diagnostic replaced recovery guard: %#v", outcome)
+			if test.failure != nil && (outcome.Message != "public reconcile detail" || outcome.Retry != "run yard migrate") {
+				t.Fatalf("reconcile diagnostic was not retained: %#v", outcome)
+			}
+			if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+				t.Fatalf("outcome exceeds released protocol contract: %v", err)
 			}
 		})
 	}
+}
+
+// A dependency failure after an owner partly applied its state, such as a
+// refreshed config before a failed provision, names one retry and resumes.
+func TestV2TransitionResumesPartiallyAppliedActivationReconciler(t *testing.T) {
+	reconciler := &v2PartialApplyReconciler{actual: digestB}
+	transition, _, _ := v2TransitionFixture(t, nil)
+	transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := transition.Converge(context.Background(), Execution{
+		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
+	})
+	if err != nil || failed.Status != StatusRecovering || failed.Code != CodeDependencyUnavailable ||
+		failed.Message != "yard default: provision failed" || failed.Retry != "run yard migrate" ||
+		failed.Transaction == nil || reconciler.actual != digestC {
+		t.Fatalf("partial apply outcome = %#v, err=%v actual=%s", failed, err, reconciler.actual)
+	}
+	if err := ValidateProcessConvergence(goal, inspection, failed); err != nil {
+		t.Fatalf("outcome exceeds released protocol contract: %v", err)
+	}
+	resume, err := transition.Inspect(context.Background(), goal)
+	if err != nil || resume.Resume == nil || len(resume.Blockers) != 0 || resume.Outcome == nil ||
+		resume.Outcome.Status != StatusRecovering || resume.Outcome.Code != CodeRecoveryPending ||
+		resume.Outcome.Transaction == nil || *resume.Outcome.Transaction != *failed.Transaction {
+		t.Fatalf("resume inspection = %#v, err=%v", resume, err)
+	}
+	ready, err := transition.Converge(context.Background(), Execution{Plan: resume.Plan})
+	if err != nil || ready.Status != StatusReady || !ready.ReachedGoal || reconciler.reconciles != 2 {
+		t.Fatalf("resumed outcome = %#v, err=%v reconciles=%d", ready, err, reconciler.reconciles)
+	}
+}
+
+type v2PartialApplyReconciler struct {
+	actual     Fingerprint
+	reconciles int
+}
+
+func (*v2PartialApplyReconciler) ID() string { return "materialized-config" }
+
+func (reconciler *v2PartialApplyReconciler) Observe(
+	context.Context, ReleasePair, ReleaseLinks,
+) (V2ActivationObservation, error) {
+	return V2ActivationObservation{
+		Actual: reconciler.actual, Desired: digestA, Converged: reconciler.actual == digestA,
+	}, nil
+}
+
+// Reconcile moves to a third valid state and fails once, then converges.
+func (reconciler *v2PartialApplyReconciler) Reconcile(context.Context, ReleaseLinks) error {
+	reconciler.reconciles++
+	if reconciler.reconciles == 1 {
+		reconciler.actual = digestC
+		return fmt.Errorf("private provision detail: %w",
+			v2PublicActivationError{"yard default: provision failed", "run yard migrate"})
+	}
+	reconciler.actual = digestA
+	return nil
 }
 
 func TestFreshV2TransitionRejectsChangedObservationScope(t *testing.T) {
