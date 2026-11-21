@@ -466,6 +466,9 @@ func ensureStateDirectory(directory string) error {
 	if err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	if err := safefs.AdmitDir(directory, 0o700); err != nil {
+		return errors.New("endpoint state directory has unsafe type or permissions")
+	}
 	info, err = os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || !ownedByUser(info) {
 		return errors.New("endpoint state directory has unsafe type or permissions")

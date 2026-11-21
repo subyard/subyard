@@ -407,3 +407,29 @@ func TestWorkerConfigKeepsControlFileChecksBeforeReplacement(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateDirectoryFinishesNarrowAndRefusesBroadDirectory(t *testing.T) {
+	dir := filepath.Join(shortRuntimeRoot(t), "run")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDirectory(dir, true); err != nil {
+		t.Fatalf("narrow owned directory: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	want := "SSH agent runtime directory and parent must be owned by the operator with mode 0700"
+	if err := validateDirectory(dir, true); err == nil || err.Error() != want {
+		t.Fatalf("broad directory: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("broad directory changed: %v %v", info, err)
+	}
+}

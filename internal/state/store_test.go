@@ -615,10 +615,20 @@ func fixtureRecord(id string) domain.ProjectRecord {
 	}
 }
 
-func TestFileStoreKeepsDirectoryAdmissionAndRefusesSymlinkedTargets(t *testing.T) {
+func TestFileStoreFinishesNarrowDirectoryAndRefusesSymlinkedTargets(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
 		t.Fatal(err)
+	}
+	// An owned directory narrower than 0700 is finished to 0700.
+	if err := os.Chmod(store.Directory(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
+		t.Fatalf("narrow owned state directory: %v", err)
+	}
+	if info, err := os.Stat(store.Directory()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow state directory not finished: %v %v", info, err)
 	}
 	// An owned 02700 directory is accepted unchanged, including its setgid bit.
 	if err := os.Chmod(store.Directory(), 0o700|os.ModeSetgid); err != nil {

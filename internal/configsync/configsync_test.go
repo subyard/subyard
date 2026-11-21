@@ -1573,3 +1573,27 @@ func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T)
 		})
 	}
 }
+
+func TestEnsureHostIDRefusesSymlinkedConfigurationRoot(t *testing.T) {
+	target := filepath.Join(testkit.TempDir(t), "elsewhere")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configHome := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Symlink(target, configHome); err != nil {
+		t.Fatal(err)
+	}
+	_, err := EnsureHostID(configHome, map[string]string{"SUBYARD_HOST_ID": "owner-a"})
+	if err == nil || err.Error() != "safefs "+configHome+": symbolic link" {
+		t.Fatalf("symlinked configuration root: %v", err)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("link target changed: %v %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "host-id")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host-id published through the link: %v", err)
+	}
+}

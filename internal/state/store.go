@@ -355,6 +355,9 @@ func (store *FileStore) lock(ctx context.Context, exclusive bool) (*safefs.LockF
 func unlock(lock *safefs.LockFile) { lock.Release() }
 
 func ensurePrivateDirectory(path string) error {
+	if err := safefs.AdmitDir(path, 0o700); err != nil {
+		return errors.New("state path is not a real directory")
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return errors.New("state path is not a real directory")

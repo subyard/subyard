@@ -101,6 +101,9 @@ func validateDirectory(dir string, create bool) error {
 			if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 				return errors.New("cannot create SSH agent runtime directory")
 			}
+			if err := safefs.AdmitDir(path, 0o700); err != nil {
+				return errors.New("SSH agent runtime directory and parent must be owned by the operator with mode 0700")
+			}
 		}
 		info, err := os.Lstat(path)
 		if err != nil {

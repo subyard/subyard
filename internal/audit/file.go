@@ -76,6 +76,9 @@ func WriteInvocation(invocation Invocation) error {
 		defer release()
 	}
 	directory := filepath.Join(invocation.Home, "logs")
+	if err := safefs.AdmitDir(directory, 0o700); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}

@@ -70,6 +70,9 @@ func EnsureHostID(configHome string, environment map[string]string) (string, err
 	if err != nil || !pending {
 		return hostID, err
 	}
+	if err := safefs.AdmitDir(configHome, 0o700); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		return "", err
 	}

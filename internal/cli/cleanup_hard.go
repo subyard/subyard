@@ -272,6 +272,9 @@ func saveCleanupRecord(path string, record any) error {
 		} else if !os.IsExist(err) {
 			return err
 		}
+		if err := safefs.AdmitDir(directory, 0o700); err != nil {
+			return errors.New("unsafe hard cleanup recovery directory")
+		}
 		info, err := os.Lstat(directory)
 		if err != nil {
 			return err

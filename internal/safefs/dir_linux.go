@@ -63,6 +63,49 @@ func EnsureDir(path string, o DirOptions) error {
 
 func EnsurePrivateDir(path string) error { return EnsureDir(path, DirOptions{}) }
 
+// AdmitDir runs before a caller's own directory policy and never replaces it.
+// It finishes a directory the caller owns whose permission bits are a strict
+// subset of mode, keeping set-ID and sticky bits. Every other state, including
+// absence, another owner, broader bits, lookup errors and a failed chmod, is
+// left unchanged for the caller's policy to report.
+func AdmitDir(path string, mode fs.FileMode) error {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	dir := &directory{fd: fd, path: path}
+	defer dir.close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil
+	}
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFLNK:
+		return refuseDirectorySymlink(path)
+	case unix.S_IFDIR:
+		want, have := uint32(mode.Perm()), stat.Mode&0o777
+		if stat.Uid == uint32(os.Geteuid()) && have != want && have&^want == 0 {
+			// A failed finish leaves the directory for the caller's policy.
+			_ = dir.chmod(want | stat.Mode&0o7000)
+		}
+	}
+	return nil
+}
+
+// refuseDirectorySymlink refuses a symlink that resolves to a directory, the one
+// shape a following mkdir or chmod would traverse. Other symlinks are left to
+// the caller's policy.
+//
+// Pending operator decision D1: if it is declined, this returns nil and the
+// audit logs directory and the EnsureHostID root follow such a link as master did.
+func refuseDirectorySymlink(path string) error {
+	var target unix.Stat_t
+	if unix.Stat(path, &target) == nil && target.Mode&unix.S_IFMT == unix.S_IFDIR {
+		return refusal(path, ErrSymlink)
+	}
+	return nil
+}
+
 func SyncDir(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {

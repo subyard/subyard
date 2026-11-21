@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestWriteExportedConfigFileKeepsFinalSymlink(t *testing.T) {
@@ -104,5 +105,78 @@ func TestHardenConfigCandidateReplacesHardLinkedFile(t *testing.T) {
 	}
 	if content, _ := os.ReadFile(path); string(content) != "A=1\n" {
 		t.Fatalf("candidate content %q", content)
+	}
+}
+
+func TestCleanupJournalDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
+	root := testkit.TempDir(t)
+	parent := filepath.Join(root, "cleanup", "yard")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "journal.json")
+	journal := &hardCleanupJournal{Schema: 1, Token: "0123456789abcdef0123456789abcdef", Phase: "recreate"}
+	if err := saveHardCleanup(path, journal); err != nil {
+		t.Fatalf("narrow owned journal directory: %v", err)
+	}
+	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow journal directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveHardCleanup(path, journal); err == nil || err.Error() != "unsafe hard cleanup recovery directory" {
+		t.Fatalf("broad journal directory: %v", err)
+	}
+	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("broad journal directory changed: %v %v", info, err)
+	}
+}
+
+func TestWriteExportedConfigFileNeverOpensSpecialFiles(t *testing.T) {
+	root := testkit.TempDir(t)
+	fifo := filepath.Join(root, "config.env")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := unix.Open(fifo, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(reader)
+	if err := writeExportedConfigFile(fifo, []byte("X=1\n"), 0o600); err == nil {
+		t.Fatal("published over a FIFO")
+	}
+	// A writer that opened and closed the FIFO would leave POLLHUP on the reader.
+	events := []unix.PollFd{{Fd: int32(reader), Events: unix.POLLIN}}
+	if _, err := unix.Poll(events, 0); err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Revents&unix.POLLHUP != 0 {
+		t.Fatal("export opened the FIFO before refusing it")
+	}
+}
+
+func TestWriteExportedConfigFileReportsDirectoryTextErrors(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "file"), []byte("keep"), 0o600)
+	for text, want := range map[string]string{"dir/.": "is a directory", "file/.": "not a directory"} {
+		link := filepath.Join(root, "link-"+filepath.Dir(text))
+		if err := os.Symlink(text, link); err != nil {
+			t.Fatal(err)
+		}
+		err := writeExportedConfigFile(link, []byte("X=1\n"), 0o600)
+		if err == nil || err.Error() != "open "+link+": "+want {
+			t.Fatalf("link to %s: %v", text, err)
+		}
+	}
+	if content, _ := os.ReadFile(filepath.Join(root, "file")); string(content) != "keep" {
+		t.Fatalf("file changed: %q", content)
 	}
 }

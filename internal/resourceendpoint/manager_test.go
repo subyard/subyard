@@ -394,3 +394,28 @@ func protectParent(t *testing.T, directory string) {
 		t.Fatal(err)
 	}
 }
+
+func TestEndpointStateDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStateDirectory(directory); err != nil {
+		t.Fatalf("narrow owned endpoint directory: %v", err)
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow endpoint directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStateDirectory(directory); err == nil || err.Error() != "endpoint state directory has unsafe type or permissions" {
+		t.Fatalf("broad endpoint directory: %v", err)
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("broad endpoint directory changed: %v %v", info, err)
+	}
+}

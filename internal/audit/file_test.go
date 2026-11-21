@@ -125,3 +125,28 @@ func TestWriteInvocationRefusesSymlinkedAuditLog(t *testing.T) {
 		t.Fatalf("symlink target changed: %q", content)
 	}
 }
+
+func TestWriteInvocationRefusesSymlinkedLogsDirectory(t *testing.T) {
+	home := testkit.TempDir(t)
+	target := filepath.Join(testkit.TempDir(t), "elsewhere")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logs := filepath.Join(home, "logs")
+	if err := os.Symlink(target, logs); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteInvocation(Invocation{Home: home, Command: "status", Now: time.Now(), PID: 1})
+	if err == nil || err.Error() != "safefs "+logs+": symbolic link" {
+		t.Fatalf("symlinked logs directory: %v", err)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("link target changed: %v %v", info, err)
+	}
+	if entries, _ := os.ReadDir(target); len(entries) != 0 {
+		t.Fatalf("link target received entries: %v", entries)
+	}
+}
