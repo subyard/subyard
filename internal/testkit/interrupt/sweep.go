@@ -263,11 +263,25 @@ func traceDiff(want, got []Point) string {
 	return out.String()
 }
 
+// signatureDiff lists differing keys of map[string]string signatures and differing
+// exported fields of struct signatures; anything else is printed whole.
 func signatureDiff(want, got any) string {
+	wantValue, gotValue := reflect.ValueOf(want), reflect.ValueOf(got)
+	if wantValue.Kind() == reflect.Struct && wantValue.Type() == gotValue.Type() {
+		var out strings.Builder
+		for i := range wantValue.NumField() {
+			wantField, gotField := wantValue.Field(i), gotValue.Field(i)
+			if wantField.CanInterface() && !reflect.DeepEqual(wantField.Interface(), gotField.Interface()) {
+				fmt.Fprintf(&out, "%s:\n%s", wantValue.Type().Field(i).Name,
+					signatureDiff(wantField.Interface(), gotField.Interface()))
+			}
+		}
+		return out.String()
+	}
 	wantMap, wantOK := want.(map[string]string)
 	gotMap, gotOK := got.(map[string]string)
 	if !wantOK || !gotOK {
-		return fmt.Sprintf("want %#v\n got %#v", want, got)
+		return fmt.Sprintf("want %#v\n got %#v\n", want, got)
 	}
 	var keys []string
 	for key := range wantMap {

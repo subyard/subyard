@@ -23,6 +23,10 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 		store uninstall.RecoveryStore
 		plan  uninstall.RecoveryPlan
 	}
+	type signature struct {
+		Tree  map[string]string
+		Epoch string // lives outside the fixture root, in the shared owner-lock directory
+	}
 	const noPlan = "yard: No saved full uninstall plan. Run 'yard teardown --full' again.\n"
 	empty, sawEmpty, resumed := false, false, 0
 	points := interrupt.Sweep(t, interrupt.Case[state]{
@@ -47,11 +51,8 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			return interrupt.Outcome{Code: code, Output: diagnostics.String()}
 		},
 		Signature: func(t *testing.T, s state) any {
-			// The owner epoch lives outside the fixture root, in the shared owner-lock directory.
-			tree := interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome))
 			epoch, err := uninstall.ReadOwnerEpoch(s.plan.Installation.DataHome)
-			tree["<owner epoch>"] = fmt.Sprint(epoch, err)
-			return tree
+			return signature{interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome)), fmt.Sprint(epoch, err)}
 		},
 		Completed: func(t *testing.T, s state, o interrupt.Outcome) {
 			if o.Code != 0 {

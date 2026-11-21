@@ -160,7 +160,8 @@ func TestSweepToyBug(t *testing.T) {
 	if bug == "" {
 		t.Skip("run by TestSweepCatchesBrokenCases")
 	}
-	c := toyCase(bug, Fail)
+	product := strings.TrimPrefix(bug, "pinned-")
+	c := toyCase(product, Fail)
 	switch bug {
 	case "min-points":
 		c.MinPoints = 10
@@ -168,21 +169,24 @@ func TestSweepToyBug(t *testing.T) {
 		c.Require = append(c.Require, "fsync")
 	case "commit":
 		c.Committed = toyCommitted
+	case "pinned-rollback":
+		c.Committed = toyCommitted
 	}
 	Sweep(t, c)
 }
 
 func TestSweepCatchesBrokenCases(t *testing.T) {
 	for bug, want := range map[string]string{
-		"leftover":   `a.tmp: want "", got "file`,
-		"repeat":     "001-toy:journal: a second retry changed the state",
-		"commit":     "001-toy:journal is before the commit point but did not keep the initial state",
-		"order":      "hook order differs from the uncut run",
-		"unfired":    "cut 004-toy:cleanup never fired",
-		"late":       "the error path reached seams after the cut",
-		"rollback":   "003-toy:write rolled back to the initial state",
-		"min-points": "the uncut run reached 4 points, want at least 10",
-		"require":    `the uncut run never reached "fsync"`,
+		"leftover":        `a.tmp: want "", got "file`,
+		"repeat":          "001-toy:journal: a second retry changed the state",
+		"commit":          "001-toy:journal is before the commit point but did not keep the initial state",
+		"order":           "hook order differs from the uncut run",
+		"unfired":         "cut 004-toy:cleanup never fired",
+		"late":            "the error path reached seams after the cut",
+		"rollback":        "003-toy:write rolled back to the initial state",
+		"pinned-rollback": "003-toy:write is past the commit point but did not converge to the final state",
+		"min-points":      "the uncut run reached 4 points, want at least 10",
+		"require":         `the uncut run never reached "fsync"`,
 	} {
 		t.Run(bug, func(t *testing.T) {
 			command := exec.Command(os.Args[0], "-test.run=^TestSweepToyBug$", "-test.count=1")
@@ -216,6 +220,17 @@ func TestInjectorFailsEveryCallFromTheCut(t *testing.T) {
 	}
 	if len(in.trace) != 2 || len(in.late) != 1 {
 		t.Fatalf("trace=%v late=%v", in.trace, in.late)
+	}
+}
+
+func TestSignatureDiffNamesStructFieldsAndMapKeys(t *testing.T) {
+	type signature struct {
+		Tree  map[string]string
+		Epoch string
+	}
+	got := signatureDiff(signature{map[string]string{"a": "1"}, "1"}, signature{map[string]string{"a": "2"}, "1"})
+	if want := "Tree:\na: want \"1\", got \"2\"\n"; got != want {
+		t.Fatalf("diff = %q, want %q", got, want)
 	}
 }
 

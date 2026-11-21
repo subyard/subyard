@@ -18,7 +18,8 @@ import (
 // writeOwnerFile, writeConnectionFile and Cache.Write remove their temporary files in a defer,
 // and their hooks fire before the temporary file exists, so no cut leaves the stale
 // .owner-state-*, .connection-* or .inventory-* file that a real crash would.
-func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connections, func(Connections) error),
+// hosts lists the host IDs whose mutation locks the operation may leave behind.
+func ownerSweep(t *testing.T, minPoints int, hosts []string, setup func(t *testing.T) (Connections, func(Connections) error),
 	completed func(t *testing.T, store Connections), require ...string,
 ) {
 	t.Helper()
@@ -39,7 +40,7 @@ func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connectio
 		Resume: func(t *testing.T, s state) interrupt.Outcome {
 			return interrupt.Outcome{Err: s.store.Recover()}
 		},
-		Signature: func(t *testing.T, s state) any { return ownerSignature(t, s.store.Root) },
+		Signature: func(t *testing.T, s state) any { return ownerSignature(t, s.store.Root, hosts) },
 		Completed: func(t *testing.T, s state, o interrupt.Outcome) {
 			if o.Err != nil {
 				t.Fatal(o.Err)
@@ -74,11 +75,15 @@ func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connectio
 
 // ownerSignature drops only the lock files that acquiring a lock leaves empty; any other
 // entry, including a non-empty or unexpected lock, stays in the signature.
-func ownerSignature(t *testing.T, root string) map[string]string {
+func ownerSignature(t *testing.T, root string, hosts []string) map[string]string {
 	t.Helper()
 	tree := interrupt.Tree(t, root)
 	const emptyLock = "file -rw------- e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	for _, name := range []string{".lock", "mutations/owner-a.lock", "mutations/owner-b.lock"} {
+	locks := []string{".lock"}
+	for _, host := range hosts {
+		locks = append(locks, "mutations/"+host+".lock")
+	}
+	for _, name := range locks {
 		if tree[name] == emptyLock {
 			delete(tree, name)
 		}
@@ -91,7 +96,7 @@ func ownerSignature(t *testing.T, root string) map[string]string {
 
 func TestRegistrationRecoversFromEveryDurableIOBoundary(t *testing.T) {
 	now, trust := time.Now(), testSSHHostTrust(t, "owner.example")
-	ownerSweep(t, 8, func(t *testing.T) (Connections, func(Connections) error) {
+	ownerSweep(t, 8, []string{"owner-a"}, func(t *testing.T) (Connections, func(Connections) error) {
 		connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
 		snapshot := Snapshot{FetchedAt: now, Inventory: fixtureInventory("owner-a", now)}
 		return Connections{Root: testkit.TempDir(t)}, func(store Connections) error { return store.Register(connection, snapshot) }
@@ -102,7 +107,7 @@ func TestRegistrationRecoversFromEveryDurableIOBoundary(t *testing.T) {
 
 func TestHostIDAdoptionRecoversFromEveryDurableIOBoundary(t *testing.T) {
 	now, trust := time.Now(), testSSHHostTrust(t, "owner.example")
-	ownerSweep(t, 13, func(t *testing.T) (Connections, func(Connections) error) {
+	ownerSweep(t, 13, []string{"owner-a", "owner-b"}, func(t *testing.T) (Connections, func(Connections) error) {
 		store := adoptionFailureFixture(t, trust, now)
 		snapshot := Snapshot{FetchedAt: now, Inventory: fixtureInventory("owner-b", now)}
 		return store, func(store Connections) error {
@@ -122,7 +127,7 @@ func TestRepairRecoversFromEveryDurableIOBoundary(t *testing.T) {
 	now := time.Now()
 	oldTrust, newTrust := testSSHHostTrust(t, "owner.example"), testSSHHostTrust(t, "owner.example")
 	snapshot := Snapshot{FetchedAt: now, Inventory: fixtureInventory("owner-a", now)}
-	ownerSweep(t, 8, func(t *testing.T) (Connections, func(Connections) error) {
+	ownerSweep(t, 8, []string{"owner-a"}, func(t *testing.T) (Connections, func(Connections) error) {
 		store := Connections{Root: testkit.TempDir(t)}
 		if err := store.Write(Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &oldTrust}); err != nil {
 			t.Fatal(err)
@@ -148,7 +153,7 @@ func TestCombinedKeyAndHostIDRepairRecoversFromEveryDurableIOBoundary(t *testing
 	now := time.Now()
 	oldTrust, newTrust := testSSHHostTrust(t, "owner.example"), testSSHHostTrust(t, "owner.example")
 	snapshot := Snapshot{FetchedAt: now, Inventory: fixtureInventory("owner-b", now)}
-	ownerSweep(t, 13, func(t *testing.T) (Connections, func(Connections) error) {
+	ownerSweep(t, 13, []string{"owner-a", "owner-b"}, func(t *testing.T) (Connections, func(Connections) error) {
 		store := adoptionFailureFixture(t, oldTrust, now)
 		plan, err := store.PrepareRepair("owner-a", newTrust, snapshot)
 		if err != nil {
@@ -169,7 +174,7 @@ func TestCombinedKeyAndHostIDRepairRecoversFromEveryDurableIOBoundary(t *testing
 func TestRemovalRecoversFromEveryDurableIOBoundary(t *testing.T) {
 	now := time.Now()
 	snapshot := Snapshot{FetchedAt: now, Inventory: fixtureInventory("owner-a", now)}
-	ownerSweep(t, 8, func(t *testing.T) (Connections, func(Connections) error) {
+	ownerSweep(t, 8, []string{"owner-a"}, func(t *testing.T) (Connections, func(Connections) error) {
 		store := Connections{Root: testkit.TempDir(t)}
 		connection := Connection{HostID: "owner-a", Destination: "owner-alias"}
 		if err := store.Write(connection); err != nil {
