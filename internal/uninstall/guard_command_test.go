@@ -274,18 +274,23 @@ func TestTeardownFullOriginalFactsUseBoundedWireAfterPartialRemoval(t *testing.T
 }
 
 func TestGuardAllReportsOnlyStructuralDetails(t *testing.T) {
-	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"instance","name":"yard","binding":"`+strings.Repeat("a", 64)+`"}]`)
+	binding := strings.Repeat("a", 64)
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"instance","name":"yard","binding":"`+binding+`"},{"kind":"profile","name":"private-name","binding":"`+binding+`"}]`)
 	t.Cleanup(func() { incusQuery = queryIncus })
 	incusQuery = func(path, _ string, target any) error {
+		if strings.HasPrefix(path, "/1.0/profiles/") {
+			return json.Unmarshal([]byte(`{"name":"private-name"}`), target)
+		}
 		return json.Unmarshal([]byte(`{"name":"yard","type":"container","config":{"secret":"value"},"devices":{},"profiles":[]}`), target)
 	}
 	var stderr bytes.Buffer
 	if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	expected := `plan_stale: {"action":"guard-all","stage":"resource","kind":"instance","ordinal":1,"category":"KeyError","field":"created_at"}` + "\n" +
-		"plan_stale: teardown inventory, artifact or resource binding is invalid\n"
-	if stderr.String() != expected {
+	if diagnostic := stderr.String(); !strings.HasPrefix(diagnostic, "plan_stale: ") ||
+		!strings.Contains(diagnostic, "instance resource 1: missing teardown resource field created_at") ||
+		!strings.Contains(diagnostic, "profile resource 2: missing teardown resource field config") ||
+		strings.Contains(diagnostic, "private-name") || strings.Contains(diagnostic, "secret") {
 		t.Fatalf("diagnostic %q", stderr.String())
 	}
 }
@@ -344,18 +349,8 @@ func TestFullFileRemoverRequiresAnActualPoolCollection(t *testing.T) {
 	}
 }
 
-// decodeFixture decodes like queryIncus, so shape errors keep their category.
 func decodeFixture(body string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(target); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
-			return typeMismatch("unexpected Incus response shape")
-		}
-		return err
-	}
-	return nil
+	return decodeIncusJSON(strings.NewReader(body), target)
 }
 
 func TestArtifactRemovalStopsAtCancellationBeforeNextUnlink(t *testing.T) {

@@ -31,8 +31,7 @@ while IFS=$'\t' read -r scope unit; do
   load_state="$(control "$scope" show "$unit" --property=LoadState --value)"
   [ "$load_state" != not-found ] || continue
   fragment="$(control "$scope" show "$unit" --property=FragmentPath --value)"
-  teardown_guard service-fragment "$fragment" \
-    || die "approved unit name now resolves to an unapproved service artifact"
+  teardown_guard service-fragment "$fragment" || exit 1
 done <<< "$service_inventory"
 
 # Disable triggering units first. The following stop is synchronous, including

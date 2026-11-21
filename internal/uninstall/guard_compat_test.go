@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,9 +118,8 @@ func TestSchemaOneFactsKeepDriftGuards(t *testing.T) {
 }
 
 // The corpus holds outcomes of `git show v0.30.0:scripts/lib/teardown-plan.py`
-// on wire inputs (generator beside it). Inputs an engine can emit keep the exit
-// code, stdout and stderr byte for byte; any other
-// input must refuse wherever the released helper refused.
+// on wire inputs (generator beside it). Engine inputs keep the exit code and
+// meaning of successful output. Every released refusal must still refuse.
 func TestGuardKeepsReleasedHelperCorpus(t *testing.T) {
 	file, err := os.Open(filepath.Join("testdata", "v0.30.0-guard-corpus.jsonl"))
 	if err != nil {
@@ -159,9 +160,19 @@ func TestGuardKeepsReleasedHelperCorpus(t *testing.T) {
 		for _, released := range row.Results {
 			var stdout, stderr strings.Builder
 			code := RunGuard(released.Mode, nil, &stdout, &stderr)
-			if row.Engine && (code != released.Exit || stderr.String() != released.Stderr || stdout.String() != released.Stdout) || released.Exit != 0 && code == 0 {
+			if row.Engine && code != released.Exit || released.Exit != 0 && code == 0 {
 				t.Errorf("%v with %v (engine %v): released %d %q %q, got %d %q %q", released.Mode, row.Env, row.Engine,
 					released.Exit, released.Stdout, released.Stderr, code, stdout.String(), stderr.String())
+			}
+			if row.Engine && released.Exit == 0 && code == 0 {
+				if released.Mode[0] == "producer-artifacts-json" {
+					var got, want []ports.TeardownArtifact
+					if json.Unmarshal([]byte(stdout.String()), &got) != nil || json.Unmarshal([]byte(released.Stdout), &want) != nil || !reflect.DeepEqual(got, want) {
+						t.Errorf("%v: got artifact JSON %q, want equivalent to %q", released.Mode, stdout.String(), released.Stdout)
+					}
+				} else if !slices.Equal(strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n"), strings.Split(strings.TrimSuffix(released.Stdout, "\n"), "\n")) {
+					t.Errorf("%v: got records %q, want %q", released.Mode, stdout.String(), released.Stdout)
+				}
 			}
 		}
 	}

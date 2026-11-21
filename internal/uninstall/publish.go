@@ -305,8 +305,8 @@ func captureAssets(root string) ([]Tree, error) {
 		if len(body) > 4<<20 || slices.ContainsFunc(body, func(value byte) bool { return value >= 0x80 }) {
 			return nil, guardRefusal("oversized installed asset manifest")
 		}
-		for _, line := range splitLines(string(body)) {
-			digest, relative, found := strings.Cut(line, "  ")
+		for line := range strings.Lines(string(body)) {
+			digest, relative, found := strings.Cut(strings.TrimSuffix(line, "\n"), "  ")
 			if !found {
 				return nil, guardRefusal("invalid installed asset line")
 			}
@@ -386,23 +386,6 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	}
 	defer file.Close()
 	return io.ReadAll(io.LimitReader(file, limit+1))
-}
-
-// splitLines keeps the manifest's historical str.splitlines boundaries.
-func splitLines(text string) []string {
-	lines := []string{}
-	for text != "" {
-		index := strings.IndexAny(text, "\n\r\v\f\x1c\x1d\x1e")
-		if index < 0 {
-			return append(lines, text)
-		}
-		lines = append(lines, text[:index])
-		if strings.HasPrefix(text[index:], "\r\n") {
-			index++
-		}
-		text = text[index+1:]
-	}
-	return lines
 }
 
 // PublishRuntime copies exact public assets with teardown's pinned
@@ -553,7 +536,7 @@ func privateDirectory(path string) error {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Getuid()) {
-		return errors.New("unsafe recovery runtime directory")
+		return guardRefusal("unsafe recovery runtime directory")
 	}
 	return nil
 }

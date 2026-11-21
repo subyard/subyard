@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -67,12 +66,12 @@ func captureService(scope string, units []string, files []producerFile, uid uint
 			if err := check(parent, name, facts); err != nil {
 				return err
 			}
-			binding, err := digest(facts)
-			artifacts = append(artifacts, ports.TeardownArtifact{Path: path, Entries: facts, Binding: binding})
+			artifact, err := artifactFromEntries(path, facts)
+			artifacts = append(artifacts, artifact)
 			return err
 		})
 	}
-	helpers := len(slices.DeleteFunc(slices.Clone(files), func(file producerFile) bool { return !file.helper })) > 0
+	helpers := slices.ContainsFunc(files, func(file producerFile) bool { return file.helper })
 	for _, file := range files {
 		err := add(file.path, func(parent int, name string, facts []Entry) error {
 			mode := uint32(0644)
@@ -127,8 +126,8 @@ func captureService(scope string, units []string, files []producerFile, uid uint
 				if filepath.Clean(destination) != file.path {
 					return guardRefusal("foreign producer enablement")
 				}
-				binding, err := digest(facts)
-				artifacts = append(artifacts, ports.TeardownArtifact{Path: link, Entries: facts, Binding: binding})
+				artifact, err := artifactFromEntries(link, facts)
+				artifacts = append(artifacts, artifact)
 				return err
 			})
 			if err != nil {
@@ -219,7 +218,7 @@ func coreProducers(root string, installation Installation, environment map[strin
 			if !producerTemplateMatches(content, render(powerTemplate), true) && (originalHelper || candidateHelper) && len(original.Templates) > 0 {
 				historical, ok := original.Templates["subyard-power-reconcile.service.in"]
 				if !ok {
-					return nil, errors.New("historical power template is missing")
+					return nil, guardRefusal("historical power template is missing")
 				}
 				powerTemplate = []byte(historical)
 			}
@@ -233,7 +232,7 @@ func coreProducers(root string, installation Installation, environment map[strin
 		if directory == "" {
 			home, ok := environment["SUBYARD_OPERATOR_HOME"]
 			if !ok {
-				return nil, errors.New("operator home is required for key producers")
+				return nil, guardRefusal("operator home is required for key producers")
 			}
 			directory = filepath.Join(home, ".config/systemd/user")
 		}

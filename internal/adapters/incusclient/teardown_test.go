@@ -83,20 +83,20 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	assertRefusal := func(wanted string) {
 		t.Helper()
 		err := run("guard-all", "fixture")
-		if err != guardExit(1) || !strings.Contains(string(output), `"action":"guard-all"`) || !strings.Contains(string(output), wanted) || strings.Contains(string(output), "synthetic-private") {
+		if err != guardExit(1) || !strings.HasPrefix(string(output), "plan_stale: ") || !strings.Contains(string(output), wanted) || strings.Contains(string(output), "synthetic-private") {
 			t.Fatal("aggregate guard lost its refusal or safe diagnostic")
 		}
 	}
-	assertRefusal(`"reason":"teardown resource changed after confirmation"`)
+	assertRefusal("instance resource 1: teardown resource changed after confirmation")
 	delete(observed, "config")
 	observed["private-fixture"] = "synthetic-private-field-value"
 	raw, _ = json.Marshal(observed)
 	testkit.WriteFile(t, data, raw, 0600)
-	assertRefusal(`"field":"config"`)
+	assertRefusal("missing teardown resource field config")
 	testkit.WriteFile(t, fake, []byte("#!/bin/sh\nprintf synthetic-private-query-output\nprintf synthetic-private-query-error >&2\nexit 23\n"), 0700)
-	assertRefusal(`"query_exit":23`)
+	assertRefusal("subprocess exited with status 23")
 	inventory = []byte(`[{"kind":"synthetic-private-kind"}]`)
-	assertRefusal(`"stage":"inventory"`)
+	assertRefusal("inventory: invalid teardown resource kind")
 }
 
 type guardExit int

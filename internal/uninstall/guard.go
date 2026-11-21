@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -31,22 +33,76 @@ func (refusal guardRefusal) Error() string { return string(refusal) }
 // statAt is the only observation point; tests inject drift through it.
 var statAt = factAt
 
-// classify keeps the historical outcomes of each guard mode: bare permission
-// for capture modes, typed staleness, or an exit-status failure.
+// classify preserves the outcomes used by the in-process callers.
 func classify(mode string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) && (mode == "capture-tree" || mode == "capture-artifact") {
+	switch guardExitCode(mode, err) {
+	case 77:
 		return os.ErrPermission
+	case ports.TeardownPlanStaleExitCode:
+		return fmt.Errorf("%w: %s: %s", domain.ErrPlanStale, mode, guardDiagnostic(err))
+	default:
+		return fmt.Errorf("%s: %s", mode, guardDiagnostic(err))
 	}
-	if errors.Is(err, os.ErrPermission) || slices.Contains(staleModes, mode) {
-		return fmt.Errorf("%w: native installation artifact guard", domain.ErrPlanStale)
-	}
-	return fmt.Errorf("native teardown artifact guard failed (%s): exit status 1", mode)
 }
 
-var staleModes = []string{"guard-artifacts", "guard-artifact", "remove-artifact", "remove-artifact-as", "capture-tree", "check-tree", "remove-tree", "verify-tree", "publish-plan"}
+func guardExitCode(mode string, err error) int {
+	if errors.Is(err, os.ErrPermission) {
+		if mode == "capture-tree" || mode == "capture-artifact" {
+			return 77
+		}
+		return ports.TeardownPlanStaleExitCode
+	}
+	switch mode {
+	case "guard-artifacts", "guard-artifact", "remove-artifact", "remove-artifact-as",
+		"capture-tree", "check-tree", "remove-tree", "verify-tree", "publish-plan",
+		"remove-files", "remove-shared", "check-profiles":
+		return ports.TeardownPlanStaleExitCode
+	default:
+		return 1
+	}
+}
+
+// guardDiagnostic renders only trusted descriptions and structural error facts.
+func guardDiagnostic(err error) string {
+	if group, ok := err.(*domain.Refusals); ok {
+		var messages []string
+		for _, cause := range group.Unwrap() {
+			messages = append(messages, guardDiagnostic(cause))
+		}
+		return strings.Join(messages, "; ")
+	}
+	var refusal guardRefusal
+	var field ports.TeardownMissingField
+	var syntax *json.SyntaxError
+	var shape *json.UnmarshalTypeError
+	var exit *exec.ExitError
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &refusal):
+		return refusal.Error()
+	case errors.As(err, &field):
+		return field.Error()
+	case errors.As(err, &syntax):
+		return fmt.Sprintf("invalid JSON at byte %d", syntax.Offset)
+	case errors.As(err, &shape):
+		return "unexpected JSON value type"
+	case errors.As(err, &exit):
+		return fmt.Sprintf("subprocess exited with status %d", exit.ExitCode())
+	case errors.Is(err, exec.ErrNotFound):
+		return "required executable was not found"
+	case errors.As(err, &errno):
+		return errno.Error()
+	default:
+		return "could not verify teardown evidence"
+	}
+}
+
+func guardContext(context string, err error) error {
+	return fmt.Errorf("%w: %w", guardRefusal(context+": "+guardDiagnostic(err)), err)
+}
 
 func pinParent(path string) (int, string, error) {
 	parts := strings.Split(path, "/")
@@ -209,12 +265,18 @@ func digest(entries []Entry) (string, error) {
 	if len(entries) == 0 {
 		return "", nil
 	}
+	// Schema-1 recovery rehashes these exact compact JSON bytes.
 	payload, err := json.Marshal(entries)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func artifactFromEntries(path string, entries []Entry) (ports.TeardownArtifact, error) {
+	binding, err := digest(entries)
+	return ports.TeardownArtifact{Path: path, Entries: entries, Binding: binding}, err
 }
 
 func sameFact(approved *Entry, current Entry, resumable bool) bool {
@@ -360,18 +422,16 @@ func CaptureArtifact(path string) (ports.TeardownArtifact, error) {
 }
 
 func captureArtifact(path string) (ports.TeardownArtifact, error) {
-	artifact := ports.TeardownArtifact{Path: path, Entries: []Entry{}}
+	entries := []Entry{}
 	err := withParent(path, "teardown artifact changed during observation", func(parent int, name string) error {
-		entries, err := walkEntries(parent, name, artifactLimit, nil, nil, false, nil)
-		if err == nil {
-			artifact.Entries = entries
-		}
+		var err error
+		entries, err = walkEntries(parent, name, artifactLimit, nil, nil, false, nil)
 		return err
 	})
-	if err == nil {
-		artifact.Binding, err = digest(artifact.Entries)
+	if err != nil {
+		return ports.TeardownArtifact{}, err
 	}
-	return artifact, err
+	return artifactFromEntries(path, entries)
 }
 
 // RemoveArtifact deletes one approved selected-teardown artifact by binding.

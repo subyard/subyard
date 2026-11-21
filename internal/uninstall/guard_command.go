@@ -21,78 +21,73 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unicode/utf16"
 
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/observation"
 	"github.com/Subyard/Subyard/internal/ports"
 	"golang.org/x/sys/unix"
 )
 
 // RunGuard is the hidden `_teardown-guard` boundary of shell and profile
-// adapters. It prints fixed refusals only, never plans, facts or bindings.
+// adapters. Stdout carries mode-specific data and stderr carries diagnostics.
 func RunGuard(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	mode := ""
 	if len(arguments) > 0 {
 		mode, arguments = arguments[0], arguments[1:]
 	}
+	var err error
+	var advice string
 	switch mode {
 	case "remove-files":
-		return refusalExit(stderr, removeFiles(), "full uninstall could not verify exact file removal; retain the saved recovery plan and retry")
+		err = removeFiles()
+		advice = "retain the saved recovery plan and retry"
 	case "remove-shared":
-		return refusalExit(stderr, removeShared(slices.Equal(arguments, []string{"--selected"}), stdout), "full uninstall shared ownership/consumer verification failed; preserve backing data and resume the exact saved plan")
+		err = removeShared(slices.Equal(arguments, []string{"--selected"}), stdout)
+		advice = "preserve backing data and resume the exact saved plan"
 	case "check-profiles":
-		return refusalExit(stderr, checkProfiles(arguments, stderr), "full uninstall conditional ownership check failed; preserve dependent resources and data")
+		err = checkProfiles(arguments)
+		advice = "preserve dependent resources and data"
 	case "files-need-root":
-		if len(arguments) == 1 && filesNeedRoot(arguments[0]) {
+		if filesNeedRoot() {
 			return 0
 		}
 		return 1
+	default:
+		err = guardMode(mode, arguments, stdin, stdout)
 	}
-	err := guardMode(mode, arguments, stdin, stdout, stderr)
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, os.ErrPermission) {
-		if mode == "capture-tree" || mode == "capture-artifact" {
-			return 77
+	code := guardExitCode(mode, err)
+	if code != 77 {
+		if advice != "" {
+			advice = "; " + advice
 		}
-		return ports.TeardownPlanStaleExitCode
+		fmt.Fprintf(stderr, "plan_stale: %s%s\n", guardDiagnostic(err), advice)
 	}
-	fmt.Fprintln(stderr, "plan_stale: teardown inventory, artifact or resource binding is invalid")
-	if slices.Contains(staleModes, mode) {
-		return ports.TeardownPlanStaleExitCode
-	}
-	return 1
-}
-
-func refusalExit(stderr io.Writer, err error, message string) int {
-	if err == nil {
-		return 0
-	}
-	fmt.Fprintln(stderr, message)
-	return ports.TeardownPlanStaleExitCode
+	return code
 }
 
 func argument(arguments []string, index int) (string, error) {
 	if index >= len(arguments) {
-		return "", errors.New("missing teardown guard argument")
+		return "", guardRefusal("missing teardown guard argument")
 	}
 	return arguments[index], nil
 }
 
-func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func guardMode(mode string, arguments []string, stdin io.Reader, stdout io.Writer) error {
 	switch mode {
 	case "capture-producer":
 		if len(arguments) != 3 {
-			return errors.New("usage: capture-producer OWNER PORT ROOT")
+			return guardRefusal("usage: capture-producer OWNER PORT ROOT")
 		}
 		port, portErr := strconv.Atoi(arguments[1])
 		root, rootErr := filepath.Abs(arguments[2])
 		home, ok := os.LookupEnv("SUBYARD_HOME")
 		operator, userErr := producerOwner()
 		if err := errors.Join(portErr, rootErr, userErr); err != nil || !ok {
-			return errors.Join(err, errors.New("invalid producer capture context"))
+			return errors.Join(guardRefusal("invalid producer capture context"), err)
 		}
 		runtime := os.Getenv("YARD_RUNTIME_ROOT")
 		if runtime == "" {
@@ -112,14 +107,10 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		if err != nil {
 			return err
 		}
-		return printReleasedJSON(stdout, artifacts)
+		return printJSON(stdout, artifacts)
 	case "capture-artifact":
-		body, err := io.ReadAll(io.LimitReader(stdin, 65537))
-		if err != nil {
-			return err
-		}
 		var item struct{ Path string }
-		if err := json.Unmarshal(body, &item); err != nil {
+		if err := readGuardJSON(stdin, 65536, "oversized artifact capture request", &item); err != nil {
 			return err
 		}
 		artifact, err := captureArtifact(item.Path)
@@ -128,15 +119,8 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		}
 		return printJSON(stdout, artifact)
 	case "capture-tree":
-		body, err := io.ReadAll(io.LimitReader(stdin, 64<<20+1))
-		if err != nil {
-			return err
-		}
 		var tree Tree
-		if len(body) > 64<<20 {
-			return guardRefusal("oversized installation artifact")
-		}
-		if err := json.Unmarshal(body, &tree); err != nil {
+		if err := readGuardJSON(stdin, 64<<20, "oversized installation artifact", &tree); err != nil {
 			return err
 		}
 		captured, err := tree.capture()
@@ -197,13 +181,17 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		return asAccount(account, func() error { return guardSelected(approved, path, func() error { return nil }) })
 	case "guard-artifacts", "guard-artifact", "remove-artifact":
 		approved, err := approvedArtifacts()
-		if err != nil || mode == "guard-artifacts" {
-			for _, item := range approved {
-				if err == nil {
-					err = guardArtifact(item.Path, item.Binding, item.Entries, nil)
+		if err != nil {
+			return err
+		}
+		if mode == "guard-artifacts" {
+			var refusals []error
+			for index, item := range approved {
+				if err := guardArtifact(item.Path, item.Binding, item.Entries, nil); err != nil {
+					refusals = append(refusals, guardContext(fmt.Sprintf("artifact %d", index+1), err))
 				}
 			}
-			return err
+			return domain.CollectRefusals(refusals...)
 		}
 		path, err := argument(arguments, 0)
 		if err != nil {
@@ -216,22 +204,21 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 		return guardSelected(approved, path, before)
 	case "guard-all":
 		project, _ := argument(arguments, 0)
-		stage, kind, ordinal := "inventory", "none", 0
 		resources, err := inventory()
-		if err == nil {
-			stage = "project"
-			if project == "" || project == "default" {
-				err = guardRefusal("teardown requires a dedicated project")
+		var refusals []error
+		if err != nil {
+			refusals = append(refusals, guardContext("inventory", err))
+		}
+		if project == "" || project == "default" {
+			refusals = append(refusals, guardRefusal("teardown requires a dedicated project"))
+		} else {
+			for index, resource := range resources {
+				if err := guardResource(resource, project); err != nil {
+					refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
+				}
 			}
 		}
-		for index := 0; err == nil && index < len(resources); index++ {
-			stage, kind, ordinal = "resource", resources[index].Kind, index+1
-			err = guardResource(resources[index], project)
-		}
-		if err != nil {
-			fmt.Fprintln(stderr, "plan_stale: "+guardAllDetails(stage, kind, ordinal, err))
-		}
-		return err
+		return domain.CollectRefusals(refusals...)
 	}
 	resources, err := inventory()
 	if err != nil {
@@ -246,7 +233,7 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 				continue
 			}
 			if resource.Pool == "" {
-				return missingField("pool")
+				return ports.TeardownMissingField("pool")
 			}
 			fmt.Fprintf(stdout, "%s\t%s\n", resource.Pool, resource.Name)
 		}
@@ -265,7 +252,7 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 			return nil
 		}
 		if len(arguments) < 3 {
-			return errors.New("usage: guard KIND NAME PROJECT [POOL]")
+			return guardRefusal("usage: guard KIND NAME PROJECT [POOL]")
 		}
 		name, project, pool := arguments[1], arguments[2], ""
 		if len(arguments) > 3 {
@@ -288,74 +275,19 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout, stderr 
 	return guardRefusal("invalid teardown guard mode")
 }
 
-var releasedEscapes = map[uint16]string{'"': `\"`, '\\': `\\`, '\b': `\b`, '\f': `\f`, '\n': `\n`, '\r': `\r`, '\t': `\t`}
+func printJSON(stdout io.Writer, value any) error {
+	return json.NewEncoder(stdout).Encode(value)
+}
 
-// printReleasedJSON writes a value as the released helper's json.dumps did:
-// ", " and ": " separators and ASCII-only strings, in marshal order.
-func printReleasedJSON(stdout io.Writer, value any) error {
-	body, err := json.Marshal(value)
+func readGuardJSON(reader io.Reader, limit int64, oversized guardRefusal, target any) error {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	var out strings.Builder
-	counts, objects := []int{}, []bool{}
-	for {
-		token, err := decoder.Token()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if delim, ok := token.(json.Delim); ok && (delim == '}' || delim == ']') {
-			counts, objects = counts[:len(counts)-1], objects[:len(objects)-1]
-			out.WriteRune(rune(delim))
-			continue
-		}
-		if depth := len(counts) - 1; depth >= 0 {
-			if objects[depth] && counts[depth]%2 == 1 {
-				out.WriteString(": ")
-			} else if counts[depth] > 0 {
-				out.WriteString(", ")
-			}
-			counts[depth]++
-		}
-		switch item := token.(type) {
-		case json.Delim:
-			out.WriteRune(rune(item))
-			counts, objects = append(counts, 0), append(objects, item == '{')
-		case string:
-			out.WriteByte('"')
-			for _, unit := range utf16.Encode([]rune(item)) {
-				if escaped, short := releasedEscapes[unit]; short {
-					out.WriteString(escaped)
-				} else if unit >= 0x20 && unit < 0x7f {
-					out.WriteByte(byte(unit))
-				} else {
-					fmt.Fprintf(&out, `\u%04x`, unit)
-				}
-			}
-			out.WriteByte('"')
-		case json.Number:
-			out.WriteString(item.String())
-		case bool:
-			out.WriteString(strconv.FormatBool(item))
-		case nil:
-			out.WriteString("null")
-		}
+	if int64(len(body)) > limit {
+		return oversized
 	}
-	_, err = fmt.Fprintln(stdout, out.String())
-	return err
-}
-
-func printJSON(stdout io.Writer, value any) error {
-	body, err := json.Marshal(value)
-	if err == nil {
-		_, err = fmt.Fprintf(stdout, "%s\n", body)
-	}
-	return err
+	return json.Unmarshal(body, target)
 }
 
 func processEnvironment() map[string]string {
@@ -398,7 +330,7 @@ func readPlan() (*RecoveryPlan, error) {
 		return nil, err
 	}
 	sum := sha256.Sum256(body)
-	if len(body) > 64<<20 || info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07777 != 0600 || info.Uid != plan.Installation.OperatorUID || hex.EncodeToString(sum[:]) != os.Getenv("SUBYARD_TEARDOWN_PLAN_SHA256") {
+	if len(body) > 64<<20 || info.Mode&07777 != 0600 || info.Uid != plan.Installation.OperatorUID || hex.EncodeToString(sum[:]) != os.Getenv("SUBYARD_TEARDOWN_PLAN_SHA256") {
 		return nil, guardRefusal("changed or unsafe full uninstall plan")
 	}
 	return plan, nil
@@ -422,12 +354,9 @@ func decodeExact(payload []byte, target any, refusal guardRefusal, allowed ...[]
 		if string(item["Path"]) == "null" || string(item["Binding"]) == "null" {
 			return refusal
 		}
-		keys := make([]string, 0, len(item))
-		for key := range item {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		if !slices.ContainsFunc(allowed, func(set []string) bool { return slices.Equal(set, keys) }) {
+		if !slices.ContainsFunc(allowed, func(set []string) bool {
+			return len(item) == len(set) && !slices.ContainsFunc(set, func(key string) bool { return item[key] == nil })
+		}) {
 			return refusal
 		}
 	}
@@ -441,7 +370,7 @@ func approvedServices(plan *RecoveryPlan) ([]RecoveryService, error) {
 	if plan != nil {
 		services = plan.Services
 	} else if value, ok := os.LookupEnv("SUBYARD_TEARDOWN_SERVICES"); !ok {
-		return nil, errors.New("approved service inventory is missing")
+		return nil, guardRefusal("approved service inventory is missing")
 	} else if err := decodeExact([]byte(value), &services, "invalid approved service scope", []string{"Artifacts", "scope", "units"}); err != nil {
 		return nil, err
 	}
@@ -548,7 +477,7 @@ func approvedArtifacts() ([]ports.TeardownArtifact, error) {
 	snapshots := [][]ports.TeardownArtifact{}
 	for _, yard := range plan.Yards {
 		if yard.Snapshot == nil {
-			return nil, errors.New("approved yard snapshot is missing")
+			return nil, guardRefusal("approved yard snapshot is missing")
 		}
 		snapshots = append(snapshots, yard.Snapshot.Artifacts)
 	}
@@ -572,8 +501,7 @@ var (
 	resourceFields   = []string{"binding", "bindings", "kind", "name", "owner", "path", "pool", "usedBy"}
 )
 
-// inventoryText reads a text field; an absent field is empty, and another
-// JSON type (null too, unless nullable) keeps the historical TypeError category.
+// inventoryText reads exact field names and distinguishes null from text.
 func inventoryText(fields map[string]json.RawMessage, key string, nullable bool) (string, error) {
 	raw, present := fields[key]
 	if !present || nullable && string(raw) == "null" {
@@ -581,7 +509,7 @@ func inventoryText(fields map[string]json.RawMessage, key string, nullable bool)
 	}
 	var value string
 	if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
-		return "", typeMismatch("teardown resource " + key + " is not text")
+		return "", guardRefusal("teardown resource " + key + " is not text")
 	}
 	return value, nil
 }
@@ -603,7 +531,7 @@ func inventory() ([]ports.TeardownResource, error) {
 	for index, body := range raw {
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
-			return nil, typeMismatch("teardown resource is not an object")
+			return nil, guardRefusal("teardown resource is not an object")
 		}
 		for key := range fields {
 			if !slices.Contains(resourceFields, key) {
@@ -633,10 +561,6 @@ func inventory() ([]ports.TeardownResource, error) {
 		}
 		resource := &resources[index]
 		if err := json.Unmarshal(body, resource); err != nil {
-			var typeErr *json.UnmarshalTypeError
-			if errors.As(err, &typeErr) {
-				return nil, typeMismatch("invalid teardown resource field type")
-			}
 			return nil, err
 		}
 		key := [3]string{resource.Kind, resource.Pool, resource.Name}
@@ -648,13 +572,6 @@ func inventory() ([]ports.TeardownResource, error) {
 	return resources, nil
 }
 
-// missingField and typeMismatch keep the historical diagnostic categories.
-type missingField = ports.TeardownMissingField
-
-type typeMismatch string
-
-func (mismatch typeMismatch) Error() string { return string(mismatch) }
-
 // incusQuery and incusCall are the only native Incus boundaries of the guard.
 var incusQuery, incusCall = queryIncus, callIncus
 
@@ -664,16 +581,13 @@ func queryIncus(path, project string, target any) error {
 	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(output))
+	return decodeIncusJSON(bytes.NewReader(output), target)
+}
+
+func decodeIncusJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
-	if err := decoder.Decode(target); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
-			return typeMismatch("unexpected Incus response shape")
-		}
-		return err
-	}
-	return nil
+	return decoder.Decode(target)
 }
 
 // queryList reads an Incus collection. Only an actual JSON array, even an
@@ -684,7 +598,7 @@ func queryList(path, project string) ([]string, error) {
 		return nil, err
 	}
 	if values == nil {
-		return nil, typeMismatch("Incus collection is not a list")
+		return nil, guardRefusal("Incus collection is not a list")
 	}
 	return values, nil
 }
@@ -712,7 +626,7 @@ func guardResource(resource ports.TeardownResource, project string) error {
 		}
 	case "volume":
 		if resource.Pool == "" {
-			return missingField("pool")
+			return ports.TeardownMissingField("pool")
 		}
 		path = "/1.0/storage-pools/" + resource.Pool + "/volumes/custom/" + name
 	case "project":
@@ -731,7 +645,7 @@ func guardResource(resource ports.TeardownResource, project string) error {
 	// The live recheck reads the same shared binding fields as assessment.
 	for _, field := range ports.TeardownBindingFields(kind) {
 		if _, present := observed[field]; !present {
-			return missingField(field)
+			return ports.TeardownMissingField(field)
 		}
 	}
 	if kind == "instance" || kind == "volume" {
@@ -756,7 +670,7 @@ func guardResource(resource ports.TeardownResource, project string) error {
 	if kind == "instance" {
 		timestamp, ok := observed["created_at"].(string)
 		if !ok {
-			return typeMismatch("instance creation time is not text")
+			return guardRefusal("instance creation time is not text")
 		}
 		suffix := ""
 		if match := fractionPattern.FindStringSubmatch(timestamp); match != nil {
@@ -786,63 +700,6 @@ func guardResource(resource ports.TeardownResource, project string) error {
 		return guardRefusal("teardown resource changed after confirmation")
 	}
 	return nil
-}
-
-var guardAllReasons = []string{"oversized teardown inventory", "invalid teardown inventory", "invalid teardown resource fields",
-	"invalid teardown resource kind", "invalid teardown resource identity", "invalid teardown binding",
-	"duplicate teardown resource", "teardown requires a dedicated project",
-	"invalid full default-profile retry bindings", "teardown resource changed after confirmation"}
-
-// guardAllDetails crosses the boundary with fixed structural labels only,
-// never native query output, commands or resource values.
-func guardAllDetails(stage, kind string, ordinal int, err error) string {
-	details := struct {
-		Action    string `json:"action"`
-		Stage     string `json:"stage"`
-		Kind      string `json:"kind"`
-		Ordinal   int    `json:"ordinal"`
-		Category  string `json:"category"`
-		Field     string `json:"field,omitempty"`
-		Reason    string `json:"reason,omitempty"`
-		QueryExit *int   `json:"query_exit,omitempty"`
-		Errno     *int   `json:"errno,omitempty"`
-	}{Action: "guard-all", Stage: stage, Kind: kind, Ordinal: ordinal, Category: "unknown"}
-	var refusal guardRefusal
-	var field missingField
-	var mismatch typeMismatch
-	var exit *exec.ExitError
-	var errno syscall.Errno
-	switch {
-	case errors.As(err, &refusal):
-		details.Category = "ValueError"
-		if slices.Contains(guardAllReasons, string(refusal)) {
-			details.Reason = string(refusal)
-		}
-	case errors.As(err, &field):
-		details.Category, details.Field = "KeyError", string(field)
-	case errors.As(err, &mismatch):
-		details.Category = "TypeError"
-	case errors.As(err, &exit):
-		code := exit.ExitCode()
-		details.Category, details.QueryExit = "CalledProcessError", &code
-	case errors.Is(err, exec.ErrNotFound):
-		code := int(unix.ENOENT)
-		details.Category, details.Errno = "FileNotFoundError", &code
-	case errors.As(err, &errno):
-		code := int(errno)
-		details.Errno = &code
-		switch errno {
-		case unix.EACCES, unix.EPERM:
-			details.Category = "PermissionError"
-		case unix.ENOENT:
-			details.Category = "FileNotFoundError"
-		case unix.ENOTDIR, unix.EISDIR, unix.EEXIST, unix.EAGAIN, unix.EINTR, unix.ECHILD, unix.ESRCH, unix.ETIMEDOUT, unix.EPIPE, unix.ECONNREFUSED, unix.ECONNRESET, unix.ECONNABORTED:
-		default:
-			details.Category = "OSError"
-		}
-	}
-	body, _ := json.Marshal(details)
-	return string(body)
 }
 
 // removeShared retires exact unused host resources after all approved yard
@@ -908,7 +765,7 @@ func removeShared(selected bool, stdout io.Writer) error {
 		}
 		// An absent consumer list is empty; null or another shape is no evidence.
 		if actual.UsedBy != nil && (json.Unmarshal(actual.UsedBy, &consumers) != nil || consumers == nil) {
-			return typeMismatch("shared resource consumers are not a list")
+			return guardRefusal("shared resource consumers are not a list")
 		}
 		foreign := slices.ContainsFunc(consumers, func(consumer string) bool {
 			return strings.SplitN(consumer, "?", 2)[0] != "/1.0/profiles/default" || len(profile.UsedBy) > 0
@@ -977,14 +834,14 @@ func (barrier *callerBarrier) check() error {
 	}
 	pid, birth, ok := strings.Cut(identity, ":")
 	if !ok {
-		return errors.New("invalid teardown caller identity")
+		return guardRefusal("invalid teardown caller identity")
 	}
 	status, err := os.ReadFile("/proc/" + pid + "/stat")
 	if err == nil {
 		// Comm may contain spaces/parentheses; fields after its final ')' start at state.
 		fields := strings.Fields(string(status)[strings.LastIndex(string(status), ")")+1:])
 		if len(fields) < 20 {
-			return errors.New("teardown caller identity is unavailable")
+			return guardRefusal("teardown caller identity is unavailable")
 		}
 		if fields[0] != "Z" && fields[19] == birth {
 			return nil
@@ -1022,10 +879,9 @@ func (barrier *callerBarrier) check() error {
 	return nil
 }
 
-func filesNeedRoot(path string) bool {
-	body, err := os.ReadFile(path)
-	var plan RecoveryPlan
-	if err != nil || json.Unmarshal(body, &plan) != nil {
+func filesNeedRoot() bool {
+	plan, err := readPlan()
+	if err != nil {
 		return false
 	}
 	return slices.ContainsFunc(plan.Trees, func(tree Tree) bool {
@@ -1232,10 +1088,10 @@ func appendUnique(values, additions []string) []string {
 
 var profileName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// checkProfiles runs only approved shipped owner hooks; never prints records.
-func checkProfiles(arguments []string, stderr io.Writer) error {
+// checkProfiles runs only approved shipped owner hooks.
+func checkProfiles(arguments []string) error {
 	if len(arguments) != 1 {
-		return errors.New("usage: check-profiles ROOT")
+		return guardRefusal("usage: check-profiles ROOT")
 	}
 	root, err := filepath.EvalSymlinks(arguments[0])
 	if err != nil {
@@ -1251,53 +1107,55 @@ func checkProfiles(arguments []string, stderr io.Writer) error {
 	if len(plan.ProfileChecks) > 128 {
 		return guardRefusal("invalid conditional owner inventory")
 	}
+	var refusals []error
 	for _, check := range plan.ProfileChecks {
 		if !profileName.MatchString(check.Profile) || check.Environment == nil {
-			return guardRefusal("invalid conditional owner identity")
+			refusals = append(refusals, guardRefusal("invalid conditional owner identity"))
+		} else if err := checkProfile(root, check); err != nil {
+			refusals = append(refusals, guardContext("profile "+check.Profile, err))
 		}
-		directory := filepath.Join(root, "config/profiles", check.Profile)
-		body, err := os.ReadFile(filepath.Join(directory, "profile.json"))
-		if err != nil {
-			return err
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+func checkProfile(root string, check RecoveryProfileCheck) error {
+	directory := filepath.Join(root, "config/profiles", check.Profile)
+	body, err := os.ReadFile(filepath.Join(directory, "profile.json"))
+	if err != nil {
+		return err
+	}
+	var declaration map[string]any
+	if err := json.Unmarshal(body, &declaration); err != nil {
+		return err
+	}
+	hook := directory + "/" + check.Hook
+	info, statErr := os.Lstat(hook)
+	resolved, resolveErr := filepath.EvalSymlinks(hook)
+	if declaration["full_cleanup"] != check.Hook || statErr != nil || !info.Mode().IsRegular() || resolveErr != nil || resolved != hook || !strings.HasPrefix(hook, directory+"/") {
+		return guardRefusal("conditional owner hook differs from its declaration")
+	}
+	if len(check.Environment) > 2048 {
+		return guardRefusal("invalid conditional owner context")
+	}
+	environment := []string{}
+	for name, value := range check.Environment {
+		if name != "PYTHONDONTWRITEBYTECODE" && name != "SUBYARD_FULL_CLEANUP_READ_ONLY" {
+			environment = append(environment, name+"="+value)
 		}
-		var declaration map[string]any
-		if err := json.Unmarshal(body, &declaration); err != nil {
-			return err
-		}
-		hook := directory + "/" + check.Hook
-		info, statErr := os.Lstat(hook)
-		resolved, resolveErr := filepath.EvalSymlinks(hook)
-		if declaration["full_cleanup"] != check.Hook || statErr != nil || !info.Mode().IsRegular() || resolveErr != nil || resolved != hook || !strings.HasPrefix(hook, directory+"/") {
-			return guardRefusal("conditional owner hook differs from its declaration")
-		}
-		if len(check.Environment) > 2048 {
-			return guardRefusal("invalid conditional owner context")
-		}
-		environment := []string{}
-		for name, value := range check.Environment {
-			if name != "PYTHONDONTWRITEBYTECODE" && name != "SUBYARD_FULL_CLEANUP_READ_ONLY" {
-				environment = append(environment, name+"="+value)
-			}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		command := exec.CommandContext(ctx, hook, "--verify-private")
-		command.Env = append(environment, "PYTHONDONTWRITEBYTECODE=1", "SUBYARD_FULL_CLEANUP_READ_ONLY=1")
-		command.Dir = root
-		command.WaitDelay = 5 * time.Second
-		output, runErr := command.Output()
-		expired := ctx.Err() != nil
-		cancel()
-		if expired {
-			return errors.New("conditional owner proof timed out")
-		}
-		var exit *exec.ExitError
-		if runErr != nil && !errors.As(runErr, &exit) {
-			return runErr
-		}
-		if runErr != nil || !bytes.Equal(bytes.Trim(output, " \t\n\r\v\f"), []byte(`{"verified": true}`)) {
-			fmt.Fprintln(stderr, "profile "+check.Profile+" private producer ownership could not be proven; preserve its producers and evidence and restore the approved source inventory")
-			return guardRefusal("conditional owner proof failed for " + check.Profile)
-		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, hook, "--verify-private")
+	command.Env = append(environment, "PYTHONDONTWRITEBYTECODE=1", "SUBYARD_FULL_CLEANUP_READ_ONLY=1")
+	command.Dir = root
+	command.WaitDelay = 5 * time.Second
+	output, err := command.Output()
+	if ctx.Err() != nil {
+		return guardRefusal("conditional owner proof timed out")
+	}
+	var proof map[string]bool
+	if err != nil || observation.ValidateJSON(output) != nil || json.Unmarshal(output, &proof) != nil || len(proof) != 1 || !proof["verified"] {
+		return guardRefusal("private producer ownership could not be proven; preserve its producers and evidence and restore the approved source inventory")
 	}
 	return nil
 }
