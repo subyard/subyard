@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -89,7 +90,8 @@ func TestProjectRemovalVariantsUseTypedDefaultsAndDeclineWithoutMutation(t *test
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, stateDirectory := nativeFixture(t)
+			fixture := newFixture(t)
+			root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 			record := projectRemovalRecord(test.mode)
 			store, err := state.NewFileStore(stateDirectory)
 			if err != nil {
@@ -119,14 +121,11 @@ func TestProjectRemovalVariantsUseTypedDefaultsAndDeclineWithoutMutation(t *test
 			prompt := &testkit.Prompt{Answers: []bool{false}}
 			runner := &testkit.ScriptedAdapter{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
-				Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+			program := fixture.New(Options{
+				Arguments: test.arguments,
+				Incus:     incus, ProjectData: probe,
 				AdapterRunner: runner, Prompt: prompt, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), "operation declined") {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -150,7 +149,8 @@ func TestProjectRemovalVariantsUseTypedDefaultsAndDeclineWithoutMutation(t *test
 }
 
 func TestProjectWorkspaceRemovalExplicitYesCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	environment, stateDirectory := fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	environment = append(environment, "SUBYARD_OPERATION_ID=remove-workspace")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
@@ -169,14 +169,11 @@ func TestProjectWorkspaceRemovalExplicitYesCommitsOnlyAfterPhysicalSuccess(t *te
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "remove-workspace", Status: "ok",
 	}}}}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "--yes", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+	program := fixture.New(Options{
+		Arguments:   []string{"remove", "--yes", "Demo"},
+		Environment: environment, Incus: incus, ProjectData: probe,
 		AdapterRunner: runner, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remove returned %d", code)
 	}
@@ -189,7 +186,8 @@ func TestProjectWorkspaceRemovalExplicitYesCommitsOnlyAfterPhysicalSuccess(t *te
 }
 
 func TestProjectWorkspaceRemovalFailureRetainsRegistry(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	environment, stateDirectory := fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	environment = append(environment, "SUBYARD_OPERATION_ID=remove-failure")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
@@ -205,14 +203,11 @@ func TestProjectWorkspaceRemovalFailureRetainsRegistry(t *testing.T) {
 	incus.Instances["subyard/yard"] = instance
 	probe := &projectRemovalProbe{err: errors.New("physical failure"), failAt: 2}
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "--yes", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+	program := fixture.New(Options{
+		Arguments:   []string{"remove", "--yes", "Demo"},
+		Environment: environment, Incus: incus, ProjectData: probe,
 		AdapterRunner: runner,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("remove returned %d", code)
 	}
@@ -222,7 +217,8 @@ func TestProjectWorkspaceRemovalFailureRetainsRegistry(t *testing.T) {
 }
 
 func TestProjectWorkspaceRemovalPreconditionFailsBeforePrompt(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	stateDirectory := filepath.Join(fixture.ConfigHome, "projects")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -234,14 +230,11 @@ func TestProjectWorkspaceRemovalPreconditionFailsBeforePrompt(t *testing.T) {
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: lifecycleIncus(),
+	program := fixture.New(Options{
+		Arguments:   []string{"remove", "Demo"},
+		Incus:       lifecycleIncus(),
 		ProjectData: &projectRemovalProbe{}, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "must be running") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -251,7 +244,8 @@ func TestProjectWorkspaceRemovalPreconditionFailsBeforePrompt(t *testing.T) {
 }
 
 func TestProjectSoftRemovalWorksWhenYardInstanceIsMissing(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	environment, stateDirectory := fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	environment = append(environment, "SUBYARD_OPERATION_ID=remove-stale-registration")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
@@ -264,14 +258,10 @@ func TestProjectSoftRemovalWorksWhenYardInstanceIsMissing(t *testing.T) {
 	incus := lifecycleIncus()
 	delete(incus.Instances, "subyard/yard")
 	probe := &projectRemovalProbe{err: errors.New("data plane must not be used")}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{
 		Arguments:   []string{"remove", "--soft", "--yes", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
+		Environment: environment, Incus: incus, ProjectData: probe,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("soft removal returned %d", code)
 	}
@@ -281,7 +271,8 @@ func TestProjectSoftRemovalWorksWhenYardInstanceIsMissing(t *testing.T) {
 }
 
 func TestProjectRemovalDeclineDoesNotRefreshRemoteOwnerInventory(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	environment, stateDirectory := fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -310,13 +301,10 @@ func TestProjectRemovalDeclineDoesNotRefreshRemoteOwnerInventory(t *testing.T) {
 	}
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "--soft", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: lifecycleIncus(), Prompt: prompt, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"remove", "--soft", "Demo"},
+		Incus:     lifecycleIncus(), Prompt: prompt, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -330,7 +318,8 @@ func TestProjectRemovalDeclineDoesNotRefreshRemoteOwnerInventory(t *testing.T) {
 }
 
 func TestProjectRemovalDeclineDoesNotRepairOrMigrateLegacyLocalState(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	stateDirectory := filepath.Join(fixture.ConfigHome, "projects")
 	record := projectRemovalRecord(domain.ProjectSync)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -357,13 +346,10 @@ func TestProjectRemovalDeclineDoesNotRepairOrMigrateLegacyLocalState(t *testing.
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "--soft", "Demo"},
-		Environment: environment, WorkingDir: root, Incus: incus, Prompt: prompt, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"remove", "--soft", "Demo"},
+		Incus:     incus, Prompt: prompt, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -423,18 +409,16 @@ func TestProjectRemovalRejectsUnsafeStateDirectoryBeforePrompt(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, stateDirectory := nativeFixture(t)
+			fixture := newFixture(t)
+			stateDirectory := filepath.Join(fixture.ConfigHome, "projects")
 			test.setup(t, stateDirectory, projectRemovalRecord(domain.ProjectSync))
 			prompt := &testkit.Prompt{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: []string{"remove", "--soft", "Demo"},
-				Environment: environment, WorkingDir: root, Incus: lifecycleIncus(),
-				Prompt: prompt, Stderr: &stderr,
+			program := fixture.New(Options{
+				Arguments: []string{"remove", "--soft", "Demo"},
+				Incus:     lifecycleIncus(),
+				Prompt:    prompt, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), "state") {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -447,15 +431,12 @@ func TestProjectRemovalRejectsUnsafeStateDirectoryBeforePrompt(t *testing.T) {
 }
 
 func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withCommands("ssh"))
+	root, environment := fixture.Root, fixture.Environment
 	fakeBin := filepath.Join(root, "fake-bin")
 	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"exit 1\n", 0o700)
-	path := fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")
-	t.Setenv("PATH", path)
-	environment = append(environment, "PATH="+path)
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	ownerRoot := filepath.Join(dataHome, "owner-inventory")
 	connection := ownerinventory.Connection{
@@ -521,16 +502,13 @@ func TestCanonicalOwnerProjectRemovalDeclinePreservesRoutingMetadata(t *testing.
 		Observed: "owned project present", Desired: "environment and record absent; workspace retained", Decision: domain.StepApply,
 		Verify: "observe native removal and retained workspace", Consequence: "remove the owned project environment and registration",
 	}}, "remove the owned project environment and registration")
+	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: "exec " + shellquote.Word(filepath.Join(fakeBin, "ssh")) + ` "$@"`})
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{
 		Arguments:   []string{"-Y", "remote-owner/default", "remove", "--soft", "Remote"},
-		Environment: environment, WorkingDir: root, RemoteControl: control, Prompt: prompt,
+		Environment: environment, RemoteControl: control, Prompt: prompt,
 		Stderr: &stderr, Clock: testkit.NewManualClock(observedAt),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}

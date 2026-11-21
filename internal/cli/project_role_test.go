@@ -47,7 +47,8 @@ func TestCanonicalProjectRoleDenialPreservesStaleControllerState(t *testing.T) {
 				continue
 			}
 			t.Run(name+"/"+test.name, func(t *testing.T) {
-				root, environment, stateDirectory := nativeFixture(t)
+				fixture := newFixture(t, withCommands("ssh", "code"))
+				root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 				manifest := filepath.Join(root, "config", "commands.registry")
 				current, err := os.ReadFile(manifest)
 				if err != nil {
@@ -111,27 +112,23 @@ func TestCanonicalProjectRoleDenialPreservesStaleControllerState(t *testing.T) {
 				if test.renamed {
 					roleReply = "printf x > " + shellquote.Word(physicalCall) + "; printf 'unexpected owner query after identity mismatch\\n' >&2; exit 1"
 				}
-				writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
-					"case \"$*\" in\n"+
-					"  *rpc*--stdio*) "+inventoryReply+" ;;\n"+
-					"  *_project-state*preview*|*_project-state*check-role*) "+roleReply+" ;;\n"+
-					"  *) printf x > "+shellquote.Word(physicalCall)+"; exit 1 ;;\nesac\n", 0o700)
-				writeCLIFile(t, filepath.Join(bin, "code"), "#!/bin/sh\nprintf x > "+shellquote.Word(physicalCall)+"\n", 0o700)
-				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				fixture.Exec().On(testkit.Match{Tool: "ssh"}, testkit.Reply{Script: trustedSSHMock(t) +
+					"case \"$*\" in\n" +
+					"  *rpc*--stdio*) " + inventoryReply + " ;;\n" +
+					"  *_project-state*preview*|*_project-state*check-role*) " + roleReply + " ;;\n" +
+					"  *) printf x > " + shellquote.Word(physicalCall) + "; exit 1 ;;\nesac\n"})
+				fixture.Exec().On(testkit.Match{Tool: "code"}, testkit.Reply{Script: "printf x > " + shellquote.Word(physicalCall)})
 				argument := "Demo"
 				if name == "sync" {
 					argument = source
 				}
 				var stdout, stderr bytes.Buffer
 				incus := lifecycleIncus()
-				program, err := New(Options{
-					RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote-owner/build", name, argument, "--yes"},
-					Environment: append(environment, "SUBYARD_HOST_ID=controller"), WorkingDir: root,
-					Stdout: &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now), Incus: incus, Executor: incus,
+				program := fixture.New(Options{
+					Arguments:   []string{"-Y", "remote-owner/build", name, argument, "--yes"},
+					Environment: append(environment, "SUBYARD_HOST_ID=controller"),
+					Stdout:      &stdout, Stderr: &stderr, Clock: testkit.NewManualClock(now), Incus: incus, Executor: incus,
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				stateRoots := []string{filepath.Join(root, "config"), filepath.Join(root, "state"), filepath.Join(root, "data")}
 				before := make([][]string, len(stateRoots))
 				for index, path := range stateRoots {
@@ -164,7 +161,8 @@ func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
 	for _, change := range []string{"unchanged", "changed", "removed"} {
 		t.Run(change, func(t *testing.T) {
 			ctx := context.Background()
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withCommands("ssh"))
+			root, environment := fixture.Root, fixture.Environment
 			registration := writeProjectCompatibilityRoute(t, root, "")
 			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
 			connection := ownerinventory.Connection{HostID: "remote-owner", Destination: "dev@remote.example"}
@@ -181,17 +179,13 @@ func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
 			responsePath := filepath.Join(bin, "response")
 			writeHostRPCFixture(t, responsePath, inventory)
 			physicalCall := filepath.Join(bin, "physical-call")
-			writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
-				"case \"$*\" in\n"+
-				"  *rpc*--stdio*) cat "+shellquote.Word(responsePath)+" ;;\n"+
-				"  *_project-state*check-role*) exit 0 ;;\n"+
-				"  *) printf x > "+shellquote.Word(physicalCall)+"; exit 1 ;;\nesac\n", 0o700)
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=controller"),
-				WorkingDir: root, Clock: testkit.NewManualClock(now), Incus: lifecycleIncus(), Stdout: io.Discard, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
+			fixture.Exec().On(testkit.Match{Tool: "ssh"}, testkit.Reply{Script: trustedSSHMock(t) +
+				"case \"$*\" in\n" +
+				"  *rpc*--stdio*) cat " + shellquote.Word(responsePath) + " ;;\n" +
+				"  *_project-state*check-role*) exit 0 ;;\n" +
+				"  *) printf x > " + shellquote.Word(physicalCall) + "; exit 1 ;;\nesac\n"})
+			program := fixture.New(Options{Environment: append(environment, "SUBYARD_HOST_ID=controller"),
+				Clock: testkit.NewManualClock(now), Incus: lifecycleIncus(), Stdout: io.Discard, Stderr: io.Discard})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -277,16 +271,14 @@ func writeProjectCompatibilityRoute(t *testing.T, root, sshHost string) string {
 }
 
 func TestProjectRoleRejectsAdmissionBeforeStateMutation(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 	writeDisabledProjectRole(t, root)
 	source := filepath.Join(root, "sample-source")
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +311,8 @@ func TestProjectRoleRejectsAdmissionBeforeStateMutation(t *testing.T) {
 }
 
 func TestProjectRoleDirectInternalEndpointRejectsAdmission(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 	writeDisabledProjectRole(t, root)
 	manifest := filepath.Join(root, "config", "commands.registry")
 	current, err := os.ReadFile(manifest)
@@ -332,11 +325,8 @@ func TestProjectRoleDirectInternalEndpointRejectsAdmission(t *testing.T) {
 		{"_state", "upsert-yard", "sample-id", "sample", "sync", "yard", "yard"},
 	} {
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+		program := fixture.New(Options{
 			Arguments: arguments, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "does not accept work projects") {
 			t.Errorf("direct state endpoint %v code=%d error=%q", arguments, code, stderr.String())
 		}
@@ -347,7 +337,8 @@ func TestProjectRoleDirectInternalEndpointRejectsAdmission(t *testing.T) {
 }
 
 func TestProjectRoleRejectsExistingProjectCommands(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 	writeDisabledProjectRole(t, root)
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
@@ -360,10 +351,7 @@ func TestProjectRoleRejectsExistingProjectCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +365,8 @@ func TestProjectRoleRejectsExistingProjectCommands(t *testing.T) {
 }
 
 func TestProjectRoleRecheckedBeforeMutation(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -387,10 +376,7 @@ func TestProjectRoleRecheckedBeforeMutation(t *testing.T) {
 	preset := filepath.Join(root, "config", "yards", "profiles", "projects.env")
 	writeCLIFile(t, preset, "ALLOWS_PROJECTS=true\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "state", "yards", "default", "config.env"), "YARD_TEMPLATE=projects\n", 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -407,13 +393,11 @@ func TestProjectRoleRecheckedBeforeMutation(t *testing.T) {
 func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 	for _, name := range []string{"sync", "code"} {
 		t.Run(name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root := fixture.Root
 			// The controller role is unrelated to the selected remote owner's role.
 			writeDisabledProjectRole(t, root)
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -436,10 +420,9 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 			if err := os.MkdirAll(bin, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			calls, denied := filepath.Join(root, "owner-calls"), filepath.Join(root, "owner-denied")
-			writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+
-				"printf '%s\\n' \"$*\" >> "+shellquote.Word(calls)+"\n"+
-				"if [ -f "+shellquote.Word(denied)+" ]; then printf 'selected yard role does not accept work projects\\n' >&2; exit 1; fi\nexit 0\n", 0o700)
+			denied := filepath.Join(root, "owner-denied")
+			fake := testkit.NewExecFake(t, bin, "ssh").On(testkit.Match{}, testkit.Reply{Script: trustedSSHMock(t) +
+				"if [ -f " + shellquote.Word(denied) + " ]; then printf 'selected yard role does not accept work projects\\n' >&2; exit 1; fi\nexit 0\n"})
 			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 			execution := &projectExecution{Loaded: selected, RequiresProjects: projectCommandRequiresProjects(name)}
 			if err := program.captureProjectOwner(context.Background(), execution); err != nil {
@@ -450,10 +433,10 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 				t.Fatalf("canonical %s failed owner role revalidation: %v", name, err)
 			}
 			release()
-			payload, err := os.ReadFile(calls)
-			if err != nil || !strings.Contains(string(payload), "check-role") || !strings.Contains(string(payload), "build") {
-				t.Fatalf("role check did not select the owner yard: %q err=%v", payload, err)
-			}
+			fake.AssertCalls(testkit.Call{Tool: "ssh", Args: []string{
+				"-T", "owner-alias", "--", "bash", "-lc",
+				shellquote.Word("SUBYARD_OPERATION_ID='' 'yard' '-Y' 'build' '_project-state' 'check-role'"),
+			}})
 			before := nativeTreeSnapshot(t, store.Root)
 			writeCLIFile(t, denied, "denied\n", 0o600)
 			physicalWork := false
@@ -492,7 +475,8 @@ func TestOwnerProjectAssessmentDoesNotWriteState(t *testing.T) {
 			{"preview denied", []string{"preview", "/host/New", "sync", "New", "0"}, true, 1},
 		} {
 			t.Run(test.name+map[bool]string{false: "/absent", true: "/legacy"}[legacy], func(t *testing.T) {
-				root, environment, stateDirectory := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
+				root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 				manifest := filepath.Join(root, "config", "commands.registry")
 				current, err := os.ReadFile(manifest)
 				if err != nil {
@@ -522,11 +506,8 @@ func TestOwnerProjectAssessmentDoesNotWriteState(t *testing.T) {
 					writeDisabledProjectRole(t, root)
 				}
 				var stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+				program := fixture.New(Options{Environment: environment,
 					Arguments: append([]string{"_project-state"}, test.args...), Stderr: &stderr, Stdout: io.Discard})
-				if err != nil {
-					t.Fatal(err)
-				}
 				before := nativeTreeSnapshot(t, root)
 				if code := program.Run(context.Background()); code != test.code {
 					t.Fatalf("owner assessment code=%d want=%d stderr=%q", code, test.code, stderr.String())
