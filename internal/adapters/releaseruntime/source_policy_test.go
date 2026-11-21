@@ -390,7 +390,10 @@ func TestSourceAnchorRefusalsPrintTheFullChain(t *testing.T) {
 		{"target in a later epoch", "1.5.0", third + "yard update", "2.1.0", journal("2.5.0", releasetransition.DirectionActivateTarget)},
 		{"target at the current anchor", "0.11.0", "yard update", "1.0.1", journal("3.0.0", releasetransition.DirectionActivateTarget)},
 		{"target in the same epoch", "1.5.0", second + third + "yard update", "2.1.0", journal("1.6.0", releasetransition.DirectionActivateTarget)},
-		{"rollback continues from the active release", "2.5.0", third + "yard update", "3.0.2", journal("1.5.0", releasetransition.DirectionActivatePrevious)},
+		{"rollback within the epoch continues from its target", "2.5.0", third + "yard update", "3.0.2", journal("2.2.0", releasetransition.DirectionActivatePrevious)},
+		{"rollback across an anchor continues from its target", "2.5.0", second + third + "yard update", "3.0.2", journal("1.5.0", releasetransition.DirectionActivatePrevious)},
+		{"rollback to a newer target continues from the active release", "1.5.0", second + third + "yard update", "2.1.0", journal("2.5.0", releasetransition.DirectionActivatePrevious)},
+		{"unversioned rollback continues from the active release", "2.5.0", third + "yard update", "3.0.2", journal("development", releasetransition.DirectionActivatePrevious)},
 		{"unversioned target continues from the active release", "0.11.0", first + second + third + "yard update", "1.0.1", journal("development", releasetransition.DirectionActivateTarget)},
 	} {
 		installer := semver.MustParse(scenario.installer)

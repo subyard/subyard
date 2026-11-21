@@ -100,11 +100,13 @@ func unfinishedBelowAnchorError(journal releasetransition.JournalRecord, active 
 
 // unfinishedBelowAnchorRefusal continues the chain from the release a finished
 // journal leaves active, and names the first hop from the active release as
-// the installer that can replace a journal its owner cannot finish.
+// the installer that can replace a journal its owner cannot finish. A forward
+// journal leaves its target; any other starts from the lower of the active
+// release and its target, so no printed hop is below the resulting release.
 func unfinishedBelowAnchorRefusal(journal releasetransition.JournalRecord, active semver.Version, boundaries []updateBoundary) error {
 	after := active
 	if target, err := releasetransition.ReleaseIDVersion(journal.Goal.Target); err == nil &&
-		journal.Goal.Direction == releasetransition.DirectionActivateTarget {
+		(journal.Goal.Direction == releasetransition.DirectionActivateTarget || target.LT(active)) {
 		after = target
 	}
 	next := "yard update && " + updateCommand(updateHops(after, boundaries))
