@@ -594,13 +594,9 @@ func TestBackendEngineChangedComparesOnlyTheEngineRevision(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, append(slices.Clone(before), "changed\n"...), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, append(slices.Clone(before), "changed\n"...), 0o755)
 		check(file+" changed", true)
-		if err := os.WriteFile(path, before, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, before, 0o755)
 	}
 	for _, marker := range []string{"", "legacy"} {
 		installed = marker
