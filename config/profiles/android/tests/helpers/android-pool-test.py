@@ -979,7 +979,8 @@ class Leases(unittest.TestCase):
             else:
                 self.assertNotIn('-feature', arguments)
             self.assertNotIn('-show-kernel', arguments)
-            for enabled, expected in (('0', arguments), ('1', arguments + ['-show-kernel'])):
+            console_arguments = arguments + ['-show-kernel', '-logcat-output', '/dev/null']
+            for enabled, expected in (('0', arguments), ('1', console_arguments)):
                 launch = subprocess.run(['bash', str(ROOT / 'config/profiles/android/runtime.sh')],
                                         env=dict(environment, SUBYARD_ANDROID_E2E_SHOW_KERNEL=enabled),
                                         capture_output=True, text=True)
