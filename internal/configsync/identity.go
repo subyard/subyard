@@ -10,6 +10,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 func HostIDPath(configHome string) string {
@@ -69,14 +70,16 @@ func EnsureHostID(configHome string, environment map[string]string) (string, err
 	if err != nil || !pending {
 		return hostID, err
 	}
-	if err := os.MkdirAll(configHome, 0o700); err != nil {
-		return "", err
+	// A broader configuration root is repaired, not refused.
+	err = safefs.EnsureDir(configHome, safefs.DirOptions{Existing: safefs.Repair, ParentMode: 0o700})
+	if errors.Is(err, safefs.ErrNotDirectory) {
+		return "", &os.PathError{Op: "mkdir", Path: configHome, Err: syscall.ENOTDIR}
 	}
-	if err := os.Chmod(configHome, 0o700); err != nil {
+	if err != nil {
 		return "", err
 	}
 	path := HostIDPath(configHome)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	err = safefs.WriteFile(path, []byte(hostID+"\n"), safefs.Options{NoReplace: true})
 	if errors.Is(err, os.ErrExist) {
 		resolved, stillPending, resolveErr := ResolveHostID(configHome, environment)
 		if resolveErr != nil {
@@ -88,20 +91,6 @@ func EnsureHostID(configHome string, environment map[string]string) (string, err
 		return resolved, nil
 	}
 	if err != nil {
-		return "", err
-	}
-	if _, err := file.WriteString(hostID + "\n"); err != nil {
-		file.Close()
-		_ = os.Remove(path)
-		return "", err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		_ = os.Remove(path)
-		return "", err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
 		return "", err
 	}
 	return hostID, nil

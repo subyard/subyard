@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
@@ -565,47 +567,11 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return err
+	err = safefs.WriteFile(path, content, safefs.Options{Mode: mode, ExactMode: true, NoReplace: !replace})
+	if !replace && errors.Is(err, os.ErrExist) {
+		return errors.New("persistent setting target already exists")
 	}
-	temp := file.Name()
-	keep := false
-	defer func() {
-		_ = file.Close()
-		if !keep {
-			_ = os.Remove(temp)
-		}
-	}()
-	if err := file.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := file.Write(content); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if replace {
-		if err := os.Rename(temp, path); err != nil {
-			return err
-		}
-	} else {
-		if err := os.Link(temp, path); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return errors.New("persistent setting target already exists")
-			}
-			return err
-		}
-		if err := os.Remove(temp); err != nil {
-			return err
-		}
-	}
-	keep = true
-	return syncPersistentDirectory(directory)
+	return err
 }
 
 func ensurePersistentRoot(configHome string) error {
@@ -656,15 +622,6 @@ func validatePersistentDirectory(path string) error {
 		return sourceError(path, 0, "", "persistent settings directory", fmt.Sprintf("directory is not operator-owned; %s; required uid=%d", FileMetadata(info), os.Getuid()), nil)
 	}
 	return nil
-}
-
-func syncPersistentDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
 }
 
 func persistentOwnershipReason(info os.FileInfo, stat *syscall.Stat_t) string {
