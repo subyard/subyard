@@ -446,7 +446,12 @@ it builds with `compileSdk` 37 minor 2 and 35 on default packages, confirms that
 without changing the SDK, adds `platforms;android-36.1` with `android-broker sdk install`, builds
 against it and runs `connectedDebugAndroidTest` through `run` without `--no-daemon`, checking that no
 Gradle daemon survives. It checks that the relay port refuses another local account and that
-repeated provisioning keeps the added package. It downloads the pinned Gradle distribution and Maven dependencies from Google and Maven Central.
+repeated provisioning keeps the added package. It downloads the pinned Gradle distribution, and Maven
+dependencies from Google and Google's Maven Central mirror, because Maven Central answers shared CI
+addresses with HTTP 429. It reports the number of relay refusal records with the first 50 and the last;
+each record carries the relay's running total. During the connected stage it keeps the newest logcat
+(main, system, crash, events and kernel) and guest memory samples in bounded files and, on failure,
+prints redacted, bounded sections of them with a meminfo snapshot taken as Gradle starts.
 
 ```sh
 bash config/profiles/android/tests/e2e/acceptance.sh --slot "$slot" --lane gradle

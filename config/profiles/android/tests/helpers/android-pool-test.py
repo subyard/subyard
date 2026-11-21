@@ -10,6 +10,7 @@ import secrets
 import signal
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,20 @@ def telemetry_collector(directory):
     binary = Path(directory) / 'subyard-telemetry'
     subprocess.run(['go', 'build', '-o', str(binary), './config/profiles/telemetry/cmd/telemetry'], cwd=ROOT, check=True)
     return str(binary)
+
+
+@contextlib.contextmanager
+def descriptor_stderr():
+    """Capture writes to file descriptor 2, which the relay refusal log uses directly."""
+    saved, kept = os.dup(2), []
+    with tempfile.TemporaryFile() as capture:
+        os.dup2(capture.fileno(), 2)
+        try:
+            yield lambda: kept[0] if kept else os.pread(capture.fileno(), 1 << 20, 0).decode()
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            kept.append(os.pread(capture.fileno(), 1 << 20, 0).decode())
 
 
 class ClientBridge(unittest.TestCase):
@@ -1755,28 +1770,38 @@ os.write(1, result.stdout)
         self.assertEqual(client.proc_address('0100007F:1F90'), ('127.0.0.1', 8080))
         self.assertEqual(client.proc_address('0000000000000000FFFF00000100007F:0035'), ('127.0.0.1', 53))
         table = self.root / 'tcp'
-        class Stream:
-            def getsockname(self):
-                return ('127.0.0.1', 5037)
-            def getpeername(self):
-                return ('127.0.0.1', 40000)
+        local, peer = ('127.0.0.1', 5037), ('127.0.0.1', 40000)
         header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
         row = '   1: 0100007F:9C40 0100007F:13AD {state} 00000000:00000000 00:00000000 00000000  {uid}        0 {inode} 1\n'
-        cases = [([dict(state='01', uid=1234, inode=77)], 1234),
+        cases = [([dict(state='01', uid=1234, inode=77)], (1234, ['ESTABLISHED'])),
                  # Server-side and timewait rows never identify the connecting owner.
-                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)], 1234),
-                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)], None),
-                 ([], None)]
+                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)],
+                  (1234, ['TIME_WAIT/orphan', 'ESTABLISHED'])),
+                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)],
+                  (None, ['ESTABLISHED', 'ESTABLISHED'])),
+                 # A peer that closed first leaves an orphaned row with uid 0; it is never the owner.
+                 ([dict(state='05', uid=0, inode=0)], (None, ['FIN_WAIT2/orphan'])),
+                 ([dict(state='08', uid=1234, inode=77)], (None, ['CLOSE_WAIT'])),
+                 ([], (None, []))]
         for rows, expected in cases:
             table.write_text(header + ''.join(row.format(**values) for values in rows))
-            self.assertEqual(client.loopback_peer_uid(Stream(), (str(table), str(self.root / 'missing'))), expected)
-        # The real kernel table resolves this process as the owner of its loopback connection.
+            self.assertEqual(client.loopback_peer(local, peer, (str(table), str(self.root / 'missing'))), expected)
+        # The real kernel table resolves this process as the owner of its loopback connection,
+        # and reports a peer that closed before the lookup without naming an owner.
         listener = client.tcp_listener()
         try:
             own = socket.create_connection(listener.getsockname(), timeout=2)
-            accepted, _ = listener.accept()
+            accepted, address = listener.accept()
             try:
-                self.assertEqual(client.loopback_peer_uid(accepted), os.getuid())
+                self.assertEqual(client.loopback_peer(accepted.getsockname(), address),
+                                 (os.getuid(), ['ESTABLISHED']))
+                own.close()
+                for _ in range(100):
+                    owner, states = client.loopback_peer(accepted.getsockname(), address)
+                    if states == ['FIN_WAIT2/orphan']:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual((owner, states), (None, ['FIN_WAIT2/orphan']))
             finally:
                 own.close()
                 accepted.close()
@@ -1795,19 +1820,124 @@ os.write(1, result.stdout)
                     own.settimeout(2)
                     self.assertEqual(own.recv(1), b'')
                 # Another local account's connection is closed before any lease tunnel opens.
-                with patch.object(client, 'loopback_peer_uid', return_value=os.getuid() + 1), \
-                        contextlib.redirect_stderr(io.StringIO()) as output:
+                with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])), \
+                        descriptor_stderr() as output:
                     with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
                         foreign.settimeout(2)
                         peer_port = foreign.getsockname()[1]
                         self.assertEqual(foreign.recv(1), b'')
-                self.assertIn(f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()}', output.getvalue())
-                self.assertIn(f'peer_port={peer_port} relay_port={port}', output.getvalue())
+                    # The refusal log writes on its own thread.
+                    for _ in range(100):
+                        if 'refusals=1 ' in output():
+                            break
+                        time.sleep(0.01)
+                self.assertIn('refused a loopback connection owned by another account '
+                              f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()} peer_state=ESTABLISHED '
+                              f'peer_port={peer_port} relay_port={port} refusals=1 unlogged=0 ', output())
+                # A peer that resets before verification is refused as unknown, counted, and the
+                # relay keeps serving its owner.
+                accept = relay.get_request
+                def late_accept():
+                    request = accept()
+                    for _ in range(100):
+                        states = client.loopback_peer(request[0].getsockname(), request[1])[1]
+                        if not states:
+                            break
+                        time.sleep(0.01)
+                    return request
+                with patch.object(relay, 'get_request', side_effect=late_accept), \
+                        descriptor_stderr() as output:
+                    reset = socket.create_connection(('127.0.0.1', port), timeout=2)
+                    reset.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                    reset.close()
+                    for _ in range(100):
+                        if 'refusals=2 ' in output():
+                            break
+                        time.sleep(0.01)
+                self.assertIn('refused a loopback connection whose owner is unknown peer_uid=unknown '
+                              f'expected_uid={os.getuid()} peer_state=', output())
+                self.assertIn('refusals=2 ', output())
+                with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                    own.settimeout(2)
+                    self.assertEqual(own.recv(1), b'')
+                # A stderr pipe nobody drains drops and counts refusal records; the relay keeps
+                # accepting, serves its owner and shuts down promptly.
+                read_end, write_end = os.pipe()
+                os.set_blocking(write_end, False)
+                with contextlib.suppress(BlockingIOError):
+                    while True:
+                        os.write(write_end, b'x' * 65536)
+                os.set_blocking(write_end, True)
+                saved = os.dup(2)
+                os.dup2(write_end, 2)
+                try:
+                    with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])):
+                        for _ in range(relay.refusal_log.records.maxsize + 20):
+                            with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
+                                foreign.settimeout(2)
+                                self.assertEqual(foreign.recv(1), b'')
+                    self.assertGreaterEqual(relay.refusal_log.dropped, 19)
+                    self.assertEqual(relay.refusals, 2 + relay.refusal_log.records.maxsize + 20)
+                    with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                        own.settimeout(2)
+                        self.assertEqual(own.recv(1), b'')
+                    started = time.monotonic()
+                    relay.shutdown()
+                    self.assertLess(time.monotonic() - started, 2)
+                finally:
+                    # The logger stays blocked in its write; closing the reader releases it.
+                    os.dup2(saved, 2)
+                    os.close(saved)
+                    os.close(write_end)
+                    os.close(read_end)
             finally:
                 relay.shutdown()
                 relay.server_close()
-        self.assertEqual(tunnels, ['tunnel'])
+        self.assertEqual(tunnels, ['tunnel', 'tunnel', 'tunnel'])
         self.assertTrue(self.refused(port))
+
+    def test_refusal_log_on_a_full_stderr_pipe_never_blocks_exit(self):
+        # The logger thread may still be writing a refusal when the interpreter exits.
+        child = '''
+import importlib.util, os, socket, sys, time
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('client', sys.argv[1])
+client = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(client)
+relay = client.start_tcp_relay('a' * 64, client.tcp_listener())
+with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])):
+    with socket.create_connection(relay.server_address, timeout=2) as foreign:
+        foreign.settimeout(2)
+        assert foreign.recv(1) == b''
+while relay.refusal_log.records.qsize():
+    time.sleep(0.01)
+time.sleep(0.2)
+relay.shutdown()
+relay.server_close()
+print('exiting', flush=True)
+'''
+        read_end, write_end = os.pipe()
+        os.set_blocking(write_end, False)
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                os.write(write_end, b'x' * 65536)
+        os.set_blocking(write_end, True)
+        try:
+            process = subprocess.Popen([sys.executable, '-I', '-c', child, str(ROOT / 'config/profiles/android/client.py')],
+                                       stdout=subprocess.PIPE, stderr=write_end)
+            os.close(write_end)
+            write_end = None
+            try:
+                output, _ = process.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                self.fail('the client did not exit with a full stderr pipe')
+            self.assertEqual((process.returncode, output), (0, b'exiting\n'))
+        finally:
+            os.close(read_end)
+            if write_end is not None:
+                os.close(write_end)
 
     def test_acquire_retains_tcp_relay_until_release(self):
         self.serve_control()
