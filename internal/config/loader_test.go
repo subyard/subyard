@@ -356,7 +356,7 @@ func TestDevSudoReadsDeprecatedAliases(t *testing.T) {
 	for _, test := range []struct{ value, want, scope string }{
 		{"0", "no", "host"}, {"1", "yes", "host"}, {"0", "no", "yard"}, {"1", "yes", "yard"}, {"0", "no", "command"}, {"1", "yes", "command"},
 	} {
-		home := t.TempDir()
+		home := testkit.TempDir(t)
 		configHome := filepath.Join(home, "config")
 		environment := map[string]string{"SUBYARD_CONFIG_HOME": configHome}
 		path := ""
@@ -403,7 +403,7 @@ func TestDevSudoReadsDeprecatedAliases(t *testing.T) {
 
 // A file the config commands do not write gets the line to edit as its repair.
 func TestDeprecatedAliasInUnauthoredFileNamesTheLine(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, "config")
 	path := filepath.Join(configHome, "yards", "default.env")
 	writeFixture(t, path, "DEV_SUDO=0\n")
@@ -450,7 +450,7 @@ func TestDevSudoAliasSnapshotsEqualCanonical(t *testing.T) {
 		t.Fatal(err)
 	}
 	for alias, canonical := range map[string]string{"0": "no", "1": "yes"} {
-		home := t.TempDir()
+		home := testkit.TempDir(t)
 		configHome := filepath.Join(home, "config")
 		load := func(value string) Loaded {
 			writeFixture(t, filepath.Join(configHome, "yards", "default", "config.env"), "DEV_SUDO="+value+"\n")
