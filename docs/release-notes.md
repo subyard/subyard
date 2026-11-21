@@ -51,10 +51,12 @@
 - **Move settings out of a source checkout before updating.** Settings in a checkout's
   `private/config.env` and yard definitions in `private/yards/*.env` no longer apply. v0.30.0
   reads them only while the matching file under the configuration root is absent, so the first
-  `yard config set` there silently drops every setting still in the overlay. Move each file whole
-  instead: `private/config.env` to `~/.config/subyard/config.env`, each `private/yards/NAME.env`
-  to `~/.config/subyard/yards/NAME.env`, or into the matching Git layer. Make every value literal
-  (see below), and only then update.
+  `yard config set` there silently drops every setting still in the overlay. Move a file whole,
+  and only when its destination is absent: `private/config.env` to
+  `~/.config/subyard/config.env`, and `private/yards/NAME.env` to `~/.config/subyard/yards/NAME.env`
+  when neither that file nor `yards/NAME/config.env` exists, or into the matching Git layer. If
+  the destination exists, the overlay was not in effect: delete it, or merge it by hand into the
+  existing file. Make every value literal (see below), and only then update.
 - User settings files at shared, host and yard scope, local and Git, accept literal values only.
   A `$NAME` or `${…}` reference, including `${NAME:=value}`, is a read error that names the file
   and line; replace it with the value. Single quotes keep dollar text literal. Shipped defaults
@@ -99,8 +101,9 @@
 - When an activation step fails after it has partly applied, the update now reports a retryable
   `recovering/dependency-unavailable` instead of `operator-action-required/recovery-ambiguous`.
   Retry `yard update`.
-- A failed integration apply during `yard update` or `yard migrate` now names the failed step,
-  the integration that owns it and the retry, `yard -Y <yard> integration status [<owner>] --json`.
+- A failed integration apply now names the failed step and the retry, and the owning integration
+  when the selection or catalog declares it. During `yard update` or `yard migrate` the retry is
+  `yard migrate`; otherwise it is `yard -Y <yard> integration status [<owner>] --json`.
 - A failing project hook during activation, `yard init` or project clone, remove, sync or bind is
   now named in the diagnostic.
 - After `yard migrate` or `yard update` repairs the release with a follow-up `yard init`, it now
