@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -311,16 +312,27 @@ func (cli *CLI) checkConfigGitPushTarget(ctx context.Context, checkout, remote, 
 
 // writeExportedConfigFile replaces a user file in the export checkout. A final
 // symlink is kept and its target is written; the target's directory must exist.
+// A target the caller may not write is refused with the open error, as before.
 func writeExportedConfigFile(path string, content []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	resolved, err := safefs.ResolveFile(path)
 	if err != nil {
 		return err
 	}
-	options := safefs.Options{Mode: mode, ExactMode: true}
-	if resolved == path {
-		options.ParentMode = 0o700
+	probe, err := os.OpenFile(resolved, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err == nil {
+		err = probe.Close()
+	} else if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	} else if pathErr, ok := err.(*os.PathError); ok {
+		pathErr.Path = path
 	}
-	return safefs.WriteFile(resolved, content, options)
+	if err != nil {
+		return err
+	}
+	return safefs.WriteFile(resolved, content, safefs.Options{Mode: mode, ExactMode: true})
 }
 
 func (prepared *preparedConfigSyncPush) cleanup(cli *CLI, ctx context.Context) {

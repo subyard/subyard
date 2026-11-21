@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,38 +32,52 @@ func EntryIdentity(path string) (EntryID, error) {
 
 // ResolveFile follows final symlinks for a user-controlled path. If the input
 // names an absent entry or any non-symlink, it is returned unchanged.
+//
+// Link text is resolved by the kernel, never cleaned lexically: "missing/../x"
+// fails as open(2) would instead of naming an existing "x". A target whose
+// directory cannot be opened fails with that errno, reported for the input path.
 func ResolveFile(path string) (string, error) {
 	input := path
 	for range 40 {
 		target, err := os.Readlink(path)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.EINVAL) {
+			if !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOTDIR) {
 				return "", err
 			}
 			if path == input {
+				if errors.Is(err, unix.ENOTDIR) {
+					return "", err
+				}
 				return path, nil
 			}
 			directory, name := splitFile(path)
-			resolved, err := filepath.EvalSymlinks(directory)
-			if errors.Is(err, os.ErrNotExist) {
-				return path, nil
+			if name == "" || name == "." || name == ".." {
+				return "", pathError("open", input, unix.EISDIR)
 			}
+			resolved, err := kernelDirectory(directory)
 			if err != nil {
-				return "", err
+				return "", pathError("open", input, err)
 			}
 			return filepath.Join(resolved, name), nil
 		}
 		if !filepath.IsAbs(target) {
 			directory, _ := splitFile(path)
-			resolved, err := filepath.EvalSymlinks(directory)
-			if err != nil {
-				return "", err
-			}
-			target = resolved + string(os.PathSeparator) + target
+			target = strings.TrimSuffix(directory, string(os.PathSeparator)) + string(os.PathSeparator) + target
 		}
 		path = target
 	}
 	return "", pathError("readlink", path, unix.ELOOP)
+}
+
+// kernelDirectory opens a directory path as the kernel resolves it and returns
+// its canonical name.
+func kernelDirectory(path string) (string, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(fd)
+	return os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
 }
 
 func splitFile(path string) (directory, name string) {
