@@ -35,6 +35,25 @@ def passed_names(*paths):
     return names
 
 
+def failed_selected(path, pattern):
+    """Return the selected tests that a go test -json run reports as failed.
+
+    A selected test is one whose top-level name matches the -run pattern; a
+    failure before any test ran, such as a fork/exec error, names none.
+    """
+    selected = re.compile(pattern)
+    names = set()
+    for line in Path(path).read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        test = event.get("Test")
+        if test and event.get("Action") == "fail" and selected.search(test.split("/")[0]):
+            names.add(test)
+    return names
+
+
 def tests(base_list, candidate_list, base_runs, candidate_runs, allowed):
     """Proof 1: the test lists and pass sets are equal except for allowed added
     tests, which must pass. The caller has checked that every run exited 0."""
@@ -156,6 +175,10 @@ def main(arguments):
     if command == "apply":
         apply(*rest[:3])
         return 0
+    if command == "failed":
+        names = failed_selected(rest[0], rest[1])
+        print(" ".join(sorted(names)))
+        return 0 if names else 1
     if command == "passed":
         print(len(passed_names(rest[0])))
         return 0

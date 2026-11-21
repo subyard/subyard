@@ -86,6 +86,14 @@ class SliceCheckTest(unittest.TestCase):
         self.assertIn("FAIL changed test file internal/cli/b_test.go has no mutant", output)
         self.assertIn("internal/cli/a_test.go\0^TestA$\0", output)
 
+    def test_a_kill_needs_a_selected_test_that_failed(self):
+        events = [{"Action": "fail", "Test": "TestOther"}, {"Action": "fail", "Test": "TestA/sub"},
+                  {"Action": "output", "Output": "fork/exec: no such file\n"}, {"Action": "fail"}]
+        run = self.write("mutant.json", "\n".join(json.dumps(event) for event in events) + "\n")
+        self.assertEqual(tool.failed_selected(run, "^TestA$"), {"TestA/sub"})
+        early = self.write("early.json", "fork/exec /tmp/cli.test: permission denied\n" + json.dumps({"Action": "fail"}) + "\n")
+        self.assertEqual(tool.failed_selected(early, "^TestA$"), set())
+
     def test_mutant_text_must_occur_once_and_honours_escapes(self):
         target = self.write("a.go", "first\nsecond\nsecond\n")
         tool.apply(target, "first\\n", "changed\\t")

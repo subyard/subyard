@@ -4,8 +4,8 @@
 #      allowed added tests pass;
 #   3. the coverprofile blocks of non-test code covered on the base stay covered in some
 #      candidate run that exits 0 (a rerun absorbs blocks behind a lost race, and is reported);
-#   4. every listed mutant of a changed test file builds and makes its selected tests,
-#      which pass without it, exit non-zero.
+#   4. every listed mutant of a changed test file builds and makes one of its selected
+#      tests, which pass without it, report a failure.
 # Assertions are reviewed, not proved: the migration rule in docs/testing.md keeps them
 # byte-identical. Proof 2 was a heuristic for that and is gone; the numbering is kept.
 # Both sides run from exports in /tmp without Git metadata: the base from git archive,
@@ -206,10 +206,12 @@ else
         result=invalid
       elif ! go -C "$work/candidate" test -c -o "$work/mutant.test" "$package" > "$work/mutant.build" 2>&1; then
         result="invalid (does not build)"
-      elif go -C "$work/candidate" test -count=1 -timeout=10m -run "$pattern" "$package" > "$work/mutant.out" 2>&1; then
+      elif go -C "$work/candidate" test -count=1 -timeout=10m -json -run "$pattern" "$package" > "$work/mutant.json" 2>&1; then
         result=survived
-      else
+      elif check failed "$work/mutant.json" "$pattern" > /dev/null; then
         result=killed
+      else
+        result="invalid (exited non-zero without a selected test failing)"
       fi
       cp -p -- "$work/original" "$target"
     fi
