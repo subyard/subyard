@@ -237,7 +237,8 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
                        'case "$ADB_EXIT" in 124|137) ;; *) printf "1.1.1.1\\n%.0s" {1..10000} ;; esac\n'
                        'if [ "${2:-}" = dumpsys ]; then\n'
                        '  if [ "$ADB_EXIT" = 137 ]; then trap "" TERM; fi\n'
-                       '  case "$ADB_EXIT" in 124|137) sleep 30 ;; esac\n'
+                       # Like the adb client, the hung query is a single process.
+                       '  case "$ADB_EXIT" in 124|137) exec sleep 30 ;; esac\n'
                        'fi\n'
                        'exit "$ADB_EXIT"\n')
         adb.chmod(0o755)
@@ -248,7 +249,10 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
                   'gradle=(bash -c "date +%s.%N > \\"$work/gradle-started\\"; sleep 1; exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT="$3" '
                   'ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
-                  'android-broker() { shift 10; local result=0; "$@" || result=$?; '
+                  # Like run: the command leads its own process group, stopped before release.
+                  'android-broker() { shift 10; local result=0 pid; setsid "$@" & pid=$!; '
+                  'wait "$pid" || result=$?; kill -TERM -- "-$pid" 2>/dev/null || true; '
+                  'kill -KILL -- "-$pid" 2>/dev/null || true; '
                   'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + watch_assignment + connected)
         calls = directory / 'calls'
         started = time.time()
@@ -264,14 +268,13 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         assert result.returncode == child_exit, result.stderr
         # Gradle starts beside the meminfo snapshot; only the leased child's exit waits for it.
         assert float(gradle_started.read_text()) - started < 2, gradle_started.read_text()
-        # Watchers stop with the leased child, before run releases the lease. A passing child
-        # leaves the bounded snapshot to finish on its own.
-        if child_exit == 0:
-            for _ in range(200):
-                if not live_processes(name):
-                    break
-                time.sleep(0.05)
-        assert not live_processes(name)
+        # Watchers and the snapshot probe stop before run releases the lease; killed processes
+        # only need a moment to be reaped, far below the probe's 7 s bound.
+        for _ in range(20):
+            if not live_processes(name):
+                break
+            time.sleep(0.05)
+        assert not live_processes(name), (child_exit, adb_exit)
         observed = calls.read_text().splitlines()
         assert observed[-1] == 'released' and 'released' not in observed[:-1], observed
         assert all(line.startswith('localfilesystem:/fixture.sock ') and ' -H ' not in line and ' -L ' not in line
@@ -279,8 +282,8 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         commands = [line.split(' ', 1)[1] for line in observed[:-1]]
         assert all(command in commands for command in watch_commands), commands
         assert any(command.startswith('shell cat /proc/loadavg /proc/meminfo') for command in commands), commands
-        # Only a failure waits for the hung snapshot: its 5 s timeout and, ignoring TERM, the 2 s
-        # kill grace.
+        # A pass stops the hung snapshot; a failure waits for its 5 s timeout and, ignoring TERM,
+        # the 2 s kill grace.
         bound = 1 if child_exit == 0 else max(1, {124: 5, 137: 5 + 2}.get(adb_exit, 0))
         assert bound <= elapsed < bound + 4, elapsed
         evidence = (directory / 'emulator-evidence.log').read_text()
