@@ -14,7 +14,7 @@ case "$#:${1:-}" in
   1:--after-permissions) ;;
   *) printf 'Usage: tests/run.sh [--after-permissions]\n' >&2; exit 2 ;;
 esac
-for check in assets headers-helper process native native-signals failure-evidence launcher lifecycle forward owner sqlite-fixture records resources privacy-canary; do
+for check in assets headers-helper process native native-signals failure-evidence launcher lifecycle rollback forward owner sqlite-fixture records resources privacy-canary; do
   python3 -B "$ROOT/tests/$check-test.py"
 done
 bash "$ROOT/tests/broker-controller-test.sh"

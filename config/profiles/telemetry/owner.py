@@ -26,10 +26,11 @@ def run(arguments, **kwargs):
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
             if line.startswith('telemetry-native-refusal-v2 '):
                 try:
-                    messages = refusal_messages(json.loads(line.removeprefix('telemetry-native-refusal-v2 ')))
+                    reasons = json.loads(line.removeprefix('telemetry-native-refusal-v2 '))
+                    messages = refusal_messages(reasons)
                 except (ValueError, TypeError, RecursionError):
                     continue
-                raise Refusal(messages)
+                raise Refusal(messages, rollback_retry(reasons))
             match = SAFE_GUEST_FAILURE.fullmatch(line)
             if match:
                 print(f'telemetry: local reconciliation failed ({match["kind"]} at {match["location"]})', file=sys.stderr)
@@ -39,12 +40,23 @@ def run(arguments, **kwargs):
     return result.stdout.decode().strip()
 
 
+def yard_name():
+    return os.environ.get('YARD_NAME') or os.environ.get('SUBYARD_YARD') or 'default'
+
+
+def rollback_retry(reasons):
+    """The next step of a rollback preparation refusal; other refusals keep config paths."""
+    for reason, command in ((['rollback-enabled'], ['profile', 'disable', 'telemetry']), (['rollback-unconverged'], ['migrate'])):
+        if reason in reasons:
+            return 'run '+shlex.join(['yard', '-Y', yard_name(), *command])
+    return None
+
+
 class Refusal(ValueError):
     """Every independent refusal found before any effect, named for the operator."""
     def __init__(self, refusals, retry=None):
         super().__init__('; '.join(refusals))
-        yard = os.environ.get('YARD_NAME') or os.environ.get('SUBYARD_YARD') or 'default'
-        self.retry = retry if retry is not None else 'run '+shlex.join(['yard', '-Y', yard, 'config', 'paths'])
+        self.retry = retry if retry is not None else 'run '+shlex.join(['yard', '-Y', yard_name(), 'config', 'paths'])
 
 
 def collector_binary(source, selected):
@@ -96,6 +108,10 @@ def main():
             operation = 'observe'
         elif arguments[:1] == ['apply'] and len(arguments) == 4:
             operation, bindings = 'refresh', arguments[2:]
+        elif arguments[:1] == ['rollback-observe'] and len(arguments) == 1:
+            operation = 'rollback-observe'
+        elif arguments[:1] == ['rollback-apply'] and len(arguments) == 4:
+            operation, bindings = 'rollback-apply', arguments[2:]
         elif arguments[:1] == ['identity-observe'] and len(arguments) == 3:
             operation,bindings='identity-observe',arguments[1:]
         elif arguments[:1] == ['identity-apply'] and len(arguments) == 2:
@@ -115,7 +131,7 @@ def main():
     if status in ('', 'STOPPED'):
         if operation == 'startup':
             print(json.dumps({'state': 'drift'}))
-        elif operation == 'observe':
+        elif operation in ('observe', 'rollback-observe'):
             print(json.dumps({'state': 'deferred' if status else 'absent', 'actual': '', 'desired': ''}))
         return 0
     if status != 'RUNNING':
@@ -181,7 +197,7 @@ def main():
         if output:
             raise ValueError('unexpected telemetry check output')
         return 0
-    if output and operation == 'observe' and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') != '1':
+    if output and operation in ('observe', 'rollback-observe') and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') != '1':
         observation = json.loads(output)
         observation.pop('diagnostics', None)
         output = json.dumps(observation)
