@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type transaction struct {
@@ -578,35 +579,7 @@ func writeFileDurable(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	temp, err := os.CreateTemp(directory, "."+filepath.Base(target)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	cleanup := true
-	defer func() {
-		_ = temp.Close()
-		if cleanup {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if err := temp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := temp.Write(content); err != nil {
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, target); err != nil {
-		return err
-	}
-	cleanup = false
-	return syncDirectory(directory)
+	return safefs.WriteFile(target, content, safefs.Options{Mode: mode, ExactMode: true})
 }
 
 func readLiveContent(configHome, path string, local ...bool) ([]byte, uint32, error) {

@@ -282,7 +282,7 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil {
 		return config.Loaded{}, err
 	}
-	draft, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
+	draft, err := os.CreateTemp("/tmp", "subyard-config-draft-*") //nolint:forbidigo // scratch draft, never published
 	if err != nil {
 		return config.Loaded{}, err
 	}
@@ -565,7 +565,7 @@ func (cli *CLI) editConfigAuthoringFile(
 		return nil, err
 	}
 	draft := filepath.Join(directory, "setting")
-	if err := os.WriteFile(draft, content, 0o600); err != nil {
+	if err := os.WriteFile(draft, content, 0o600); err != nil { //nolint:forbidigo // editor draft in a private scratch directory
 		return nil, err
 	}
 	command := exec.CommandContext(ctx, editor, draft)

@@ -30,7 +30,7 @@ type preparedFile struct {
 }
 
 func (runtime Runtime) preparedFiles(prepared domain.RemotePrepared) ([]preparedFile, error) {
-	config, err := safefs.ResolveFile(runtime.sshConfigPath())
+	config, err := safefs.ResolveFileForCreate(runtime.sshConfigPath())
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (runtime Runtime) checkPreparedBinding(prepared domain.RemotePrepared) erro
 }
 
 func (runtime Runtime) checkedSSHConfig(prepared domain.RemotePrepared) (string, error) {
-	config, err := safefs.ResolveFile(runtime.sshConfigPath())
+	config, err := safefs.ResolveFileForCreate(runtime.sshConfigPath())
 	if err != nil || prepared.Binding == "" {
 		return config, err
 	}
@@ -189,7 +189,7 @@ func (runtime Runtime) checkedSSHConfig(prepared domain.RemotePrepared) (string,
 }
 
 func (runtime Runtime) verifySSHConfigTarget(config string) error {
-	current, err := safefs.ResolveFile(runtime.sshConfigPath())
+	current, err := safefs.ResolveFileForCreate(runtime.sshConfigPath())
 	if err != nil {
 		return err
 	}

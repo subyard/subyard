@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type errorTransport struct{ err error }
@@ -91,7 +92,7 @@ func TestClientRequiresVerifiedConnectionTrustForRenameCandidate(t *testing.T) {
 }
 
 func TestRefreshConnectionAdoptsTrustedOwnerRename(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "dev@owner.example", Trust: &trust}
@@ -115,7 +116,7 @@ func TestRefreshConnectionAdoptsTrustedOwnerRename(t *testing.T) {
 }
 
 func TestConnectionsBuildTrustedSSHClientFromPersistedTrust(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{
@@ -124,12 +125,10 @@ func TestConnectionsBuildTrustedSSHClientFromPersistedTrust(t *testing.T) {
 	if err := store.Write(connection); err != nil {
 		t.Fatal(err)
 	}
-	program := filepath.Join(t.TempDir(), "ssh")
-	arguments := filepath.Join(t.TempDir(), "arguments")
+	program := filepath.Join(testkit.TempDir(t), "ssh")
+	arguments := filepath.Join(testkit.TempDir(t), "arguments")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SSH_ARGUMENT_LOG\"\nexit 17\n"
-	if err := os.WriteFile(program, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, program, []byte(script), 0o700)
 	client, err := store.TrustedSSHClient(connection, program, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -158,19 +157,17 @@ func TestConnectionsBuildTrustedSSHClientFromPersistedTrust(t *testing.T) {
 }
 
 func TestManagedSSHTransportClassifiesChangedHostKeyAsIntegrityFailure(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
 	if err := store.Write(connection); err != nil {
 		t.Fatal(err)
 	}
-	program := filepath.Join(t.TempDir(), "ssh")
-	if err := os.WriteFile(program, []byte(
+	program := filepath.Join(testkit.TempDir(t), "ssh")
+	testkit.WriteFile(t, program, []byte(
 		"#!/bin/sh\nprintf '%s\\n' 'REMOTE HOST IDENTIFICATION HAS CHANGED' >&2\nexit 255\n",
-	), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	), 0o700)
 	client, err := store.TrustedSSHClient(connection, program, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +179,7 @@ func TestManagedSSHTransportClassifiesChangedHostKeyAsIntegrityFailure(t *testin
 }
 
 func TestChangedSSHKeyRefreshDoesNotMutateConnectionCacheOrRouting(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -194,9 +191,7 @@ func TestChangedSSHKeyRefreshDoesNotMutateConnectionCacheOrRouting(t *testing.T)
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, "state"), []byte("kept\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, "state"), []byte("kept\n"), 0o600)
 	connectionBefore, err := os.ReadFile(filepath.Join(root, "connections", "owner-a.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -205,12 +200,10 @@ func TestChangedSSHKeyRefreshDoesNotMutateConnectionCacheOrRouting(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	program := filepath.Join(t.TempDir(), "ssh")
-	if err := os.WriteFile(program, []byte(
+	program := filepath.Join(testkit.TempDir(t), "ssh")
+	testkit.WriteFile(t, program, []byte(
 		"#!/bin/sh\nprintf '%s\\n' 'REMOTE HOST IDENTIFICATION HAS CHANGED' >&2\nexit 255\n",
-	), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	), 0o700)
 	client, err := store.TrustedSSHClient(connection, program, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +230,7 @@ func TestChangedSSHKeyRefreshDoesNotMutateConnectionCacheOrRouting(t *testing.T)
 
 func TestAssessSSHHostKeyReadsTheKeyCapturedByOpenSSH(t *testing.T) {
 	trust := testSSHHostTrust(t, "owner-alias")
-	program := filepath.Join(t.TempDir(), "ssh")
+	program := filepath.Join(testkit.TempDir(t), "ssh")
 	script := `#!/bin/sh
 known_hosts=
 previous=
@@ -252,12 +245,10 @@ printf '%s\n' "$ASSESS_LINE" > "$known_hosts"
 [ "$(stat -c %a "$known_hosts")" = 600 ] || exit 98
 exit 255
 `
-	if err := os.WriteFile(program, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, program, []byte(script), 0o700)
 	t.Setenv("ASSESS_LINE", trust.KnownHostsLine)
 	assessed, err := AssessSSHHostKey(
-		context.Background(), t.TempDir(), program, "owner-alias", time.Second,
+		context.Background(), testkit.TempDir(t), program, "owner-alias", time.Second,
 	)
 	if err != nil || assessed.Fingerprint != trust.Fingerprint {
 		t.Fatalf("assessment = %#v, %v", assessed, err)

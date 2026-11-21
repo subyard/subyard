@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestRepairAndRemovalJournalsRejectOversizedFiles(t *testing.T) {
@@ -20,11 +22,9 @@ func TestRepairAndRemovalJournalsRejectOversizedFiles(t *testing.T) {
 		{name: "removal", path: Connections.removalPath},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store := Connections{Root: t.TempDir()}
+			store := Connections{Root: testkit.TempDir(t)}
 			payload := bytes.Repeat([]byte{'x'}, 8*1024*1024+1)
-			if err := os.WriteFile(test.path(store), payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, test.path(store), payload, 0o600)
 			if err := store.Recover(); err == nil || !strings.Contains(err.Error(), "too large") {
 				t.Fatalf("Recover oversized %s journal = %v", test.name, err)
 			}
@@ -44,7 +44,7 @@ func writeJournalFixture(t *testing.T, path string, value any) {
 }
 
 func TestRegistrationJournalRecoveryIsIdempotent(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -64,7 +64,7 @@ func TestRegistrationJournalRecoveryIsIdempotent(t *testing.T) {
 }
 
 func TestRegistrationRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -82,7 +82,7 @@ func TestRegistrationRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
 }
 
 func TestLegacyRegistrationJournalRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias"}
 	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
@@ -99,7 +99,7 @@ func TestLegacyRegistrationJournalRecoveryCompletesConnectionOnlyMixedState(t *t
 }
 
 func TestHostIDMigrationJournalRecoveryIsIdempotent(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	oldConnection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -110,9 +110,7 @@ func TestHostIDMigrationJournalRecoveryIsIdempotent(t *testing.T) {
 	if err := os.MkdirAll(oldRouting, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600)
 	newConnection := oldConnection
 	newConnection.HostID = "owner-b"
 	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-b", time.Now())}
@@ -133,7 +131,7 @@ func TestHostIDMigrationJournalRecoveryIsIdempotent(t *testing.T) {
 func TestHostIDMigrationRecoveryCompletesBothSidesOfRoutingCommitPoint(t *testing.T) {
 	for _, routingAlreadyMoved := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before-routing-rename", true: "after-routing-rename"}[routingAlreadyMoved], func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			store := Connections{Root: root}
 			trust := testSSHHostTrust(t, "owner.example")
 			oldConnection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -155,9 +153,7 @@ func TestHostIDMigrationRecoveryCompletesBothSidesOfRoutingCommitPoint(t *testin
 			if err := os.MkdirAll(oldRouting, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600)
 			if routingAlreadyMoved {
 				if err := os.Rename(oldRouting, newRouting); err != nil {
 					t.Fatal(err)
@@ -174,7 +170,7 @@ func TestHostIDMigrationRecoveryCompletesBothSidesOfRoutingCommitPoint(t *testin
 }
 
 func TestRepairAndRemovalJournalRecoveryAreIdempotent(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	oldTrust := testSSHHostTrust(t, "owner.example")
 	newTrust := testSSHHostTrust(t, "owner.example")
@@ -203,7 +199,7 @@ func TestRepairAndRemovalJournalRecoveryAreIdempotent(t *testing.T) {
 }
 
 func TestRepairRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	oldTrust, newTrust := testSSHHostTrust(t, "owner.example"), testSSHHostTrust(t, "owner.example")
 	oldConnection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &oldTrust}
@@ -230,7 +226,7 @@ func TestRepairRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
 func TestRemovalRecoveryCompletesEveryDeleteBoundary(t *testing.T) {
 	for _, removedCount := range []int{0, 1, 2} {
 		t.Run(map[int]string{0: "journal-only", 1: "connection-deleted", 2: "connection-and-cache-deleted"}[removedCount], func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			store := Connections{Root: root}
 			connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 			if err := store.Write(connection); err != nil {

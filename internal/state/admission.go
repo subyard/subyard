@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 var ErrAdmissionPending = errors.New("project admission is already in progress")
+
+var errReservationNotRegular = errors.New("project reservation is not a regular file")
 
 const reservationTTL = 6 * time.Hour
 
@@ -325,44 +328,30 @@ func (store *FileStore) writeReservation(reservation ProjectReservation) error {
 	}
 	payload = append(payload, '\n')
 	path := store.reservationPath(reservation.OperationID)
-	file, err := os.CreateTemp(store.reservationDirectory(), ".reservation.tmp.*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(payload); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(temporary, path); errors.Is(err, os.ErrExist) {
+	err = writeStateFile(path, payload, ".reservation.tmp.*", true)
+	if errors.Is(err, os.ErrExist) {
 		current, readErr := store.readReservation(reservation.OperationID)
 		if readErr == nil && current == reservation {
 			return nil
 		}
+		if errors.Is(readErr, errReservationNotRegular) {
+			return readErr
+		}
 		return errors.New("project operation ID already has a different reservation")
-	} else if err != nil {
-		return err
 	}
-	return syncDirectory(store.reservationDirectory())
+	return err
 }
 
 func (store *FileStore) readReservation(operationID string) (ProjectReservation, error) {
 	if !domain.SafeID(operationID) {
 		return ProjectReservation{}, errors.New("invalid project reservation operation ID")
 	}
-	payload, err := os.ReadFile(store.reservationPath(operationID))
+	path := store.reservationPath(operationID)
+	// A reservation is private state: a final symlink or special file is never read through.
+	payload, err := safefs.ReadRegular(path, safefs.ReadOptions{})
+	if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotRegular) {
+		return ProjectReservation{}, fmt.Errorf("%w: %s", errReservationNotRegular, path)
+	}
 	if err != nil {
 		return ProjectReservation{}, err
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -56,14 +57,14 @@ func syntheticYardWithHostKeys(t *testing.T, additionalKeys ...ssh.Signer) (Conf
 	identitySigner, _ := ssh.NewSignerFromKey(identity)
 	block, _ := ssh.MarshalPrivateKey(identity, "")
 	identityPath := filepath.Join(dir, "transport")
-	os.WriteFile(identityPath, pem.EncodeToMemory(block), 0600)
+	testkit.WriteFile(t, identityPath, pem.EncodeToMemory(block), 0600)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { listener.Close() })
 	hostPath := filepath.Join(dir, "known_hosts")
-	os.WriteFile(hostPath, []byte(knownhosts.Line([]string{listener.Addr().String()}, hostSigner.PublicKey())+"\n"), 0600)
+	testkit.WriteFile(t, hostPath, []byte(knownhosts.Line([]string{listener.Addr().String()}, hostSigner.PublicKey())+"\n"), 0600)
 	_, port, _ := net.SplitHostPort(listener.Addr().String())
 	portNum, _ := strconv.Atoi(port)
 	ready := make(chan *ssh.ServerConn, 4)
@@ -139,9 +140,9 @@ func prepareSyntheticUnlock(t *testing.T, cfg Config) (Manager, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "encrypted")
-	os.WriteFile(path, pem.EncodeToMemory(block), 0600)
+	testkit.WriteFile(t, path, pem.EncodeToMemory(block), 0600)
 	askpass := filepath.Join(dir, "askpass")
-	os.WriteFile(askpass, []byte("#!/bin/sh\nprintf '%s\\n' synthetic-passphrase\n"), 0700)
+	testkit.WriteFile(t, askpass, []byte("#!/bin/sh\nprintf '%s\\n' synthetic-passphrase\n"), 0700)
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -274,11 +275,11 @@ func TestFailedUnlockLeavesNoGrant(t *testing.T) {
 			cfg, _ := syntheticYard(t)
 			m, path := prepareSyntheticUnlock(t, cfg)
 			if failure == "wrong-passphrase" {
-				os.WriteFile(filepath.Join(filepath.Dir(cfg.Directory), "askpass"), []byte("#!/bin/sh\n[ ! -e \"$0.called\" ] || exit 1\n: > \"$0.called\"\nprintf '%s\\n' wrong-synthetic-passphrase\n"), 0700)
+				testkit.WriteFile(t, filepath.Join(filepath.Dir(cfg.Directory), "askpass"), []byte("#!/bin/sh\n[ ! -e \"$0.called\" ] || exit 1\n: > \"$0.called\"\nprintf '%s\\n' wrong-synthetic-passphrase\n"), 0700)
 			} else {
 				_, key, _ := ed25519.GenerateKey(rand.Reader)
 				signer, _ := ssh.NewSignerFromKey(key)
-				os.WriteFile(cfg.KnownHostsFile, []byte(knownhosts.Line([]string{fmt.Sprintf("127.0.0.1:%d", cfg.SSHPort)}, signer.PublicKey())+"\n"), 0600)
+				testkit.WriteFile(t, cfg.KnownHostsFile, []byte(knownhosts.Line([]string{fmt.Sprintf("127.0.0.1:%d", cfg.SSHPort)}, signer.PublicKey())+"\n"), 0600)
 			}
 			if _, err := m.Unlock(context.Background(), path, time.Minute); err == nil {
 				t.Fatal("failed unlock succeeded")

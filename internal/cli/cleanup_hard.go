@@ -27,6 +27,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -140,33 +141,8 @@ func restoreCleanupState(root string, entries []cleanupStateEntry) error {
 			}
 			continue
 		}
-		file, err := os.CreateTemp(filepath.Dir(target), ".cleanup-state-*")
-		if err != nil {
+		if err := restoreCleanupFile(target, entry); err != nil {
 			return err
-		}
-		name := file.Name()
-		writeErr := func() error {
-			if err := file.Chmod(os.FileMode(entry.Mode)); err != nil {
-				return err
-			}
-			if err := file.Chown(-1, entry.GID); err != nil {
-				return err
-			}
-			if _, err := file.Write(entry.Content); err != nil {
-				return err
-			}
-			return file.Sync()
-		}()
-		closeErr := file.Close()
-		if writeErr == nil {
-			writeErr = closeErr
-		}
-		if writeErr == nil {
-			writeErr = os.Rename(name, target)
-		}
-		_ = os.Remove(name)
-		if writeErr != nil {
-			return writeErr
 		}
 	}
 	actual, err := captureCleanupState(root)
@@ -186,6 +162,25 @@ func restoreCleanupState(root string, entries []cleanupStateEntry) error {
 	}
 	return nil
 }
+
+// restoreCleanupFile publishes one file with its exact recorded mode and group.
+// It does not sync the directory, which may be execute-only; the root is synced last.
+func restoreCleanupFile(target string, entry cleanupStateEntry) error {
+	pending, err := safefs.Create(target, safefs.Options{
+		Mode: os.FileMode(entry.Mode), ExactMode: true,
+		Owner:       &safefs.Ownership{UID: -1, GID: entry.GID},
+		TempPattern: ".cleanup-state-*",
+	})
+	if err != nil {
+		return err
+	}
+	defer pending.Abort()
+	if _, err := pending.File().Write(entry.Content); err != nil {
+		return err
+	}
+	return pending.Publish()
+}
+
 func hardCleanupPath(yard domain.Context) string {
 	key := sha256.Sum256([]byte(yard.IncusProject + "\x00" + yard.YardInstanceName))
 	return filepath.Join(yard.Paths.DataHome, "cleanup", hex.EncodeToString(key[:12]), "journal.json")
@@ -264,11 +259,33 @@ func saveHardCleanup(path string, journal *hardCleanupJournal) error {
 	return saveCleanupRecord(path, journal)
 }
 
+// admitCleanupDirectories finishes narrower owned cleanup directories outermost
+// first, so the lookup of the inner directory does not fail on an outer one
+// without search permission. The inner directory is touched only after the
+// outer one passes the recovery directory rules. Every refusal is left to
+// saveCleanupRecord.
+func admitCleanupDirectories(outer, inner string) {
+	if cleanupAncestors(outer) != nil {
+		return
+	}
+	_ = safefs.AdmitDir(outer, 0o700)
+	info, err := os.Lstat(outer)
+	if err != nil {
+		return
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != uint32(os.Getuid()) {
+		return
+	}
+	_ = safefs.AdmitDir(inner, 0o700)
+}
+
 func saveCleanupRecord(path string, record any) error {
+	parent := filepath.Dir(path)
+	admitCleanupDirectories(filepath.Dir(parent), parent)
 	if err := cleanupAncestors(path); err != nil {
 		return err
 	}
-	parent := filepath.Dir(path)
 	for _, directory := range []string{filepath.Dir(parent), parent} {
 		if err := os.Mkdir(directory, 0700); err == nil {
 			if err := os.Chmod(directory, 0700); err != nil {
@@ -302,28 +319,7 @@ func saveCleanupRecord(path string, record any) error {
 	if len(content) > 32<<20 {
 		return errors.New("cleanup recovery record exceeds size limit")
 	}
-	file, err := os.CreateTemp(parent, ".journal-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-	if err := file.Chmod(0600); err != nil {
-		file.Close()
-		return err
-	}
-	_, writeErr := file.Write(append(content, '\n'))
-	if err := errors.Join(writeErr, file.Sync(), file.Close()); err != nil {
-		return err
-	}
-	if err := os.Rename(file.Name(), path); err != nil {
-		return err
-	}
-	directory, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return safefs.WriteFile(path, append(content, '\n'), safefs.Options{TempPattern: ".journal-*"})
 }
 
 func cleanupConfigBinding(loaded config.Loaded) string {

@@ -42,8 +42,11 @@ type Options struct {
 	ParentMode  fs.FileMode // Zero requires the parent to exist.
 	Owner       *Ownership
 	NoReplace   bool
-	Durability  Durability
-	Fault       func(Point) error // Test-only interruption hook.
+	// CheckAtPublish skips the early target check in Create. Publish still
+	// refuses a symlink or non-regular target before renaming.
+	CheckAtPublish bool
+	Durability     Durability
+	Fault          func(Point) error // Test-only interruption hook.
 }
 
 type Point string
@@ -145,7 +148,7 @@ func (p *Pending) create() error {
 	if err := p.stageFile(pattern); err != nil {
 		return err
 	}
-	if !p.options.NoReplace {
+	if !p.options.NoReplace && !p.options.CheckAtPublish {
 		if err := p.checkTarget(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}

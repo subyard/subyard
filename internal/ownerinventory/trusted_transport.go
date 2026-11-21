@@ -10,6 +10,7 @@ import (
 	"time"
 
 	transportadapter "github.com/Subyard/Subyard/internal/adapters/transport"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 func AssessSSHHostKey(
@@ -77,7 +78,7 @@ func (transport *managedTrustTransport) Call(
 		return nil, err
 	}
 	knownHostsPath := filepath.Join(temporary, "known_hosts")
-	if err := os.WriteFile(knownHostsPath, []byte(transport.knownHostsLine+"\n"), 0o600); err != nil {
+	if err := safefs.WriteFile(knownHostsPath, []byte(transport.knownHostsLine+"\n"), safefs.Options{Durability: safefs.BestEffort}); err != nil {
 		return nil, err
 	}
 	process, err := transportadapter.SSHPinned(

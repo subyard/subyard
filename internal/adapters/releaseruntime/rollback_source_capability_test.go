@@ -158,7 +158,7 @@ func TestFreshRollbackRequiresSourceActivationCapabilityBeforeConsent(t *testing
 	for _, scope := range []string{"yard", "yard.test-yard", "owner-registration", "source-install"} {
 		for _, check := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/check=%t", scope, check), func(t *testing.T) {
-				root := t.TempDir()
+				root := testkit.TempDir(t)
 				response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"decisions":[{"resource":"test-resource","scope":%q,"decision":"canonicalize","result":"pending"}],"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
 				candidate := writeRuntimeCandidateFixture(t, root, fmt.Sprintf(response, scope))
 				request := releasetransition.ProcessRequest{
@@ -215,7 +215,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 		{name: "sealed-owner-changed", queried: true, scope: "yard", decision: "canonicalize", probe: "fixed", stale: true, allowed: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			var response releasetransition.ProcessResponse
 			if err := json.Unmarshal([]byte(`{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`), &response); err != nil {
 				t.Fatal(err)

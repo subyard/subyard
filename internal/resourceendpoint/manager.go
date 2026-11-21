@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -187,7 +189,7 @@ func (manager Manager) CommitWith(
 	if err != nil {
 		return err
 	}
-	defer releaseLock(lock)
+	defer lock.Release()
 	current, err := readState(request.Directory)
 	if err != nil {
 		return err
@@ -464,6 +466,9 @@ func ensureStateDirectory(directory string) error {
 	if err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	if err := safefs.AdmitDir(directory, 0o700); err != nil {
+		return errors.New("endpoint state directory has unsafe type or permissions")
+	}
 	info, err = os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || !ownedByUser(info) {
 		return errors.New("endpoint state directory has unsafe type or permissions")
@@ -484,32 +489,21 @@ func ensureStateDirectory(directory string) error {
 	return nil
 }
 
-func acquireLock(ctx context.Context, directory string) (*os.File, error) {
-	lock, err := os.OpenFile(filepath.Join(directory, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+func acquireLock(ctx context.Context, directory string) (*safefs.LockFile, error) {
+	lock, err := safefs.OpenLock(filepath.Join(directory, ".lock"), 0o600)
 	if err != nil {
 		return nil, err
 	}
 	info, err := lock.Stat()
 	if err != nil || !safeOwnedFile(info) {
-		lock.Close()
+		lock.Release()
 		return nil, errors.New("endpoint state lock has unsafe type or permissions")
 	}
-	for {
-		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return lock, nil
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			lock.Close()
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			lock.Close()
-			return nil, context.Cause(ctx)
-		case <-time.After(5 * time.Millisecond):
-		}
+	if err := lock.Acquire(ctx, false, 5*time.Millisecond); err != nil {
+		lock.Release()
+		return nil, err
 	}
+	return lock, nil
 }
 
 func ownedByUser(info os.FileInfo) bool {
@@ -525,50 +519,14 @@ func safeOwnedFile(info os.FileInfo) bool {
 	return ok && stat.Nlink == 1
 }
 
-func releaseLock(lock *os.File) {
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	_ = lock.Close()
-}
-
 func writeState(directory string, current state) error {
 	current = canonicalState(current)
 	if err := validateState(current); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".state.json.tmp-")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	published := false
-	defer func() {
-		_ = temporary.Close()
-		if !published {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(temporary)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(current); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, filepath.Join(directory, "state.json")); err != nil {
-		return err
-	}
-	published = true
-	dir, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return safefs.WriteFrom(filepath.Join(directory, "state.json"), safefs.Options{TempPattern: ".state.json.tmp-*"}, func(file *os.File) error {
+		encoder := json.NewEncoder(file)
+		encoder.SetEscapeHTML(false)
+		return encoder.Encode(current)
+	})
 }

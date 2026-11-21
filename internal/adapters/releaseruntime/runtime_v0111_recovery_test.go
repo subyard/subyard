@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 const v0111ProcessFixtureEnvironment = "SUBYARD_TEST_V0111_TRANSITION_PROCESS"
@@ -74,7 +75,7 @@ func (reconciler v0111FixtureReconciler) Reconcile(
 	if reconciler.fail {
 		return errors.New("fixture activation reconciliation failed")
 	}
-	return os.WriteFile(reconciler.statePath, []byte(reconciler.desired+"\n"), 0o600)
+	return os.WriteFile(reconciler.statePath, []byte(reconciler.desired+"\n"), 0o600) //nolint:forbidigo // fake without testing.TB
 }
 
 type v0111AbsentOwnerRegistration struct{}
@@ -104,7 +105,7 @@ func (v0111AbsentOwnerRegistration) Commit(
 
 func newV0111ProcessFixture(t *testing.T) (v0111ProcessFixture, v0111FixtureBindings) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fixture := v0111ProcessFixture{
 		runtimeRoot: filepath.Join(root, "runtime"),
 		configHome:  filepath.Join(root, "config"),
@@ -177,15 +178,11 @@ esac
 		"0.11.2-candidate", fixture.statePath, version, transaction, executable)
 	candidate := writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, releaseID, version, payload)
 	registryPath := filepath.Join(candidate.root, "config", "release-transition.json")
-	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registryPath, registry, 0o600)
 	engineDigest := sha256.Sum256([]byte(payload))
 	registryDigest := sha256.Sum256(registry)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", engineDigest, registryDigest)
-	if err := os.WriteFile(filepath.Join(candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
 	return candidate
 }
 

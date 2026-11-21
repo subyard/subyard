@@ -519,6 +519,11 @@ func resolveKnownHosts(path string) (string, error) {
 	if errors.Is(err, syscall.ELOOP) {
 		return "", errors.New("refusing non-regular SSH trust store")
 	}
+	// A link target whose directory cannot be opened keeps the lock-open errno.
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Op == "open" {
+		return "", pathErr.Err
+	}
 	return target, err
 }
 

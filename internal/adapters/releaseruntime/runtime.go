@@ -26,6 +26,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
 	"golang.org/x/sys/unix"
@@ -2185,16 +2186,13 @@ func (runtime *Runtime) fetch(ctx context.Context, options options, name, destin
 		}
 		return nil
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(destination), ".download-*")
+	// The destination is checked at publication, after the source, as the rename was before.
+	pending, err := safefs.Create(destination, safefs.Options{TempPattern: ".download-*", CheckAtPublish: true})
 	if err != nil {
 		return err
 	}
-	path := temporary.Name()
-	defer os.Remove(path)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
+	defer pending.Abort()
+	temporary := pending.File()
 	var reader io.ReadCloser
 	if strings.HasPrefix(options.baseURL, "file://") {
 		reader, err = os.Open(filepath.Join(strings.TrimPrefix(options.baseURL, "file://"), name))
@@ -2204,42 +2202,45 @@ func (runtime *Runtime) fetch(ctx context.Context, options options, name, destin
 			url = fmt.Sprintf("https://github.com/%s/releases/download/%s", options.repository, options.tag)
 		}
 		if !strings.HasPrefix(url, "https://") {
-			temporary.Close()
 			return errors.New("release base URL must use https:// or file://")
 		}
 		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(url, "/")+"/"+name, nil)
 		if requestErr != nil {
-			temporary.Close()
 			return requestErr
 		}
 		response, requestErr := runtime.config.HTTPClient.Do(request)
 		if requestErr != nil {
-			temporary.Close()
 			return requestErr
 		}
 		if response.StatusCode != http.StatusOK {
 			response.Body.Close()
-			temporary.Close()
 			return fmt.Errorf("download returned %s", response.Status)
 		}
 		reader = response.Body
 	}
 	if err != nil {
-		temporary.Close()
 		return err
 	}
 	_, copyErr := io.Copy(temporary, reader)
-	closeReaderErr, closeFileErr := reader.Close(), temporary.Close()
+	closeReaderErr := reader.Close()
+	var syncFileErr error
+	if copyErr == nil && closeReaderErr == nil {
+		syncFileErr = temporary.Sync()
+	}
+	closeFileErr := temporary.Close()
 	if copyErr != nil {
 		return copyErr
 	}
 	if closeReaderErr != nil {
 		return closeReaderErr
 	}
+	if syncFileErr != nil {
+		return syncFileErr
+	}
 	if closeFileErr != nil {
 		return closeFileErr
 	}
-	return os.Rename(path, destination)
+	return pending.Commit()
 }
 
 func (runtime *Runtime) latestTag(ctx context.Context, repository string) (string, error) {

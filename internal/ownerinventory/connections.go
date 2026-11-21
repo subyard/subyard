@@ -391,33 +391,6 @@ func (store Connections) writeConnectionFile(connection Connection) error {
 		return err
 	}
 	directory := filepath.Join(store.Root, "connections")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
 	path := filepath.Join(directory, connection.HostID+".json")
-	temporary, err := os.CreateTemp(directory, ".connection-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temporary.Name()
-	defer os.Remove(tempPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(payload); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return err
-	}
-	return store.syncDirectory(directory)
+	return writeOwnerRecord(path, payload, ".connection-*", store.failIO)
 }
