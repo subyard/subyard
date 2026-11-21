@@ -367,6 +367,9 @@ func recoverHostSourceRenameAtCheckpoint(configHome string, journal hostIDRename
 	if strings.TrimSpace(headRef) != source.HeadRef {
 		return errors.New("source HEAD reference changed during rename")
 	}
+	if err := reachCheckpoint(checkpoint, "index-lock"); err != nil {
+		return err
+	}
 	releaseIndex, err := lockRenameIndex(source)
 	if err != nil {
 		return err
@@ -391,6 +394,9 @@ func recoverHostSourceRenameAtCheckpoint(configHome string, journal hostIDRename
 		if err := verifyRenameSubtree(source.Root, source.BeforeCommit, source.SourceHostID, source.SourceHostID); err != nil {
 			return err
 		}
+		if err := reachCheckpoint(checkpoint, "subtree-move"); err != nil {
+			return err
+		}
 		if err := os.Rename(oldPath, newPath); err != nil {
 			return err
 		}
@@ -405,34 +411,50 @@ func recoverHostSourceRenameAtCheckpoint(configHome string, journal hostIDRename
 		return errors.New("source rename paths collided or disappeared; retain journal for recovery")
 	}
 	if head == source.BeforeCommit {
+		if err := reachCheckpoint(checkpoint, "head-update"); err != nil {
+			return err
+		}
 		if _, err := gitOutput(source.Root, "update-ref", "HEAD", source.AfterCommit, source.BeforeCommit); err != nil {
 			return err
 		}
 	}
 	// Only these two known index trees are admitted, never an unrelated staged edit.
 	if index == source.BeforeTree {
-		if checkpoint != nil {
-			if err := checkpoint("index-publication"); err != nil {
-				return err
-			}
+		if err := reachCheckpoint(checkpoint, "index-publication"); err != nil {
+			return err
 		}
 		if err := publishRenameIndex(source, indexImage, index); err != nil {
 			return err
 		}
 	}
 	for _, file := range source.Cache {
+		if err := reachCheckpoint(checkpoint, "cache-write"); err != nil {
+			return err
+		}
 		if err := writeFileDurable(configHome, filepath.Join(configHome, file.Path), file.Content, os.FileMode(file.Mode)); err != nil {
 			return err
 		}
 	}
+	if err := reachCheckpoint(checkpoint, "manifest-publication"); err != nil {
+		return err
+	}
 	if err := writeFileDurable(configHome, ManifestPath(configHome), journal.ManifestAfter, 0o600); err != nil {
+		return err
+	}
+	if err := reachCheckpoint(checkpoint, "identity-publication"); err != nil {
 		return err
 	}
 	if err := writeFileDurable(configHome, HostIDPath(configHome), []byte(journal.NewHostID+"\n"), 0o600); err != nil {
 		return err
 	}
 	receipt, _ := json.Marshal(completedHostRename{SourceHostID: source.SourceHostID, NewHostID: journal.NewHostID, Root: source.Root, RecordDigest: source.RecordDigest, Commit: source.AfterCommit})
+	if err := reachCheckpoint(checkpoint, "receipt-publication"); err != nil {
+		return err
+	}
 	if err := writeFileDurable(configHome, filepath.Join(configHome, ".sync", "host-id-rename-complete.json"), append(receipt, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := reachCheckpoint(checkpoint, "journal-cleanup"); err != nil {
 		return err
 	}
 	releaseIndex()
@@ -440,6 +462,15 @@ func recoverHostSourceRenameAtCheckpoint(configHome string, journal hostIDRename
 		return err
 	}
 	return cleanupRenameIndex(source)
+}
+
+// reachCheckpoint calls the test-only recovery checkpoint before a durable effect.
+// Production recovery passes nil.
+func reachCheckpoint(checkpoint func(string) error, name string) error {
+	if checkpoint == nil {
+		return nil
+	}
+	return checkpoint(name)
 }
 
 func (plan HostIDRenamePlan) SourceConsequences() []string {
