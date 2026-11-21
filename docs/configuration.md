@@ -220,11 +220,12 @@ line and the replacement. Any other value is refused. Older runtimes refuse `yes
 owner host that reads the file runs this release, for example
 `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`.
 
-Absent `DEV_SUDO` means passwordless sudo without prompts for an older runtime and `prompt` for
-this one. After `yard update`, release activation reprovisions the coding agents of each running
-yard without an assignment with the default `prompt`, so they ask before sudo from then on. Stopped
-yards stay unchanged until the release reaches them, at the latest on their next `yard init`. Set
-`yes` there to keep the old behaviour and run `yard init`.
+Absent `DEV_SUDO` meant no grant in v0.30.0 and means `prompt` in this release. After
+`yard update`, release activation reprovisions the coding agents of each running yard without an
+assignment with the default `prompt`, so they ask before sudo from then on; the grant itself
+appears on the yard's next `yard init`. Stopped yards stay unchanged until the release reaches
+them, at the latest on their next `yard init`. Set `no` there to keep the yard without sudo and
+run `yard init`.
 
 Older runtimes refuse `DEV_SUDO` at shared scope: publish a shared value only after all owner
 hosts are updated, and until then keep it at host or yard scope.
@@ -295,13 +296,13 @@ Restrict write access to the configuration repository to trusted operators.
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
 the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
 `DEV_SUDO` assignment, `1` and `0` included, and, if one was Git-backed, sync the removal while
-the runtime still supports it. A yard that runs the default needs nothing more: an older runtime
-reads its installed record, its own default keeps the grant, and its hooks remove the sudo
-prompts. A yard that applied `yes` or `no` must also run `yard init` without the assignment
-before downgrading, because older runtimes refuse an installed record of either value. That
-includes a yard that kept `1` or `0`: release activation or `yard init` records them as `yes` and
-`no`. For a `no` yard that init
-publishes the grant; after the downgrade, set `DEV_SUDO=0` and run `yard init` to remove it.
+the runtime still supports it. A yard that runs the default needs nothing more before the
+downgrade: an older runtime reads its installed record, and its hooks remove the sudo prompts. A
+yard that applied `yes` or `no` must also run `yard init` without the assignment before
+downgrading, because older runtimes refuse an installed record of either value. That includes a
+yard that kept `1` or `0`: release activation or `yard init` records them as `yes` and `no`.
+v0.30.0 defaults to no grant, so its next `yard init` after the downgrade removes the grant; set
+`DEV_SUDO=1` first where the yard should keep passwordless sudo.
 
 ### Git identity
 
@@ -770,7 +771,7 @@ policy cannot be verified or reconciled and points to `yard -Y NAME integration 
 finding text comes from the yard and is not rendered.
 
 To opt out, remove `codex` from the yard's `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off`
-in the yard's settings, and run `yard setup` for that yard. Setup refuses this setting before
+in the yard's settings, and run `yard init` for that yard. Setup refuses this setting before
 changing the yard if Codex is still selected. With the opt-out approved, setup disables the boot
 loader and unloads the two verified profiles, attachment first. Stop any affected sandbox jobs
 before opting out.
