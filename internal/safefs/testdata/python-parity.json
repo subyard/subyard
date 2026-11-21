@@ -5,6 +5,6 @@
   {"target":"directory", "mode":384, "umask":2, "outcome":"not regular"},
   {"target":"fifo", "mode":384, "umask":18, "outcome":"not regular"},
   {"target":"absent", "mode":416, "umask":18, "no_replace":true, "outcome":"published"},
-  {"target":"regular", "mode":384, "umask":18, "no_replace":true, "outcome":"exists"},
-  {"target":"symlink", "mode":384, "umask":18, "no_replace":true, "outcome":"exists"}
+  {"target":"regular", "mode":384, "umask":18, "no_replace":true, "outcome":"exists", "python_outcome":"no-replace refused"},
+  {"target":"symlink", "mode":384, "umask":18, "no_replace":true, "outcome":"exists", "python_outcome":"no-replace refused"}
 ]

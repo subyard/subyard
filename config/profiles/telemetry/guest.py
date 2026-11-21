@@ -337,11 +337,7 @@ class Runtime:
                 os.fchmod(fd, 0o770)
                 with native.developer_files(self.uid, self.gid):
                     safefs.ensure_dir(name, dir_fd=fd)
-                try:
-                    safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
-                except FileExistsError:
-                    # Another apply created it. The caller validates its metadata.
-                    pass
+                safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
             finally:
                 os.close(fd)
 

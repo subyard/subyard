@@ -113,16 +113,20 @@ def sync_dir(path_or_fd):
 
 def _finish_directory(fd, info, mode, gid):
     actual = stat.S_IMODE(info.st_mode)
-    if actual & _SET_ID:
-        return
+    wanted = mode | (actual & (stat.S_ISVTX | _SET_ID))
     descriptor = f'/proc/self/fd/{fd}'
-    if gid != -1 and info.st_gid != gid:
+    change_group = gid != -1 and gid != info.st_gid
+    if change_group:
         os.chown(descriptor, -1, gid)
-    wanted = mode | (actual & stat.S_ISVTX)
-    if actual != wanted:
-        # Procfs addresses the open inode even when its mode is 0000.
-        os.chmod(descriptor, wanted)
-        _fault(AFTER_DIR_CHMOD)
+    if actual == wanted and not (change_group and wanted & _SET_ID):
+        return
+    group = gid if change_group else info.st_gid
+    # Linux would clear setgid on chmod without group membership or CAP_FSETID.
+    if wanted & stat.S_ISGID and os.geteuid() != 0 and group != os.getegid() and group not in os.getgroups():
+        return
+    # Procfs addresses the open inode even when its mode is 0000.
+    os.chmod(descriptor, wanted)
+    _fault(AFTER_DIR_CHMOD)
 
 
 def _ensure_at(parent, name, path, mode, uid, gid, existing, durability):
@@ -172,7 +176,7 @@ def _finish_parent(fd, mode, durability):
     info = os.fstat(fd)
     actual = info.st_mode & 0o777
     wanted = mode & 0o777
-    if info.st_uid == os.geteuid() and actual != wanted and not (actual & ~wanted or info.st_mode & _SET_ID):
+    if info.st_uid == os.geteuid() and actual != wanted and not actual & ~wanted:
         _finish_directory(fd, info, mode, -1)
         if durability == DURABLE:
             sync_dir(fd)
@@ -286,28 +290,14 @@ def resolve_file(path):
     return os.path.realpath(path, strict=True)
 
 
-def _rename_noreplace(src, dst, src_fd, dst_fd):
+def rename_noreplace(src, dst, *, src_dir_fd=-100, dst_dir_fd=-100):
+    """Rename atomically without replacing an existing entry."""
     src_bytes, dst_bytes = os.fsencode(src), os.fsencode(dst)
     if b'\0' in src_bytes or b'\0' in dst_bytes:
         raise ValueError('embedded null byte')
-    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
-    if rename is not None:
-        if rename(src_fd, src_bytes, dst_fd, dst_bytes, 1) == 0:
-            return True
-        error = ctypes.get_errno()
-        if error not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
-            raise OSError(error, os.strerror(error), src, None, dst)
-    source_parent = None if src_fd == -100 else src_fd
-    if stat.S_ISDIR(os.stat(src, dir_fd=source_parent, follow_symlinks=False).st_mode):
-        raise OSError(errno.EOPNOTSUPP, 'atomic no-replace directory rename requires renameat2', src, None, dst)
-    os.link(src, dst, src_dir_fd=source_parent,
-            dst_dir_fd=None if dst_fd == -100 else dst_fd, follow_symlinks=False)
-    return False
-
-
-def rename_noreplace(src, dst, *, src_dir_fd=-100, dst_dir_fd=-100):
-    if not _rename_noreplace(src, dst, src_dir_fd, dst_dir_fd):
-        os.unlink(src, dir_fd=None if src_dir_fd == -100 else src_dir_fd)
+    rename = getattr(ctypes.CDLL(None), 'renameat2', None)
+    if rename is None or rename(src_dir_fd, src_bytes, dst_dir_fd, dst_bytes, 1) != 0:
+        raise OSError(errno.EOPNOTSUPP, 'atomic no-replace rename requires renameat2(RENAME_NOREPLACE)')
 
 
 class Pending:
@@ -387,16 +377,13 @@ class Pending:
         self.file.close()
         self._fault(BEFORE_PUBLISH)
         if self._no_replace:
-            renamed = _rename_noreplace(self.name, self._target, self.dir_fd, self._parent)
-            self.published = True
-            if not renamed:
-                os.unlink(self.name, dir_fd=self.dir_fd)
+            rename_noreplace(self.name, self._target, src_dir_fd=self.dir_fd, dst_dir_fd=self._parent)
         else:
             target = _lstat(self._target, self._parent)
             if target is not None:
                 _regular(target, self.path)
             os.replace(self.name, self._target, src_dir_fd=self.dir_fd, dst_dir_fd=self._parent)
-            self.published = True
+        self.published = True
         self.name = None
         self._fault(AFTER_PUBLISH)
 
