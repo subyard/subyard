@@ -53,7 +53,8 @@ func (*diagnosticStatusPlatform) ObserveProfileRuntimeDiagnostics(context.Contex
 }
 
 func TestConfigSettingDiagnosticUsesAppliedSnapshot(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	loaded.Environment["DEV_USER"] = "next"
 	platform := &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), settings: loaded.Catalog.IntegrationInitSettings(loaded.Environment)}
@@ -71,7 +72,8 @@ func TestConfigSettingDiagnosticUsesAppliedSnapshot(t *testing.T) {
 }
 
 func TestConfigAssessmentKeepsIndependentDriftAfterSourceFailure(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude codex"
 	loaded.Environment["AGENT_claude_CONFIG"] = t.TempDir()
@@ -108,7 +110,8 @@ func TestConfigAssessmentKeepsIndependentDriftAfterSourceFailure(t *testing.T) {
 }
 
 func TestConfigInstalledDiagnosticShowsAppliedEnvironmentProfiles(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	loaded.EnvironmentProfiles.Effective = []string{"sample"}
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"}}}
@@ -124,7 +127,8 @@ func TestConfigInstalledDiagnosticShowsAppliedEnvironmentProfiles(t *testing.T) 
 }
 
 func TestConfigStatusPrintsAppliedSettingDifferences(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	settings := loaded.Catalog.IntegrationInitSettings(loaded.Environment)
 	settings["DEV_USER"] = "old"
@@ -132,10 +136,7 @@ func TestConfigStatusPrintsAppliedSettingDifferences(t *testing.T) {
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running"}}}
 	appendHashSteps(t, incus, loaded)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Arguments: []string{"config", "status"}, InitPlatform: platform, Incus: incus, Executor: incus, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"config", "status"}, InitPlatform: platform, Incus: incus, Executor: incus, Stdout: &stdout, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("status %d: %s", code, stderr.String())
 	}
@@ -148,7 +149,8 @@ func TestConfigStatusPrintsAppliedSettingDifferences(t *testing.T) {
 }
 
 func TestMaterializationReportsIndependentSourceFailures(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude codex"
 	loaded.Environment["AGENT_claude_CONFIG"] = "/unavailable-one"
@@ -162,7 +164,8 @@ func TestMaterializationReportsIndependentSourceFailures(t *testing.T) {
 }
 
 func TestConfigSettingDiagnosticReportsSamePathContentChange(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	path := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
@@ -182,7 +185,8 @@ func TestConfigSettingDiagnosticReportsSamePathContentChange(t *testing.T) {
 }
 
 func TestConfigSettingDiagnosticReportsCommittedConfigSourceChange(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	path := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {

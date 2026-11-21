@@ -8,10 +8,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	history := UpdateHistory{Home: home, Now: func() time.Time { return now }}
 	recorder, err := history.Begin(UpdateRecord{
@@ -56,7 +58,7 @@ func TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes(t *testing.T) {
 }
 
 func TestUpdateHistoryRetainsNewestThirtyAttempts(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	history := UpdateHistory{Home: home, Now: func() time.Time { return now }}
 	for index := 0; index < 32; index++ {
@@ -80,7 +82,7 @@ func TestUpdateHistoryRetainsNewestThirtyAttempts(t *testing.T) {
 }
 
 func TestUpdateHistoryKeepsRepeatedOperationIDAsSeparateAttempts(t *testing.T) {
-	history := UpdateHistory{Home: t.TempDir()}
+	history := UpdateHistory{Home: testkit.TempDir(t)}
 	for range 2 {
 		recorder, err := history.Begin(UpdateRecord{OperationID: "op-repeated", Direction: "activate"})
 		if err != nil {
@@ -97,7 +99,7 @@ func TestUpdateHistoryKeepsRepeatedOperationIDAsSeparateAttempts(t *testing.T) {
 }
 
 func TestUpdateHistoryReopensBegunAttemptAsUnfinished(t *testing.T) {
-	history := UpdateHistory{Home: t.TempDir()}
+	history := UpdateHistory{Home: testkit.TempDir(t)}
 	if _, err := history.Begin(UpdateRecord{OperationID: "op-unfinished", Direction: "activate"}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,16 +111,14 @@ func TestUpdateHistoryReopensBegunAttemptAsUnfinished(t *testing.T) {
 }
 
 func TestUpdateHistoryPreservesRefreshFailureWhenPruningFails(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	history := UpdateHistory{Home: home}
 	recorder, err := history.Begin(UpdateRecord{OperationID: "op-prune-failure", Direction: "activate"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	directory := filepath.Join(home, "logs", "updates")
-	if err := os.WriteFile(filepath.Join(directory, "corrupt.json"), []byte("not-json\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(directory, "corrupt.json"), []byte("not-json\n"), 0o600)
 	if err := recorder.Advance("refresh", "release-target", ""); err == nil {
 		t.Fatal("expected pruning failure")
 	}
@@ -140,7 +140,7 @@ func TestUpdateHistoryPreservesRefreshFailureWhenPruningFails(t *testing.T) {
 }
 
 func TestAuditRotationRetainsFiveGenerationsAndViewerReadsAcrossThem(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	for index := 0; index < 7; index++ {
 		if err := WriteInvocation(Invocation{
 			Home: home, Command: "status", Arguments: []string{fmt.Sprintf("%02d", index)}, Maximum: 1,

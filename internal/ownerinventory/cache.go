@@ -58,43 +58,11 @@ func (cache Cache) Write(snapshot Snapshot) error {
 		return errors.New("owner inventory fetchedAt is required")
 	}
 	path := cache.path(snapshot.Inventory.HostID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".inventory-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temporary.Name()
-	defer os.Remove(tempPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(payload); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return err
-	}
-	if cache.failIO != nil {
-		if err := cache.failIO(ownerIODirectorySync); err != nil {
-			return err
-		}
-	}
-	return syncOwnerDirectory(filepath.Dir(path))
+	return writeOwnerRecord(path, payload, ".inventory-*", cache.failIO)
 }
 
 func (cache Cache) Invalidate(hostID string) error {

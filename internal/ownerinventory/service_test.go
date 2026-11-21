@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type fixedClock struct{ now time.Time }
@@ -33,7 +34,7 @@ func fixtureInventory(hostID string, observed time.Time, projects ...string) dom
 
 func TestFreshCacheDoesNotFetch(t *testing.T) {
 	now := time.Unix(1000, 0)
-	cache := Cache{Root: t.TempDir()}
+	cache := Cache{Root: testkit.TempDir(t)}
 	inventory := fixtureInventory("owner-a", now, "one")
 	if err := cache.Write(Snapshot{FetchedAt: now, Inventory: inventory}); err != nil {
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestFreshCacheDoesNotFetch(t *testing.T) {
 
 func TestForceRefreshBypassesFreshCache(t *testing.T) {
 	now := time.Unix(1500, 0)
-	cache := Cache{Root: t.TempDir()}
+	cache := Cache{Root: testkit.TempDir(t)}
 	if err := cache.Write(Snapshot{
 		FetchedAt: now, Inventory: fixtureInventory("owner-a", now, "old"),
 	}); err != nil {
@@ -75,7 +76,7 @@ func TestForceRefreshBypassesFreshCache(t *testing.T) {
 
 func TestStaleCacheRefreshReplacesDeletedProjects(t *testing.T) {
 	now := time.Unix(2000, 0)
-	cache := Cache{Root: t.TempDir()}
+	cache := Cache{Root: testkit.TempDir(t)}
 	if err := cache.Write(Snapshot{
 		FetchedAt: now.Add(-time.Minute), Inventory: fixtureInventory("owner-a", now, "ghost"),
 	}); err != nil {
@@ -105,7 +106,7 @@ func TestStaleCacheRefreshReplacesDeletedProjects(t *testing.T) {
 
 func TestRefreshFailureReturnsExplicitStaleSnapshot(t *testing.T) {
 	now := time.Unix(3000, 0)
-	cache := Cache{Root: t.TempDir()}
+	cache := Cache{Root: testkit.TempDir(t)}
 	if err := cache.Write(Snapshot{
 		FetchedAt: now.Add(-time.Minute), Inventory: fixtureInventory("owner-a", now, "kept"),
 	}); err != nil {
@@ -124,7 +125,7 @@ func TestRefreshFailureReturnsExplicitStaleSnapshot(t *testing.T) {
 
 func TestMissingSnapshotRefreshFailureIsUnavailable(t *testing.T) {
 	result := (Service{
-		Cache: Cache{Root: t.TempDir()}, Clock: fixedClock{now: time.Unix(3500, 0)},
+		Cache: Cache{Root: testkit.TempDir(t)}, Clock: fixedClock{now: time.Unix(3500, 0)},
 		Fetch: func(context.Context, string) (domain.OwnerInventory, error) {
 			return domain.OwnerInventory{}, errors.New("offline")
 		},
@@ -135,7 +136,7 @@ func TestMissingSnapshotRefreshFailureIsUnavailable(t *testing.T) {
 }
 
 func TestCacheUsesPrivateAtomicFile(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	cache := Cache{Root: root}
 	now := time.Unix(4000, 0)
 	if err := cache.Write(Snapshot{

@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const sourceStagePrefix = ".subyard-config-source-"
@@ -357,8 +358,8 @@ func (cli *CLI) initializeConfigSource(
 		}
 	}
 	manifest := filepath.Join(checkout, "subyard-config.json")
-	if err := os.WriteFile(
-		manifest, []byte("{\n  \"schemaVersion\": 1\n}\n"), 0o600,
+	if err := safefs.WriteFile(
+		manifest, []byte("{\n  \"schemaVersion\": 1\n}\n"), safefs.Options{Mode: 0o600},
 	); err != nil {
 		return "", err
 	}
@@ -490,13 +491,10 @@ func hardenConfigCandidate(root string) error {
 				if err != nil {
 					return err
 				}
-				if err := os.Remove(path); err != nil {
-					return err
-				}
-				if err := os.WriteFile(path, content, info.Mode().Perm()&^0o022); err != nil {
-					return err
-				}
-				return nil
+				// Atomic replacement breaks the hard link without removing the path.
+				return safefs.WriteFile(path, content, safefs.Options{
+					Mode: info.Mode().Perm() &^ 0o022, ExactMode: true,
+				})
 			}
 		}
 		protected := info.Mode().Perm() &^ 0o022

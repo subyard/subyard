@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestRemovedCleanupMetadataDoesNotDeclareAnIntegration(t *testing.T) {
@@ -52,7 +53,7 @@ func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 		{"legacy equal empty", "AGENTS=none\nCODING_TOOL_INTEGRATIONS=\n", "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			path := filepath.Join(home, ".config/subyard/yards/default/config.env")
 			writeFixture(t, path, test.content)
 			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
@@ -71,7 +72,7 @@ func TestIntegrationSelectionKeepsRequestsAndPresence(t *testing.T) {
 			}
 		})
 	}
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	loaded, err := Load(LoadOptions{RepositoryRoot: home, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": filepath.Join(home, ".config/subyard"), "DEV_UID": "1000", "SSH_PORT": "2222", "FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "HOST_BASE": filepath.Join(home, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(home, "host"), "STORAGE_PATH": filepath.Join(home, "storage"), "SHIFT_MODE": "shift"}})
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +99,7 @@ func TestTestRoleIntegrationPolicy(t *testing.T) {
 		{name: "default role parity", yard: "default", content: "YARD_TEMPLATE=test-vms\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			writeFixture(t, filepath.Join(home, ".config/subyard/yards", test.yard, "config.env"), test.content)
 			command := cloneStringMap(test.command)
 			command["SUBYARD_CONFIG_HOME"] = filepath.Join(home, ".config/subyard")

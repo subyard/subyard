@@ -386,7 +386,7 @@ func TestBindWorkspaceCleanupResumesSafeIntermediateStates(t *testing.T) {
 	for _, state := range []string{"full", "metadata-only", "empty", "missing"} {
 		t.Run(state, func(t *testing.T) {
 			id := "demo-12345678"
-			root := filepath.Join(t.TempDir(), id)
+			root := filepath.Join(testkit.TempDir(t), id)
 			if state != "missing" {
 				if err := os.Mkdir(root, 0o755); err != nil {
 					t.Fatal(err)
@@ -399,9 +399,7 @@ func TestBindWorkspaceCleanupResumesSafeIntermediateStates(t *testing.T) {
 			}
 			if state == "full" || state == "metadata-only" {
 				metadata := []byte(`{"schema":1,"projectId":"demo-12345678","mode":"bind","target":"sample-profile"}`)
-				if err := os.WriteFile(filepath.Join(root, ".subyard-meta.json"), metadata, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(root, ".subyard-meta.json"), metadata, 0o600)
 			}
 			record := cloneRecord()
 			record.ProjectID, record.YardPath = id, filepath.Join(root, "src")
@@ -425,14 +423,12 @@ func TestBindWorkspaceCleanupRejectsUnexpectedContent(t *testing.T) {
 		}
 	}
 	id := "demo-12345678"
-	root := filepath.Join(t.TempDir(), id)
+	root := filepath.Join(testkit.TempDir(t), id)
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	foreign := filepath.Join(root, "keep")
-	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, foreign, []byte("keep"), 0o600)
 	record := cloneRecord()
 	record.ProjectID, record.YardPath = id, filepath.Join(root, "src")
 	record.Mode, record.Target = domain.ProjectBind, "yard"
@@ -494,7 +490,7 @@ func TestProjectSyncReservesLocalWorkspaceAsRootBeforeAssigningOwnership(t *test
 func TestProjectSyncRejectsExistingPhysicalWorkspaceBeforeOpeningArchive(t *testing.T) {
 	for _, existing := range []string{"directory", "symlink"} {
 		t.Run(existing, func(t *testing.T) {
-			base := t.TempDir()
+			base := testkit.TempDir(t)
 			workspace := filepath.Join(base, "Demo")
 			kept := filepath.Join(base, "kept")
 			if err := os.Mkdir(kept, 0o755); err != nil {
@@ -529,7 +525,7 @@ func TestProjectSyncRejectsExistingPhysicalWorkspaceBeforeOpeningArchive(t *test
 }
 
 func TestProjectSyncFailedTransferLeavesReservationAndRetryUsesDistinctWorkspace(t *testing.T) {
-	base := t.TempDir()
+	base := testkit.TempDir(t)
 	firstRoot := filepath.Join(base, "Demo")
 	first := cloneRecord()
 	first.Mode, first.HostPath, first.YardPath = domain.ProjectSync, "/host/demo", filepath.Join(firstRoot, "src")
@@ -541,9 +537,7 @@ func TestProjectSyncFailedTransferLeavesReservationAndRetryUsesDistinctWorkspace
 		t.Fatal("invalid transfer unexpectedly succeeded")
 	}
 	marker := filepath.Join(firstRoot, "reserved-after-failure")
-	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
-		t.Fatalf("failed workspace was not retained: %v", err)
-	}
+	testkit.WriteFile(t, marker, []byte("keep"), 0o600)
 
 	second := first
 	second.ProjectID, second.Name = "Demo-2", "Demo-2"
@@ -707,7 +701,7 @@ func TestProjectExportRejectsProjectsWithoutHostCopy(t *testing.T) {
 func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 	data := &projectDataStub{}
 	code := &vsCodeStub{}
-	workspaceDirectory := t.TempDir()
+	workspaceDirectory := testkit.TempDir(t)
 	record := cloneRecord()
 	record.Mode, record.HostPath, record.Target = domain.ProjectSync, "/host/demo", "yard"
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
@@ -759,7 +753,7 @@ func TestProjectCodeWritesRemoteWorkspaceAndOpensDescriptor(t *testing.T) {
 }
 
 func TestProjectCodeRejectsDedicatedIdentityWithoutVMLoopbackRelay(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	home := filepath.Join(root, "home")
 	dataHome := filepath.Join(root, "data")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -778,10 +772,8 @@ func TestProjectCodeRejectsDedicatedIdentityWithoutVMLoopbackRelay(t *testing.T)
 	if err := os.Chmod(identity+".pub", 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".ssh", "subyard.config"), []byte(
-		"Host yard\n    IdentityFile \""+identity+"\"\n    IdentitiesOnly yes\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(home, ".ssh", "subyard.config"), []byte(
+		"Host yard\n    IdentityFile \""+identity+"\"\n    IdentitiesOnly yes\n"), 0o600)
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"subyard/yard": {Status: "Running", Devices: map[string]map[string]string{}},
 	}}
@@ -797,7 +789,7 @@ func TestProjectCodeRejectsDedicatedIdentityWithoutVMLoopbackRelay(t *testing.T)
 }
 
 func TestProjectCodeWorkspaceNamespaceSeparatesHostAndProjectIdentity(t *testing.T) {
-	workspaceDirectory := t.TempDir()
+	workspaceDirectory := testkit.TempDir(t)
 	code := &vsCodeStub{}
 	for _, identity := range []struct{ host, projectID string }{
 		{host: "a-b", projectID: "c"},
@@ -825,7 +817,7 @@ func TestProjectCodeWorkspaceNamespaceSeparatesHostAndProjectIdentity(t *testing
 func TestProjectCodeRequiresCanonicalYardIdentity(t *testing.T) {
 	code := &vsCodeStub{}
 	runner := ProjectActionRunner{
-		Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: t.TempDir(),
+		Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: testkit.TempDir(t),
 		Yard: domain.Context{AccessKind: domain.AccessRemote}, Project: cloneRecord(),
 	}
 	_, _, err := runner.Run(context.Background(), domain.AdapterRequest{
@@ -840,7 +832,7 @@ func TestProjectCodeRequiresResolvedAlias(t *testing.T) {
 	for _, alias := range []string{"", "-invalid"} {
 		code := &vsCodeStub{}
 		runner := ProjectActionRunner{
-			Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: t.TempDir(),
+			Data: &projectDataStub{}, VSCode: code, WorkspaceDirectory: testkit.TempDir(t),
 			Yard:    domain.Context{AccessKind: domain.AccessRemote, SSHHost: alias},
 			Project: cloneRecord(), YardIdentity: "owner/default",
 		}
@@ -855,7 +847,7 @@ func TestProjectCodeRequiresResolvedAlias(t *testing.T) {
 
 func TestProjectCodeManualFallbackUsesPositionalControllerDescriptor(t *testing.T) {
 	record := cloneRecord()
-	workspaceDirectory := filepath.Join(t.TempDir(), "directory with spaces")
+	workspaceDirectory := filepath.Join(testkit.TempDir(t), "directory with spaces")
 	runner := ProjectActionRunner{
 		Data: &projectDataStub{}, WorkspaceDirectory: workspaceDirectory,
 		Yard: domain.Context{AccessKind: domain.AccessRemote, SSHHost: "yard"}, Project: record,
@@ -891,7 +883,7 @@ func (executor corruptPreparedProjectCopy) Stream(ctx context.Context, yard doma
 		return result, fmt.Errorf("synthetic stream: stdout=%q stderr=%q: %w", result.Stdout, result.Stderr, err)
 	}
 	if err == nil && executor.corrupt && slices.Contains(request.Command, "-xf") {
-		err = os.WriteFile(filepath.Join(executor.path, "content.txt"), []byte("corrupted after transfer"), 0o600)
+		err = os.WriteFile(filepath.Join(executor.path, "content.txt"), []byte("corrupted after transfer"), 0o600) //nolint:forbidigo // fake without testing.TB
 	}
 	return result, err
 }

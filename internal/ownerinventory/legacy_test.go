@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestLegacyDiscoveryPersistsOnlyUntrustedCacheAndFallsBackOffline(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	inventory := domain.OwnerInventory{
 		Schema:     domain.OwnerInventorySchema,
@@ -56,7 +57,7 @@ func TestLegacyDiscoveryPersistsOnlyUntrustedCacheAndFallsBackOffline(t *testing
 }
 
 func TestLegacyRefreshRejectsHostIDChangeWithoutManagedTrust(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-old", Destination: "dev@remote.example"}
@@ -86,7 +87,7 @@ func TestLegacyRefreshRejectsHostIDChangeWithoutManagedTrust(t *testing.T) {
 }
 
 func TestLegacyDiscoveryCanBeUpgradedToManagedTrust(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	now := time.Now().UTC()
 	inventory := domain.OwnerInventory{
@@ -109,9 +110,7 @@ func TestLegacyDiscoveryCanBeUpgradedToManagedTrust(t *testing.T) {
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, "project"), []byte("kept\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, "project"), []byte("kept\n"), 0o600)
 	trust := testSSHHostTrust(t, "owner-alias")
 	plan, err := store.PrepareRegistration(Connection{
 		HostID: "owner-a", Destination: "owner-alias", Trust: &trust,

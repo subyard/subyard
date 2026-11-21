@@ -359,3 +359,20 @@ func waitForOpenLockFiles(ctx context.Context, path string, count int) error {
 		}
 	}
 }
+
+func TestPublishRefusesStoreLinkToDirectory(t *testing.T) {
+	directory := testkit.TempDir(t)
+	store := filepath.Join(directory, "known_hosts")
+	if err := os.Symlink(".", store); err != nil {
+		t.Fatal(err)
+	}
+	request := publicationCandidate(t, store, "owner.example")
+	manager := &Manager{Environment: os.Environ(), pending: []candidate{request}}
+	err := manager.publish(context.Background())
+	if err == nil || err.Error() != "refusing non-regular SSH trust store" {
+		t.Fatalf("publication through a link to a directory = %v", err)
+	}
+	if info, err := os.Lstat(store); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("store link replaced: %v", err)
+	}
+}

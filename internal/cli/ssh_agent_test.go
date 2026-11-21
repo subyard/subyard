@@ -13,15 +13,14 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestSSHAgentStatusDoesNotCreateState(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root := fixture.Root
 	var out, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "status", "--json"}, Environment: environment, WorkingDir: root, Stdout: &out, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"ssh-agent", "status", "--json"}, Stdout: &out, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 || !strings.Contains(out.String(), `"state":"locked"`) {
 		t.Fatalf("code=%d output=%s stderr=%s", code, &out, &stderr)
 	}
@@ -48,17 +47,15 @@ func (executor *sshAgentDispatchExecutor) Exec(
 }
 
 func TestSSHAgentEnvironmentIncludesDeselectedProfileHooksAndStopsOnFailure(t *testing.T) {
-	root, _, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root := fixture.Root
 	writeCLIFile(t, filepath.Join(root, "scripts", "ssh-agent-environment.sh"), "generic", 0o700)
 	for _, item := range []struct{ name, body string }{
 		{"selected", "selected hook"}, {"deselected", "deselected hook"},
 	} {
 		directory := filepath.Join(root, "config", "profiles", item.name)
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(directory, "profile.json"), `{"schema_version":1,"guest_environment":{"handler":"guest.sh"}}`, 0o600)
-		writeCLIFile(t, filepath.Join(directory, "guest.sh"), item.body, 0o700)
+		fixture.Write(filepath.Join(directory, "profile.json"), `{"schema_version":1,"guest_environment":{"handler":"guest.sh"}}`)
+		fixture.Write(filepath.Join(directory, "guest.sh"), item.body, 0o700)
 	}
 	catalog, err := config.LoadCatalog(root)
 	if err != nil {
@@ -135,12 +132,9 @@ func TestSSHAgentArgumentBoundaries(t *testing.T) {
 }
 
 func TestSSHAgentUnlockNeedsTerminalEvenWithConsent(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
 	var out bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "unlock", "--key", "absent", "--ttl", "2h", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &out})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"ssh-agent", "unlock", "--key", "absent", "--ttl", "2h", "--yes"}, Stderr: &out})
 	program.operatorTerminal = func() bool { return false }
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(out.String(), "requires a terminal") {
 		t.Fatalf("code=%d err=%s", code, &out)
@@ -171,14 +165,12 @@ func TestSSHAgentLockIsPromptFreeAndUnlockAssessesAccess(t *testing.T) {
 }
 
 func TestSSHAgentRejectsInvalidKeyBeforeGuestPreparation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root := fixture.Root
 	key := filepath.Join(root, "invalid-key")
 	writeCLIFile(t, key, "invalid private key", 0600)
 	var out bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", "unlock", "--key", key, "--ttl", "2h", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &out})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"ssh-agent", "unlock", "--key", key, "--ttl", "2h", "--yes"}, Stderr: &out})
 	program.operatorTerminal = func() bool { return true }
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(out.String(), "encrypted private key") {
 		t.Fatalf("invalid key reached transport preparation: code=%d err=%s", code, &out)
@@ -186,8 +178,9 @@ func TestSSHAgentRejectsInvalidKeyBeforeGuestPreparation(t *testing.T) {
 }
 
 func TestSSHAgentRevocationRemainsAvailableDuringReleaseRecovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	runtimeRoot := filepath.Join(root, "runtime-agent-recovery")
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
+	runtimeRoot := testkit.TempDir(t)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
 	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	before, err := os.ReadFile(journal)
@@ -196,10 +189,7 @@ func TestSSHAgentRevocationRemainsAvailableDuringReleaseRecovery(t *testing.T) {
 	}
 	for _, verb := range []string{"status", "lock"} {
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"ssh-agent", verb}, Environment: environment, WorkingDir: root, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: []string{"ssh-agent", verb}, Environment: environment, Stderr: &stderr})
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("%s: code=%d %s", verb, code, &stderr)
 		}

@@ -111,12 +111,9 @@ func infrastructureYardFixture(t *testing.T, cli *CLI, incus *testkit.Incus, id,
 }
 
 func TestInfrastructureServiceRegistrationHasNoLifecycleEffects(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	incus := lifecycleIncus()
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus})
 	selection := infrastructureFixture(t, program, incus, "fixture-service")
 	if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
 		t.Fatal(err)
@@ -149,12 +146,9 @@ func TestInfrastructureServiceRegistrationHasNoLifecycleEffects(t *testing.T) {
 }
 
 func TestInfrastructureServiceOwnerRenameRequiresExplicitVerifiedRepair(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	incus := lifecycleIncus()
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus})
 	selection := infrastructureFixture(t, program, incus, "fixture-service")
 	loaded, err := program.loadContext("default")
 	if err != nil {
@@ -199,7 +193,7 @@ func TestInfrastructureServiceLifecycleExecutesOnlyParentApproval(t *testing.T) 
 		action := strings.TrimSuffix(mode, "-converged")
 		for _, outcome := range []string{"success", "stale", "unauthorized", "forged-authority"} {
 			t.Run(mode+"/"+outcome, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
 				incus := lifecycleIncus()
 				instance := incus.Instances["subyard/yard"]
 				if action != "start" {
@@ -223,10 +217,7 @@ func TestInfrastructureServiceLifecycleExecutesOnlyParentApproval(t *testing.T) 
 						delete(incus.Instances, "subyard/yard")
 					}
 				}}}}
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy(), Prompt: prompt})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Incus: incus, InitPlatform: platform, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy(), Prompt: prompt})
 				selection := infrastructureFixture(t, program, incus, "fixture-service")
 				loaded, err := program.loadContext("default")
 				if err != nil {
@@ -302,8 +293,7 @@ func TestInfrastructureServiceLifecycleExecutesOnlyParentApproval(t *testing.T) 
 func TestInfrastructureServiceExactOwnerRPCRejectsStaleTargets(t *testing.T) {
 	for _, kind := range []string{"success", "registration", "owner", "uuid", "ownership", "expected-owner"} {
 		t.Run(kind, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			environment = append(environment, "NESTED_E2E_VMS=1")
+			fixture := newFixture(t, withWorkingDir(""), withEnv("NESTED_E2E_VMS=1"))
 			incus := lifecycleIncus()
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
@@ -312,10 +302,7 @@ func TestInfrastructureServiceExactOwnerRPCRejectsStaleTargets(t *testing.T) {
 			runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: "service-rpc", Status: "ok"}, Apply: func(domain.AdapterRequest) {
 				probe.output = bytes.Replace(probe.output, []byte(`"state":"held"`), []byte(`"state":"available"`), 1)
 			}}}}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, ProjectData: probe, AdapterRunner: runner})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Incus: incus, ProjectData: probe, AdapterRunner: runner})
 			selection := infrastructureFixture(t, program, incus, "test-vms")
 			loaded, err := program.loadContext("default")
 			if err != nil {
@@ -377,12 +364,9 @@ func TestInfrastructureServiceExactOwnerRPCRejectsStaleTargets(t *testing.T) {
 }
 
 func TestInfrastructureServiceSelectionIgnoresWorkspaceAndRefusesAmbiguity(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	incus := lifecycleIncus()
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus})
 	selection := infrastructureFixture(t, program, incus, "fixture-service")
 	program.env["SUBYARD_YARD"] = "missing-workspace"
 	definition := command.Definition{Name: "fixture-service", Handler: "@test-vms"}
@@ -411,12 +395,9 @@ func TestInfrastructureServiceSelectionIgnoresWorkspaceAndRefusesAmbiguity(t *te
 }
 
 func TestInfrastructureServiceErrorsAreStructured(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stdout: &output})
 	failure := &ownerservice.ResolutionError{Code: "service_absent", Owner: "fixture-owner", Service: "fixture-service"}
 	if code := program.reportServiceError([]string{"status", "--json"}, failure); code != 1 {
 		t.Fatal(code)

@@ -8,10 +8,11 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestLoadNamedContext(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	operatorHome := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "config-home")
 	shipped := filepath.Join(root, "config")
@@ -91,7 +92,7 @@ func TestLoadNamedContext(t *testing.T) {
 }
 
 func TestLoadRejectsBroadDataHome(t *testing.T) {
-	operatorHome := t.TempDir()
+	operatorHome := testkit.TempDir(t)
 	_, err := Load(LoadOptions{
 		RepositoryRoot: filepath.Clean(filepath.Join("..", "..")),
 		OperatorHome:   operatorHome,
@@ -108,7 +109,7 @@ func TestLoadRejectsBroadDataHome(t *testing.T) {
 }
 
 func TestLoadExactYardSettingsFile(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	operatorHome := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "config-home")
 	shipped := filepath.Join(root, "config")
@@ -159,7 +160,7 @@ DEV_SUDO=no
 }
 
 func TestRetiredE2EVMTemplateReportsMigrationAndTeardown(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	configDir := filepath.Join(root, "config")
 	yardFile := filepath.Join(root, "yards", "e2e-yard.env")
 	writeFixture(t, yardFile, "YARD_TEMPLATE=e2e-vms\nSSH_PORT=3333\n")
@@ -186,7 +187,7 @@ func TestRetiredE2EVMTemplateReportsMigrationAndTeardown(t *testing.T) {
 }
 
 func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	operatorHome := filepath.Join(root, "home")
 	configHome := filepath.Join(operatorHome, ".config", "subyard")
 	shipped := filepath.Join(root, "config")
@@ -267,7 +268,7 @@ func TestGitApprovalDefaultAndExplicitPromptScopes(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	for _, scope := range []string{"default", "shared", "host", "yard", "command"} {
 		t.Run(scope, func(t *testing.T) {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, ".config", "subyard")
 			options := LoadOptions{
 				RepositoryRoot: root, OperatorHome: home, YardName: "named",
@@ -320,7 +321,7 @@ func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 		{name: "command overrides yard", shared: "no", yard: "yes", command: "no", want: "no", scope: "command", role: "command override"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, "config")
 			for path, value := range map[string]string{
 				GitSettingsRelativePath + "/config.env":               test.gitHost,
@@ -352,7 +353,7 @@ func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
 	for _, value := range []string{"1", "0", "true"} {
 		for _, scope := range []string{"host", "command"} {
-			home := t.TempDir()
+			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, "config")
 			environment := map[string]string{"SUBYARD_CONFIG_HOME": configHome}
 			if scope == "host" {
@@ -371,7 +372,7 @@ func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
 
 func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	temp := t.TempDir()
+	temp := testkit.TempDir(t)
 	home := filepath.Join(temp, "home")
 	configHome := filepath.Join(home, ".config", "subyard")
 	shared := filepath.Join(configHome, "overrides", "shared", "agents", "codex", "rules", "repo.rules")
@@ -576,7 +577,7 @@ func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 		{"secret-like", "config.env", "YARD_IMAGE=password=hidden\n", "secret material"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			temp := t.TempDir()
+			temp := testkit.TempDir(t)
 			home := filepath.Join(temp, "home")
 			configHome := filepath.Join(home, ".config", "subyard")
 			writeFixture(t, filepath.Join(configHome, test.relative), test.content)
@@ -596,7 +597,7 @@ func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 
 func TestProductionLoaderRejectsPendingConfigurationTransaction(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	temporary := t.TempDir()
+	temporary := testkit.TempDir(t)
 	home := filepath.Join(temporary, "home")
 	configHome := filepath.Join(home, ".config", "subyard")
 	writeFixture(t, filepath.Join(configHome, ".sync", "transaction.json"), "{}\n")
@@ -794,7 +795,7 @@ func TestLegacyEmptyCommandSelection(t *testing.T) {
 func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
 	for _, yard := range []string{"default", "named"} {
 		t.Run(yard, func(t *testing.T) {
-			operatorHome := t.TempDir()
+			operatorHome := testkit.TempDir(t)
 			configHome := filepath.Join(operatorHome, ".config", "subyard")
 			hostFile := filepath.Join(configHome, "config.env")
 			yardFile := filepath.Join(configHome, "yards", yard, "config.env")
@@ -838,7 +839,7 @@ func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
 }
 
 func TestRetiredCodexAssignmentsCannotAffectExportsOrOtherSettings(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config.env")
+	file := filepath.Join(testkit.TempDir(t), "config.env")
 	writeFixture(t, file, "CODEX_VERSION=\"${SSH_PORT:=4444}\"\n: \"${CODEX_SHA256_AMD64:=${DEV_UID:=2000}}\"\nCODEX_SHA256_ARM64=\nCODING_TOOL_INTEGRATIONS=codex\n")
 	values, err := ReadAssignmentsOver(file, map[string]string{"CODEX_VERSION": "0.147.0"})
 	if err != nil {
@@ -904,7 +905,7 @@ func TestE2EConfigValidation(t *testing.T) {
 }
 
 func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	operatorHome := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "config-home")
 	for _, directory := range []string{filepath.Join(root, "config"), filepath.Join(configHome, "yards")} {
@@ -988,7 +989,5 @@ func writeFixture(t *testing.T, path, content string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(content), 0o600)
 }

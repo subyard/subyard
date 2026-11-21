@@ -32,7 +32,7 @@ type configProspective struct {
 func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
 	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
 	if desired.Exists {
-		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
+		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*") //nolint:forbidigo // scratch draft, never published
 		if err != nil {
 			return nil, err
 		}
