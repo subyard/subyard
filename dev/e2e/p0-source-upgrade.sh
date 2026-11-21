@@ -583,6 +583,44 @@ verify_config_workflow() {
   [ "$host_hash" = "$guest_hash" ] || die 'configured Codex rules were not applied to the yard'
 }
 
+verify_combined_codex_policy_migration() {
+  # The published hop verifies its own requirements digest before handoff.
+  # Exercise the combined layout on the ordinary yard after that handoff.
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- bash -e -s <<'COMBINED_APPROVAL'
+rm -f /etc/codex/49-subyard-approval-hook.toml \
+  /etc/codex/50-subyard-git-approval.rules.inc /etc/codex/51-subyard-sudo-approval.rules.inc
+cat > /etc/codex/requirements.toml <<'REQUIREMENTS'
+# Managed by Subyard Codex provision.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+check_for_update_on_startup = false
+[rules]
+prefix_rules = [
+  { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt" },
+  { pattern = [{ token = "sudo" }], decision = "prompt" },
+]
+[features]
+hooks = true
+[hooks]
+managed_dir = "/etc/codex"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/etc/codex/subyard-git-approval-hook --plain git sudo"
+timeout = 3
+REQUIREMENTS
+COMBINED_APPROVAL
+  operator_yard init --yes || die 'init did not reprovision the combined Codex policy'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
+    || die 'init did not split the combined Codex policy'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- codex-policy-check >/dev/null \
+    || die 'migrated Codex policies failed readiness'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- test ! -e /etc/codex/50-subyard-git-approval.rules.inc \
+    || die 'sudo-only migration kept the Git approval policy'
+  printf 'ok: ordinary yard reprovisioned the combined Codex policy\n'
+}
+
 guest_dev() {
   incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" --user "$FIXTURE_DEV_UID" --group "$FIXTURE_DEV_UID" -- "$@"
 }
@@ -1013,32 +1051,6 @@ prepare() {
   if incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then
     die 'the baseline runtime installed Codex sudo prompts'
   fi
-  # The published hop predates the combined policy. Seed that on-disk shape
-  # so the candidate update exercises migration on the retained ordinary yard.
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- bash -e -s <<'COMBINED_APPROVAL'
-install -d -m 0755 /etc/codex
-cat > /etc/codex/requirements.toml <<'REQUIREMENTS'
-# Managed by Subyard Codex provision.
-allowed_approval_policies = ["on-request"]
-allowed_approvals_reviewers = ["user"]
-check_for_update_on_startup = false
-[rules]
-prefix_rules = [
-  { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt" },
-  { pattern = [{ token = "sudo" }], decision = "prompt" },
-]
-[features]
-hooks = true
-[hooks]
-managed_dir = "/etc/codex"
-[[hooks.PreToolUse]]
-matcher = "Bash"
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "/etc/codex/subyard-git-approval-hook --plain git sudo"
-timeout = 3
-REQUIREMENTS
-COMBINED_APPROVAL
   if update_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
@@ -1053,10 +1065,6 @@ COMBINED_APPROVAL
   # reprovisions the running yard's agents with sudo prompts and keeps the grant.
   incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml \
     || die 'update did not install the default Codex sudo prompts'
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
-    || die 'update did not split the combined Codex policy'
-  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- codex-policy-check >/dev/null \
-    || die 'migrated Codex policies failed readiness'
   incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- runuser -u dev -- sudo -n true \
     || die 'update removed the passwordless grant'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
@@ -1084,6 +1092,7 @@ COMBINED_APPROVAL
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'repeated init changed the ordinary yard'
   verify_config_workflow
+  verify_combined_codex_policy_migration
   operator_yard stop --yes
 
   verify_v2_release_transition "$VERSION_A"
