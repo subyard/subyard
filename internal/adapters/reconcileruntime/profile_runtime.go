@@ -233,13 +233,14 @@ func (runtime Runtime) ObserveProfileRuntimeRollback(ctx context.Context, id str
 }
 
 // ApplyProfileRuntimeRollback converts one owner's state to its prepared
-// rollback format, with the assessment, result and verification checks of apply.
-func (runtime Runtime) ApplyProfileRuntimeRollback(ctx context.Context, id, operationID, actual, desired string) error {
+// rollback format, with the assessment, result and verification checks of
+// apply. The confirmed consequence is part of the assessment.
+func (runtime Runtime) ApplyProfileRuntimeRollback(ctx context.Context, id, operationID, actual, desired, consequence string) error {
 	definition, err := runtime.rollbackRuntimeDefinition(id)
 	if err != nil {
 		return err
 	}
-	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRollback, operationID, actual, desired)
+	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRollback, operationID, actual, desired, &consequence)
 }
 
 func (runtime Runtime) rollbackRuntimeDefinition(id string) (profile.Definition, error) {
@@ -406,7 +407,7 @@ func (runtime Runtime) applyProfileRuntime(
 	definition profile.Definition,
 	operationID, actual, desired string,
 ) error {
-	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRefresh, operationID, actual, desired)
+	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRefresh, operationID, actual, desired, nil)
 }
 
 func (runtime Runtime) applyProfileRuntimeWith(
@@ -414,6 +415,7 @@ func (runtime Runtime) applyProfileRuntimeWith(
 	definition profile.Definition,
 	actions profileRuntimeActions,
 	operationID, actual, desired string,
+	consequence *string,
 ) error {
 	if !domain.SafeID(operationID) {
 		return errors.New("profile runtime refresh requires a valid operation ID")
@@ -426,7 +428,8 @@ func (runtime Runtime) applyProfileRuntimeWith(
 	if observation.State == ports.RuntimeStateCurrent && observation.Actual == desired && observation.Desired == desired {
 		return nil
 	}
-	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired {
+	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired ||
+		consequence != nil && observation.Consequence != *consequence {
 		return fmt.Errorf("%w: profile runtime assessment changed before apply", domain.ErrPlanStale)
 	}
 	nonce, err := profileRuntimeDiagnosticNonce()

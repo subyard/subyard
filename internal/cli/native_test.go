@@ -5946,16 +5946,56 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded := config.Loaded{Catalog: catalog, Context: domain.Context{IncusProject: "project", YardInstanceName: "yard", YardName: "default"}}
+	loaded := config.Loaded{Catalog: catalog, Context: domain.Context{IncusProject: "project", YardInstanceName: "yard", YardName: "default",
+		Paths: domain.RuntimePaths{ConfigHome: testkit.TempDir(t)}}}
 	observation, err := runtimeConfig.ProfileRuntimeRollbackObservation(context.Background(), root, loaded, "sample-runtime")
 	if err != nil || observation.State != ports.RuntimeStateCurrent {
 		t.Fatalf("rollback observation = %#v, %v", observation, err)
 	}
-	if err := runtimeConfig.ProfileRuntimeRollbackApply(context.Background(), root, loaded, "sample-runtime", "op-1", digest, digest); err != nil {
+	if err := runtimeConfig.ProfileRuntimeRollbackApply(context.Background(), root, loaded, "sample-runtime", "op-1", digest, digest, ""); err != nil {
 		t.Fatalf("converged rollback apply = %v", err)
 	}
 	// The converged apply is verified by rollback-observe alone.
 	if calls, err := os.ReadFile(filepath.Join(root, "calls")); err != nil || string(calls) != "rollback-observe\nrollback-observe\n" {
 		t.Fatalf("hook calls = %q, %v", calls, err)
+	}
+	// Neither action touches another yard's native instance.
+	incus.Instances["project/yard"] = ports.InstanceInfo{Name: "yard", Status: "Running", Config: map[string]string{"user.subyard.name": "other"}}
+	if _, err := runtimeConfig.ProfileRuntimeRollbackObservation(context.Background(), root, loaded, "sample-runtime"); err == nil {
+		t.Fatal("rollback-observe ran against another yard's instance")
+	}
+	if err := runtimeConfig.ProfileRuntimeRollbackApply(context.Background(), root, loaded, "sample-runtime", "op-2", digest, digest, ""); err == nil {
+		t.Fatal("rollback-apply ran against another yard's instance")
+	}
+}
+
+// Preparing profile runtimes for rollback is not a release update: no update
+// headline, no completed update and no update history.
+func TestRollbackPreparationIsPresentedAsItsOwnResult(t *testing.T) {
+	var stdout bytes.Buffer
+	home := testkit.TempDir(t)
+	program := &CLI{options: Options{Stdout: &stdout}, env: map[string]string{"SUBYARD_HOME": home}}
+	execution := &releaseExecution{
+		prepared: releaseruntime.Prepared{Action: releaseruntime.PrepareRollbackAction, SourceVersion: "0.31.0", TargetVersion: "0.30.0"},
+		inspection: &releasetransition.Inspection{Outcome: &releasetransition.Outcome{
+			Status: releasetransition.StatusMigrationRequired, Active: "release-b",
+			Message: "profile runtimes are prepared for release-a", Retry: "run yard update --rollback",
+		}},
+	}
+	program.printUpdatePreview(execution)
+	program.printUpdateResult(execution, true)
+	output := stdout.String()
+	if strings.Contains(output, "Update:") || strings.Contains(output, "Update completed") || !strings.Contains(output, "[ ok ] Profile runtimes prepared for rollback") ||
+		!strings.Contains(output, "Status: migration-required") || !strings.Contains(output, "Next: run yard update --rollback") {
+		t.Fatalf("preparation output = %q", output)
+	}
+	if err := program.beginUpdateHistory(domain.OperationPlan{OperationID: "op-1"}, execution); err != nil || execution.history != nil {
+		t.Fatalf("preparation began update history: %v", err)
+	}
+	if err := program.recordUpdateTerminal([]string{"--rollback"}, "op-1", "confirmation", "declined", "operator_declined", execution); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Fatalf("preparation wrote update history: %v, %v", entries, err)
 	}
 }

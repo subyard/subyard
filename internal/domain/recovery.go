@@ -25,6 +25,7 @@ const (
 	VerbMigrateCheck
 	VerbUpdate
 	VerbUpdateCheck
+	VerbUpdateRollback
 	VerbStart
 	VerbStopForce
 	VerbIntegrationStatus
@@ -33,13 +34,13 @@ const (
 var verbWords = map[Verb]string{
 	VerbInit: "init", VerbConfigApply: "config apply", VerbConfigStatus: "config status",
 	VerbConfigValidate: "config validate", VerbMigrate: "migrate", VerbMigrateCheck: "migrate --check",
-	VerbUpdate: "update", VerbUpdateCheck: "update --check", VerbStart: "start", VerbStopForce: "stop --force",
+	VerbUpdate: "update", VerbUpdateCheck: "update --check", VerbUpdateRollback: "update --rollback", VerbStart: "start", VerbStopForce: "stop --force",
 	VerbIntegrationStatus: "integration status",
 }
 
 // Host verbs act on the whole host and never select a yard.
 func (verb Verb) Host() bool {
-	return verb == VerbMigrate || verb == VerbMigrateCheck || verb == VerbUpdate || verb == VerbUpdateCheck
+	return verb == VerbMigrate || verb == VerbMigrateCheck || verb == VerbUpdate || verb == VerbUpdateCheck || verb == VerbUpdateRollback
 }
 
 // Action is one recovery command. Version is used only by VerbUpdate.
@@ -187,7 +188,7 @@ func (finding Finding) Remedies(attempted Action) []Action {
 }
 
 // recoveryRank orders remedies: prerequisites before repairs, repairs before reads.
-var recoveryRank = []Verb{VerbMigrate, VerbUpdate, VerbStopForce, VerbStart, VerbInit, VerbConfigApply, VerbIntegrationStatus, VerbConfigStatus, VerbMigrateCheck, VerbUpdateCheck}
+var recoveryRank = []Verb{VerbMigrate, VerbUpdate, VerbUpdateRollback, VerbStopForce, VerbStart, VerbInit, VerbConfigApply, VerbIntegrationStatus, VerbConfigStatus, VerbMigrateCheck, VerbUpdateCheck}
 
 func rank(finding Finding, action Action) int {
 	switch {
