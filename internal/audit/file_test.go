@@ -126,7 +126,7 @@ func TestWriteInvocationRefusesSymlinkedAuditLog(t *testing.T) {
 	}
 }
 
-func TestWriteInvocationRefusesSymlinkedLogsDirectory(t *testing.T) {
+func TestWriteInvocationFollowsSymlinkedLogsDirectory(t *testing.T) {
 	home := testkit.TempDir(t)
 	target := filepath.Join(testkit.TempDir(t), "elsewhere")
 	if err := os.Mkdir(target, 0o700); err != nil {
@@ -135,18 +135,16 @@ func TestWriteInvocationRefusesSymlinkedLogsDirectory(t *testing.T) {
 	if err := os.Chmod(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logs := filepath.Join(home, "logs")
-	if err := os.Symlink(target, logs); err != nil {
+	if err := os.Symlink(target, filepath.Join(home, "logs")); err != nil {
 		t.Fatal(err)
 	}
-	err := WriteInvocation(Invocation{Home: home, Command: "status", Now: time.Now(), PID: 1})
-	if err == nil || err.Error() != "safefs "+logs+": symbolic link" {
+	if err := WriteInvocation(Invocation{Home: home, Command: "status", Now: time.Now(), PID: 1}); err != nil {
 		t.Fatalf("symlinked logs directory: %v", err)
 	}
-	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o755 {
-		t.Fatalf("link target changed: %v %v", info, err)
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("link target not repaired: %v %v", info, err)
 	}
-	if entries, _ := os.ReadDir(target); len(entries) != 0 {
-		t.Fatalf("link target received entries: %v", entries)
+	if content, err := os.ReadFile(filepath.Join(target, "yard.log")); err != nil || !strings.Contains(string(content), "status") {
+		t.Fatalf("audit entry not written through the link: %q %v", content, err)
 	}
 }

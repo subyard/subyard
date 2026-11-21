@@ -16,34 +16,33 @@ func TestAdmitDirStates(t *testing.T) {
 		name    string
 		prepare func(path string)
 		want    fs.FileMode // Expected mode of the entry at path, or of the link target.
-		refused bool
 	}{
-		{"absent", func(string) {}, 0, false},
-		{"exact", admitFixtureDir(t, 0o700), 0o700 | fs.ModeDir, false},
-		{"broader", admitFixtureDir(t, 0o750), 0o750 | fs.ModeDir, false},
-		{"group only", admitFixtureDir(t, 0o050), 0o050 | fs.ModeDir, false},
-		{"narrower", admitFixtureDir(t, 0o500), 0o700 | fs.ModeDir, false},
-		{"no permissions", admitFixtureDir(t, 0o000), 0o700 | fs.ModeDir, false},
-		{"narrower setgid", admitFixtureDir(t, 0o500|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir, false},
-		{"exact setgid", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir, false},
-		{"regular file", func(path string) { testkit.WriteFile(t, path, nil, 0o600) }, 0o600, false},
-		{"dangling symlink", func(path string) { admitFixtureLink(t, filepath.Join(root, "absent-target"), path) }, 0, false},
+		{"absent", func(string) {}, 0},
+		{"exact", admitFixtureDir(t, 0o700), 0o700 | fs.ModeDir},
+		{"broader", admitFixtureDir(t, 0o750), 0o750 | fs.ModeDir},
+		{"group only", admitFixtureDir(t, 0o050), 0o050 | fs.ModeDir},
+		{"narrower", admitFixtureDir(t, 0o500), 0o700 | fs.ModeDir},
+		{"no permissions", admitFixtureDir(t, 0o000), 0o700 | fs.ModeDir},
+		{"narrower setgid", admitFixtureDir(t, 0o500|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
+		{"exact setgid", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
+		{"regular file", func(path string) { testkit.WriteFile(t, path, nil, 0o600) }, 0o600},
+		{"dangling symlink", func(path string) { admitFixtureLink(t, filepath.Join(root, "absent-target"), path) }, 0},
 		{"symlink to file", func(path string) {
 			target := path + ".target"
 			testkit.WriteFile(t, target, nil, 0o600)
 			admitFixtureLink(t, target, path)
-		}, 0o600, false},
+		}, 0o600},
 		{"symlink to directory", func(path string) {
 			target := path + ".target"
 			admitFixtureDir(t, 0o500)(target)
 			admitFixtureLink(t, target, path)
-		}, 0o500 | fs.ModeDir, true},
+		}, 0o500 | fs.ModeDir},
 	}
 	for _, test := range cases {
 		path := filepath.Join(root, test.name)
 		test.prepare(path)
 		err := AdmitDir(path, 0o700)
-		if test.refused != errors.Is(err, ErrSymlink) || (!test.refused && err != nil) {
+		if err != nil {
 			t.Errorf("%s: AdmitDir = %v", test.name, err)
 		}
 		info, statErr := os.Stat(path)
