@@ -1065,8 +1065,18 @@ that rollback. With both gates off, the surviving hook blocks wrapped Git and su
 instead of prompting for them. The [v0.30.0 provisioner](https://github.com/subyard/subyard/blob/e2b31943dac13e05837e1b392416d023911abfd0/config/agents/claude/provision.sh#L155-L164)
 publishes only the Git drop-in.
 
-TODO (rollback slice 4 or later): have the rollback hook retire the split approval files
-owned by the outgoing release before converging a pre-split target.
+After rolling back to a release without split policies, such as v0.30.0, remove the
+leftover drop-ins by hand. `48-subyard-update-lock.json` only repeats the update lock, but
+`49-subyard-approval-hook.json` keeps the hook running and `51-subyard-sudo-approval.json`
+keeps the sudo prompts, so `DEV_SUDO` no longer controls them and wrapped forms can be
+blocked. From the owner host:
+
+```sh
+yard shell --root -- rm -f /etc/claude-code/managed-settings.d/48-subyard-update-lock.json \
+  /etc/claude-code/managed-settings.d/49-subyard-approval-hook.json \
+  /etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json
+yard init
+```
 
 Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
 standard bypass mode is also covered by the SDK fixture. A native CLI terminal check using
