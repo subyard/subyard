@@ -247,7 +247,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
         owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
         for reasons, message, retry in (
                 ('[["rollback-enabled"]]', 'telemetry is enabled', 'run yard -Y secondary profile disable telemetry'),
-                ('[["rollback-unconverged"]]', 'not converged with this release', 'run yard -Y secondary migrate'),
+                ('[["rollback-unconverged"]]', 'not converged with this release', 'run yard migrate'),
                 ('[["unsafe-policy","codex"]]', 'unsafe or foreign telemetry policy', 'run yard -Y secondary config paths')):
             with self.subTest(reasons=reasons), patch.dict(os.environ, YARD_NAME='secondary'), \
                     self.assertRaisesRegex(owner['Refusal'], message) as refused:

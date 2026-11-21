@@ -46,9 +46,11 @@ def yard_name():
 
 def rollback_retry(reasons):
     """The next step of a rollback preparation refusal; other refusals keep config paths."""
-    for reason, command in ((['rollback-enabled'], ['profile', 'disable', 'telemetry']), (['rollback-unconverged'], ['migrate'])):
-        if reason in reasons:
-            return 'run '+shlex.join(['yard', '-Y', yard_name(), *command])
+    if ['rollback-enabled'] in reasons:
+        return 'run '+shlex.join(['yard', '-Y', yard_name(), 'profile', 'disable', 'telemetry'])
+    # migrate is a host verb.
+    if ['rollback-unconverged'] in reasons:
+        return 'run yard migrate'
     return None
 
 
