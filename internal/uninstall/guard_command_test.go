@@ -310,7 +310,7 @@ func TestGuardAllReportsPreflightRefusalsBeforeQuery(t *testing.T) {
 	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", string(payload))
 	t.Cleanup(func() { incusQuery = queryIncus })
 	incusQuery = func(_, _ string, _ any) error {
-		t.Fatal("queried Incus before local preflight passed")
+		t.Fatal("queried Incus with an invalid project")
 		return nil
 	}
 	var stderr bytes.Buffer
@@ -320,6 +320,21 @@ func TestGuardAllReportsPreflightRefusalsBeforeQuery(t *testing.T) {
 	expected := "plan_stale: host-profile resource 3: invalid full default-profile retry bindings; " +
 		"inventory: invalid teardown resource kind; teardown requires a dedicated project; " +
 		"volume resource 2: missing teardown resource field pool\n"
+	if stderr.String() != expected {
+		t.Fatalf("diagnostic %q, want %q", stderr.String(), expected)
+	}
+}
+
+func TestGuardAllReportsLocalAndIndependentBindingRefusals(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"volume","name":"data","binding":"`+binding+`"},{"kind":"profile","name":"fixture","binding":"`+binding+`"}]`)
+	t.Setenv("PATH", testkit.TempDir(t))
+	var stderr bytes.Buffer
+	if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	expected := "plan_stale: profile resource 2: required executable was not found; " +
+		"volume resource 1: missing teardown resource field pool\n"
 	if stderr.String() != expected {
 		t.Fatalf("diagnostic %q, want %q", stderr.String(), expected)
 	}

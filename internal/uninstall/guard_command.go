@@ -620,18 +620,23 @@ func guardAll(project string) error {
 	if err != nil {
 		refusals = append(refusals, guardContext("inventory", err))
 	}
-	if project == "" || project == "default" {
+	dedicatedProject := project != "" && project != "default"
+	if !dedicatedProject {
 		refusals = append(refusals, guardRefusal("teardown requires a dedicated project"))
 	}
+	var eligible []int
 	for index, resource := range resources {
+		if resource.Kind == "" {
+			continue // Inventory could not decode this record.
+		}
 		if err := guardResourceFields(resource); err != nil {
 			refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
+		} else if dedicatedProject {
+			eligible = append(eligible, index)
 		}
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return err
-	}
-	for index, resource := range resources {
+	for _, index := range eligible {
+		resource := resources[index]
 		if err := guardResourceBinding(resource, project); err != nil {
 			refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
 		}
