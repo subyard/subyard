@@ -285,7 +285,7 @@ export -f connected connected_watch android_capture_evidence
 export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log" ANDROID_GRADLE_WORK="$work"
 # The child shell expands the exported evidence path and command arguments.
 # shellcheck disable=SC2016
-android-broker run --device phone --api 36 --wait 1230 --purpose android-gradle -- \
+android-broker run --device phone --api 36 --wait 900 --purpose android-gradle -- \
   bash -c 'trap "connected 2> \"$ANDROID_GRADLE_EVIDENCE\"" EXIT; connected_watch; "$@"' _ \
   "${gradle[@]}" -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1 :app:connectedDebugAndroidTest \
   > "$work/connected.log" 2>&1 < /dev/null

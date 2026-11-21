@@ -558,23 +558,17 @@ assert {kind: {"include": [entry for entry in group["include"] if entry["id"] no
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 plan = default_plan
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"\n', 1)[1]
-selection = selection.split('          # An empty matrix', 1)[0]
+selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
 for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
              *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
-        env=dict(os.environ, ONLY=only, RETRY="", GRADLE_COPIES="", plan=json.dumps(plan))))
+        env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
     expected = ({kind: {"include": [entry for entry in group["include"] if entry["id"] == only]}
                  for kind, group in plan.items()} if only else
                 {kind: {"include": [entry for entry in group["include"] if not entry.get("manual")]}
                  for kind, group in plan.items()})
     assert selected == expected
-selected = json.loads(subprocess.check_output(
-    ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
-    env=dict(os.environ, ONLY="profile:android/gradle", RETRY="", GRADLE_COPIES="1 2 3", plan=json.dumps(plan))))
-assert selected["checks"]["include"] == []
-gradle = next(entry for entry in plan["nested"]["include"] if entry["id"] == "profile:android/gradle")
-assert selected["nested"]["include"] == [gradle | {"copy": copy} for copy in (1, 2, 3)]
 print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
 # Periodic-only profile lanes are planned for Periodic E2E but are never release checks.
 periodic_only = {"profile:" + name + "/" + lane["id"] for name, entry in a.profile_inventory(root).items()

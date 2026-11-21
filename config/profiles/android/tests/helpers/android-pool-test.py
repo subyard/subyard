@@ -571,6 +571,35 @@ class Leases(unittest.TestCase):
         with self.assertRaisesRegex(poolmod.PoolError, 'boot failed; runtime was stopped'):
             self.pool.allocation(token)
 
+    def test_boot_timeout_keeps_diagnostics_after_slot_reuse_until_expiry(self):
+        token = secrets.token_hex(32)
+        diagnostic = 'Android boot did not settle. Cgroup CPU PSI was 45%.'
+        with patch.object(self.runtime, 'start', side_effect=poolmod.PoolError('boot_timeout', diagnostic)):
+            with self.pool.lock:
+                failed = self.pool.reserve({}, token, self.owner)
+                worker = self.pool.workers[failed['slot_id']]
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+
+        replacement, allocation = self.acquire()
+        self.assertEqual(allocation['slot_id'], failed['slot_id'])
+        self.assertGreater(allocation['generation'], failed['generation'])
+        with self.assertRaises(poolmod.PoolError) as error:
+            self.pool.allocation(token)
+        self.assertEqual(error.exception.code, 'boot_timeout')
+        self.assertEqual(str(error.exception), diagnostic + '; runtime was stopped')
+        with self.assertRaisesRegex(poolmod.PoolError, 'credential already used'):
+            self.pool.reserve({}, token, self.owner)
+        self.pool.release(token)
+        self.assertEqual(self.pool.allocation(replacement)['state'], 'held')
+
+        self.now += poolmod.TTL
+        with self.assertRaises(poolmod.PoolError) as error:
+            self.pool.allocation(token)
+        self.assertEqual(error.exception.code, 'stale')
+        self.pool.reap()
+        self.assertFalse(self.pool.boot_failures)
+
     def test_quarantine_keeps_image_pinned_and_never_reallocates(self):
         token, allocation = self.acquire()
         self.runtime.fail_stop = True
@@ -1042,23 +1071,28 @@ class Leases(unittest.TestCase):
         ready = b'101'
         restart = b'102'
         cases = [
-            ([ready] * 5, [10, 70, 10, 10, 10], [0] * 5, 8, None),
-            ([ready] * 5, [10, None, 10, 10, 10], [0] * 5, 8, None),
-            ([ready] * 5, [10] * 5, [0, 30, 0, 0, 0], 8, None),
-            ([ready] * 5, [10] * 5, [0, None, 0, 0, 0], 8, None),
-            ([ready, None, ready, ready, ready], [10] * 5, [0] * 5, 8, None),
-            ([ready, ready, restart, restart, restart], [10] * 5, [0] * 5, 8, None),
-            ([None] * 5, [35] * 5, [None] * 5, 10, True),
+            ([ready] * 5, [10, 70, 10, 10, 10], [0] * 5, 0, 8, False),
+            ([ready] * 5, [10, None, 10, 10, 10], [0] * 5, 0, 8, False),
+            ([ready] * 5, [10] * 5, [0, 30, 0, 0, 0], 0, 8, False),
+            ([ready] * 5, [10] * 5, [0, None, 0, 0, 0], 0, 8, False),
+            ([ready, None, ready, ready, ready], [10] * 5, [0] * 5, 0, 8, False),
+            ([ready, ready, restart, restart, restart], [10] * 5, [0] * 5, 0, 8, False),
+            # The first wakeup is at 5s. Readiness needs another 4s of passing samples.
+            ([ready] * 4, [10] * 4, [0] * 4, 3, 9, False),
+            ([None] * 5, [35] * 5, [None] * 5, 0, 10, True),
         ]
-        for samples, cpu, memory, elapsed, failure in cases:
-            with self.subTest(samples=samples, cpu=cpu, memory=memory):
+        for samples, cpu, memory, wakeup_delay, elapsed, failure in cases:
+            with self.subTest(samples=samples, cpu=cpu, memory=memory, wakeup_delay=wakeup_delay):
                 now = [0]
                 pressures = {'cpu': iter(cpu), 'memory': iter(memory)}
                 def advance(seconds):
+                    if now[0] == 0:
+                        seconds += wakeup_delay
                     now[0] += seconds
                 cancel = SimpleNamespace(is_set=lambda: False, wait=advance)
                 with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now[0]), \
                      patch.object(poolmod, 'BOOT_TIMEOUT', 10), patch.object(poolmod, 'BOOT_SETTLE_SECONDS', 4), \
+                     patch.object(poolmod, 'BOOT_SAMPLE_INTERVAL', 4), \
                      patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
                      patch.object(runtime, 'adb_ready', side_effect=[(sample, False) for sample in samples]), \
                      patch.object(runtime, 'boot_pressure', side_effect=lambda _, resource: next(pressures[resource])), \
@@ -1077,6 +1111,23 @@ class Leases(unittest.TestCase):
                 self.assertEqual(now[0], elapsed)
                 self.assertIn(f'settled={str(not failure).lower()} boot_to_ready_seconds={elapsed + 3}.0 '
                               f'elapsed_seconds={elapsed}.0', journal.getvalue())
+
+    def test_boot_pressure_reads_emulator_unit_instead_of_broker(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        runtime.PROC_ROOT, runtime.CGROUP_ROOT = self.root / 'proc', self.root / 'cgroups'
+        broker = 'system.slice/subyard-android-pool.service'
+        (runtime.PROC_ROOT / 'self').mkdir(parents=True)
+        (runtime.PROC_ROOT / 'self/cgroup').write_text(f'0::/{broker}\n')
+        for unit, cpu, memory in ((broker, '75.25', '45.50'),
+                                  ('system.slice/subyard-android-slot-007-12.service', '12.25', '1.50')):
+            cgroup = runtime.CGROUP_ROOT / unit
+            cgroup.mkdir(parents=True)
+            for resource, value in (('cpu', cpu), ('memory', memory)):
+                (cgroup / f'{resource}.pressure').write_text(f'some avg10={value} avg60=2.00 avg300=3.00 total=12\n'
+                                                           'full avg10=0.10 avg60=0.20 avg300=0.30 total=10\n')
+        slot = dict(slot_id='007', generation=12)
+        self.assertEqual(runtime.boot_pressure(slot, 'cpu'), 12.25)
+        self.assertEqual(runtime.boot_pressure(slot, 'memory'), 1.50)
 
     def test_runtime_namespace_rejects_collisions_and_cleans_only_its_name(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root='/unused'))
