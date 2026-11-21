@@ -182,6 +182,17 @@ func inspectConfigurationSources(home, data string, loaded []config.Loaded) []do
 				result = append(result, domain.Inspected{Key: key, State: domain.InspectedNotice, Resource: assignment.Path, Message: assignment.String(), Next: assignment.Repair()})
 			}
 		}
+		for _, assignment := range yard.DeprecatedAssignments() {
+			if assignment.Command() {
+				continue
+			}
+			relative, _ := filepath.Rel(home, assignment.Path)
+			key := "sources.deprecated." + domain.InspectionName(assignment.Scope+"."+relative+"."+assignment.Name)
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, domain.Inspected{Key: key, State: domain.InspectedNotice, Resource: assignment.Path, Message: assignment.String(), Next: assignment.Repair()})
+			}
+		}
 	}
 	legacy, err := legacyConfigInputsAt(home, data)
 	result = append(result, domain.InspectionRead("sources.legacy.read", home, err)...)

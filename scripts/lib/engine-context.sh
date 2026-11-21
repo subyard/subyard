@@ -23,6 +23,8 @@ subyard_require_engine_context() {
     NESTED_E2E_VMS SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS; do
     [ -n "${!name+x}" ] || subyard_context_error "engine context is missing $name"
   done
+  # 0 and 1 are deprecated aliases of no and yes.
+  case "$DEV_SUDO" in 0) DEV_SUDO=no ;; 1) DEV_SUDO=yes ;; esac
 }
 
 subyard_apply_profile_guest_environment_hooks() {

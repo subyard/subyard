@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -346,5 +347,48 @@ func TestConfigAliasRepairRejectsUnsealedToolingAndSelectors(t *testing.T) {
 		if err != nil || string(content) != before {
 			t.Fatal("rejected source repair wrote target")
 		}
+	}
+}
+
+// A deprecated DEV_SUDO alias is valid configuration; validate and show name it
+// with its replacement. config set stores it as given, for owner hosts that
+// still run an older runtime.
+func TestConfigReportsDeprecatedDevSudoAlias(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	host := filepath.Join(home, "config.env")
+	writeConfigCommandFile(t, host, "DEV_SUDO=0\n")
+	run := func(arguments ...string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: arguments, Stdout: &stdout, Stderr: &stderr})
+		return code, stdout.String() + stderr.String()
+	}
+	note := "DEV_SUDO=0 in " + host + ":1 is deprecated and read as no; yard -Y default config set DEV_SUDO no --scope host --local"
+	if code, output := run("config", "validate"); code != 0 || output != "yard default: configuration schema valid\n  deprecated: "+note+"\n" {
+		t.Fatalf("validate code=%d output=%q", code, output)
+	}
+	code, output := run("config", "validate", "--json")
+	var report struct {
+		Configurations []struct {
+			Yard       string
+			Valid      bool
+			Deprecated []string
+		}
+	}
+	if code != 0 || json.Unmarshal([]byte(output), &report) != nil || len(report.Configurations) != 1 ||
+		!report.Configurations[0].Valid || !slices.Equal(report.Configurations[0].Deprecated, []string{note}) {
+		t.Fatalf("validate --json code=%d output=%s", code, output)
+	}
+	if code, output := run("config", "show", "DEV_SUDO"); code != 0 || !strings.Contains(output, "effective: no\n") || !strings.Contains(output, "deprecated: "+note+"\n") {
+		t.Fatalf("show code=%d output=%s", code, output)
+	}
+	if code, output := run("config", "set", "DEV_SUDO", "1", "--scope", "host", "--yes"); code != 0 {
+		t.Fatalf("set code=%d output=%s", code, output)
+	}
+	if content := string(mustReadConfigFixture(t, host)); content != "DEV_SUDO='1'\n" {
+		t.Fatalf("config set did not store the value as given: %q", content)
+	}
+	note = "DEV_SUDO=1 in " + host + ":1 is deprecated and read as yes; yard -Y default config set DEV_SUDO yes --scope host --local"
+	if code, output := run("config", "validate"); code != 0 || output != "yard default: configuration schema valid\n  deprecated: "+note+"\n" {
+		t.Fatalf("stored alias not reported: code=%d output=%q", code, output)
 	}
 }

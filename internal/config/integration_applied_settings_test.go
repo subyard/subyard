@@ -109,9 +109,9 @@ func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
 			t.Fatalf("desired %q with snapshot %#v projected as %q, want %q", test.desired, test.applied, got, test.want)
 		}
 	}
-	for _, value := range []string{"1", "0"} {
+	for _, value := range []string{"true", "off", "2"} {
 		if catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": value}) == nil {
-			t.Fatalf("installed snapshot accepted legacy DEV_SUDO=%s", value)
+			t.Fatalf("installed snapshot accepted unsupported DEV_SUDO=%s", value)
 		}
 	}
 }
