@@ -45,7 +45,7 @@ func runTTYUnlockFixture(path string) int {
 	if err != nil {
 		return 2
 	}
-	if err := os.WriteFile(path+".pid", []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+	if err := os.WriteFile(path+".pid", []byte(strconv.Itoa(os.Getpid())), 0600); err != nil { //nolint:forbidigo // fake without testing.TB
 		return 2
 	}
 	manager := Manager{Config: cfg.Config, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Environment: []string{"PATH=/usr/bin:/bin", "SSH_ASKPASS_REQUIRE=never"}}
@@ -108,9 +108,7 @@ func testTerminalUnlock(t *testing.T, scenario string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(filepath.Dir(cfg.Directory), "terminal.json")
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, raw, 0600)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }

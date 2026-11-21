@@ -568,9 +568,7 @@ func TestCurrentTransitionReportsPartialLedgerAndHumanNextAction(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(ledgerPath, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, ledgerPath, payload, 0o600)
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 	var stdout bytes.Buffer
@@ -858,21 +856,15 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			}
 			fixture.candidate = writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, string(fixture.candidate.release), "0.11.2", engine)
 			registryPath := filepath.Join(fixture.candidate.root, "config", "release-transition.json")
-			if err := os.WriteFile(registryPath, fixture.registry, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, registryPath, fixture.registry, 0o600)
 			manifest := fmt.Sprintf("%s  ./bin/yard-engine\n%s  ./config/release-transition.json\n", v0111FixtureFingerprintBytes([]byte(engine)), v0111FixtureFingerprintBytes(fixture.registry))
 			for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "ports.env"} {
 				payload := mustReadFile(t, filepath.Join("..", "..", "..", "config", name))
-				if err := os.WriteFile(filepath.Join(fixture.candidate.root, "config", name), payload, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "config", name), payload, 0o600)
 				manifest += fmt.Sprintf("%s  ./config/%s\n", v0111FixtureFingerprintBytes(payload), name)
 			}
 
-			if err := os.WriteFile(filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
 			if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
 			}
@@ -891,9 +883,7 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 				if name == "broken" {
 					registration = "SSH_PORT=not-a-number\n"
 				}
-				if err := os.WriteFile(path, []byte(registration), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, path, []byte(registration), 0o600)
 			}
 			if scenario.resumes || scenario.remote {
 				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: fixture.candidate.root, OperatorHome: filepath.Dir(fixture.runtimeRoot), YardName: "named", Environment: map[string]string{"HOME": filepath.Dir(fixture.runtimeRoot), "SUBYARD_CONFIG_HOME": fixture.configHome}})
@@ -924,9 +914,7 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(sourceRoot, "private", "yards"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(sourceRoot, "private", "yards", "named.env"), []byte("# source-only fixture\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(sourceRoot, "private", "yards", "named.env"), []byte("# source-only fixture\n"), 0o600)
 			runtime := New(Config{Inputs: fixtureCommandInputs(environment), RepositoryRoot: sourceRoot, Stdout: &stdout})
 			defer runtime.Close()
 			wrong, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestSSHAgentKeyPathIsRedacted(t *testing.T) {
@@ -24,7 +25,7 @@ func TestSSHAgentKeyPathIsRedacted(t *testing.T) {
 }
 
 func TestWriteInvocationRedactsAndRotates(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	invocation := Invocation{
 		Home: home, Command: "clone", Arguments: []string{
 			"https://user:password@example.test/repo?token=private#credential",
@@ -58,7 +59,7 @@ func TestWriteInvocationRedactsAndRotates(t *testing.T) {
 }
 
 func TestOperationLogCorrelatesLifecycleWithoutEventData(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	sink := OperationLog{Home: home, WorkingDir: "/workspace", Yard: "named"}
 	err := sink.WriteAudit(context.Background(), domain.OperationEvent{
 		OperationID: "op-lifecycle", Kind: "operation.finished",

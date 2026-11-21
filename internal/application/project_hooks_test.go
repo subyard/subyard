@@ -13,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestProjectHooksBoundExecutionAndDiagnoseMissingDispatcher(t *testing.T) {
@@ -26,7 +27,7 @@ func TestProjectHooksBoundExecutionAndDiagnoseMissingDispatcher(t *testing.T) {
 			t.Fatalf("hook request has no bounded deadline: %v", remaining)
 		}
 		command := append([]string(nil), request.Command...)
-		command[len(command)-1] = filepath.Join(t.TempDir(), "missing-dispatcher")
+		command[len(command)-1] = filepath.Join(testkit.TempDir(t), "missing-dispatcher")
 		if err := exec.CommandContext(ctx, command[0], command[1:]...).Run(); err == nil {
 			t.Fatal("absent dispatcher was silently accepted")
 		}

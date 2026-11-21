@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestMaterializationUsesApprovalVariantForShippedSource(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	base := filepath.Join(root, "base.json")
 	git := filepath.Join(root, "git.json")
 	sudo := filepath.Join(root, "sudo.json")
@@ -85,11 +86,9 @@ func TestMaterializedAssetsRejectInvalidIdentityAndDestination(t *testing.T) {
 }
 
 func TestMaterializedAssetReadRejectsSymlinkConfig(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	path := filepath.Join(root, "source")
-	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("{}"), 0600)
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)

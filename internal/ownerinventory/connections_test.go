@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
 
 func TestConnectionsListReadOnlyDoesNotCreateOrRecoverStore(t *testing.T) {
 	t.Run("absent store", func(t *testing.T) {
-		root := filepath.Join(t.TempDir(), "missing-owner-inventory")
+		root := filepath.Join(testkit.TempDir(t), "missing-owner-inventory")
 		connections, err := (Connections{Root: root}).ListReadOnly()
 		if err != nil || len(connections) != 0 {
 			t.Fatalf("read absent store: connections=%#v err=%v", connections, err)
@@ -29,12 +30,10 @@ func TestConnectionsListReadOnlyDoesNotCreateOrRecoverStore(t *testing.T) {
 	})
 
 	t.Run("pending recovery", func(t *testing.T) {
-		root := t.TempDir()
+		root := testkit.TempDir(t)
 		journalPath := filepath.Join(root, "registration.json")
 		journal := []byte("{invalid-recovery\n")
-		if err := os.WriteFile(journalPath, journal, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, journalPath, journal, 0o600)
 		connections, err := (Connections{Root: root}).ListReadOnly()
 		if err != nil || len(connections) != 0 {
 			t.Fatalf("read pending store: connections=%#v err=%v", connections, err)
@@ -89,25 +88,21 @@ func TestSSHHostTrustValidatesConcreteKeyAndFingerprint(t *testing.T) {
 }
 
 func TestReadSSHHostTrustRequiresExactlyOneCapturedKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "candidate.known_hosts")
+	path := filepath.Join(testkit.TempDir(t), "candidate.known_hosts")
 	trust := testSSHHostTrust(t, "owner.example")
-	if err := os.WriteFile(path, []byte(trust.KnownHostsLine+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(trust.KnownHostsLine+"\n"), 0o600)
 	read, err := ReadSSHHostTrust(path)
 	if err != nil || read.Fingerprint != trust.Fingerprint {
 		t.Fatalf("captured trust = %#v, %v", read, err)
 	}
-	if err := os.WriteFile(path, []byte(trust.KnownHostsLine+"\n"+trust.KnownHostsLine+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(trust.KnownHostsLine+"\n"+trust.KnownHostsLine+"\n"), 0o600)
 	if _, err := ReadSSHHostTrust(path); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("multiple captured keys accepted: %v", err)
 	}
 }
 
 func TestConnectionsCollapseAliasesAndRejectIdentityCollisions(t *testing.T) {
-	store := Connections{Root: t.TempDir()}
+	store := Connections{Root: testkit.TempDir(t)}
 	if err := store.Write(Connection{
 		HostID: "owner-a", Destination: "dev@owner.example",
 		LegacyNames: []string{"two", "one", "one"},
@@ -137,7 +132,7 @@ func TestConnectionsCollapseAliasesAndRejectIdentityCollisions(t *testing.T) {
 }
 
 func TestConnectionsWriteRejectsManagedTrustDowngradeOrReplacement(t *testing.T) {
-	store := Connections{Root: t.TempDir()}
+	store := Connections{Root: testkit.TempDir(t)}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{
 		HostID: "owner-a", Destination: "owner-alias", Trust: &trust,
@@ -159,7 +154,7 @@ func TestConnectionsWriteRejectsManagedTrustDowngradeOrReplacement(t *testing.T)
 }
 
 func TestRemovalRejectsProjectReferencesAndDeletesControllerState(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "dev@owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -177,18 +172,14 @@ func TestRemovalRejectsProjectReferencesAndDeletesControllerState(t *testing.T) 
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, "stale.json"), []byte("stale\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, "stale.json"), []byte("stale\n"), 0o600)
 	if _, err := store.PrepareRemoval(connection, Snapshot{FetchedAt: time.Now(), Inventory: empty}); err == nil || !strings.Contains(err.Error(), "routing state") {
 		t.Fatalf("remove accepted project routing state: %v", err)
 	}
 	if err := os.Remove(filepath.Join(routing, "stale.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, ".lock"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, ".lock"), nil, 0o600)
 	plan, err := store.PrepareRemoval(connection, Snapshot{FetchedAt: time.Now(), Inventory: empty})
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +202,7 @@ func TestRemovalRejectsProjectReferencesAndDeletesControllerState(t *testing.T) 
 }
 
 func TestRemovalRequiresFreshAuthoritativeSnapshot(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "dev@owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -229,7 +220,7 @@ func TestRemovalRequiresFreshAuthoritativeSnapshot(t *testing.T) {
 }
 
 func TestRemovalPlanRejectsConnectionChangedAfterConfirmation(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -265,7 +256,7 @@ func TestRemovalPlanRequiresCurrentSnapshot(t *testing.T) {
 		{name: "future-clock-skew", fetchedAt: now.Add(Freshness + time.Second)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			store := Connections{Root: root, now: func() time.Time { return now }}
 			connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 			if err := store.Write(connection); err != nil {
@@ -288,7 +279,7 @@ func TestRemovalPlanRequiresCurrentSnapshot(t *testing.T) {
 
 func TestRemovalPlanExpiresBeforeApply(t *testing.T) {
 	now := time.Unix(1_000, 0).UTC()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root, now: func() time.Time { return now }}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -311,7 +302,7 @@ func TestRemovalPlanExpiresBeforeApply(t *testing.T) {
 }
 
 func TestRemovalWaitsForProjectMutationLease(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -353,7 +344,7 @@ func TestRemovalWaitsForProjectMutationLease(t *testing.T) {
 }
 
 func TestProjectLeaseWaitsForRemovalThenRejectsDeletedOwner(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -396,7 +387,7 @@ func TestProjectLeaseWaitsForRemovalThenRejectsDeletedOwner(t *testing.T) {
 }
 
 func TestApplyRegistrationRecoversPendingJournalUnderOwnLease(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{HostID: "owner-a", Destination: "owner.example", Trust: &trust}
@@ -419,7 +410,7 @@ func TestApplyRegistrationRecoversPendingJournalUnderOwnLease(t *testing.T) {
 }
 
 func TestRecoveryDefersRemovalWhileProjectMutationLeaseIsHeld(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -445,7 +436,7 @@ func TestRecoveryDefersRemovalWhileProjectMutationLeaseIsHeld(t *testing.T) {
 }
 
 func TestConnectionUpdateCannotResurrectRemovedOwner(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner.example"}
 	if err := store.Write(connection); err != nil {
@@ -475,15 +466,11 @@ func TestEnsureNoRoutingProjectsAllowsOnlyRegularProjectLock(t *testing.T) {
 		want  bool
 	}{
 		{name: "regular lock", want: true, setup: func(t *testing.T, projects string) {
-			if err := os.WriteFile(filepath.Join(projects, ".lock"), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(projects, ".lock"), nil, 0o600)
 		}},
 		{name: "lock symlink", setup: func(t *testing.T, projects string) {
 			target := filepath.Join(filepath.Dir(projects), "target")
-			if err := os.WriteFile(target, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, target, nil, 0o600)
 			if err := os.Symlink(target, filepath.Join(projects, ".lock")); err != nil {
 				t.Fatal(err)
 			}
@@ -494,18 +481,14 @@ func TestEnsureNoRoutingProjectsAllowsOnlyRegularProjectLock(t *testing.T) {
 			}
 		}},
 		{name: "nonempty lock", setup: func(t *testing.T, projects string) {
-			if err := os.WriteFile(filepath.Join(projects, ".lock"), []byte("unexpected\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(projects, ".lock"), []byte("unexpected\n"), 0o600)
 		}},
 		{name: "state record", setup: func(t *testing.T, projects string) {
-			if err := os.WriteFile(filepath.Join(projects, "project.json"), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(projects, "project.json"), nil, 0o600)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			projects := filepath.Join(root, "routing", "owner-a", "default", "projects")
 			if err := os.MkdirAll(projects, 0o700); err != nil {
 				t.Fatal(err)
@@ -520,7 +503,7 @@ func TestEnsureNoRoutingProjectsAllowsOnlyRegularProjectLock(t *testing.T) {
 }
 
 func TestConnectionsRegisterPersistsConnectionTrustAndInitialSnapshotTogether(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{
@@ -548,7 +531,7 @@ func TestConnectionsRegisterPersistsConnectionTrustAndInitialSnapshotTogether(t 
 }
 
 func TestConnectionsAdoptHostIDMigratesConnectionAndCacheWithoutAlias(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	connection := Connection{
 		HostID: "owner-a", Destination: "dev@owner.example",
@@ -567,9 +550,7 @@ func TestConnectionsAdoptHostIDMigratesConnectionAndCacheWithoutAlias(t *testing
 	if err := os.MkdirAll(oldRouting, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(oldRouting, "project.json"), []byte("project-state\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(oldRouting, "project.json"), []byte("project-state\n"), 0o600)
 	proof := IdentityProof{
 		ExpectedHostID: "owner-a", ObservedHostID: "owner-b",
 		Destination: "dev@owner.example", TrustFingerprint: connection.Trust.Fingerprint,
@@ -630,7 +611,7 @@ func TestConnectionsAdoptHostIDFailsClosedOnProofAndCollision(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			store := Connections{Root: root}
 			trust := testSSHHostTrust(t, "owner.example")
 			if err := store.Write(Connection{
@@ -658,7 +639,7 @@ func TestConnectionsAdoptHostIDFailsClosedOnProofAndCollision(t *testing.T) {
 }
 
 func TestConnectionsPreparedRepairAcceptsChangedKeyAndHostID(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	oldTrust := testSSHHostTrust(t, "owner.example")
 	newTrust := testSSHHostTrust(t, "owner.example")
@@ -678,9 +659,7 @@ func TestConnectionsPreparedRepairAcceptsChangedKeyAndHostID(t *testing.T) {
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, "one.json"), []byte("one\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, "one.json"), []byte("one\n"), 0o600)
 	snapshot := Snapshot{
 		FetchedAt: time.Unix(200, 0).UTC(),
 		Inventory: inventoryWithHostID(oldInventory, "owner-b"),
@@ -707,7 +686,7 @@ func TestConnectionsPreparedRepairAcceptsChangedKeyAndHostID(t *testing.T) {
 }
 
 func TestConnectionsAdoptHostIDRejectsOrphanTargetCacheBeforeMutation(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	store := Connections{Root: root}
 	trust := testSSHHostTrust(t, "owner.example")
 	connection := Connection{

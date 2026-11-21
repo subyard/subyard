@@ -135,9 +135,7 @@ func TestYardRegistrationRepairRejectsSnapshotDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(replacement, content, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, replacement, content, 0o600)
 			if err := os.Rename(replacement, path); err != nil {
 				t.Fatal(err)
 			}
@@ -178,7 +176,7 @@ func TestYardRegistrationRepairRejectsArchiveRaceAndSymlinkTraversal(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		external := t.TempDir()
+		external := testkit.TempDir(t)
 		if err := os.Symlink(external, filepath.Join(configHome, "recovery")); err != nil {
 			t.Fatal(err)
 		}
@@ -228,7 +226,7 @@ func TestYardRegistrationRepairRechecksSourcesAfterPreparingRecovery(t *testing.
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(replacement, content, 0o600); err != nil {
+		if err := os.WriteFile(replacement, content, 0o600); err != nil { //nolint:forbidigo // fake without testing.TB
 			return err
 		}
 		return os.Rename(replacement, nestedPath)

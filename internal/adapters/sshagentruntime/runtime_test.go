@@ -59,7 +59,7 @@ func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
 func TestStopAcceptsControlDisconnect(t *testing.T) {
 	for name, response := range map[string]string{"empty": "", "partial": "{"} {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testkit.TempDir(t)
 			lock, err := acquireLock(context.Background(), filepath.Join(dir, "worker.lock"))
 			if err != nil {
 				t.Fatal(err)
@@ -98,15 +98,13 @@ func TestStopAcceptsControlDisconnect(t *testing.T) {
 }
 
 func TestDaemonPendingGrantCanBeLockedAndCannotRestartGrant(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	os.Chmod(root, 0700)
 	dir := filepath.Join(root, "run")
 	os.Mkdir(dir, 0700)
 	cfg := daemonConfig{Config: Config{Directory: dir, SSHPort: 1, Developer: "dev", IdentityFile: "unused", KnownHostsFile: "unused"}, TTL: time.Minute}
 	data, _ := json.Marshal(cfg)
-	if err := os.WriteFile(filepath.Join(dir, "worker.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(dir, "worker.json"), data, 0600)
 	done := make(chan error, 1)
 	go func() { done <- RunDaemon(context.Background(), dir) }()
 	m := Manager{Config: cfg.Config}
@@ -176,7 +174,7 @@ func TestEmptyAgentCannotActivateGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
-	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	testkit.WriteFile(t, filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -208,7 +206,7 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 	cfg, _ := syntheticYard(t)
 	validateDirectory(cfg.Directory, true)
 	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
-	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	testkit.WriteFile(t, filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -257,7 +255,7 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 }
 
 func TestPrivateFilesRejectFIFOWithoutBlocking(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fifo := filepath.Join(root, "fifo")
 	if err := unix.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
@@ -290,14 +288,12 @@ func TestValidateKeyRejectsUnencryptedOrPublicFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "key")
+	path := filepath.Join(testkit.TempDir(t), "key")
 	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "synthetic", []byte("synthetic-passphrase"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, pem.EncodeToMemory(block), 0600)
 	if err := ValidateKey(path); err != nil {
 		t.Fatalf("encrypted key rejected: %v", err)
 	}
@@ -314,15 +310,11 @@ func TestValidateKeyRejectsUnencryptedOrPublicFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, pem.EncodeToMemory(block), 0600)
 	if err := ValidateKey(path); err == nil {
 		t.Fatal("unencrypted key accepted")
 	}
-	if err := os.WriteFile(path, []byte("invalid private key"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("invalid private key"), 0600)
 	if err := ValidateKey(path); err == nil {
 		t.Fatal("malformed key accepted")
 	}

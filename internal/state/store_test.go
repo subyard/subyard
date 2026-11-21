@@ -49,19 +49,15 @@ func TestFileStoreRejectsCorruptAndSymlinkedState(t *testing.T) {
 	if _, err := store.List(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(store.Directory(), "bad.json"), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(store.Directory(), "bad.json"), []byte("{"), 0o600)
 	if _, err := store.List(context.Background()); err == nil {
 		t.Fatal("corrupt state was accepted")
 	}
 	if err := os.Remove(filepath.Join(store.Directory(), "bad.json")); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), "target.json")
-	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	target := filepath.Join(testkit.TempDir(t), "target.json")
+	testkit.WriteFile(t, target, []byte("{}"), 0o600)
 	if err := os.Symlink(target, filepath.Join(store.Directory(), "linked.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -76,9 +72,7 @@ func TestFileStoreRejectsBroadPermissionsAndOversizedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(store.Directory(), "unsafe.json")
-	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("{}"), 0o600)
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +82,7 @@ func TestFileStoreRejectsBroadPermissionsAndOversizedState(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, make([]byte, 1024*1024+1), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, make([]byte, 1024*1024+1), 0o600)
 	if _, err := store.List(context.Background()); err == nil {
 		t.Fatal("oversized state file was accepted")
 	}
@@ -135,9 +127,7 @@ func TestFileStoreDoesNotRepairInvalidBroadState(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(store.Directory(), "invalid.json")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("{}\n"), 0o600)
 	// Normalize the legacy mode across process umasks.
 	if err := os.Chmod(path, 0o664); err != nil {
 		t.Fatal(err)
@@ -197,7 +187,7 @@ func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
 			name: "symlink",
 			setup: func(t *testing.T, directory string) string {
 				t.Helper()
-				link := filepath.Join(t.TempDir(), "projects")
+				link := filepath.Join(testkit.TempDir(t), "projects")
 				if err := os.Symlink(directory, link); err != nil {
 					t.Fatal(err)
 				}
@@ -206,7 +196,7 @@ func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			directory := filepath.Join(t.TempDir(), "projects")
+			directory := filepath.Join(testkit.TempDir(t), "projects")
 			store, err := NewFileStore(directory)
 			if err != nil {
 				t.Fatal(err)
@@ -231,7 +221,7 @@ func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
 }
 
 func TestFileStoreReadOnlyDoesNotCreateMissingStateDirectory(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "missing", "projects")
+	directory := filepath.Join(testkit.TempDir(t), "missing", "projects")
 	store, err := NewFileStore(directory)
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +324,7 @@ func TestProjectAdmissionUsesCanonicalNamesAndIndependentSyncCopies(t *testing.T
 }
 
 func TestProjectAdmissionPreviewDoesNotPublishReservation(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "projects")
+	directory := filepath.Join(testkit.TempDir(t), "projects")
 	store, err := NewFileStore(directory)
 	if err != nil {
 		t.Fatal(err)
@@ -363,9 +353,7 @@ func TestProjectAdmissionIgnoresInterruptedReservationCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidate := filepath.Join(store.reservationDirectory(), ".reservation.tmp.interrupted")
-	if err := os.WriteFile(candidate, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, candidate, []byte("{"), 0o600)
 	first, err := store.Admit(
 		context.Background(), "op-one", "/work/Demo",
 		domain.ProjectSync, "Demo", false,
@@ -594,7 +582,7 @@ func TestServiceRemoveProjectUsesSourceKey(t *testing.T) {
 
 func newTestStore(t *testing.T) *FileStore {
 	t.Helper()
-	store, err := NewFileStore(filepath.Join(t.TempDir(), "state"))
+	store, err := NewFileStore(filepath.Join(testkit.TempDir(t), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}

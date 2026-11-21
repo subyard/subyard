@@ -567,7 +567,7 @@ func TestVersionedConfigSyncGuardsYardDeletionAndKeepsSameNameHostScoped(t *test
 		t.Fatal(err)
 	}
 
-	secondHome := filepath.Join(t.TempDir(), "config")
+	secondHome := filepath.Join(testkit.TempDir(t), "config")
 	second := fixture.options(false)
 	second.ConfigHome = secondHome
 	second.Environment = map[string]string{
@@ -751,7 +751,7 @@ func TestVersionedConfigSyncGuardsMissingManagedYardDefinition(t *testing.T) {
 }
 
 func TestVersionedConfigSyncRecoversInterruptedApply(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := ensureConfigurationRoot(configHome); err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestVersionedConfigSyncRejectsStaleSourcePlan(t *testing.T) {
 func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		external := filepath.Join(t.TempDir(), "config.env")
+		external := filepath.Join(testkit.TempDir(t), "config.env")
 		writeSyncTestFile(t, external, "DEV_UID=2233\n", 0o600)
 		target := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -830,7 +830,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 	t.Run("hardlink", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		external := filepath.Join(t.TempDir(), "config.env")
+		external := filepath.Join(testkit.TempDir(t), "config.env")
 		writeSyncTestFile(t, external, "DEV_UID=2233\n", 0o600)
 		target := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -910,7 +910,7 @@ func TestVersionedConfigSyncRejectsLiveSymlinkAncestor(t *testing.T) {
 	if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	external := filepath.Join(t.TempDir(), "external-overrides")
+	external := filepath.Join(testkit.TempDir(t), "external-overrides")
 	if err := os.MkdirAll(filepath.Join(external, "shared"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ func TestVersionedConfigSyncRejectsLiveSymlinkAncestor(t *testing.T) {
 }
 
 func TestVersionedConfigSyncRecoveryDoesNotOverwriteExternalChange(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := ensureConfigurationRoot(configHome); err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestVersionedConfigSyncRecoveryDoesNotOverwriteExternalChange(t *testing.T)
 }
 
 func TestEnsureHostIDRepairsLegacyConfigurationRootMode(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := os.MkdirAll(configHome, 0o775); err != nil {
 		t.Fatal(err)
 	}
@@ -1082,7 +1082,7 @@ func TestHostIDRenameRecoveryUsesHostIDAsCommitPoint(t *testing.T) {
 }
 
 func TestVersionedConfigSyncRecoveryRollsBackUnpublishedHostID(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := ensureConfigurationRoot(configHome); err != nil {
 		t.Fatal(err)
 	}

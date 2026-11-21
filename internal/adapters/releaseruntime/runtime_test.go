@@ -144,7 +144,7 @@ func TestProductionTransitionPathDoesNotDelegateToLegacyMutation(t *testing.T) {
 }
 
 func TestCandidateBlockedInspectionCheckReturnsStructuredPublicOutcome(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["inspect the blocked transition"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-z","target":"release-b","code":"migration-stale","message":"the resource changed","retry":"run yard update --check","transaction":"tx-0123456789abcdef"}}}`
 	candidate := writeRuntimeCandidateFixture(t, root, response)
 	request := releasetransition.ProcessRequest{
@@ -213,7 +213,7 @@ func TestCandidateBlockedInspectionCheckReturnsStructuredPublicOutcome(t *testin
 }
 
 func TestCandidateInvalidRegistryOutcomeStaysStructured(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	response := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-z","target":"release-b","code":"registry-invalid","message":"the candidate release transition registry is invalid","retry":"install a release with a valid transition registry, then run yard update --check"}}`
 	candidate := writeRuntimeCandidateFixture(t, root, response)
 	request := releasetransition.ProcessRequest{
@@ -259,7 +259,7 @@ func TestCandidateInvalidRegistryOutcomeStaysStructured(t *testing.T) {
 }
 
 func TestRollbackStandaloneBlockedOutcomeStaysStructured(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	response := `{"schemaVersion":1,"outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"rollback-incompatible","message":"retained runtime is outside the supported horizon","retry":"restore a compatible retained release"}}`
 	candidate := writeRuntimeCandidateFixture(t, root, response)
 	request := releasetransition.ProcessRequest{
@@ -295,7 +295,7 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			runtimeRoot := filepath.Join(root, "runtime")
 			cache := filepath.Join(root, "cache")
 			for _, directory := range []string{
@@ -305,12 +305,8 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(
-				filepath.Join(runtimeRoot, "releases", "release-a", "bin", "yard-engine"),
-				[]byte("#!/bin/sh\nexit 0\n"), 0o700,
-			); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, filepath.Join(runtimeRoot, "releases", "release-a", "bin", "yard-engine"),
+				[]byte("#!/bin/sh\nexit 0\n"), 0o700)
 			if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
 				t.Fatal(err)
 			}
@@ -351,7 +347,7 @@ func TestRollbackToRetainedPreAnchorReleaseRefusesBeforeDispatch(t *testing.T) {
 
 func testRollbackBelowAnchor(t *testing.T, targetVersion string) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	runtimeRoot := filepath.Join(root, "runtime")
 	configHome := filepath.Join(root, "config")
 	capture := filepath.Join(root, "transition-requests.jsonl")
@@ -386,16 +382,10 @@ case "${1:-}" in
 esac
 `, targetVersion, legacyUnexpected)
 	legacyEngine := filepath.Join(legacyRoot, "bin", "yard-engine")
-	if err := os.WriteFile(legacyEngine, []byte(legacyPayload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, legacyEngine, []byte(legacyPayload), 0o700)
 	legacyDigest := sha256.Sum256([]byte(legacyPayload))
 	legacyManifest := fmt.Sprintf("%x  ./bin/yard-engine\n", legacyDigest)
-	if err := os.WriteFile(
-		filepath.Join(legacyRoot, "runtime-files.sha256"), []byte(legacyManifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(legacyRoot, "runtime-files.sha256"), []byte(legacyManifest), 0o600)
 	if err := os.Symlink("releases/"+string(owner.release), filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -442,14 +432,8 @@ esac
 `, oldTransitionCalled)
 	oldEngineDigest := sha256.Sum256([]byte(oldPayload))
 	oldManifest := fmt.Sprintf("%x  ./bin/yard-engine\n", oldEngineDigest)
-	if err := os.WriteFile(filepath.Join(oldRoot, "bin", "yard-engine"), []byte(oldPayload), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(oldRoot, "runtime-files.sha256"), []byte(oldManifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(oldRoot, "bin", "yard-engine"), []byte(oldPayload), 0o700)
+	testkit.WriteFile(t, filepath.Join(oldRoot, "runtime-files.sha256"), []byte(oldManifest), 0o600)
 
 	requestCapture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "rollback-inspection.json")
 	readyInspection := fmt.Sprintf(
@@ -463,9 +447,7 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 `, requestCapture, readyInspection)
-	if err := os.WriteFile(fixture.engine, []byte(ownerPayload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.engine, []byte(ownerPayload), 0o700)
 	ownerEngineDigest := sha256.Sum256([]byte(ownerPayload))
 	registryPath := filepath.Join(
 		fixture.runtimeRoot, "releases", ownerRelease, "config", "release-transition.json",
@@ -474,18 +456,12 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registryPath, registry, 0o600)
 	registryDigest := sha256.Sum256(registry)
 	ownerManifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
 		ownerEngineDigest, registryDigest)
-	if err := os.WriteFile(
-		filepath.Join(fixture.runtimeRoot, "releases", ownerRelease, "runtime-files.sha256"),
-		[]byte(ownerManifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(fixture.runtimeRoot, "releases", ownerRelease, "runtime-files.sha256"),
+		[]byte(ownerManifest), 0o600)
 
 	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
@@ -522,9 +498,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, journalPayload, 0o600)
 
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
@@ -567,9 +541,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), ledgerPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), ledgerPayload, 0o600)
 	var reportOutput bytes.Buffer
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
@@ -764,9 +736,7 @@ func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {
 					t.Fatal(err)
 				}
 				manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine)))
-				if err := os.WriteFile(filepath.Join(root, "runtime-files.sha256"), manifest, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), manifest, 0o600)
 				digest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))
 				if scenario == "legacy" {
 					if err := os.Remove(filepath.Join(root, "config", "release-transition.json")); err != nil {
@@ -774,17 +744,11 @@ func TestRollbackFactsRequireExactSealedArtifact(t *testing.T) {
 					}
 				}
 			case "manifest":
-				if err := os.WriteFile(filepath.Join(root, "runtime-files.sha256"), []byte("changed\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), []byte("changed\n"), 0o600)
 			case "engine":
-				if err := os.WriteFile(fixture.engine, []byte("changed"), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.engine, []byte("changed"), 0o700)
 			case "registry":
-				if err := os.WriteFile(filepath.Join(root, "config", "release-transition.json"), []byte("changed"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(root, "config", "release-transition.json"), []byte("changed"), 0o600)
 			case "version":
 				writeProtectedRuntimeFixtureEngine(t, fixture, "#!/bin/sh\nprintf 'yard-engine 1.2.4\\n'\n")
 				manifest, err := os.ReadFile(filepath.Join(root, "runtime-files.sha256"))
@@ -883,13 +847,9 @@ esac
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(fixture.journalPath, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
 			if scenario == "artifact" {
-				if err := os.WriteFile(fixture.engine, []byte("changed"), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.engine, []byte("changed"), 0o700)
 			}
 			if scenario == "current" || scenario == "previous" {
 				path := filepath.Join(fixture.runtimeRoot, scenario)
@@ -930,7 +890,7 @@ esac
 }
 
 func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}{}`)
 	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
@@ -952,15 +912,13 @@ func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
 }
 
 func TestVerifiedCandidateRootDescriptorSurvivesAncestorReplacement(t *testing.T) {
-	parent := t.TempDir()
+	parent := testkit.TempDir(t)
 	runtimeRoot := filepath.Join(parent, "runtime")
 	candidateRoot := filepath.Join(runtimeRoot, "releases", "release-b")
 	if err := os.MkdirAll(candidateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(candidateRoot, "marker"), []byte("original\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidateRoot, "marker"), []byte("original\n"), 0o600)
 	candidate := publishedCandidate{release: "release-b", root: candidateRoot}
 	root, err := openVerifiedCandidateRoot(candidate, runtimeRoot)
 	if err != nil {
@@ -975,9 +933,7 @@ func TestVerifiedCandidateRootDescriptorSurvivesAncestorReplacement(t *testing.T
 	if err := os.MkdirAll(replacement, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(replacement, "marker"), []byte("replacement\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(replacement, "marker"), []byte("replacement\n"), 0o600)
 
 	marker, err := openCandidateFile(int(root.Fd()), "marker")
 	if err != nil {
@@ -994,7 +950,7 @@ func TestVerifiedCandidateRootDescriptorSurvivesAncestorReplacement(t *testing.T
 }
 
 func TestVerifiedCandidateInvocationBindsRegistryDigest(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	capture := filepath.Join(filepath.Dir(root), "candidate-request.json")
 	response := candidateProtocolFixtureResponse
 	payload := fmt.Sprintf(`#!/bin/sh
@@ -1037,7 +993,7 @@ esac
 }
 
 func TestCandidateProtocolRejectsLegacyManifestWithoutV2Registry(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}`)
 	if err := os.RemoveAll(filepath.Join(candidate.root, "config")); err != nil {
 		t.Fatal(err)
@@ -1047,12 +1003,8 @@ func TestCandidateProtocolRejectsLegacyManifestWithoutV2Registry(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(engine)
-	if err := os.WriteFile(
-		filepath.Join(candidate.root, "runtime-files.sha256"),
-		[]byte(fmt.Sprintf("%x  ./bin/yard-engine\n", digest)), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidate.root, "runtime-files.sha256"),
+		[]byte(fmt.Sprintf("%x  ./bin/yard-engine\n", digest)), 0o600)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
 	if err != nil {
@@ -1224,9 +1176,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, journalPayload, 0o600)
 
 	resumed, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
@@ -1536,9 +1486,7 @@ func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *
 			name: "corrupt journal",
 			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture) {
 				t.Helper()
-				if err := os.WriteFile(fixture.journalPath, []byte("{\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.journalPath, []byte("{\n"), 0o600)
 			},
 			code: releasetransition.CodeJournalInvalid, target: "unknown",
 			retry: "restore protected release metadata from backup, then run yard update --check",
@@ -1659,9 +1607,7 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 			name: "modified engine",
 			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
 				t.Helper()
-				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.engine, []byte(payload), 0o700)
 			},
 		},
 		{
@@ -1669,9 +1615,7 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
 				t.Helper()
 				external := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-engine")
-				if err := os.WriteFile(external, []byte(payload), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, external, []byte(payload), 0o700)
 				if err := os.Remove(fixture.engine); err != nil {
 					t.Fatal(err)
 				}
@@ -1684,9 +1628,7 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 			name: "non-executable engine",
 			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
 				t.Helper()
-				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.engine, []byte(payload), 0o700)
 				if err := os.Chmod(fixture.engine, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -1696,17 +1638,11 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 			name: "modified engine and replaced manifest",
 			tamper: func(t *testing.T, fixture protectedRuntimeTransitionFixture, payload string) {
 				t.Helper()
-				if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, fixture.engine, []byte(payload), 0o700)
 				digest := sha256.Sum256([]byte(payload))
 				manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", digest)
-				if err := os.WriteFile(
-					filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
-					[]byte(manifest), 0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
+					[]byte(manifest), 0o600)
 			},
 		},
 	} {
@@ -1768,9 +1704,7 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 `, replacementCalled, fixture.recoveringResponse())
-	if err := os.WriteFile(replacement, []byte(replacementPayload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, replacement, []byte(replacementPayload), 0o700)
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 		OwnerLockHeld: func() bool { return true },
@@ -1810,9 +1744,7 @@ esac
 	if err := os.Rename(replacement, fixture.engine); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(proceed, []byte("continue\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, proceed, []byte("continue\n"), 0o600)
 	select {
 	case observed := <-result:
 		if observed.err != nil || observed.outcome == nil ||
@@ -2001,7 +1933,7 @@ func TestJournalOwnerLaunchRevalidatesInstalledEngine(t *testing.T) {
 }
 
 func TestCandidateTransitionRejectsContradictoryInspectionOutcome(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected release transition"]},"blockers":[{"code":"migration-stale","resource":"yard.fixture","message":"the resource changed","retry":"run yard update --check"}],"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","target":"release-b","code":"ready","message":"verified"}}}`
 	candidate := writeRuntimeCandidateFixture(t, root, response)
 	request := releasetransition.ProcessRequest{
@@ -2021,7 +1953,7 @@ func TestCandidateTransitionRejectsContradictoryInspectionOutcome(t *testing.T) 
 }
 
 func TestCandidateTransitionRejectsSemanticallyInvalidReadyOutcome(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
 	invalid := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}`
 	payload := fmt.Sprintf(`#!/bin/sh
@@ -2058,7 +1990,7 @@ esac
 }
 
 func TestCandidateTransitionDoesNotPrintIntermediateWarnings(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	inspection := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","target":"release-b","code":"transition-required","message":"the release transition has not started","retry":"run yard update"}}}`
 	ready := `{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":"release-b","previous":"release-a","target":"release-b","code":"ready","message":"verified","transaction":"tx-0123456789abcdef","warnings":["recovery cleanup is pending"]}}`
 	payload := fmt.Sprintf(`#!/bin/sh
@@ -2114,8 +2046,8 @@ func TestCandidateTransitionReinspectsPlanStaleOutcomeBeforeReturning(t *testing
 		{name: "false ready active release", reinspection: wrongReady, wantError: "inconsistent release reinspection"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			settled := filepath.Join(t.TempDir(), "settled")
+			root := testkit.TempDir(t)
+			settled := filepath.Join(testkit.TempDir(t), "settled")
 			payload := fmt.Sprintf(`#!/bin/sh
 marker=%q
 case "${1:-}" in
@@ -2166,7 +2098,7 @@ esac
 func TestCandidateTransitionValidatesNonReadyOutcomeAtProcessBoundary(t *testing.T) {
 	execute := func(t *testing.T, inspection, convergence string) error {
 		t.Helper()
-		root := t.TempDir()
+		root := testkit.TempDir(t)
 		payload := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;
@@ -2298,9 +2230,7 @@ func TestMutationGateRestoresSourceIngressFromTheProtectedJournal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, encoded, 0o600)
 	capture := filepath.Join(home, "source-ingress-request.json")
 	engine := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
@@ -2351,7 +2281,7 @@ func newProtectedRuntimeTransitionFixture(
 	checkpoint releasetransition.JournalCheckpoint,
 ) protectedRuntimeTransitionFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fixture := protectedRuntimeTransitionFixture{
 		runtimeRoot: filepath.Join(root, "runtime"), configHome: filepath.Join(root, "config"),
 		cache: filepath.Join(root, "cache"), installer: filepath.Join(root, "installer"),
@@ -2391,9 +2321,7 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 `, response)
-	if err := os.WriteFile(fixture.engine, []byte(engine), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.engine, []byte(engine), 0o700)
 	registry := []byte("{}\n")
 	registryPath := filepath.Join(
 		fixture.runtimeRoot, "releases", fixture.target, "config", "release-transition.json",
@@ -2401,9 +2329,7 @@ esac
 	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registryPath, registry, 0o600)
 	payload, err := os.ReadFile(fixture.engine)
 	if err != nil {
 		t.Fatal(err)
@@ -2414,17 +2340,11 @@ esac
 		digest, registryDigest)
 	manifestDigest := sha256.Sum256([]byte(manifest))
 	fixture.artifactDigest = fmt.Sprintf("%x", manifestDigest)
-	if err := os.WriteFile(
-		filepath.Join(fixture.runtimeRoot, "releases", fixture.target, "runtime-files.sha256"),
-		[]byte(manifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fixture.installer, []byte(fmt.Sprintf(
+	testkit.WriteFile(t, filepath.Join(fixture.runtimeRoot, "releases", fixture.target, "runtime-files.sha256"),
+		[]byte(manifest), 0o600)
+	testkit.WriteFile(t, fixture.installer, []byte(fmt.Sprintf(
 		"#!/bin/sh\n# --publish-only\nprintf called > %q\nexit 91\n", fixture.publicationCapture,
-	)), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	)), 0o700)
 
 	authorizationPlan := releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64))
 	resumePlan := releasetransition.PlanToken(fixture.resumePlan)
@@ -2466,9 +2386,7 @@ esac
 	if err := os.MkdirAll(filepath.Dir(fixture.journalPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, journalPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, journalPayload, 0o600)
 	return fixture
 }
 
@@ -2499,9 +2417,7 @@ func writeProtectedRuntimeFixtureEngine(
 	payload string,
 ) {
 	t.Helper()
-	if err := os.WriteFile(fixture.engine, []byte(payload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.engine, []byte(payload), 0o700)
 	engineDigest := sha256.Sum256([]byte(payload))
 	registry, err := os.ReadFile(filepath.Join(
 		filepath.Dir(filepath.Dir(fixture.engine)), "config", "release-transition.json",
@@ -2512,12 +2428,8 @@ func writeProtectedRuntimeFixtureEngine(
 	registryDigest := sha256.Sum256(registry)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
 		engineDigest, registryDigest)
-	if err := os.WriteFile(
-		filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
-		[]byte(manifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(filepath.Dir(filepath.Dir(fixture.engine)), "runtime-files.sha256"),
+		[]byte(manifest), 0o600)
 	manifestDigest := sha256.Sum256([]byte(manifest))
 	snapshot, err := os.ReadFile(fixture.journalPath)
 	if err != nil {
@@ -2532,9 +2444,7 @@ func writeProtectedRuntimeFixtureEngine(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, encoded, 0o600)
 }
 
 func writeRuntimeCandidateFixture(
@@ -2616,24 +2526,18 @@ func writeRuntimeCandidatePayload(
 		t.Fatalf("candidate fixture root: %v", err)
 	}
 	engine := filepath.Join(candidateRoot, "bin", "yard-engine")
-	if err := os.WriteFile(engine, []byte(payload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, engine, []byte(payload), 0o700)
 	registry := []byte("{}\n")
 	registryPath := filepath.Join(candidateRoot, "config", "release-transition.json")
 	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registryPath, registry, 0o600)
 	digest := sha256.Sum256([]byte(payload))
 	registryDigest := sha256.Sum256(registry)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
 		digest, registryDigest)
-	if err := os.WriteFile(filepath.Join(candidateRoot, "runtime-files.sha256"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidateRoot, "runtime-files.sha256"), []byte(manifest), 0o600)
 	return publishedCandidate{release: "release-b", root: candidateRoot}
 }
 
@@ -2649,7 +2553,7 @@ type v0111CandidateRoutingFixture struct {
 
 func newV0111CandidateRoutingFixture(t *testing.T) v0111CandidateRoutingFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fixture := v0111CandidateRoutingFixture{
 		runtimeRoot:        filepath.Join(root, "runtime"),
 		configHome:         filepath.Join(root, "config"),
@@ -2776,14 +2680,10 @@ esac
 	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(journalPath, journalPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fixture.installer, []byte(fmt.Sprintf(
+	testkit.WriteFile(t, journalPath, journalPayload, 0o600)
+	testkit.WriteFile(t, fixture.installer, []byte(fmt.Sprintf(
 		"#!/bin/sh\n# --publish-only\nprintf called > %q\nexit 91\n", fixture.publicationCapture,
-	)), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	)), 0o700)
 	return fixture
 }
 
@@ -2800,26 +2700,18 @@ func writeVersionedRuntimeCandidate(
 		t.Fatal(err)
 	}
 	engine := filepath.Join(candidateRoot, "bin", "yard-engine")
-	if err := os.WriteFile(engine, []byte(payload), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, engine, []byte(payload), 0o700)
 	registry := []byte("{}\n")
 	registryPath := filepath.Join(candidateRoot, "config", "release-transition.json")
 	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(registryPath, registry, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registryPath, registry, 0o600)
 	engineDigest := sha256.Sum256([]byte(payload))
 	registryDigest := sha256.Sum256(registry)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
 		engineDigest, registryDigest)
-	if err := os.WriteFile(
-		filepath.Join(candidateRoot, "runtime-files.sha256"), []byte(manifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidateRoot, "runtime-files.sha256"), []byte(manifest), 0o600)
 	if version == "" {
 		t.Fatal("candidate fixture version is required")
 	}
@@ -2838,11 +2730,7 @@ func unbindCandidateRegistry(
 	}
 	engineDigest := sha256.Sum256(enginePayload)
 	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", engineDigest)
-	if err := os.WriteFile(
-		filepath.Join(candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
 	if removeRegistry {
 		if err := os.Remove(filepath.Join(candidate.root, "config", "release-transition.json")); err != nil {
 			t.Fatal(err)
