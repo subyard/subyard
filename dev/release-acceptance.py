@@ -427,6 +427,8 @@ CI_COUNTED_POLICIES = frozenset({
     "c8c262c85a127ba8034478cbacc1720f15597b56",
     # host-free-verify also uploads profile test logs.
     "4796e78c8e1657f31f89a32a3f8e4f38dd6c0372",
+    # actions/setup-go pinned to v7.1.0; commands unchanged.
+    "4e5dd6d76dec4c405ebaaa8a6972925cabcdfce3",
 })
 
 
