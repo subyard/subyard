@@ -682,23 +682,15 @@ func TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory(t *testing.T) {
 }
 
 func TestExplicitRemoteUpdateLogViewerUsesForwardRoute(t *testing.T) {
-	fixture := newFixture(t, withYards("remote"))
-	root, environment := fixture.Root, fixture.Environment
+	fixture := newFixture(t, withYards("remote"), withCommands("ssh"))
+	// The forwarded call is answered by the catch-all after the -G resolution rule.
+	fixture.Exec().
+		On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+		On(testkit.Match{Tool: "ssh"}, testkit.Reply{})
+	environment := fixture.Environment
 	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"),
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
-	fakeBin := filepath.Join(root, "fake-bin")
-	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sshLog := filepath.Join(root, "remote-logs-ssh.log")
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-`+trustedSSHMock(t)+`
-printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
-`, 0o700)
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	environment = append(environment,
-		"PATH="+os.Getenv("PATH"),
-		"SUBYARD_TEST_SSH_LOG="+sshLog,
 		"SUBYARD_OPERATION_ID=remote-update-logs",
 	)
 	var stdout, stderr bytes.Buffer
@@ -710,9 +702,12 @@ printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote update logs code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	forwarded, err := os.ReadFile(sshLog)
-	if err != nil {
-		t.Fatal(err)
+	// The former stub logged the arguments of its last non -G call, one per line.
+	var forwarded []byte
+	for _, call := range fixture.Exec().Calls() {
+		if len(call.Args) == 0 || call.Args[0] != "-G" {
+			forwarded = []byte(strings.Join(call.Args, "\n") + "\n")
+		}
 	}
 	for _, expected := range []string{"owner.example", "inner", "logs", "--updates", "-n", "3"} {
 		if !strings.Contains(string(forwarded), expected) {
