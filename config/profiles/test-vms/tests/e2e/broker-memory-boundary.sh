@@ -1255,9 +1255,9 @@ runtime_root="$SUBYARD_HOME/runtime"
 old_hash="$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')"
 remove_owned_device
 YARD_RELEASE_BASE_URL="file://$release" runtime_yard update \
-  --runtime-root "$runtime_root" --version p0-broker-recovery-update --check >/dev/null
+  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update --check >/dev/null
 YARD_RELEASE_BASE_URL="file://$release" runtime_yard update \
-  --runtime-root "$runtime_root" --version p0-broker-recovery-update --yes >/dev/null
+  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update --yes >/dev/null
 assert_owned_device
 assert_held_unchanged
 assert_memory_accounting

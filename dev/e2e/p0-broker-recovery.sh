@@ -500,10 +500,10 @@ install_candidate_update() {
 	if [ -z "$artifact" ]; then
 		arch="$(go env GOARCH)"
     release="$ROOT/.build/p0-broker-recovery-update"
-    artifact="$release/subyard-p0-broker-recovery-update-linux-$arch"
+    artifact="$release/subyard-0.29.1-p0.broker-recovery-update-linux-$arch"
     dev/package-engine.sh \
       --output-dir "$release" \
-      --version p0-broker-recovery-update \
+      --version 0.29.1-p0.broker-recovery-update \
       --arch "$arch" >/dev/null
   fi
   for input in \
@@ -519,11 +519,11 @@ install_candidate_update() {
 	release_cache="${SUBYARD_HOME:-$HOME/.subyard}/releases"
 	YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$release_cache" \
 		"$runtime_root/current/bin/yard" update \
-		--runtime-root "$runtime_root" --version p0-broker-recovery-update \
+		--runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update \
 		--check >/dev/null
 	YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$release_cache" \
 		"$runtime_root/current/bin/yard" update \
-		--runtime-root "$runtime_root" --version p0-broker-recovery-update \
+		--runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update \
 		--yes >/dev/null
 }
 
