@@ -9,6 +9,7 @@ import pwd
 import re
 import records
 import select
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -33,6 +34,34 @@ BINARY_LIMIT = 64*1024*1024
 # Inventory key for the other digest an interrupted asset update may leave on
 # disk. Path entries stay single digests, which v0.30 can still read.
 REPLACED = 'replaced'
+# Codex reads otel.headers_helper from this release on; older clients export
+# without Authorization, which the receiver rejects.
+CODEX_LINK = Path('/opt/subyard/codex/codex')
+CODEX_HELPER_VERSION = (0, 170, 0)
+
+
+def headers_helper(auth):
+    """POSIX shell builtins only; stderr is fixed text and never names the token."""
+    return ('#!/bin/sh\n# Managed by Subyard telemetry profile.\n'
+            "fail() { printf 'subyard-telemetry: %s\\n' \"$1\" >&2; exit 1; }\n"
+            "[ \"$#\" -eq 0 ] || fail 'unexpected arguments'\n"
+            'token=\n'
+            f'IFS= read -r token 2>/dev/null <{shlex.quote(str(auth))} || [ -n "$token" ] || fail \'collector token unavailable\'\n'
+            'case "$token" in *[!0-9a-f]*) fail \'invalid collector token\' ;; esac\n'
+            '[ "${#token}" -eq 64 ] || fail \'invalid collector token\'\n'
+            'printf \'{"Authorization":"Bearer %s"}\\n\' "$token"\n').encode()
+
+
+def codex_helper_supported(link=None):
+    """False only for a Subyard-provisioned Codex release older than the helper."""
+    try:
+        target = os.readlink(CODEX_LINK if link is None else link)
+    except OSError:
+        return True
+    match = re.fullmatch(r'releases/([0-9]+)\.([0-9]+)\.([0-9]+)/bin/codex', target)
+    return match is None or tuple(map(int, match.groups())) >= CODEX_HELPER_VERSION
+
+
 # Drop-in directories systemd applies to every service, such as the LXC guest's.
 TYPE_DROPINS = (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d'))
 # Lines of the stock LXC guest drop-in after its [Service] header, the type-wide one a recognized
@@ -110,6 +139,8 @@ class Runtime:
         # Workloads inherit their caller's ceilings. Do not put a low collector
         # MemoryMax on this delegated ancestor or kill workloads on opt-out.
         manager = prefix+common+f'Slice=user-{self.uid}.slice\nExecStart={self.starts[MANAGER]}\nDelegate=cpu memory io pids\nKillMode=process\n[Install]\nWantedBy=multi-user.target\n'
+        self.helper = library/'otlp-headers'
+        self.assets[self.helper] = (headers_helper(self.auth), 0o755)
         self.assets[units/COLLECTOR] = (collector.encode(), 0o644)
         self.assets[units/MANAGER] = (manager.encode(), 0o644)
         for command, target, extra in [('subyard-telemetry-run', 'launcher.py', 'run '), ('subyard-telemetry-forward', 'forward.py', '')]:
@@ -242,14 +273,17 @@ class Runtime:
             raise ValueError('foreign control state')
         return True
 
-    def token(self, path=None):
+    def token(self, path=None, strict=True):
         path = self.auth if path is None else path
         value = native.snapshot(path)
         if value is None or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o600:
             raise ValueError('private collector token required')
-        token = value.decode().strip()
+        token = value.decode(errors='replace').strip()
         if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
             raise ValueError('invalid collector token')
+        # The headers helper reads only an exact first line; the collector trims.
+        if strict and value not in (token.encode(), token.encode()+b'\n'):
+            raise ValueError('noncanonical collector token')
         return token
 
     def private_directory(self, path, refusal):
@@ -284,9 +318,14 @@ class Runtime:
         if not self.auth.exists():
             # Keep the v0.30 bearer: the analytics copy, else the one its home-config receipt records.
             old = self.data/'auth.token'
-            token = (self.token(old) if old.exists() or old.is_symlink()
+            token = (self.token(old, strict=False) if old.exists() or old.is_symlink()
                      else native.legacy_token(self.control/'native.json') or secrets.token_hex(32))
             native.publish(self.auth, (token+'\n').encode(), None, self.uid, self.gid)
+        token = self.token(strict=False)
+        current = native.snapshot(self.auth)
+        if current != (token+'\n').encode():
+            # A hand-restored copy may carry CRLF or blanks the helper rejects.
+            native.publish(self.auth, (token+'\n').encode(), current, self.uid, self.gid)
         return self.token()
 
     def manager(self, unit, startup=False):
@@ -369,9 +408,10 @@ class Runtime:
         # Before the first apply after v0.30 the bearer is still in the analytics directory.
         for path in (self.auth, self.data/'auth.token'):
             if token is None and (self.selected or receipt.exists()) and native.snapshot(path) is not None:
-                token = self.token(path)
+                token = self.token(path, strict=False)
         return native.reconcile(self.etc, self.home, receipt, self.agents if self.selected else [],
-                                self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check)
+                                self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check,
+                                helper=str(self.helper))
 
     def observe(self):
         installed = self.owned()
@@ -430,6 +470,8 @@ class Runtime:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             if not skill_current:
                 diagnostics.append({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'})
+            if self.selected and 'codex' in self.agents and not codex_helper_supported():
+                diagnostics.append({'parameter': 'telemetry.codex-headers-helper', 'installed': 'missing', 'desired': 'present'})
             for unit in (COLLECTOR, MANAGER):
                 expected = self.selected if unit == COLLECTOR else True if self.selected else None
                 if expected is None:
@@ -771,6 +813,8 @@ class Runtime:
         cutover = (installed and not prepared or (self.data/CUTOVER).exists()) and self.cutover_receipt()
         retiring = cutover and not prepared
         old_auth = self.data/'auth.token'
+        # Policies name the helper; install it first so a stop between them leaves none dangling.
+        self.publish_asset(self.helper, saved)
         self.reconcile_native(check=False, token=token)
         stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
                 and (retiring or changed or not self.running_no_new_privs(fields)
