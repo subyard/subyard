@@ -244,9 +244,8 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         adb.chmod(0o755)
         requests = []
         relay = fake_relay(relay_mode, requests)
-        gradle_started = directory / 'gradle-started'
         script = ('set -euo pipefail\nwork="$1"; '
-                  'gradle=(bash -c "date +%s.%N > \\"$work/gradle-started\\"; sleep 1; exit $2"); '
+                  'gradle=(bash -c "grep -q \'^capture_exit=\' \\"$work/watch/before.log\\" || exit 98; sleep 1; exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT="$3" '
                   'ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
                   # Like run: the command leads its own process group, stopped before release.
@@ -266,9 +265,7 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
             relay.close()
         elapsed = time.time() - started
         assert result.returncode == child_exit, result.stderr
-        # Gradle starts beside the meminfo snapshot; only the leased child's exit waits for it.
-        assert float(gradle_started.read_text()) - started < 2, gradle_started.read_text()
-        # Watchers and the snapshot probe stop before run releases the lease; killed processes
+        # The meminfo capture finishes before Gradle starts. Watchers stop before release; killed processes
         # only need a moment to be reaped, far below the probe's 7 s bound.
         for _ in range(20):
             if not live_processes(name):
@@ -282,9 +279,8 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         commands = [line.split(' ', 1)[1] for line in observed[:-1]]
         assert all(command in commands for command in watch_commands), commands
         assert any(command.startswith('shell cat /proc/loadavg /proc/meminfo') for command in commands), commands
-        # A pass stops the hung snapshot; a failure waits for its 5 s timeout and, ignoring TERM,
-        # the 2 s kill grace.
-        bound = 1 if child_exit == 0 else max(1, {124: 5, 137: 5 + 2}.get(adb_exit, 0))
+        # A hung snapshot delays Gradle by the bounded timeout and, if it ignores TERM, the kill grace.
+        bound = 1 + {124: 5, 137: 7}.get(adb_exit, 0)
         assert bound <= elapsed < bound + 4, elapsed
         evidence = (directory / 'emulator-evidence.log').read_text()
         if child_exit == 0:
@@ -382,6 +378,7 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
                                            (23, 'gradle', 0, True), (23, 'gradle', 7, True)):
     script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; journal_exit="$3"\n'
               'lane=gradle; project=fixture; instance=fixture; incus_binary=(incus)\n'
+              'android_gradle_boot_evidence() { :; }\n'
               'timeout() { printf "%s\\n" "$*"; '
               'printf "journal 12:34:56.789 192.0.2.1 2001:db8::1 token=canary\\n"; '
               'printf "1.1.1.1\\n%.0s" {1..10000}; return "$journal_exit"; }\n'

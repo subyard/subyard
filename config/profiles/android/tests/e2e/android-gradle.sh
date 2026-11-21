@@ -217,13 +217,6 @@ connected_watch() {
   local adb="$ANDROID_SDK_ROOT/platform-tools/adb" watch="$ANDROID_GRADLE_WORK/watch"
   local watcher="$ANDROID_GRADLE_WORK/watch.py"
   mkdir -p "$watch"
-  # The snapshot runs beside Gradle; the capture helper bounds it, and run stops its adb client
-  # with this process group.
-  {
-    printf 'android-gradle evidence: before connected meminfo\n' >&2
-    android_capture_evidence --foreground "$adb" shell dumpsys meminfo || true
-  } 2> "$watch/before.log" &
-  ANDROID_GRADLE_SNAPSHOT="$!"
   # -D marks every change of buffer, which the crash section follows.
   python3 "$watcher" stream "$watch/logcat.log" 2097152 -- \
     "$adb" logcat -D -b main -b system -b crash -v threadtime < /dev/null &
@@ -240,6 +233,11 @@ connected_watch() {
     "$adb" shell 'cat /proc/loadavg /proc/meminfo; for p in cpu memory io; do printf "pressure %s\n" "$p"; cat "/proc/pressure/$p"; done; grep -E "^(oom_kill|allocstall|pgmajfault|pswp|workingset_refault)" /proc/vmstat' \
     < /dev/null &
   ANDROID_GRADLE_WATCHERS+=" $!"
+  # The broker has granted a settled device. Finish the bounded snapshot before starting Gradle.
+  {
+    printf 'android-gradle evidence: before connected meminfo\n' >&2
+    android_capture_evidence --foreground "$adb" shell dumpsys meminfo || true
+  } 2> "$watch/before.log"
 }
 # No --no-daemon: run's GRADLE_OPTS guard keeps Gradle inside the lease.
 # The child's EXIT trap runs while run still owns the emulator and ADB relay.
@@ -266,12 +264,6 @@ raise SystemExit(0 if healthy else 1)
   for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
     wait "$pid" 2>/dev/null || true
   done
-  # A failure waits for the bounded snapshot; a pass stops it. Its probe stays in this process
-  # group, which run stops before it releases the lease.
-  if [ -n "${ANDROID_GRADLE_SNAPSHOT:-}" ]; then
-    [ "$result" -ne 0 ] || kill -TERM "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
-    wait "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
-  fi
   if [ "$result" -ne 0 ]; then
     cat "$watch/before.log" >&2 2>/dev/null || true
     printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
@@ -293,7 +285,7 @@ export -f connected connected_watch android_capture_evidence
 export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log" ANDROID_GRADLE_WORK="$work"
 # The child shell expands the exported evidence path and command arguments.
 # shellcheck disable=SC2016
-android-broker run --device phone --api 36 --wait 900 --purpose android-gradle -- \
+android-broker run --device phone --api 36 --wait 1230 --purpose android-gradle -- \
   bash -c 'trap "connected 2> \"$ANDROID_GRADLE_EVIDENCE\"" EXIT; connected_watch; "$@"' _ \
   "${gradle[@]}" -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1 :app:connectedDebugAndroidTest \
   > "$work/connected.log" 2>&1 < /dev/null

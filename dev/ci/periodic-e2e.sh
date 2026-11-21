@@ -156,7 +156,7 @@ install_runtime() {
 # The documented path for a host without Incus: init installs it, then the service is registered.
 # This process predates the incus-admin group that init creates.
 install_pool() {
-  local free_gib
+  local check_id="$1" free_gib
   install -d -m 0700 "$HOME/.config/subyard"
   cat >> "$HOME/.config/subyard/config.env" <<'CONFIG'
 CODING_TOOL_INTEGRATIONS=''
@@ -164,6 +164,9 @@ E2E_VM_SLOT_COUNT=1
 E2E_MEMORY_RESERVE=2GiB
 E2E_DISK_RESERVE=2GiB
 CONFIG
+  if [ "$check_id" = profile:android/gradle ]; then
+    printf 'E2E_VM_CPU=3\n' >> "$HOME/.config/subyard/config.env"
+  fi
   # The default 20 GiB disk needs 62 GiB to build a base; the small runner disk has less.
   free_gib="$(df --output=avail -BG "$HOME" | tail -n 1 | tr -dc 0-9)"
   if [ "$free_gib" -lt 65 ]; then
@@ -232,7 +235,7 @@ check_probes() {
   probe docker-removed drop_docker
   probe_after prepare-host candidate install_candidate "$BUNDLE"
   probe_after candidate candidate-runtime install_runtime
-  probe_after candidate-runtime test-vms-service install_pool
+  probe_after candidate-runtime test-vms-service install_pool "$id"
   probe_after test-vms-service "check:$id" run_check "$@"
   probe facts-after facts
   write_summary

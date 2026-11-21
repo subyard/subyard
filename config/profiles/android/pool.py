@@ -32,6 +32,9 @@ import xml.etree.ElementTree as ET
 TTL = 1200
 HEARTBEAT = 300
 BOOT_TIMEOUT = 1200
+BOOT_SETTLE_SECONDS = 20
+BOOT_CPU_PRESSURE_LIMIT = 20.0
+BOOT_MEMORY_PRESSURE_LIMIT = 5.0
 SCHEMA = 'subyard.android-pool.v1'
 VERSIONS = {34: '14', 35: '15', 36: '16'}
 # Emulator 37.1.11 raised the tested phone to 2.5GiB. The current upstream
@@ -727,7 +730,10 @@ class Runtime:
 
     @staticmethod
     def budget(request):
-        return (PRESETS[request['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
+        overhead = RUNTIME_OVERHEAD_MIB
+        if os.getenv('SUBYARD_ANDROID_E2E_GRADLE') == 'raised':
+            overhead += 1024
+        return (PRESETS[request['device']][3] + overhead) * 1024**2
 
     @staticmethod
     def meminfo(body):
@@ -1068,8 +1074,10 @@ class Runtime:
         avd = avds / 'managed.avd'
         avd.mkdir()
         (avds / 'managed.ini').write_text(f'avd.ini.encoding=UTF-8\npath={avd}\ntarget=android-{request["api"]}\n')
+        experiment = os.getenv('SUBYARD_ANDROID_E2E_GRADLE') in ('default', 'raised')
+        cores = min(3, len(os.sched_getaffinity(0))) if experiment else 2
         config = {'AvdId': 'managed', 'avd.ini.displayname': 'Managed disposable emulator',
-                  'abi.type': 'x86_64', 'hw.cpu.arch': 'x86_64', 'hw.cpu.ncore': '2',
+                  'abi.type': 'x86_64', 'hw.cpu.arch': 'x86_64', 'hw.cpu.ncore': cores,
                   'hw.lcd.width': width, 'hw.lcd.height': height, 'hw.lcd.density': density,
                   'hw.ramSize': memory, 'hw.keyboard': 'yes', 'hw.gpu.enabled': 'yes',
                   'hw.gpu.mode': 'host' if self.config.get('gpu', 'host') == 'host' else 'swiftshader', 'hw.mainKeys': 'no', 'hw.device.name': request['device'],
@@ -1092,7 +1100,7 @@ class Runtime:
              '--property=BindReadOnlyPaths=' + str(image) + ':' + str(base_image)
              + ' ' + str(resolver) + ':/etc/resolv.conf',
              '--property=TimeoutStopSec=30',
-             '--property=MemoryMax=' + str(memory + RUNTIME_OVERHEAD_MIB) + 'M', '--property=OOMPolicy=kill',
+             '--property=MemoryMax=' + str(self.budget(request) // 1024**2) + 'M', '--property=OOMPolicy=kill',
              '--property=Restart=no', '--property=BindsTo=subyard-android-pool.service',
              '--property=After=subyard-android-pool.service',
              '--setenv=HOME=' + str(home), '--setenv=ANDROID_AVD_HOME=' + str(avds),
@@ -1101,8 +1109,14 @@ class Runtime:
              '--setenv=EMULATOR_GPU=' + self.config.get('gpu', 'host'),
              '/usr/local/lib/subyard-android/runtime.sh'])
         self.start_network(slot, directory, cancel, namespace)
-        deadline = time.monotonic() + BOOT_TIMEOUT
+        self.wait_for_boot(slot, cancel, cores, settle=experiment)
+
+    def wait_for_boot(self, slot, cancel, cores, *, settle):
+        started = time.monotonic()
+        deadline = started + BOOT_TIMEOUT
         wifi_state = {}
+        stable_since = stable_framework = first_package = peak_pressure = peak_memory_pressure = None
+        settled = False
         while time.monotonic() < deadline:
             require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
             pid = self.pid(slot)
@@ -1110,10 +1124,11 @@ class Runtime:
             # Probe the existing ADB server directly. An adb CLI here could auto-start an
             # unowned root daemon outside the runtime cgroup when the server is not ready yet.
             process = None
-            ready = False
+            sample = None
             try:
                 process = self.connect(slot)
-                ready, _ = self.adb_ready(process, wifi_state=wifi_state)
+                sample, _ = self.adb_ready(process, timeout=min(5, deadline - time.monotonic()),
+                                           wifi_state=wifi_state, settle=settle)
             except (subprocess.SubprocessError, OSError, PoolError):
                 pass
             finally:
@@ -1127,14 +1142,52 @@ class Runtime:
                         process.wait(timeout=5)
                     with contextlib.suppress(OSError):
                         process.stdout.close()
-            if ready:
+            now = time.monotonic()
+            if sample is not None and not settle:
                 return
-            cancel.wait(1)
-        raise PoolError('boot_timeout', f'Android boot did not complete within {BOOT_TIMEOUT} seconds')
+            if sample is not None:
+                framework, pressure = sample
+                if first_package is None:
+                    first_package = round(now - started, 1)
+                peak_pressure = pressure if peak_pressure is None else max(pressure, peak_pressure)
+                memory_pressure = self.boot_memory_pressure(slot)
+                if memory_pressure is not None:
+                    peak_memory_pressure = (memory_pressure if peak_memory_pressure is None
+                                            else max(peak_memory_pressure, memory_pressure))
+                if (pressure <= BOOT_CPU_PRESSURE_LIMIT and memory_pressure is not None
+                        and memory_pressure <= BOOT_MEMORY_PRESSURE_LIMIT):
+                    if stable_since is None or stable_framework != framework:
+                        stable_since, stable_framework = now, framework
+                    elif now - stable_since >= BOOT_SETTLE_SECONDS and now < deadline:
+                        settled = True
+                        break
+                else:
+                    stable_since = None
+            else:
+                stable_since = None
+            cancel.wait(min(2 if settle else 1, max(0, deadline - now)))
+        if settle:
+            print(f'android boot readiness cores={cores} settled={str(settled).lower()} '
+                  f'elapsed_seconds={time.monotonic() - started:.1f} first_package_seconds={first_package} '
+                  f'peak_cpu_some_avg10={peak_pressure} peak_memory_some_avg10={peak_memory_pressure}',
+                  file=sys.stderr, flush=True)
+            require(settled, 'boot_timeout', f'Android boot did not settle within {BOOT_TIMEOUT} seconds')
+        else:
+            raise PoolError('boot_timeout', f'Android boot did not complete within {BOOT_TIMEOUT} seconds')
+
+    def boot_memory_pressure(self, slot):
+        try:
+            path = self.CGROUP_ROOT / 'system.slice' / self.unit(slot) / 'memory.pressure'
+            match = re.search(r'^some avg10=([0-9]{1,3}\.[0-9]{2}) ', path.read_text(), re.M)
+        except OSError:
+            return None
+        if match and float(match[1]) <= 100:
+            return float(match[1])
+        return None
 
     @staticmethod
-    def adb_ready(process, timeout=5, wifi_state=None):
-        """Return (ready, connection submitted) through the existing private ADB server."""
+    def adb_ready(process, timeout=5, wifi_state=None, *, settle=False):
+        """Return ((framework PID, CPU pressure) or None, Wi-Fi submission)."""
         if wifi_state is None:
             wifi_state = {}
         deadline = time.monotonic() + timeout
@@ -1160,7 +1213,7 @@ class Runtime:
 
         request('host:transport:emulator-5554')
         if read(4) != b'OKAY':
-            return False, False
+            return None, False
         # Android can report boot completion while its initial Wi-Fi setting is still off.
         # Initialize the guest radio explicitly, then wait for local IPv4 configuration.
         # A clean image can retain a disabled default network even after radio enable.
@@ -1170,6 +1223,11 @@ class Runtime:
         submitted_for = wifi_state.get('submitted_for', '')
         if not re.fullmatch(r'[1-9][0-9]{0,9}', str(submitted_for)):
             submitted_for = ''
+        ready_probe = 'printf "%s:ready\\n" "$framework"; '
+        if settle:
+            ready_probe = ('case "$(cmd package path android 2>/dev/null)" in package:/*) '
+                           'cat /proc/pressure/cpu | { read -r kind avg10 rest; '
+                           '[ "$kind" = some ] && printf "%s:ready:%s\\n" "$framework" "$avg10"; };; esac; ')
         request('shell:if [ "$(getprop sys.boot_completed)" = 1 ]; then '
                 'framework=$(pidof system_server); '
                 'case "$framework" in ""|*[!0-9]*|0*) exit 1;; esac; '
@@ -1179,31 +1237,36 @@ class Runtime:
                 '"Service wifi: found") ;; *) exit 1;; esac; '
                 'if [ "$(settings get global wifi_on)" = 0 ]; then svc wifi enable >/dev/null || exit 1; fi; '
                 'if ip -4 addr show scope global | grep -q " inet "; then '
-                'printf "%s:ready\\n" "$framework"; '
+                f'{ready_probe}'
                 f'elif [ "$framework" != "{submitted_for}" ] && '
                 'cmd wifi status 2>/dev/null | { IFS= read -r radio; [ "$radio" = "Wifi is enabled" ]; } && '
                 'cmd wifi connect-network AndroidWifi open >/dev/null 2>&1; then '
                 'printf "%s:submitted\\n" "$framework"; '
                 'else printf "%s:pending\\n" "$framework"; fi; fi')
         if read(4) != b'OKAY':
-            return False, False
+            return None, False
         line = bytearray()
         while len(line) < 1024:
             byte = read(1)
             if byte is None:
-                return False, False
+                return None, False
             line.extend(byte)
             if byte == b'\n':
-                match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready|submitted|pending|missing)', line.strip())
+                match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready(?::avg10=([0-9]{1,3}\.[0-9]{2}))?|submitted|pending|missing)',
+                                     line.strip())
                 if not match:
-                    return False, False
-                framework, state = match.groups()
+                    return None, False
+                framework, state, avg10 = match.groups()
                 if state == b'missing':
                     wifi_state.pop('submitted_for', None)
                 elif state == b'submitted':
                     wifi_state['submitted_for'] = framework.decode('ascii')
-                return state == b'ready', state == b'submitted'
-        return False, False
+                if settle and avg10 is not None and float(avg10) <= 100:
+                    return (framework, float(avg10)), False
+                if not settle and state == b'ready':
+                    return (framework, None), False
+                return None, state == b'submitted'
+        return None, False
 
     def start_network(self, slot, directory, cancel, namespace):
         pid = self.pid(slot)
@@ -1305,6 +1368,14 @@ class Runtime:
 
     def stop(self, slot):
         unit = self.unit(slot)
+        if os.getenv('SUBYARD_ANDROID_E2E_GRADLE') in ('default', 'raised'):
+            try:
+                group = self.CGROUP_ROOT / 'system.slice' / unit
+                counters = dict(line.split() for line in (group / 'memory.events').read_text().splitlines())
+                values = ' '.join(f'{name}={int(counters[name])}' for name in ('high', 'max', 'oom', 'oom_kill'))
+                print(f'android gradle memory events unit={unit} {values}', file=sys.stderr, flush=True)
+            except (OSError, ValueError, KeyError):
+                pass  # The slot may never have started, or systemd may already have collected it.
         self.stop_unit(self.network_unit(slot))
         self.stop_unit(unit)
         directory = self.root / unit.removesuffix('.service')
@@ -1505,7 +1576,7 @@ class Pool:
             for key in ('acquired_at', 'ready_at', 'last_heartbeat_at', 'expires_at'):
                 result[key] = utc(slot.get(key))
         if 'request' in slot:
-            result['reserved_memory_bytes'] = (PRESETS[slot['request']['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
+            result['reserved_memory_bytes'] = Runtime.budget(slot['request'])
         result['lease'] = dict(contract='resource-lease/v1', resource_type='android-emulator',
                                resource_id='emulator', slot_id=slot['slot_id'],
                                generation=slot['generation'], state=('draining' if slot['state'] in ('provisioning', 'held')

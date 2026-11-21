@@ -18,6 +18,10 @@ vm_type=android-test
 [ "$lane" != skills ] || vm_type=subyard-pair
 allocation_route=()
 [ -z "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] || allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
+fixture_env=()
+if [ "$lane" = gradle ] && [ -n "${SUBYARD_ANDROID_E2E_GRADLE:-}" ]; then
+  fixture_env=(env "SUBYARD_ANDROID_E2E_GRADLE=$SUBYARD_ANDROID_E2E_GRADLE")
+fi
 bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$slot" --type "$vm_type" --vm-count 1 \
   --purpose android-pool-runtime --vm 1 -- \
-  bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane "$lane"
+  "${fixture_env[@]}" bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane "$lane"

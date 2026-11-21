@@ -10,6 +10,8 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+gradle_headroom="${SUBYARD_ANDROID_E2E_GRADLE:-default}"
+case "$gradle_headroom" in default|raised) ;; *) printf 'invalid Gradle memory headroom\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -70,6 +72,8 @@ init_attempted=0
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 android_start_monitor() {
+  local args=()
+  [ "$lane" != gradle ] || args=(--host-only)
   monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
   monitor_log="$state/first-boot-monitor.log"
   incus_binary=(/usr/bin/incus)
@@ -84,7 +88,7 @@ android_start_monitor() {
       [ "$monitor_seconds" -gt 0 ] || break
       monitor_status=0
       timeout --foreground --kill-after=10 "$monitor_seconds" "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-        python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
+        python3 -u - "$monitor_stop" "${args[@]}" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
         || monitor_status=$?
       [ ! -e "$monitor_host_stop" ] || break
       if [ "$last_monitor_status" != "$monitor_status" ]; then
@@ -123,6 +127,11 @@ android_require_gradle_console() {
     return 1
   fi
 }
+android_gradle_boot_evidence() {
+  android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    journalctl --no-pager -q -n 8 -o cat -u subyard-android-pool.service \
+      --grep='^android (boot readiness|gradle memory events) ' || true
+}
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -145,6 +154,7 @@ cleanup() {
   # The emulator journal includes the guest console and survives lease release.
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
+    android_gradle_boot_evidence
     printf 'android-gradle evidence: emulator journal with guest kernel console\n' >&2
     android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' || true
@@ -321,6 +331,14 @@ android_repeat_provision() {
 }
 android_phase_begin provision
 android_network_received provision before
+if [ "$lane" = gradle ]; then
+  printf 'android gradle fixture headroom=%s lease_cpus=%s\n' "$gradle_headroom" "${SUBYARD_E2E_CPU_PER_VM:-unknown}"
+  incus --project "$project" exec "$instance" -- sh -se -- "$gradle_headroom" <<'SH'
+directory=/run/systemd/system/subyard-android-pool.service.d
+install -d -m 0755 "$directory"
+printf '[Service]\nEnvironment=SUBYARD_ANDROID_E2E_GRADLE=%s\n' "$1" > "$directory/gradle-boot.conf"
+SH
+fi
 yard provision --yes
 android_network_received provision after
 android_phase_end 0
@@ -472,6 +490,7 @@ SH
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
   android_remove_gradle_console
+  android_gradle_boot_evidence
   android_require_gradle_console
   android_phase_end 0
   android_phase_begin relay-owner
