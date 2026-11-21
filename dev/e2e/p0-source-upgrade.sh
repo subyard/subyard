@@ -1013,6 +1013,32 @@ prepare() {
   if incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then
     die 'the baseline runtime installed Codex sudo prompts'
   fi
+  # The published hop predates the combined policy. Seed that on-disk shape
+  # so the candidate update exercises migration on the retained ordinary yard.
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- bash -e -s <<'COMBINED_APPROVAL'
+install -d -m 0755 /etc/codex
+cat > /etc/codex/requirements.toml <<'REQUIREMENTS'
+# Managed by Subyard Codex provision.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+check_for_update_on_startup = false
+[rules]
+prefix_rules = [
+  { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt" },
+  { pattern = [{ token = "sudo" }], decision = "prompt" },
+]
+[features]
+hooks = true
+[hooks]
+managed_dir = "/etc/codex"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/etc/codex/subyard-git-approval-hook --plain git sudo"
+timeout = 3
+REQUIREMENTS
+COMBINED_APPROVAL
   if update_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
@@ -1027,6 +1053,10 @@ prepare() {
   # reprovisions the running yard's agents with sudo prompts and keeps the grant.
   incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml \
     || die 'update did not install the default Codex sudo prompts'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
+    || die 'update did not split the combined Codex policy'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- codex-policy-check >/dev/null \
+    || die 'migrated Codex policies failed readiness'
   incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- runuser -u dev -- sudo -n true \
     || die 'update removed the passwordless grant'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \

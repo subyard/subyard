@@ -57,13 +57,14 @@ type configTargetAssessment struct {
 type configTargetSelector func() ([]configTarget, error)
 
 type configAsset struct {
-	OwnedFormat string
-	Setting     string
-	Name        string
-	Source      string
-	Destination string
-	Scope       string
-	Role        string
+	OwnedFormat     string
+	Setting         string
+	Name            string
+	Source          string
+	Destination     string
+	Scope           string
+	Role            string
+	ApprovalSources []string
 }
 
 // Classify by the subcommand that owns execution. Invalid arguments to these
@@ -1347,7 +1348,8 @@ func materializationDesired(target configTarget, check bool, reader func(config.
 			if reader == nil {
 				reader = target.Loaded.ProspectiveFiles.ReadAsset
 			}
-			payload, sourceErr := reader(config.MaterializedAsset{Source: asset.Source})
+			source := config.MaterializedAsset{Source: asset.Source, ApprovalSources: asset.ApprovalSources}
+			payload, sourceErr := source.ReadContent(reader)
 			if sourceErr != nil && !os.IsNotExist(sourceErr) {
 				findings = append(findings, fmt.Errorf("%s: %w", asset.Name, sourceErr))
 				continue
@@ -1517,7 +1519,7 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 	var result []configAsset
 	for _, selected := range assets {
 		materialized := selected.Asset
-		asset := configAsset{Name: materialized.Name, Setting: materialized.Setting, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
+		asset := configAsset{Name: materialized.Name, Setting: materialized.Setting, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat, ApprovalSources: materialized.ApprovalSources}
 		if trace, ok := loaded.Settings[materialized.Setting]; ok {
 			if resolution, found := effectiveSettingResolution(trace); found {
 				asset.Scope, asset.Role = resolution.Scope, resolution.Role

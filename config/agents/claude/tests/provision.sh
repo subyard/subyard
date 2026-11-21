@@ -92,6 +92,9 @@ link="$root/usr/local/bin/claude"
 check="$root/usr/local/bin/claude-policy-check"
 policy_dir="$root/etc/claude-code/managed-settings.d"
 policy="$policy_dir/50-subyard-git-approval.json"
+sudo_policy="$policy_dir/51-subyard-sudo-approval.json"
+hook_policy="$policy_dir/49-subyard-approval-hook.json"
+update_policy="$policy_dir/48-subyard-update-lock.json"
 git_hook="$(dirname "$policy_dir")/subyard-git-approval-hook"
 install -d -m 0755 "$policy_dir"
 printf '{"permissions":{"deny":["Bash(secret *)"]}}\n' > "$policy_dir/10-foreign.json"
@@ -168,23 +171,16 @@ rm "$policy"
 ln -s "$policy_dir/10-foreign.json" "$policy"
 if run_hook "$root" >/dev/null 2>&1; then fail 'policy symlink accepted'; fi
 
-# The managed drop-in locks every native update path and old policy files converge.
+# The update lock and arbiter are independent of either approval policy.
 rm -f "$policy"
 run_hook "$root" >/dev/null
-jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'update lock missing from the managed policy'
-jq 'del(.env)' "$policy" > "$tmp/legacy-policy.json"
-cp "$tmp/legacy-policy.json" "$policy"
-if "$check" >/dev/null 2>&1; then fail 'policy without the update lock passed readiness'; fi
-run_hook "$root" >/dev/null
-jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'legacy policy did not converge'
-
-# The installed hook and its managed registration converge together.
+jq -e '.env == {DISABLE_UPDATES: "1"}' "$update_policy" >/dev/null
 python3 "$ROOT/dev/sync-git-approval-hook.py" --check
 python3 "$ROOT/config/agents/shared/tests/git-approval-hook-test.py" "$git_hook"
-jq -e --arg hook "$git_hook" '
-  .hooks.PreToolUse == [{matcher:"Bash", hooks:[{
-    type:"command", command:($hook | @sh), timeout:3, onFailure:"block"
-  }]}]' "$policy" >/dev/null || fail 'managed Git hook registration missing'
+registration="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$hook_policy")"
+jq -e '.hooks.PreToolUse == [{matcher:"Bash", hooks:[{
+  type:"command", command:.hooks.PreToolUse[0].hooks[0].command, timeout:3, onFailure:"block"
+}]}]' "$hook_policy" >/dev/null
 printf '# fixture drift\n' >> "$git_hook"
 chmod 0666 "$git_hook"
 if "$check" >/dev/null 2>"$tmp/hook-drift.err"; then fail 'Git hook drift passed readiness'; fi
@@ -192,47 +188,53 @@ grep -Fq 'managed approval hook permissions drifted' "$tmp/hook-drift.err"
 grep -Fq 'managed approval hook content drifted' "$tmp/hook-drift.err"
 run_hook "$root" >/dev/null
 
-# Apply off to a previously managed prompt policy, then restore prompt.
-jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode lacks the Git ask rules'
+# Git can be removed and restored while the update lock stays installed.
+jq -e '.permissions.ask == ["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]' "$policy" >/dev/null
+cp "$policy" "$tmp/git-policy"
 CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
-jq -e '. == {"$comment":"Subyard Claude permission policy","env":{DISABLE_UPDATES:"1"}}' "$policy" >/dev/null \
-  || fail 'off mode kept the Git ask rules or dropped the update lock'
-[ "$(stat -c '%a' "$policy")" = 644 ] || fail 'off mode policy mode drifted'
-"$check" | grep -F >/dev/null 'managed Git prompts off' || fail 'off mode readiness did not name the mode'
-jq '.env = {DISABLE_UPDATES: "1"}' "$tmp/legacy-policy.json" > "$policy"
-if "$check" >/dev/null 2>&1; then fail 'off mode accepted the prompt policy'; fi
+[ ! -e "$policy" ] && [ ! -e "$hook_policy" ] || fail 'off mode kept the Git policy or hook registration'
+jq -e '.env == {DISABLE_UPDATES: "1"}' "$update_policy" >/dev/null
+"$check" | grep -F >/dev/null 'managed Git prompts off'
+cp "$tmp/git-policy" "$policy"
+if "$check" >/dev/null 2>&1; then fail 'off mode accepted a stale Git policy'; fi
 if CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
 run_hook "$root" >/dev/null
-jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode was not restored'
-"$check" >/dev/null || fail 'restored prompt mode failed readiness'
+cmp "$policy" "$tmp/git-policy"
 [ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
 
-# DEV_SUDO=prompt, the default, adds sudo ask rules and the sudo hook gate in both Git modes;
-# no and yes install neither.
-sudo_rules='["Bash(sudo)","Bash(sudo:*)","Bash(su)","Bash(su:*)","Bash(doas)","Bash(doas:*)","Bash(pkexec)","Bash(pkexec:*)","Bash(sudoedit)","Bash(sudoedit:*)","Bash(run0)","Bash(run0:*)"]'
-prompt_policy="$(cat "$policy")"
-for git_mode in prompt off; do
-  case "$git_mode" in prompt) gates='git sudo' ;; off) gates=sudo ;; esac
-  CODING_TOOL_GIT_APPROVAL="$git_mode" DEV_SUDO=prompt run_hook "$root" >/dev/null
-  jq -e --argjson sudo "$sudo_rules" --arg mode "$git_mode" --arg hook "$git_hook" --arg gates "$gates" '
-    .permissions.ask == (if $mode == "prompt" then ["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"] else [] end) + $sudo
-    and .hooks.PreToolUse == [{matcher:"Bash", hooks:[{
-      type:"command", command:(($hook | @sh) + " " + $gates), timeout:3, onFailure:"block"}]}]' "$policy" >/dev/null \
-    || fail "DEV_SUDO=prompt policy is wrong with Git $git_mode"
-  "$check" | grep -F >/dev/null 'Managed sudo ask rules installed (DEV_SUDO=prompt)' \
-    || fail 'sudo prompt readiness did not name the mode'
-  # shellcheck disable=SC2086 # The gates are separate hook arguments.
-  if printf '{"tool_input":{"command":"env sudo id"}}' | "$git_hook" $gates >/dev/null 2>&1; then
-    fail 'installed hook allowed a wrapped sudo'
-  fi
-done
-sudo_policy="$(cat "$policy")"
+# Migrate an old combined file. Both policies and the one arbiter survive reprovision.
+jq -s '.[0] * .[1] * .[2] | .permissions.ask += ["Bash(sudo)", "Bash(sudo:*)"] |
+  .hooks.PreToolUse[0].hooks[0].command = ($hook + " git sudo")' --arg hook "$git_hook" \
+  "$policy" "$update_policy" "$hook_policy" > "$tmp/legacy-policy.json"
+cp "$tmp/legacy-policy.json" "$policy"
+rm -f "$update_policy" "$hook_policy"
+DEV_SUDO=prompt run_hook "$root" >/dev/null
+cmp "$policy" "$tmp/git-policy"
+jq -e '.permissions.ask == ["Bash(sudo)","Bash(sudo:*)","Bash(su)","Bash(su:*)","Bash(doas)","Bash(doas:*)","Bash(pkexec)","Bash(pkexec:*)","Bash(sudoedit)","Bash(sudoedit:*)","Bash(run0)","Bash(run0:*)"]' "$sudo_policy" >/dev/null
+[ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$hook_policy")" = "$registration" ]
+installed="$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy")"
+DEV_SUDO=prompt run_hook "$root" >/dev/null
+[ "$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy")" = "$installed" ]
+"$check" | grep -F >/dev/null 'Managed sudo ask rules installed (DEV_SUDO=prompt)'
+if printf '{"tool_input":{"command":"env sudo id"}}' | bash -c "$registration" >/dev/null 2>&1; then
+  fail 'installed hook allowed a wrapped sudo'
+fi
+printf '{"tool_input":{"command":"echo sudo | git push"}}' | bash -c "$registration"
+mv "$sudo_policy" "$tmp/sudo-policy"
+if "$check" >/dev/null 2>"$tmp/sudo-drift.err"; then fail 'missing sudo policy passed readiness'; fi
+grep -Fq 'managed sudo approval policy is missing' "$tmp/sudo-drift.err"
+
+# The sudo-only upgrade removes the combined Git file and preserves the sudo policy.
+cp "$tmp/legacy-policy.json" "$policy"
 (unset DEV_SUDO; CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null)
-[ "$(cat "$policy")" = "$sudo_policy" ] || fail 'unset DEV_SUDO did not install the prompt policy'
+[ ! -e "$policy" ] || fail 'sudo-only mode kept the legacy combined policy'
+cmp "$sudo_policy" "$tmp/sudo-policy"
+"$check" >/dev/null
 # 0 and 1 are deprecated aliases of no and yes.
 for sudo_mode in no yes 0 1; do
   DEV_SUDO="$sudo_mode" run_hook "$root" >/dev/null
-  [ "$(cat "$policy")" = "$prompt_policy" ] || fail "DEV_SUDO=$sudo_mode changed the Git prompt policy"
+  cmp "$policy" "$tmp/git-policy"
+  [ ! -e "$sudo_policy" ] || fail 'disabled sudo policy was retained'
   if "$check" | grep -F >/dev/null 'sudo ask'; then fail "DEV_SUDO=$sudo_mode readiness named sudo prompts"; fi
 done
 if DEV_SUDO=true CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>"$tmp/sudo-mode.err"; then
@@ -307,7 +309,7 @@ if "$check" >"$tmp/refusals.out" 2>"$tmp/refusals.err"; then fail 'readiness pas
 grep -Fq ' ready' "$tmp/refusals.out" && fail 'refused readiness still reported ready'
 sed -e 's/^claude-policy-check: //' -e 's/;.*//' "$tmp/refusals.err" > "$tmp/refusals.actual"
 cat > "$tmp/refusals.expected" <<REFUSALS
-managed policy is missing
+managed Git approval policy is missing
 canonical command does not point to the managed runtime
 a native self-installed link shadows $link
 REFUSALS
@@ -316,7 +318,7 @@ rm -f -- "$shadow"
 ln -s "$root/opt/subyard/claude/claude" "$link"
 # A missing policy alone still fails, and a conflict stays visible beside a refusal.
 if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'a missing policy passed readiness'; fi
-[ "$(cat "$tmp/refusals.err")" = 'claude-policy-check: managed policy is missing; run yard init' ] \
+[ "$(cat "$tmp/refusals.err")" = 'claude-policy-check: managed Git approval policy is missing; run yard init' ] \
   || fail 'a missing policy reported something else'
 ln -s /usr/bin/true "$shadow"
 if "$check" >"$tmp/refusals.out" 2>/dev/null; then fail 'a missing policy passed beside a conflict'; fi
@@ -329,7 +331,7 @@ cp "$policy" "$policy.saved"
 printf '{}\n' > "$policy"
 if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'policy drift passed readiness'; fi
 grep -Fq 'permissions drifted' "$tmp/refusals.err" || fail 'policy permission drift was not reported'
-grep -Fq 'managed policy drifted' "$tmp/refusals.err" || fail 'policy content drift was not reported'
+grep -Fq 'managed Git approval policy drifted' "$tmp/refusals.err" || fail 'policy content drift was not reported'
 mv "$policy.saved" "$policy"
 chmod 0644 "$policy"
 "$check" >/dev/null || fail 'restored policy did not restore readiness'

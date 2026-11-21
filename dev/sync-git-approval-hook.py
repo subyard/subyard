@@ -9,27 +9,60 @@ ROOT = Path(__file__).resolve().parents[1] / "config/agents"
 BEGIN = "# BEGIN generated Git approval hook"
 END = "# END generated Git approval hook"
 
-HELPERS = r'''# Publish the helper before the policy that references it.
-install_git_approval_hook() {
-  local hook_stage
-  [ -n "$APPROVAL_GATES" ] || return 0
-  hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
-  git_approval_hook > "$hook_stage"
-  chmod 0755 "$hook_stage"
-  mv -fT -- "$hook_stage" "$git_hook"
+HELPERS = r'''# Publish each file atomically and preserve an already converged inode.
+publish_approval_file() {
+  local path="$1" mode="$2" stage
+  stage="$(mktemp "$(dirname "$path")/.approval.XXXXXX")"
+  cat > "$stage"
+  chmod "$mode" "$stage"
+  if [ "$(id -u)" = 0 ]; then chown "$expected_owner" "$stage"; fi
+  if [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(stat -c '%a:%u:%g' "$path")" = "$mode:$expected_owner" ] && cmp -s "$stage" "$path"; then
+    rm -f -- "$stage"
+  else
+    mv -fT -- "$stage" "$path"
+  fi
+}
+
+reconcile_approval_file() {
+  local path="$1" content="$2"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | publish_approval_file "$path" 644
+  else
+    rm -f -- "$path"
+  fi
+}
+
+approval_command() {
+  jq -n --args '$ARGS.positional | map(@sh) | join(" ")' -- \
+    "$git_hook" "$@" --policies "$git_policy" "$sudo_policy"
+}
+
+# A content check can still run when permissions drifted.
+approval_file_present() {
+  local path="$1" expected="$2" mode="$3" label="$4"
+  if [ -z "$expected" ]; then
+    [ ! -e "$path" ] && [ ! -L "$path" ] || refuse "$label should be absent; run yard init"
+  elif [ -f "$path" ] && [ ! -L "$path" ]; then
+    [ "$(stat -c '%a:%u:%g' "$path" 2>/dev/null)" = "$mode:$expected_owner" ] \
+      || refuse "$label permissions drifted; run yard init"
+    return 0
+  else
+    refuse "$label is missing; run yard init"
+  fi
+  return 1
+}
+
+check_approval_hash() {
+  if approval_file_present "$1" "$2" "$3" "$4"; then
+    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
+      || refuse "$4 content drifted; run yard init"
+  fi
 }
 
 check_git_approval_hook() {
-  local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
   [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
-  if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
-    [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed approval hook permissions drifted; run yard init'
-    [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed approval hook content drifted; run yard init'
-  else
-    refuse 'managed approval hook is missing; run yard init'
-  fi
+  check_approval_hash "$git_hook" "$git_hook_sha" 755 'managed approval hook'
 }
 '''
 
