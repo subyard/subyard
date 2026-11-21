@@ -978,6 +978,8 @@ class Leases(unittest.TestCase):
                 self.assertEqual(arguments[arguments.index('-feature') + 1], '-Vulkan')
             else:
                 self.assertNotIn('-feature', arguments)
+            self.assertEqual(arguments[-2:], ['-logcat', '*:S'])
+            self.assertNotIn('-logcat-output', arguments)
             self.assertNotIn('-show-kernel', arguments)
             console_arguments = arguments + ['-show-kernel', '-logcat-output', '/dev/null']
             for enabled, expected in (('0', arguments), ('1', console_arguments)):
@@ -1027,6 +1029,7 @@ class Leases(unittest.TestCase):
             command = next(command for command in commands if '--unit' in command
                            and command[command.index('--unit') + 1] == runtime.unit(slot))
             self.assertIn('--setenv=EMULATOR_GPU=software', command)
+            self.assertNotIn('SUBYARD_ANDROID_E2E_SHOW_KERNEL', ' '.join(command))
             self.assertIn(f'--property=MemoryMax={memory + poolmod.RUNTIME_OVERHEAD_MIB}M', command)
             self.assertIn('--property=NetworkNamespacePath=' + str(netns / runtime.namespace_name(slot)), command)
             self.assertNotIn('--property=PrivateNetwork=yes', command)

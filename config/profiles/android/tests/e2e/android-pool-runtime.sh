@@ -61,6 +61,7 @@ project=''
 instance=''
 monitor_pid=''
 monitor_stop=''
+console_dropin=''
 definition_checksum=''
 sdk_pool=''
 sdk_volume=''
@@ -102,6 +103,26 @@ android_start_monitor() {
   grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
     || { printf 'android boot monitor did not start\n' >&2; return 1; }
 }
+android_remove_gradle_console() {
+  [ -n "$console_dropin" ] || return 0
+  timeout --kill-after=5 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    sh -ec 'rm -f -- "$1"; systemctl daemon-reload' _ "$console_dropin" || {
+      printf 'android-gradle: failed to remove or reload the kernel console drop-in\n' >&2
+      return 1
+    }
+  console_dropin=''
+}
+android_require_gradle_console() {
+  local sample capture_status=0 kernel_record='^\[[[:space:]]*[0-9]+\.[0-9]+\]'
+  printf 'android-gradle evidence: guest kernel console sample\n' >&2
+  sample="$(android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    journalctl --no-pager -q -n 8 -o cat -u 'subyard-android-slot-*' --grep="$kernel_record" 2>&1)" || capture_status=$?
+  printf '%s\n' "$sample" >&2
+  if [ "$capture_status" -ne 0 ] || ! grep -Eq "$kernel_record" <<< "$sample"; then
+    printf 'android-gradle: could not verify guest kernel console records in the slot journal\n' >&2
+    return 1
+  fi
+}
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -109,6 +130,10 @@ cleanup() {
   android_phase_end "$status"
   android_phase_begin cleanup
   cleanup_status=0
+  if ! android_remove_gradle_console; then
+    cleanup_status=3
+    [ "$status" -ne 0 ] || status=3
+  fi
   touch "$monitor_host_stop"
   if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ] || [ "$lane" = gradle ]; } \
     && [ "$failed_phase" = images ] && { [ "$sdk_api" = 35 ] || [ "$sdk_api" = 36 ]; } \
@@ -446,12 +471,8 @@ SH
     cat "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
-  # A short sample also confirms the console reached the journal if the connected test passes.
-  printf 'android-gradle evidence: guest kernel console sample\n' >&2
-  android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-    journalctl --no-pager -q -n 8 -o cat -u 'subyard-android-slot-*' \
-      --grep='^\[[[:space:]]*[0-9]+\.[0-9]+\]' || true
-  incus --project "$project" exec "$instance" -- sh -ec 'rm -- "$1"; systemctl daemon-reload' _ "$console_dropin"
+  android_remove_gradle_console
+  android_require_gradle_console
   android_phase_end 0
   android_phase_begin relay-owner
   # The loopback relay refuses a connection owned by another local account.
