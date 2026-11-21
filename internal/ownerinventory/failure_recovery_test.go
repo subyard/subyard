@@ -15,9 +15,10 @@ import (
 // ownerSweep cuts one owner-state operation at every failIO call and recovers with Recover.
 //
 // Fail mode is crash-faithful here because the error paths only release locks. Known gap:
-// writeOwnerFile, writeConnectionFile and Cache.Write remove their temporary files in a defer,
-// and their hooks fire before the temporary file exists, so no cut leaves the stale
-// .owner-state-*, .connection-* or .inventory-* file that a real crash would.
+// writeOwnerRecord stages through safefs.WriteFile, which removes the stage file on an error
+// that does not wrap safefs.ErrCrash, and the owner hooks fire only before staging or after
+// publication, so no cut leaves the stale .owner-state-*, .connection-* or .inventory-* stage
+// file that a real crash would.
 // hosts lists the host IDs whose mutation locks the operation may leave behind.
 func ownerSweep(t *testing.T, minPoints int, hosts []string, setup func(t *testing.T) (Connections, func(Connections) error),
 	completed func(t *testing.T, store Connections), require ...string,
