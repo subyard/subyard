@@ -297,12 +297,16 @@ Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older 
 the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
 `DEV_SUDO` assignment, `1` and `0` included, and, if one was Git-backed, sync the removal while
 the runtime still supports it. A yard that runs the default needs nothing more before the
-downgrade: an older runtime reads its installed record, and its hooks remove the sudo prompts. A
-yard that applied `yes` or `no` must also run `yard init` without the assignment before
-downgrading, because older runtimes refuse an installed record of either value. That includes a
-yard that kept `1` or `0`: release activation or `yard init` records them as `yes` and `no`.
-v0.30.0 defaults to no grant, so its next `yard init` after the downgrade removes the grant; set
-`DEV_SUDO=1` first where the yard should keep passwordless sudo.
+downgrade: an older runtime reads its installed record. A yard that applied `yes` or `no` must
+also run `yard init` without the assignment before downgrading, because older runtimes refuse an
+installed record of either value. That includes a yard that kept `1` or `0`: release activation
+or `yard init` records them as `yes` and `no`. That init runs as `prompt` and publishes the
+grant, also for a `no` or `0` yard such as one from the Hermes and Amnezia presets. After the
+downgrade, v0.30.0's hooks drop the sudo prompts, so a published grant stays open without prompts
+until the next `yard init`. Run `yard init` for every yard immediately after the downgrade:
+v0.30.0 defaults to no grant and removes it. To keep passwordless sudo, set
+`DEV_SUDO=1` after the downgrade and before that init; set before the downgrade it records `yes`,
+which v0.30.0 refuses.
 
 ### Git identity
 

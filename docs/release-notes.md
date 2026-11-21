@@ -24,8 +24,13 @@
 - Before downgrading, remove every `DEV_SUDO` assignment, `1` and `0` included, and sync a
   Git-backed removal while this release still runs. A yard that applied `yes` or `no`, also
   through a kept `1` or `0`, must then run `yard init` without the assignment, because older
-  runtimes refuse its installed record. After the downgrade, v0.30.0's next `yard init` removes
-  the grant; set `DEV_SUDO=1` first where the yard should keep passwordless sudo.
+  runtimes refuse its installed record. That init runs as `prompt` and publishes the grant, also
+  for a `no` or `0` yard such as one from the Hermes and Amnezia presets. After the downgrade,
+  v0.30.0's hooks drop the sudo prompts, so a published grant stays open without prompts until
+  the next `yard init`. Run `yard init` for every yard immediately after the downgrade: v0.30.0
+  defaults to no grant and removes it. To keep passwordless sudo, set `DEV_SUDO=1` after the
+  downgrade and before that init; set before the downgrade it records `yes`, which v0.30.0
+  refuses.
 - Claude, Codex, and OpenCode now default to running Git commits and pushes
   without a managed approval prompt. Existing yards keep their installed policy
   until the next `yard init`. Set `CODING_TOOL_GIT_APPROVAL=prompt` to keep or
@@ -44,9 +49,12 @@
 ### Configuration
 
 - **Move settings out of a source checkout before updating.** Settings in a checkout's
-  `private/config.env` and yard definitions in `private/yards/*.env` no longer apply. Move host
-  settings into the host file, for example with `yard config set NAME VALUE --scope host`, or
-  into the Git host layer, and yard definitions into the local or Git yard layer.
+  `private/config.env` and yard definitions in `private/yards/*.env` no longer apply. v0.30.0
+  reads them only while the matching file under the configuration root is absent, so the first
+  `yard config set` there silently drops every setting still in the overlay. Move each file whole
+  instead: `private/config.env` to `~/.config/subyard/config.env`, each `private/yards/NAME.env`
+  to `~/.config/subyard/yards/NAME.env`, or into the matching Git layer. Make every value literal
+  (see below), and only then update.
 - User settings files at shared, host and yard scope, local and Git, accept literal values only.
   A `$NAME` or `${…}` reference, including `${NAME:=value}`, is a read error that names the file
   and line; replace it with the value. Single quotes keep dollar text literal. Shipped defaults
@@ -60,13 +68,19 @@
 - `yard config set SETTING VALUE [SETTING VALUE ...]` saves several settings in one atomic local
   write. It checks cross-setting constraints against the combined result, reports every refusal
   and writes nothing if any check fails.
+- Config sync with an unknown file under `overrides/agents/` in a Git source now reports it
+  together with every other refusal instead of hiding them.
+- A config refresh refusal, for example after `config sync pull --apply`, now names one next step
+  that makes progress; a rollback refused because the current release is unfinished names
+  `yard migrate`.
 
 ### Installation check
 
 - `yard check` is now a read-only installation check of configuration, release readiness, the
   host and state journals. It reports every finding and never repairs, starts yards, requests sudo
   or fetches releases. `--json` prints a versioned report; the exit code is 0 when clean, 1 for
-  drift or blockers and 2 for usage errors. See [installation check](control-plane.md#installation-check).
+  drift or blockers and 2 for usage, contract or output errors. See
+  [installation check](control-plane.md#installation-check).
 - The previous host preflight is now `yard [-Y NAME] check --host`. `yard -Y NAME check` is a
   usage error, so update scripts that call it. `check --host` forwarded to an owner on an older
   release fails with an unknown option.
@@ -85,6 +99,12 @@
 - When an activation step fails after it has partly applied, the update now reports a retryable
   `recovering/dependency-unavailable` instead of `operator-action-required/recovery-ambiguous`.
   Retry `yard update`.
+- A failed integration apply during `yard update` or `yard migrate` now names the failed step,
+  the integration that owns it and the retry, `yard -Y <yard> integration status [<owner>] --json`.
+- A failing project hook during activation, `yard init` or project clone, remove, sync or bind is
+  now named in the diagnostic.
+- After `yard migrate` or `yard update` repairs the release with a follow-up `yard init`, it now
+  also shows the offer to provision a selected profile that is not yet provisioned.
 - Installations older than 0.28.0 still update in two steps,
   `yard update --version 0.28.1 && yard update`, and the refusal prints that chain.
 <!-- Rollback hooks: the rollback-hooks change replaces the next entry. -->
@@ -93,9 +113,11 @@
   `dependency-unavailable` for `activation.telemetry-runtime`, and this release stays active.
   Export the telemetry store first: the older collector cannot open a store above a third of its
   1 GiB bound; see [telemetry rollback steps](telemetry.md#capture-policy-and-delivery). After a
-  rollback, v0.30.0 reads this release's profile metadata strictly and refuses its own
-  `yard update --rollback` back to it; return with `yard update --version` and this release's
-  version. Rollback to 0.29.0 or earlier stays refused as `rollback-incompatible`.
+  rollback, v0.30.0 decodes this release's metadata strictly, rejects `advisories` in the
+  telemetry `profile.json` and `approval_sources` in `config/agents/opencode/integration.json`,
+  and so refuses its own `yard update --rollback` back to it; return with `yard update --version`
+  and this release's version. Rollback to 0.29.0 or earlier stays refused as
+  `rollback-incompatible`.
 
 ### Telemetry profile
 
@@ -119,10 +141,10 @@
   answer per-task usage queries. See [usage and attribution](telemetry.md#usage-and-attribution).
 - The fixed 1 GiB store bound is replaced by the soft `TELEMETRY_DISK_BUDGET` (default `30GiB`).
   When space runs short only raw OTLP is refused; usage and lifecycle records keep flowing, and
-  `yard status` shows a `storage-capacity` warning. Nothing is pruned automatically; remove old
-  data with the collector's `prune --older-than`.
-- Forward updates from v0.30.0 with telemetry enabled no longer refuse the collector units as
-  foreign, and managed runs shorter than about a second keep their telemetry.
+  `yard status` shows a `storage-capacity` warning. v0.30.0's automatic seven-day retention of
+  samples and OTLP is gone: nothing is pruned automatically, so the store grows up to the budget
+  unless you remove old data with the collector's `prune --older-than`.
+- Managed runs shorter than about a second keep their telemetry.
 
 ### Codex sandbox on AppArmor hosts
 
@@ -130,10 +152,17 @@
   `yard init` now loads the distribution's `bwrap` and `unpriv_bwrap` profiles into the yard's own
   AppArmor namespace, so restricted Codex sandboxes work. The host policy and sysctl stay
   unchanged, and the approval plan shows the change. This happens only when Codex or Claude Code
-  is selected; `yard init` no longer fails in this step for other yards. To opt out, remove
+  is selected. To opt out, remove
   `codex` from `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off` and run `yard init`. A
   release update that cannot verify this policy names the yard and points to
   `yard -Y NAME integration status`. See [where Codex runs](configuration.md#where-codex-runs).
+
+### Skills and cleanup
+
+- A new core skill, `subyard-agent-bridge`, ships to every yard. It lets Claude and Codex run a
+  detached worker of the other vendor, message it and read its result.
+- `yard teardown --full` no longer gets stuck when an interrupted run left an empty recovery
+  directory; it removes the directory and continues.
 
 ### Test VMs
 
