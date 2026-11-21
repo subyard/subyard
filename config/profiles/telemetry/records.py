@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import ctypes
 import datetime
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -15,9 +16,17 @@ import socket
 import subprocess
 import sys
 import stat
-import tempfile
 import time
 import uuid
+
+# The owner bundle carries a sibling copy. Installed launchers use the shared
+# guest library, and source-checkout tools use the repository copy.
+_here = Path(__file__).resolve().parent
+for _directory in (_here, _here.parent/'subyard-python', _here/'../../../internal/safefs'):
+    if (_directory/'safefs.py').is_file():
+        sys.path.insert(0, str(_directory.resolve()))
+        break
+import safefs
 
 SCHEMA = 'subyard.telemetry.record/v1'
 POLICY_VERSION = 'subyard.telemetry.capture/v1'
@@ -75,20 +84,25 @@ def operational_directory(data_dir):
 
 
 def private_directory(path):
-    """Create/check the private leaf, never repair existing objects.
-
-    Parents must already satisfy their owning contract: mkdir(parents=True) does
-    not make intermediate parents private. Initialize the data root first before
-    creating sources, runs or spool beneath it.
-    """
+    """Create the private leaf or finish an owned leaf with narrower permissions."""
     path = Path(path)
     for parent in (path, *path.parents):
         if parent.is_symlink():
             raise ValueError('unsafe directory')
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise ValueError('private directory required')
+    try:
+        fd, _ = safefs.open_dir(path, owner=(os.getuid(), -1), parent_mode=0o700,
+                                durability=safefs.BEST_EFFORT)
+    except safefs.Unsafe as error:
+        if error.reason == safefs.SYMLINK:
+            raise ValueError('unsafe directory') from None
+        if error.reason == safefs.NOT_DIRECTORY:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path)) from None
+        raise ValueError('private directory required') from None
+    try:
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+            raise ValueError('private directory required')
+    finally:
+        os.close(fd)
     return path
 
 
@@ -106,18 +120,12 @@ def atomic_json(path, value, *, family=None):
     content = compact_json(value)+b'\n'
     if len(content) > 65536:
         raise ValueError('record too large')
-    fd, temporary = tempfile.mkstemp(prefix='.', suffix='.tmp', dir=path.parent)
     try:
-        with os.fdopen(fd, 'wb') as out:
-            os.fchmod(out.fileno(), 0o600)
-            out.write(content)
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(temporary, path)
-        sync_directory(path.parent)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        safefs.write_file(path, content, prefix='.', suffix='.tmp')
+    except safefs.Unsafe as error:
+        if error.reason == safefs.SYMLINK:
+            raise ValueError('unsafe file') from None
+        raise ValueError('private file required') from None
 
 
 def checked_file(fd, maximum):
@@ -154,12 +162,7 @@ def lock_until(fd, mode, deadline):
                 raise
             time.sleep(min(0.005, remaining))
 
-def sync_directory(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+sync_directory = safefs.sync_dir
 
 
 @contextmanager

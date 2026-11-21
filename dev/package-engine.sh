@@ -123,6 +123,7 @@ runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   internal/adapters/configmaterial/tomli_w.py
   internal/adapters/configmaterial/TOMLI_W_LICENSE
+  internal/safefs/safefs.py
   scripts/e2e-lab/base.sh
   scripts/lib/owner-address.sh
   scripts/lib/preview-proxy.sh
@@ -152,7 +153,7 @@ while IFS= read -r -d '' relative; do
     config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs) continue ;;
   esac
   case "$relative" in
-    scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
+    scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE|internal/safefs/safefs.py) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;
   esac
   case "$relative" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) printf 'package-engine: unsafe runtime path\n' >&2; exit 1 ;; esac
@@ -163,6 +164,7 @@ while IFS= read -r -d '' relative; do
   mode=0644
   [ ! -x "$REPO/$relative" ] || mode=0755
   [ "$relative" != internal/adapters/configmaterial/tomli_w.py ] || mode=0644
+  [ "$relative" != internal/safefs/safefs.py ] || mode=0644
   install -m "$mode" -- "$REPO/$relative" "$bundle_stage/$relative"
 done < "$runtime_list"
 rm -f -- "$runtime_list"
@@ -176,6 +178,7 @@ for required in config/installation-capabilities.json \
   config/retired-components.json \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
+  internal/safefs/safefs.py \
   scripts/e2e-lab/base.sh \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \

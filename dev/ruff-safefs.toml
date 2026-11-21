@@ -1,0 +1,12 @@
+target-version = "py311"
+
+[lint]
+select = ["TID251"]
+
+[lint.flake8-tidy-imports.banned-api]
+"os.replace".msg = "Publish files with safefs.write_file or safefs.create"
+"tempfile.mkstemp".msg = "Stage files with safefs.create"
+"tempfile.NamedTemporaryFile".msg = "Stage files with safefs.create"
+
+[lint.per-file-ignores]
+"!{config/profiles/telemetry/guest.py,config/profiles/telemetry/native.py,config/profiles/telemetry/records.py}" = ["TID251"]

@@ -36,7 +36,8 @@ func recoveryFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
 func TestRecoveryRetainsPackagedCoreDependencies(t *testing.T) {
 	source := testkit.TempDir(t)
 	paths := []string{"bin/yard", "config/commands.registry", "scripts/teardown-physical.sh", "scripts/lib/teardown-services.sh",
-		"internal/adapters/configmaterial/tomli_w.py", "internal/adapters/configmaterial/TOMLI_W_LICENSE", "internal/unrelated.py"}
+		"internal/adapters/configmaterial/tomli_w.py", "internal/adapters/configmaterial/TOMLI_W_LICENSE",
+		"internal/safefs/safefs.py", "internal/unrelated.py"}
 	var manifest strings.Builder
 	for _, path := range paths {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(source, path)), 0700); err != nil {

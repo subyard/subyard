@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """System-managed exporter policy and one-way cleanup of the v0.30 home writer."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import math
 import os
+from pathlib import Path
 import re
 import stat
 import tempfile
@@ -63,40 +64,29 @@ def snapshot(path, max_bytes=CONFIG_LIMIT):
 
 
 def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600, policy_gid=None):
+    from records import safefs
+
     safe(path)
     if len(content) > max_bytes:
         raise ValueError('native file exceeds size bound')
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix='.telemetry-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w+b') as output:
-            if policy_gid is not None:
-                os.fchmod(output.fileno(), 0o600)
-            output.write(content)
-            output.flush()
-            if uid is not None:
-                os.fchown(output.fileno(), uid, gid)
-            if policy_gid is None:
-                os.fchmod(output.fileno(), mode)
-            output.seek(0)
-            if output.read() != content:
-                raise ValueError('native payload verification failed')
-            os.fsync(output.fileno())
-            if snapshot(path, max_bytes=max_bytes) != expected:
-                raise ValueError('native configuration changed')
-            os.replace(temporary, path)
-            if policy_gid is not None:
-                os.fchown(output.fileno(), -1, policy_gid)
-                os.fchmod(output.fileno(), mode)
-                os.fsync(output.fileno())
-        directory = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+
+    def check(pending):
+        pending.file.seek(0)
+        if pending.file.read() != content:
+            raise ValueError('native payload verification failed')
+        if snapshot(path, max_bytes=max_bytes) != expected:
+            raise ValueError('native configuration changed')
+
+    owner = (uid, gid) if uid is not None else None
+    staging = nullcontext()
+    if policy_gid is not None:
+        # Policy staging includes a bearer token. Contain it in a private
+        # directory while setting its final group and mode before publication.
+        owner = (-1 if uid is None else uid, policy_gid)
+        staging = tempfile.TemporaryDirectory(prefix='.telemetry-', dir=path.parent)
+    with staging as directory:
+        safefs.write_file(path, content, owner=owner, mode=mode, prefix='.telemetry-',
+                          parent_mode=0o700, stage_dir=directory, check=check)
 
 
 def desired(agent, endpoint, helper=HELPER):
@@ -285,6 +275,14 @@ def contains_token(path, token):
             return False
 
 
+def legacy_path(path):
+    from records import safefs
+
+    if any(parent.is_symlink() for parent in path.parents):
+        raise ValueError('unsafe native path')
+    return Path(safefs.resolve_file(path))
+
+
 def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
     before, entries = legacy_receipt(receipt_path)
     if before is None:
@@ -309,7 +307,8 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     failures.append(('legacy-token-remains', agent))
                 continue
             try:
-                raw = snapshot(path)
+                target = legacy_path(path)
+                raw = snapshot(target)
                 if raw is None or not raw.strip():
                     continue
                 document = parse(agent, raw)
@@ -339,11 +338,11 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                 if unsafe_restore or any(value.encode() in payload for value in tokens):
                     failures.append(('legacy-token-remains', agent))
                 elif payload != raw:
-                    info = path.lstat()
+                    info = target.lstat()
                     if info.st_uid != uid or info.st_gid != gid:
                         raise ValueError('foreign home configuration')
                     # Any rewritten home document can contain user credentials.
-                    edits.append((path, payload, raw, info.st_mode & 0o600))
+                    edits.append((path, target, payload, raw, info.st_mode & 0o600))
             except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
                 failures.append(('legacy-config', agent))
     return before, edits, tokens, covered
@@ -463,11 +462,13 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
         raise ValueError('collector token required before writing policy')
     if receipt is not None:
         with developer_files(uid, gid):
-            for path, payload, before, mode in edits:
-                publish(path, payload, before, mode=mode)
+            for path, target, payload, before, mode in edits:
+                if legacy_path(path) != target:
+                    raise ValueError('native configuration changed')
+                publish(target, payload, before, mode=mode)
             for agent, (_, relative, _) in AGENTS.items():
                 try:
-                    if any(value.encode() in (snapshot(home/relative) or b'') if agent in covered
+                    if any(value.encode() in (snapshot(legacy_path(home/relative)) or b'') if agent in covered
                            else contains_token(home/relative, value) for value in legacy):
                         failures.append(('legacy-token-remains', agent))
                 except (OSError, ValueError):
