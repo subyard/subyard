@@ -735,6 +735,8 @@ outer_dev() {
 }
 
 printf '  [ .. ] creating and tearing down a current-candidate inner yard\n'
+bounded_command outer-timezone incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
+  timedatectl set-timezone America/New_York
 outer_dev bash -euc '
   source=$1
   candidate_state="$HOME/.cache/subyard-nested-teardown-candidate"
@@ -755,6 +757,9 @@ outer_dev bash -euc '
   printf "outer sentinel\n" > "$HOME/.subyard/workspaces/active.code-workspace"
   cd "$source"
   "$launcher" init --yes
+  inner_zone=$(sudo -n incus exec yard --project subyard -- readlink -f /etc/localtime)
+  [ "$inner_zone" = /usr/share/zoneinfo/America/New_York ] \
+    || { echo "inner yard did not inherit the outer timezone: $inner_zone" >&2; exit 1; }
   sudo -n incus project show subyard >/dev/null
   sg incus-admin -c "exec $teardown_command"
   ! sudo -n incus project show subyard >/dev/null 2>&1

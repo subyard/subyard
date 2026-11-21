@@ -17,6 +17,23 @@ subyard_instance_defaults() {
   PROJ=(--project "$INCUS_PROJECT")
 }
 
+subyard_host_timezone() {
+  local etc="$1" target zone='' LC_ALL=C
+  # Prefer the active zone when the legacy timezone file is stale.
+  IFS= read -r -d '' target < <(readlink -z -- "$etc/localtime" 2>/dev/null) || target=''
+  case "$target" in
+    /usr/share/zoneinfo/* | ../usr/share/zoneinfo/*) zone=${target#*/usr/share/zoneinfo/} ;;
+    *)
+      [ -f "$etc/timezone" ] || return 1
+      # Read the whole file and reject NULs. EOF is normal for a text file.
+      if { IFS=$' \t\r\n' read -r -d '' zone < "$etc/timezone"; } 2>/dev/null; then
+        return 1
+      fi ;;
+  esac
+  [[ "$zone" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && "$zone" != UTC && "$zone" != Etc/UTC ]] || return 1
+  printf '%s\n' "$zone"
+}
+
 subyard_instance_base_flags() {
   LAUNCH_FLAGS=()
   if [ "$YARD_KIND" = vm ]; then
