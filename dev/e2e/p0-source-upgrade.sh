@@ -392,9 +392,9 @@ BASELINE_CONFIG
   incus stop "$INSTANCE" --project "$PROJECT"
   operator_env jq -e '.schemaVersion == 1 and (.files | length) > 0' \
     "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
-  # No DEV_SUDO value is valid on both runtimes. As the release notes ask, the operator
-  # removes the assignment with the old engine and updates; absent means the old runtime's
-  # passwordless sudo and the candidate's default prompt.
+  # The candidate still reads 1 and 0 as deprecated aliases. This fixture covers the
+  # update without an assignment: the operator removes it with the old engine and
+  # updates; absent means the old runtime's passwordless sudo and the candidate's prompt.
   # The hop runtime saves no local settings before the Git settings migration, so the
   # removal uses the creation runtime.
   operator_yard config unset DEV_SUDO --scope host --yes

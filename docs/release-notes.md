@@ -8,11 +8,12 @@
   `sudoedit` and `run0`; it is a guardrail, not a boundary. `yes` keeps the earlier
   behaviour: passwordless sudo without prompts. Existing yards change: after `yard update`
   reprovisions a running yard's agents, or the next `yard init`, agents ask before sudo unless
-  `DEV_SUDO=yes`. The values `1` and `0` are refused and not migrated, and older runtimes
-  refuse the new values. Before `yard update`, remove every `DEV_SUDO` assignment with the
-  older runtime; after it, set `yes`, or `no` where you had `0`, and run `yard init`. Publish a
-  shared value only after every owner host is updated. Before downgrading a yard that applied
-  `yes` or `no`, run `yard init` without the assignment. See
+  `DEV_SUDO=yes`. The earlier values `1` and `0` keep working as deprecated aliases of `yes`
+  and `no`, so yards that set them, including yards created from the Hermes and Amnezia presets,
+  update unchanged; `yard check` and `yard config validate` name each one with its replacement.
+  Older runtimes refuse the new values: switch to `yes` and `no` once every owner host is
+  updated, and publish a shared value only then. Before downgrading a yard that applied
+  `yes` or `no`, also through a kept `1` or `0`, run `yard init` without the assignment. See
   [passwordless sudo inside the yard](configuration.md#passwordless-sudo-inside-the-yard).
 - With `CODING_TOOL_GIT_APPROVAL=prompt`, the Claude and Codex hook now refuses any literal
   mention of `git commit` or `git push` that the client's own prompt does not cover: anything

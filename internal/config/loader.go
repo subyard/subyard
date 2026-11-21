@@ -76,6 +76,7 @@ type Loaded struct {
 	assetValidationInputs []string
 	ProspectiveFiles      *ProspectiveFiles
 	ignored               []IgnoredAssignment
+	deprecated            []DeprecatedAssignment
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -137,6 +138,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
 		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
+		deprecated:            tracker.deprecatedAssignments(ctx.YardName, ctx.Paths.ConfigHome),
 	}, nil
 }
 
@@ -471,7 +473,7 @@ func load(
 				continue
 			}
 		}
-		values[name] = value
+		values[name], _ = tracker.catalog.CanonicalSettingValue(name, value)
 		if batch != nil {
 			batch.setAvailable(name, true)
 		}
@@ -1156,7 +1158,9 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 			refusals = append(refusals, sourceError(path, assignment.line, recognizedSettingKey(settings, canonical), "scalar settings", "conflicting legacy and canonical settings", nil))
 		}
 		seen[canonical] = layerValue{input: assignment.name, value: assignment.value, line: assignment.line}
-		probe[canonical] = assignment.value
+		// A deprecated value alias reads as its canonical value. Observers still
+		// receive the authored value so the tracker can report its line.
+		probe[canonical], _ = settings.CanonicalSettingValue(canonical, assignment.value)
 		if canonical != assignment.name {
 			delete(probe, assignment.name)
 		}

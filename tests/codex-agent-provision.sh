@@ -334,12 +334,13 @@ done
 cp "$requirements" "$tmp/sudo-prompt-requirements"
 (unset DEV_SUDO; run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null)
 cmp "$requirements" "$tmp/sudo-prompt-requirements" || fail "unset DEV_SUDO did not install the prompt rules"
-for sudo_mode in yes no; do
+# 0 and 1 are deprecated aliases of no and yes.
+for sudo_mode in yes no 1 0; do
   run_hook amd64 "$root" DEV_SUDO="$sudo_mode" >/dev/null
   cmp "$requirements" "$tmp/git-prompt-requirements" || fail "DEV_SUDO=$sudo_mode changed the requirements"
 done
-if run_hook amd64 "$root" DEV_SUDO=0 CODING_TOOL_GIT_APPROVAL=sometimes >/dev/null 2>"$tmp/sudo-mode.err"; then
-  fail "legacy DEV_SUDO value accepted"
+if run_hook amd64 "$root" DEV_SUDO=true CODING_TOOL_GIT_APPROVAL=sometimes >/dev/null 2>"$tmp/sudo-mode.err"; then
+  fail "unsupported DEV_SUDO value accepted"
 fi
 grep -Fq 'DEV_SUDO must be yes, no or prompt' "$tmp/sudo-mode.err" || fail "invalid DEV_SUDO was not named"
 grep -Fq 'CODING_TOOL_GIT_APPROVAL must be prompt or off' "$tmp/sudo-mode.err" \

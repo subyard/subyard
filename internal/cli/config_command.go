@@ -684,6 +684,29 @@ func printIgnoredAssignments(output io.Writer, indent, setting string, yards ...
 			}
 		}
 	}
+	printDeprecatedAssignments(output, indent, setting, yards...)
+}
+
+// printDeprecatedAssignments renders each deprecated value alias once, with
+// the canonical replacement and its exact repair.
+func printDeprecatedAssignments(output io.Writer, indent, setting string, yards ...config.Loaded) {
+	seen := map[string]bool{}
+	for _, loaded := range yards {
+		for _, assignment := range loaded.DeprecatedAssignments() {
+			if setting != "" && assignment.Name != setting {
+				continue
+			}
+			if key := deprecatedAssignmentKey(assignment); !seen[key] {
+				seen[key] = true
+				fmt.Fprintf(output, "%sdeprecated: %s\n", indent, assignment)
+			}
+		}
+	}
+}
+
+// deprecatedAssignmentKey identifies one source assignment across yards.
+func deprecatedAssignmentKey(assignment config.DeprecatedAssignment) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", assignment.Name, assignment.Scope, assignment.Path, assignment.Line)
 }
 
 // localIgnoredAssignments returns the ignored assignments of every local yard

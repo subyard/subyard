@@ -415,10 +415,11 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		names, err = config.LocalBatchYardNames(home)
 	}
 	type row struct {
-		Yard       string `json:"yard"`
-		Valid      bool   `json:"valid"`
-		Diagnostic string `json:"diagnostic,omitempty"`
-		Retry      string `json:"retry,omitempty"`
+		Yard       string   `json:"yard"`
+		Valid      bool     `json:"valid"`
+		Diagnostic string   `json:"diagnostic,omitempty"`
+		Retry      string   `json:"retry,omitempty"`
+		Deprecated []string `json:"deprecated,omitempty"`
 	}
 	var rows []row
 	failed := err != nil
@@ -432,6 +433,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 			continue
 		}
 		result := row{Yard: name, Valid: err == nil}
+		for _, assignment := range loaded.DeprecatedAssignments() {
+			result.Deprecated = append(result.Deprecated, assignment.String())
+		}
 		if err != nil {
 			failed = true
 			result.Diagnostic = (configProspectiveError{home, err}).Error()
@@ -450,6 +454,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		for _, result := range rows {
 			if result.Valid {
 				fmt.Fprintf(cli.options.Stdout, "yard %s: configuration schema valid\n", result.Yard)
+				for _, note := range result.Deprecated {
+					fmt.Fprintf(cli.options.Stdout, "  deprecated: %s\n", note)
+				}
 			} else if result.Yard == "" {
 				fmt.Fprintf(cli.options.Stdout, "%s\nRetry: %s\n", result.Diagnostic, result.Retry)
 			} else {
