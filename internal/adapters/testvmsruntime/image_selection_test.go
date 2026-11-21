@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestImageSelectionProtocol(t *testing.T) {
@@ -30,7 +32,7 @@ func TestImageSelectionProtocol(t *testing.T) {
 		t.Run(selection.suffix, func(t *testing.T) {
 			cfg := fixtureConfig(t)
 			cfg.Disk = "20GiB"
-			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 			var output bytes.Buffer
 			facade := Facade{Store: store, Output: &output, EnvironmentSpec: cfg.EnvironmentSpec}
 			command := "acquire-v3 subyard-pair client SHA256:key default Project run tests " + key[0] + " " + key[1] + " slot-001" + selection.suffix
@@ -78,7 +80,7 @@ func TestImageSelectionKeepsCurrentBasePerOSAndType(t *testing.T) {
 	} {
 		registry.Bases = append(registry.Bases, BaseImage{Environment: spec.name, Image: spec.image, Key: fmt.Sprintf("%064x", i+1), Fingerprint: fmt.Sprintf("%064x", i+10), CreatedAt: now.Add(time.Duration(i) * time.Minute)})
 	}
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	rt.Runner = &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("current base must not be pruned: %v", args)
 	}}
@@ -92,10 +94,8 @@ func TestImageSelectionKeepsCurrentBasePerOSAndType(t *testing.T) {
 
 func TestImageSelectionRecipeIdentity(t *testing.T) {
 	cfg := fixtureConfig(t)
-	cfg.RecipeRoot = t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("recipe"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	cfg.RecipeRoot = testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("recipe"), 0600)
 	// Pinned from master 8c18dbf7, before image selection, with manifest bytes "recipe".
 	const legacy = "c755d79f5eaacebe9feac8231a59e5a87da00336b72665693b20b04a0f6e2e1d"
 	seen := map[string]bool{}

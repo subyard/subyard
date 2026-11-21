@@ -7,29 +7,28 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; }
 need jq
 
-# The public policy contains no provider, model, or credentials.
-policy="$ROOT/config/agents/opencode/opencode.jsonc"
+# The public policies contain no provider, model, or credentials. The base policy asks for
+# nothing; each approval variant adds only its gate's ask patterns.
+dir="$ROOT/config/agents/opencode"
 jq -e '
-  .permission["*"] == "allow" and
-  .permission.bash["*"] == "allow" and
-  .permission.bash["git commit"] == "ask" and
-  .permission.bash["git commit *"] == "ask" and
-  .permission.bash["git push"] == "ask" and
-  .permission.bash["git push *"] == "ask" and
-  (has("autoupdate") | not) and
-  (has("provider") | not) and
-  (has("model") | not)
-' "$policy" >/dev/null || fail "OpenCode yard policy contract is invalid"
-off_policy="$ROOT/config/agents/opencode/opencode-off.jsonc"
-diff -u <(jq 'del(.permission.bash["git commit", "git commit *", "git push", "git push *"])' "$policy") \
-  "$off_policy" || fail "OpenCode off policy must remove only the commit and push prompts"
+  .permission == {"*": "allow", "bash": {"*": "allow"}} and
+  (has("autoupdate") | not) and (has("provider") | not) and (has("model") | not)
+' "$dir/opencode.jsonc" >/dev/null || fail "OpenCode yard policy contract is invalid"
+git_ask='["git commit", "git commit *", "git push", "git push *"]'
+sudo_ask='["sudo", "sudo *", "su", "su *", "doas", "doas *", "pkexec", "pkexec *", "sudoedit", "sudoedit *", "run0", "run0 *"]'
+for variant in git:"$git_ask" sudo:"$sudo_ask" git-sudo:"$(jq -cn --argjson a "$git_ask" --argjson b "$sudo_ask" '$a + $b')"; do
+  name="${variant%%:*}"
+  diff -u <(jq --argjson ask "${variant#*:}" '.permission.bash += ($ask | map({(.): "ask"}) | add)' "$dir/opencode.jsonc") \
+    <(jq . "$dir/opencode-$name.jsonc") \
+    || fail "OpenCode $name policy must add only its approval prompts"
+done
 
-manifest="$ROOT/config/agents/opencode/integration.json"
+manifest="$dir/integration.json"
 jq -e '
   .schema_version == 2 and .command == "opencode" and .provision == "provision.sh" and
   (.artifacts | length) == 2 and
   (.artifacts[0] | .id == "config" and .source == "opencode.jsonc" and
-    .git_approval_off_source == "opencode-off.jsonc" and
+    .approval_sources == {"git": "opencode-git.jsonc", "sudo": "opencode-sudo.jsonc", "git sudo": "opencode-git-sudo.jsonc"} and
     .destination == ".config/opencode/opencode.jsonc" and .format == "destination") and
   (.artifacts[1] | .kind == "instructions" and .source_setting == "HOST_OPENCODE_AGENTS_MD" and
     .destination == ".config/opencode/AGENTS.md")

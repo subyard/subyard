@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -36,35 +37,27 @@ func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
 		{name: "diagnostic", failure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			environment = append(environment, "NESTED_E2E_VMS=1")
+			fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1"), withCommands("scripts/e2e-lab/invoke.sh"))
 			incus := lifecycleIncus()
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
 			incus.Instances["subyard/yard"] = instance
 			output := payload
-			ending := ""
+			exit := 0
 			if tc.failure {
 				output = "broker unavailable"
-				ending = "exit 1\n"
+				exit = 1
 			}
-			path := filepath.Join(root, "scripts", "e2e-lab", "invoke.sh")
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIFile(t, path, "#!/bin/sh\n[ \"$*\" = status ] || exit 2\nprintf '%s\\n' '"+output+"'\n"+ending, 0755)
+			fixture.Exec().On(testkit.Match{Args: []string{"status"}}, testkit.Reply{Stdout: output + "\n", Exit: exit})
 			arguments := []string{"test-vms", "status"}
 			if tc.json {
 				arguments = append(arguments, "--json")
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
-				Environment: environment, WorkingDir: root, Incus: incus, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: arguments, Incus: incus, Stdout: &stdout, Stderr: &stderr})
 			infrastructureFixture(t, program, incus, "test-vms")
 			code := program.Run(context.Background())
+			fixture.Exec().AssertCalls(testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: []string{"status"}})
 			if tc.failure {
 				if code == 0 || !strings.Contains(stdout.String()+stderr.String(), output) {
 					t.Fatalf("lost failure: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -95,8 +88,7 @@ func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
 }
 
 func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-revoke")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-revoke"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -109,15 +101,7 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 	runner.Steps[0].Apply = func(domain.AdapterRequest) {
 		probe.output = bytes.Replace(probe.output, []byte(`"state":"held"`), []byte(`"state":"available"`), 1)
 	}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
-		Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0))})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms failed with %d", code)
@@ -156,8 +140,8 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 		{name: "generation overflow", generation: ^uint64(0)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover")
+			fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover"))
+			root := fixture.Root
 			incus := lifecycleIncus()
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
@@ -212,14 +196,7 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 				publish()
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
-				Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
-				Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"test-vms", "recover", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr})
 			infrastructureFixture(t, program, incus, "test-vms")
 			code := program.Run(context.Background())
 			if tc.wantOK {
@@ -241,8 +218,7 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 }
 
 func TestTestVMsMapsWorkerStaleIdentityToPlanStale(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-stale")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-stale"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -251,15 +227,7 @@ func TestTestVMsMapsWorkerStaleIdentityToPlanStale(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Err: workerErr}}}
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"test-vms", "revoke", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
-		AdapterRunner: runner, Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
@@ -268,38 +236,21 @@ func TestTestVMsMapsWorkerStaleIdentityToPlanStale(t *testing.T) {
 }
 
 func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
-	configHome := filepath.Dir(stateDirectory)
-	if err := os.MkdirAll(filepath.Join(configHome, "yards", "remote"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(configHome, "yards", "remote", "config.env"),
+	fixture := newFixture(t, withCommands("ssh"))
+	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"),
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\n"+
-			"SSH_PORT=4444\nNESTED_E2E_VMS=1\n", 0o600)
-	fakeBin := filepath.Join(root, "fake-bin")
-	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sshLog := writeStructuredOwnerFixture(t, fakeBin, "test-vms", []string{"revoke", "--slot", "2", "--expect-owner", "fixture-owner"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
-
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-	environment = append(environment,
-		"PATH="+os.Getenv("PATH"),
+			"SSH_PORT=4444\nNESTED_E2E_VMS=1\n")
+	owner := testkit.TempDir(t)
+	sshLog := writeStructuredOwnerFixture(t, owner, "test-vms", []string{"revoke", "--slot", "2", "--expect-owner", "fixture-owner"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
+	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: "exec " + shellquote.Word(filepath.Join(owner, "ssh")) + " \"$@\""})
+	environment := append(fixture.Environment,
 		"SUBYARD_TEST_SSH_LOG="+sshLog,
 		"SUBYARD_OPERATION_ID=remote-test-vms-revoke",
 	)
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"test-vms", "revoke", "--slot", "2", "--owner", "fixture-owner"},
-		Environment: environment, WorkingDir: root, ProjectData: probe,
-		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "2", "--owner", "fixture-owner"}, Environment: environment, ProjectData: probe, Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
 	registerStructuredOwnerFixture(t, program, "fixture-owner", "owner.example")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote test-vms: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -428,8 +379,7 @@ func TestTestVMStatusInvocationBypassesMutationGate(t *testing.T) {
 }
 
 func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-status")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-status"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -438,14 +388,7 @@ func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 		Schema: 1, OperationID: "test-vms-status", Status: "ok",
 	}}}}
 	prompt := &testkit.Prompt{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "status"},
-		Environment: environment, WorkingDir: root, Incus: incus, AdapterRunner: runner,
-		Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "status"}, Incus: incus, AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0))})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms status failed with %d", code)
@@ -461,20 +404,12 @@ func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 }
 
 func TestTestVMsRejectsStoppedYardBeforePrompt(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1"))
 	incus := lifecycleIncus()
-	environment = append(environment, "NESTED_E2E_VMS=1")
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, AdapterRunner: runner,
-		Prompt: prompt, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "recover", "--slot", "2"}, Incus: incus, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "must be running") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -485,8 +420,7 @@ func TestTestVMsRejectsStoppedYardBeforePrompt(t *testing.T) {
 }
 
 func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-decline")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-decline"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -495,14 +429,7 @@ func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{}
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "revoke", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
-		Prompt: prompt, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -514,8 +441,7 @@ func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
 }
 
 func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-noop")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-noop"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -523,14 +449,7 @@ func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "revoke", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
-		AdapterRunner: runner, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
@@ -545,8 +464,7 @@ func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 }
 
 func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover-noop")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover-noop"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -554,14 +472,7 @@ func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","state":"available"},{"slot_id":"slot-002","state":"available"}]}}`)}
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
-		AdapterRunner: runner, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "recover", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
@@ -572,8 +483,7 @@ func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 }
 
 func TestTestVMRecoverInProgressIsNoOpBeforeConfirmation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recovering-noop")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recovering-noop"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -581,14 +491,7 @@ func TestTestVMRecoverInProgressIsNoOpBeforeConfirmation(t *testing.T) {
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"state":"available"},{"slot_id":"slot-002","resource_generation":4,"lease_epoch":8,"state":"recovering"}]}}`)}
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
-		AdapterRunner: runner, Prompt: prompt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "recover", "--slot", "2"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
@@ -617,8 +520,7 @@ func TestTestVMPreflightRejectsNoncanonicalSlotInventory(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			environment = append(environment, "NESTED_E2E_VMS=1")
+			fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1"))
 			incus := lifecycleIncus()
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
@@ -629,15 +531,7 @@ func TestTestVMPreflightRejectsNoncanonicalSlotInventory(t *testing.T) {
 			prompt := &testkit.Prompt{}
 			runner := &testkit.ScriptedAdapter{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard",
-				Arguments:   []string{"test-vms", "revoke", "--slot", "1"},
-				Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe,
-				AdapterRunner: runner, Prompt: prompt, Stderr: &stderr,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"test-vms", "revoke", "--slot", "1"}, Incus: incus, ProjectData: probe, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr})
 			infrastructureFixture(t, program, incus, "test-vms")
 			if code := program.Run(context.Background()); code != 2 ||
 				!strings.Contains(stderr.String(), "invalid status response") {
@@ -686,7 +580,8 @@ func (probe *testVMStatusProbe) Stream(
 }
 
 func TestTestVMLogsReadsHostWideLogWithoutYardBrokerContext(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	recorder := testvmsruntime.EventRecorder{
 		StateDir: filepath.Join(root, "broker"),
@@ -712,18 +607,7 @@ func TestTestVMLogsReadsHostWideLogWithoutYardBrokerContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root,
-		Program:        "yard",
-		Arguments:      []string{"test-vms", "logs", "--slot", "2", "-n", "1"},
-		Environment:    environment,
-		WorkingDir:     root,
-		Stdout:         &stdout,
-		Stderr:         &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "logs", "--slot", "2", "-n", "1"}, Stdout: &stdout, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("logs failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -747,7 +631,8 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 	if _, err := prepareTeardownExecution([]string{"keepdata"}); err == nil {
 		t.Fatal("unsafe teardown argument was accepted")
 	}
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root := fixture.Root
 	dispatcher := filepath.Join(root, ".build", "yard")
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "teardown-test", Status: "ok",
@@ -760,16 +645,7 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 	}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", DispatcherPath: dispatcher, Arguments: []string{"teardown", "--keep-data"},
-		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-test", "SUBYARD_DISPATCHER_PATH=/ambient/engine"), WorkingDir: root,
-		AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)),
-		Stderr: &stderr, Incus: incus,
-		NetworkPolicy: allowTestNetworkPolicy(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{DispatcherPath: dispatcher, Arguments: []string{"teardown", "--keep-data"}, Environment: append(fixture.Environment, "SUBYARD_OPERATION_ID=teardown-test", "SUBYARD_DISPATCHER_PATH=/ambient/engine"), AdapterRunner: runner, Prompt: prompt, Clock: testkit.NewManualClock(time.Unix(100, 0)), Stderr: &stderr, Incus: incus, NetworkPolicy: allowTestNetworkPolicy()})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("teardown failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -814,18 +690,12 @@ func TestLifecycleExecutionBuildsTypedStopDelta(t *testing.T) {
 }
 
 func TestLifecycleStartFailsClosedWithoutNetworkPolicyAdapter(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
 	incus := lifecycleIncus()
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "start-without-network-policy", Status: "ok",
 	}}}}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
-		Incus: incus, AdapterRunner: runner,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus, AdapterRunner: runner})
 	execution := &lifecycleExecution{action: "start"}
 	yard := domain.Context{YardName: "default", IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0"}
 	if err := program.observeLifecycleExecution(context.Background(), yard, execution); err != nil {
@@ -882,16 +752,10 @@ func TestObserveTeardownExecutionDetectsOwnedTarget(t *testing.T) {
 		{name: "persistent volume", reconcile: ports.ReconcileState{VolumeFound: true}, changed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
 			incus := lifecycleIncus()
 			incus.Reconcile = test.reconcile
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Environment: environment,
-				WorkingDir: root, Incus: incus, NetworkPolicy: allowTestNetworkPolicy(),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Incus: incus, NetworkPolicy: allowTestNetworkPolicy()})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -908,12 +772,8 @@ func TestObserveTeardownExecutionDetectsOwnedTarget(t *testing.T) {
 }
 
 func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
-	yardDirectory := filepath.Join(filepath.Dir(stateDirectory), "yards", "other")
-	if err := os.MkdirAll(yardDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(yardDirectory, "config.env"), "SSH_PORT=2223\n", 0o600)
+	fixture := newFixture(t)
+	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "other", "config.env"), "SSH_PORT=2223\n")
 	incus := lifecycleIncus()
 	incus.Reconcile.InstanceFound = true
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
@@ -923,16 +783,7 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 		incus.Reconcile.InstanceFound = false
 		incus.Instances = map[string]ports.InstanceInfo{}
 	}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--yes"},
-		Environment: append(environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), WorkingDir: root,
-		AdapterRunner: runner, Prompt: &testkit.Prompt{},
-		Incus: incus,
-		Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"teardown", "--yes"}, Environment: append(fixture.Environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), AdapterRunner: runner, Prompt: &testkit.Prompt{}, Incus: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy()})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("teardown failed with %d", code)
 	}
@@ -943,26 +794,20 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 }
 
 func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=retire-legacy")
+	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=retire-legacy"), withCommands("scripts/e2e-lab/invoke.sh"))
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available","legacy_retained":true}]}}`)}
-	probe.afterPath = filepath.Join(root, "retirement-arguments")
+	probe.afterPath = filepath.Join(fixture.Root, "retirement-ran")
 	probe.afterOutput = bytes.Replace(probe.output, []byte(`"legacy_retained":true`), []byte(`"legacy_retained":false`), 1)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
-	if err := os.MkdirAll(filepath.Join(root, "scripts/e2e-lab"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(root, "scripts/e2e-lab/invoke.sh"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > retirement-arguments\n", 0o700)
+	// The worker runs in the repository root, where the probe looks for its marker.
+	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: ": > retirement-ran"})
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "retire-legacy", "--slot", "1"},
-		Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, Prompt: prompt, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"test-vms", "retire-legacy", "--slot", "1"},
+		Incus: incus, ProjectData: probe, Prompt: prompt, Stderr: &stderr})
 	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("retirement returned %d: %s", code, stderr.String())
@@ -970,27 +815,22 @@ func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
 		t.Fatalf("retirement prompt: %#v", prompt.Requests)
 	}
-	arguments, err := os.ReadFile(filepath.Join(root, "retirement-arguments"))
-	if err != nil || string(arguments) != "retire-legacy-slot-1\n--expect-resource-generation\n7\n--expect-lease-epoch\n0\n--yes\n" {
-		t.Fatalf("retirement arguments: %q, error: %v", arguments, err)
-	}
+	fixture.Exec().AssertCalls(testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: []string{
+		"retire-legacy-slot-1", "--expect-resource-generation", "7", "--expect-lease-epoch", "0", "--yes",
+	}})
 }
 
 func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 	for _, selection := range []string{"explicit", "inherited", "canonical", "follow"} {
 		t.Run(selection, func(t *testing.T) {
-			root, environment, stateDirectory := nativeFixture(t)
-			if err := os.MkdirAll(filepath.Join(filepath.Dir(stateDirectory), "yards", "remote"), 0o700); err != nil {
-				t.Fatal(err)
+			fixture := newFixture(t, withCommands("ssh"))
+			root, environment := fixture.Root, fixture.Environment
+			fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"), "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
+			log := trustedSSHMock(t) + "printf 'selected-owner-log\\n'\n"
+			if selection == "follow" {
+				log += "exec sleep 30\n"
 			}
-			writeCLIFile(t, filepath.Join(filepath.Dir(stateDirectory), "yards", "remote", "config.env"), "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
-			fakeBin := filepath.Join(root, "fake-bin")
-			if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"printf 'selected-owner-log\\n'\n", 0o700)
-			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-			environment = append(environment, "PATH="+os.Getenv("PATH"))
+			fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: log})
 			arguments := []string{"-Y", "remote", "test-vms", "logs"}
 			if selection == "inherited" {
 				arguments = []string{"test-vms", "logs"}
@@ -1020,13 +860,9 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 			var output io.Writer = &stdout
 			if selection == "follow" {
 				arguments = append(arguments, "-f")
-				writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"printf 'selected-owner-log\\n'\nexec sleep 30\n", 0o700)
 				output = &cancelLogWriter{output: &stdout, cancel: cancel}
 			}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: output, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: arguments, Environment: environment, Stdout: output, Stderr: &stderr})
 			if code := program.Run(ctx); (code != 0 && selection != "follow") || !strings.Contains(stdout.String(), "selected-owner-log") {
 				t.Fatalf("selected remote log: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
@@ -1039,7 +875,8 @@ func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
 }
 
 func TestTestVMLogsReadOnlyDuringRecovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
 	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -1057,10 +894,7 @@ func TestTestVMLogsReadOnlyDuringRecovery(t *testing.T) {
 		{[]string{"test-vms", "logs", "-n", "0"}, 2},
 	} {
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.args, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: test.args, Environment: environment, Stdout: &stdout, Stderr: &stderr})
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if code := program.Run(ctx); code != test.code {

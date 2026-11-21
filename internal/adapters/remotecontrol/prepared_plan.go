@@ -14,10 +14,11 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type preparedFile struct {
-	Path          string
+	Path, Target  string
 	Exists        bool
 	Mode          os.FileMode
 	Size          int64
@@ -29,6 +30,14 @@ type preparedFile struct {
 }
 
 func (runtime Runtime) preparedFiles(prepared domain.RemotePrepared) ([]preparedFile, error) {
+	config, err := safefs.ResolveFile(runtime.sshConfigPath())
+	if err != nil {
+		return nil, err
+	}
+	return runtime.preparedFilesAt(prepared, config)
+}
+
+func (runtime Runtime) preparedFilesAt(prepared domain.RemotePrepared, config string) ([]preparedFile, error) {
 	paths := []string{runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)}
 	contextPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
@@ -54,7 +63,14 @@ func (runtime Runtime) preparedFiles(prepared domain.RemotePrepared) ([]prepared
 	files := make([]preparedFile, 0, len(paths))
 	for _, path := range paths {
 		fact := preparedFile{Path: path}
-		info, err := os.Lstat(path)
+		target := path
+		if path == runtime.sshConfigPath() {
+			if config != path && slices.Contains(paths, config) {
+				return nil, errors.New("unsafe remote configuration target")
+			}
+			target, fact.Target = config, config
+		}
+		info, err := os.Lstat(target)
 		if errors.Is(err, os.ErrNotExist) {
 			files = append(files, fact)
 			continue
@@ -71,7 +87,7 @@ func (runtime Runtime) preparedFiles(prepared domain.RemotePrepared) ([]prepared
 			fact.Device, fact.Inode, fact.UID, fact.GID, fact.Changed = uint64(identity.Dev), identity.Ino, identity.Uid, identity.Gid, identity.Ctim
 		}
 		if !identityPaths[path] || strings.HasSuffix(path, ".pub") {
-			fact.Content, err = os.ReadFile(path)
+			fact.Content, err = os.ReadFile(target)
 			if err != nil {
 				return nil, err
 			}
@@ -149,12 +165,40 @@ func (runtime Runtime) checkPreparedBinding(prepared domain.RemotePrepared) erro
 	if prepared.Binding == "" {
 		return nil
 	}
-	fresh, err := runtime.preparedBinding(prepared)
+	_, err := runtime.checkedSSHConfig(prepared)
+	return err
+}
+
+func (runtime Runtime) checkedSSHConfig(prepared domain.RemotePrepared) (string, error) {
+	config, err := safefs.ResolveFile(runtime.sshConfigPath())
+	if err != nil || prepared.Binding == "" {
+		return config, err
+	}
+	files, err := runtime.preparedFilesAt(prepared, config)
+	if err != nil {
+		return "", err
+	}
+	fresh, err := preparedFilesBinding(files)
+	if err != nil {
+		return "", err
+	}
+	if fresh != prepared.Binding {
+		return "", remoteBindingChanged()
+	}
+	return config, nil
+}
+
+func (runtime Runtime) verifySSHConfigTarget(config string) error {
+	current, err := safefs.ResolveFile(runtime.sshConfigPath())
 	if err != nil {
 		return err
 	}
-	if fresh != prepared.Binding {
-		return fmt.Errorf("%w: remote registration or trust changed after planning", domain.ErrPlanStale)
+	if current != config {
+		return remoteBindingChanged()
 	}
 	return nil
+}
+
+func remoteBindingChanged() error {
+	return fmt.Errorf("%w: remote registration or trust changed after planning", domain.ErrPlanStale)
 }

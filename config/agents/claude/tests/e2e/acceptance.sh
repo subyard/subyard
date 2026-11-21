@@ -36,6 +36,16 @@ if ! python3 -m venv "$fixture/venv"; then
 fi
 "$fixture/venv/bin/pip" install --disable-pip-version-check -q claude-agent-sdk
 result=0
+if [ "${1:-}" = --installed-policy ] && [ "${PARITY_SUDO:-}" = 1 ]; then
+  # The yard installed DEV_SUDO=prompt; check only the sudo prompts with the managed CLI.
+  PARITY_CLAUDE_CLI=/usr/local/bin/claude \
+    "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
+    "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-sudo" || result=$?
+  for log in "$fixture"/evidence-sudo/*.jsonl; do
+    [ ! -f "$log" ] || cat "$log"
+  done
+  exit "$result"
+fi
 "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
   "$ROOT/config/agents/claude/settings.json" "$fixture/evidence" || result=$?
 if [ "$result" = 0 ]; then
@@ -56,11 +66,17 @@ if [ "$result" = 0 ] && [ "${1:-}" != --installed-policy ]; then
   PARITY_GIT_APPROVAL=off PARITY_CLAUDE_CLI=/usr/local/bin/claude \
     "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
     "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-off" || result=$?
+  sudo -n env CODING_TOOL_GIT_APPROVAL=off DEV_SUDO=prompt bash "$ROOT/config/agents/claude/provision.sh"
+  claude-policy-check
+  PARITY_SUDO=1 PARITY_CLAUDE_CLI=/usr/local/bin/claude \
+    "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
+    "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-sudo" || result=$?
   sudo -n env CODING_TOOL_GIT_APPROVAL=prompt bash "$ROOT/config/agents/claude/provision.sh"
   claude-policy-check
 fi
 # These logs contain only fixture commands and the synthetic loopback model exchange.
-for log in "$fixture"/evidence/*.jsonl "$fixture"/evidence-managed/*.jsonl "$fixture"/evidence-off/*.jsonl; do
+for log in "$fixture"/evidence/*.jsonl "$fixture"/evidence-managed/*.jsonl "$fixture"/evidence-off/*.jsonl \
+  "$fixture"/evidence-sudo/*.jsonl; do
   [ ! -f "$log" ] || cat "$log"
 done
 exit "$result"

@@ -399,11 +399,19 @@ func (record CompatibilityEvidence) validate() error {
 }
 
 func decodeBoundedRecord(payload []byte, maximum int, target any) error {
+	return decodeBounded(payload, maximum, target, true)
+}
+
+// decodeBounded decodes one bounded JSON value; strict also refuses fields
+// the target does not define.
+func decodeBounded(payload []byte, maximum int, target any, strict bool) error {
 	if len(payload) == 0 || len(payload) > maximum {
 		return invalid("record size is outside the allowed bound")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}

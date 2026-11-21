@@ -10,34 +10,6 @@ import (
 	"testing"
 )
 
-func TestV2CheckpointConsentSurvivesPostActivationReplacement(t *testing.T) {
-	fixture := newV2PostActivationRecoveryFixture(t)
-	transition := fixture.transition
-	transition.options.MigrationCheckpoint = true
-	transition.options.ActivateLinks = func(_ context.Context, pair ReleasePair) (ReleaseLinks, error) {
-		*fixture.links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
-		return *fixture.links, nil
-	}
-	inspection, err := transition.Inspect(context.Background(), fixture.goal)
-	if err != nil || len(inspection.Blockers) != 0 {
-		t.Fatalf("replacement inspection: %#v err=%v", inspection, err)
-	}
-	outcome, err := transition.Converge(context.Background(), Execution{
-		Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
-	})
-	if err != nil || outcome.Status != StatusReady {
-		t.Fatalf("replacement convergence: %#v err=%v", outcome, err)
-	}
-	checkpoint, err := transition.store.ReadMigrationCheckpoint()
-	if err != nil || !checkpoint.Exists {
-		t.Fatalf("replacement lost checkpoint consent: %#v err=%v", checkpoint, err)
-	}
-	final, err := transition.Inspect(context.Background(), fixture.goal)
-	if err != nil || final.Outcome.Status != StatusReady || final.Assessment.Changed {
-		t.Fatalf("replacement fixed point: %#v err=%v", final, err)
-	}
-}
-
 func TestV2CheckpointLedgerStepsUseCompactAuthorityAndResume(t *testing.T) {
 	for _, faultPoint := range []string{"", "after-settings-cas", "after-ledger-cas"} {
 		name := faultPoint

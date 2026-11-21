@@ -1,6 +1,7 @@
 package releaseruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -628,4 +629,127 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing.T) {
+	for _, installed := range []string{"0.10.0", "0.11.0", "0.11.1", "0.17.3", "0.21.0", "0.27.0", "0.28.0", "0.28.1"} {
+		for _, target := range []string{"0.17.3-older", "1.2.3-aaaaaaaaaaaa"} {
+			for _, checkpoint := range []releasetransition.JournalCheckpoint{releasetransition.JournalAuthorized, releasetransition.JournalReconciling, releasetransition.JournalComplete} {
+				t.Run(fmt.Sprintf("%s/%s/%s", installed, target, checkpoint), func(t *testing.T) {
+					fixture := newProtectedRuntimeTransitionFixture(t, checkpoint)
+					active := writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, installed+"-installed", installed,
+						"#!/bin/sh\nprintf 'yard-engine "+installed+"\\n'\n")
+					current := filepath.Join(fixture.runtimeRoot, "current")
+					if err := os.Remove(current); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink("releases/"+string(active.release), current); err != nil {
+						t.Fatal(err)
+					}
+					journal, err := releasetransition.ParseJournal(mustReadFile(t, fixture.journalPath))
+					if err != nil {
+						t.Fatal(err)
+					}
+					journal.Goal.Target = releasetransition.ReleaseID(target)
+					journal.Releases.Target = journal.Goal.Target
+					payload, err := releasetransition.MarshalJournal(journal)
+					if err != nil {
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, fixture.journalPath, payload, 0600)
+					runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+					defer runtime.Close()
+					version := semver.MustParse(installed)
+					wantRefusal := checkpoint != releasetransition.JournalComplete && version.GTE(semver.MustParse(MinimumSourceVersion)) && version.LT(semver.MustParse(UpdateAnchorVersion))
+					for _, flags := range [][]string{{}, {"--check"}, {"--offline"}} {
+						args := append([]string{"--runtime-root", fixture.runtimeRoot, "--version", "1.2.3"}, flags...)
+						_, err := runtime.PrepareTransition(context.Background(), args, fixture.configHome, "default")
+						if wantRefusal {
+							next := "yard update && yard update --version 0.28.1 && yard update"
+							if target == "1.2.3-aaaaaaaaaaaa" {
+								next = "yard update && yard update"
+							}
+							want := "source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: " + next + "\nThis release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v0.28.1 installer or use a later v0.28.x fix release. Do not uninstall."
+							if target == "0.17.3-older" {
+								// The missing journal target is an independent inspection refusal.
+								unavailable := "code=dependency-unavailable active=" + string(active.release) + " previous=none target=0.17.3-older"
+								if err == nil || !strings.Contains(err.Error(), unavailable) || !strings.HasSuffix(err.Error(), "; "+want) ||
+									strings.Index(err.Error(), unavailable) > strings.Index(err.Error(), "source-anchor-required") {
+									t.Fatalf("flags=%v: refusal=%v, want %q and %q", flags, err, unavailable, want)
+								}
+							} else if err == nil || err.Error() != want {
+								t.Fatalf("flags=%v: refusal=%v, want %q", flags, err, want)
+							}
+						} else if err != nil && strings.Contains(err.Error(), "an unfinished release transition must first") {
+							t.Fatalf("source outside unfinished anchor case was intercepted: %v", err)
+						}
+						if got := mustReadFile(t, fixture.journalPath); !bytes.Equal(payload, got) {
+							t.Fatal("refusal changed journal")
+						}
+						if got, err := os.Readlink(current); err != nil || got != "releases/"+string(active.release) {
+							t.Fatalf("refusal changed active link: %s %v", got, err)
+						}
+						if _, err := os.Stat(fixture.publicationCapture); !os.IsNotExist(err) {
+							t.Fatalf("refusal published a release: %v", err)
+						}
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("blocked installed owner", func(t *testing.T) {
+		fixture := newV0111CandidateRoutingFixture(t)
+		runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(fixture.environment()),
+			Installer: fixture.installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		defer runtime.Close()
+		protected, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+		if err != nil || protected == nil || len(protected.inspection.Blockers) != 1 {
+			t.Fatalf("v0.11.1 owner inspection = %+v, %v; want one blocker", protected, err)
+		}
+		blocker := protected.inspection.Blockers[0]
+		// The owner's diagnosis is independent of the source anchor and sorts before it.
+		want := "release transition blocker: code=plan-stale resource=transition.observation-scope; " + blocker.Message + "; next: " + blocker.Retry +
+			"; source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: yard update && yard update --version 0.28.1 && yard update\n" +
+			"This release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v0.28.1 installer or use a later v0.28.x fix release. Do not uninstall."
+		before := fixture.snapshot(t)
+		for _, flags := range [][]string{{"--check"}, {"--offline"}} {
+			args := append([]string{"--runtime-root", fixture.runtimeRoot, "--version", fixture.candidateVersion}, flags...)
+			_, err := runtime.PrepareTransition(context.Background(), args, fixture.configHome, "default")
+			if err == nil || err.Error() != want {
+				t.Fatalf("flags=%v: refusal=%v, want %q", flags, err, want)
+			}
+		}
+		if !bytes.Equal(before, fixture.snapshot(t)) {
+			t.Fatal("refusal changed protected history or links")
+		}
+		for _, path := range []string{fixture.publicationCapture, fixture.candidateCalls} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("refusal published or invoked a replacement candidate: %s %v", path, err)
+			}
+		}
+	})
+
+	t.Run("environment version without explicit option", func(t *testing.T) {
+		fixture := newV0111CandidateRoutingFixture(t)
+		environment := fixture.environment()
+		environment["YARD_RELEASE_VERSION"] = fixture.candidateVersion
+		runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment),
+			Installer: fixture.installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		defer runtime.Close()
+		before := fixture.snapshot(t)
+		_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--runtime-root", fixture.runtimeRoot}, fixture.configHome, "default")
+		want := "an unfinished or unsafe release transition permits only exact target " + fixture.sourceID + "; next: run the verified standalone release with --offline and its exact --version"
+		if err == nil || err.Error() != want {
+			t.Fatalf("environment-only version changed the ordinary retry hint: %v, want %q", err, want)
+		}
+		if !bytes.Equal(before, fixture.snapshot(t)) {
+			t.Fatal("environment-only selection changed protected history or links")
+		}
+		for _, path := range []string{fixture.publicationCapture, fixture.candidateCalls} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("environment-only selection published or invoked a replacement candidate: %s %v", path, err)
+			}
+		}
+	})
 }

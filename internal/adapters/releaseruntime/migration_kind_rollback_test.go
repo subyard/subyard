@@ -250,7 +250,7 @@ func retainedFixtureAtVersion(t *testing.T, version string) (*Runtime, published
 
 func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 	const live = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":3},"migrations":[{"id":"first","kind":"test-vms-settings-v1-to-v2","domain":"settings","fromEpoch":1,"toEpoch":2},{"id":"second","kind":"local-ssh-port-settings-v2-to-v3","domain":"settings","fromEpoch":2,"toEpoch":3}]}`
-	for _, name := range []string{"identical", "both registryless", "one registryless", "different ID", "swapped kinds", "retired target with unreadable projection", "identical retired registries with unreadable projection", "NetworkManager epoch crossing"} {
+	for _, name := range []string{"identical", "both registryless", "one registryless", "different ID", "swapped kinds", "retired target with unreadable projection", "identical retired registries with unreadable projection", "NetworkManager epoch crossing", "declared equivalent predecessor", "undeclared equivalent predecessor", "equivalent predecessor with unreadable declaration", "identical with unreadable declaration", "declared equivalent successor", "undeclared equivalent successor"} {
 		t.Run(name, func(t *testing.T) {
 			runtime, candidate, request, called, updateArgs := retainedVersionFixture(t)
 			active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
@@ -283,6 +283,25 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 					source = retained
 					want = "cannot read the legacy migration ledger projection"
 				}
+			case "declared equivalent predecessor", "undeclared equivalent predecessor", "equivalent predecessor with unreadable declaration":
+				// The active release retires the prefix its predecessor still defines.
+				source = writeAppliedSettingsCheckpoint(t, request, retained)
+				switch name {
+				case "declared equivalent predecessor":
+					want = ""
+				case "equivalent predecessor with unreadable declaration":
+					want = "rollback declaration of the release pair cannot be verified"
+				}
+			case "declared equivalent successor", "undeclared equivalent successor":
+				// The retained release retires the prefix the active one still defines.
+				retained = writeAppliedSettingsCheckpoint(t, request, source)
+				if name == "declared equivalent successor" {
+					// The registry relation is admitted, so the history is read.
+					want = "cannot read the legacy migration ledger projection"
+				}
+			case "identical with unreadable declaration":
+				// Only an equivalent relation depends on the declaration.
+				want = ""
 			case "NetworkManager epoch crossing":
 				source = []byte(`{"schemaVersion":2,"minimumEpochs":{"power-metadata":3},"currentEpochs":{"power-metadata":4},"migrations":[{"id":"introduce-nm-device-guard-v4","kind":"nm-device-guard-v1","domain":"power-metadata","fromEpoch":3,"toEpoch":4}]}`)
 				retained = []byte(`{"schemaVersion":2,"minimumEpochs":{"power-metadata":3},"currentEpochs":{"power-metadata":3},"migrations":[]}`)
@@ -291,6 +310,14 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 				rewriteReleaseOwnerManifest(t, active)
 			} else {
 				writeMigrationRollbackSource(t, candidate, request, source)
+			}
+			switch name {
+			case "declared equivalent predecessor":
+				declareRollbackPredecessor(t, active, registryCanonicalDigest(t, retained))
+			case "equivalent predecessor with unreadable declaration", "identical with unreadable declaration":
+				declareRollbackPredecessor(t, active, "AAAA")
+			case "declared equivalent successor":
+				declareRollbackPredecessor(t, candidate, registryCanonicalDigest(t, source))
 			}
 			if retained != nil {
 				bindRollbackFixtureRegistry(t, candidate, retained)
@@ -337,6 +364,28 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func registryCanonicalDigest(t *testing.T, registry []byte) string {
+	t.Helper()
+	parsed, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := parsed.CanonicalDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(digest)
+}
+
+// declareRollbackPredecessor seals a rollback declaration naming digest into
+// the release.
+func declareRollbackPredecessor(t *testing.T, release publishedCandidate, digest string) {
+	t.Helper()
+	testkit.WriteFile(t, filepath.Join(release.root, "config", "release-rollback.json"),
+		[]byte(fmt.Sprintf(`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[]}`+"\n", digest)), 0o600)
+	rewriteReleaseOwnerManifest(t, release)
 }
 
 // Create a checkpoint at epoch 2 whose legacy projection lists the live ID.
@@ -831,15 +880,6 @@ func TestTransitionLaunchRefusesNonActiveEngineWithoutSelection(t *testing.T) {
 	defer verified.Close()
 	request.ArtifactDigest = verified.manifestDigest
 	_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
-	assertReleaseSelectionStale(t, err)
-
-	active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
-	assets, err := runtime.verifyPublishedCandidate(ctx, active, request.RuntimeRoot, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer assets.Close()
-	_, err = runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, "")
 	assertReleaseSelectionStale(t, err)
 	assertMigrationRollbackUnchanged(t, request, called)
 }

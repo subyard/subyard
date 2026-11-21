@@ -19,6 +19,7 @@ from unittest import mock
 GUEST = Path(__file__).parent/'e2e/release-activation-guest.sh'
 REPO = Path(__file__).resolve().parents[4]
 ANCHOR_VERSION, INSTALLER_SHA, _, _ = runpy.run_path(str(REPO/'dev/verify-release-upgrades.py'))['published_anchor'](REPO)
+CONNECTION_VERSION = re.search(r'^VERSION=(\S+)$', GUEST.with_name('connection-sync-guest.sh').read_text(), re.M)[1]
 
 
 def source_fixture(name):
@@ -829,7 +830,7 @@ else: sys.exit(99)
                         (root/name).unlink(missing_ok=True)
                     script = (source_fixture('connection-fixture.sh')+
                         'set -euo pipefail\nROOT="$FIXTURE_ROOT" STATE="$FIXTURE_ROOT" RELEASE="$FIXTURE_ROOT/bin"\n'
-                        'VERSION=0.21.2-github-connection-e2e\n'
+                        f'VERSION={CONNECTION_VERSION}\n'
                         'fail() { exit 43; }\ncontext() { :; }\n'
                         '"$ROOT/dev/package-engine.sh" --output-dir "$RELEASE" --version "$VERSION" --arch amd64\n'
                         'prepare_connection_runtime "$FIXTURE_ROOT/bin/incus"\n')
@@ -842,7 +843,10 @@ else: sys.exit(99)
                     match = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', version)
                     self.assertIsNotNone(match, 'fixture version must be valid SemVer')
                     numbers = tuple(map(int, match.groups()))
-                    self.assertTrue(numbers > (0, 11, 0) or (numbers == (0, 11, 0) and '-' not in version))
+                    anchor = tuple(map(int, ANCHOR_VERSION.split('.')))
+                    # A first install is its own release-transition source: below the anchor it stops.
+                    self.assertTrue(numbers > anchor or (numbers == anchor and '-' not in version),
+                                    f'fixture version {version} is below the update anchor {ANCHOR_VERSION}')
 
     def test_fresh_repeat_and_failed_init_ownership(self):
         init = source_fixture('connection-fixture.sh')

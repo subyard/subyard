@@ -84,7 +84,7 @@ exit "$STATUS"
                    SUBYARD_CONFIG_HOME=str(fixture), SUBYARD_HOME=str(runtime), STORAGE_PATH=str(fixture),
                    HOST_BASE=str(fixture), RESTRICTED_DISK_PATHS="", ACCESS_KIND="local", YARD_KIND="container",
                    YARD_INSTANCE_NAME=name, INCUS_PROJECT="default", INCUS_BRIDGE="incusbr0", SSH_HOST=name,
-                   DEV_USER="nobody", DEV_UID="65534", DEV_SUDO="0", FORWARD_SSH_AGENT="0", NESTED_E2E_VMS="0")
+                   DEV_USER="nobody", DEV_UID="65534", DEV_SUDO="no", FORWARD_SSH_AGENT="0", NESTED_E2E_VMS="0")
         def adapter(status=0, action="status", check=False):
             (profile / "profile.conf").write_text(f"STATUS={status}\nACTION={action}\n")
             entries = {}

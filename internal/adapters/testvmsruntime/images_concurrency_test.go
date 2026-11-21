@@ -20,10 +20,8 @@ import (
 
 func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 	cfg := fixtureConfig(t)
-	cfg.RecipeRoot = t.TempDir()
-	if err := os.WriteFile(filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("fixture recipe"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	cfg.RecipeRoot = testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("fixture recipe"), 0600)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	building, finishBuild := make(chan struct{}, 2), make(chan struct{})
 	var release sync.Once
@@ -382,7 +380,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 					t.Fatalf("write failure lost conservative capture requirement across restart: %+v", persisted.Build)
 				}
 				restarted := newRuntime()
-				recorder := EventRecorder{StateDir: t.TempDir(), Source: cfg.BrokerSource}
+				recorder := EventRecorder{StateDir: testkit.TempDir(t), Source: cfg.BrokerSource}
 				restarted.Events = &recorder
 				registry, err := restarted.imageRegistry()
 				if err != nil {

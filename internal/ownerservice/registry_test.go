@@ -92,6 +92,36 @@ func TestRegistryInterruptedPublicationAndGenerationCAS(t *testing.T) {
 	}
 }
 
+func TestRegistryPublishFinishesNarrowDirectories(t *testing.T) {
+	registry, record, public := fixture(t)
+	if err := registry.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	service := filepath.Join(public, record.Service)
+	for _, directory := range []string{public, service} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := registry.Published(record, public); err == nil || err.Error() != "unsafe service registry directory" {
+		t.Fatalf("read-only check missed drift: %v", err)
+	}
+	for _, directory := range []string{public, service} {
+		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("read-only check modified %s: %v, %v", directory, info, err)
+		}
+	}
+	if err := registry.Publish(record, public); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Published(record, public); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRegistryRejectsUnsafeModeLinkAndPublicReplacement(t *testing.T) {
 	for _, kind := range []string{"mode", "symlink", "hardlink", "public"} {
 		t.Run(kind, func(t *testing.T) {

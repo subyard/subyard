@@ -2,9 +2,68 @@ package ports
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+
 	"github.com/Subyard/Subyard/internal/domain"
 )
+
+// teardownBindingFields are the native fields one teardown resource binding
+// covers. Assessment and the apply-time live recheck share them; instances and
+// volumes also bind their snapshot names; an image binds its bare fingerprint
+// and a bucket its bare name.
+var teardownBindingFields = map[string][]string{
+	"instance":     {"name", "type", "created_at", "config", "devices", "profiles"},
+	"profile":      {"name", "config", "devices", "description"},
+	"host-profile": {"name", "config", "devices", "description"},
+	"volume":       {"name", "type", "content_type", "config", "description"},
+	"project":      {"name", "config", "description"},
+	"network":      {"name", "type", "managed", "config", "description"},
+	"pool":         {"name", "driver", "config", "description"},
+	"image":        {"fingerprint"},
+	"bucket":       {"name"},
+}
+
+// TeardownBindingFields returns the shared binding fields of a resource kind.
+func TeardownBindingFields(kind string) []string { return teardownBindingFields[kind] }
+
+// TeardownMissingField names an observed binding field that is absent.
+type TeardownMissingField string
+
+func (field TeardownMissingField) Error() string {
+	return "missing teardown resource field " + string(field)
+}
+
+// TeardownBinding hashes exactly the shared binding fields of an observation.
+func TeardownBinding(kind string, observed map[string]any) (string, error) {
+	fields, known := teardownBindingFields[kind]
+	if !known {
+		return "", fmt.Errorf("unknown teardown resource kind %s", kind)
+	}
+	if kind == "instance" || kind == "volume" {
+		fields = append(fields[:len(fields):len(fields)], "snapshots")
+	}
+	selected := make(map[string]any, len(fields))
+	for _, field := range fields {
+		value, present := observed[field]
+		if !present {
+			return "", TeardownMissingField(field)
+		}
+		selected[field] = value
+	}
+	var value any = selected
+	if kind == "image" || kind == "bucket" {
+		value = selected[fields[0]]
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // TeardownInventoryReader provides read-only identities at the physical owner.
 // It is optional so generic Incus consumers need not implement deletion policy.

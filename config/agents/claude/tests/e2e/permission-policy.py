@@ -19,9 +19,21 @@ from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient,
 from claude_agent_sdk.types import PermissionRuleValue
 
 PROMPTS_OFF = os.environ.get("PARITY_GIT_APPROVAL") == "off"
-COMMANDS = ["./ordinary.sh", "./private-denied.sh", "./project-denied.sh", "git commit --allow-empty -m parity-one",
+# DEV_SUDO=prompt: direct escalation asks each time; other literal spellings are blocked by the hook.
+# The hook passes a call that starts with a direct command, so Claude's one prompt must cover the
+# whole call, including a later spelling and an arbitrary tail.
+SUDO = os.environ.get("PARITY_SUDO") == "1"
+SUDO_COMMANDS = ["./ordinary.sh", "sudo -n touch sudo-one.marker", "sudo -n touch sudo-two.marker",
+                 "sudo -n touch multi-a.marker; /usr/bin/sudo -n touch multi-b.marker",
+                 "cd . && sudo -n touch tail-a.marker > /dev/null; echo $(id -u) | bash -c 'cat > tail-b.marker'",
+                 "/usr/bin/sudo -n touch wrapped.marker", "env sudo -n touch env.marker",
+                 "bash -c 'sudo -n touch nested.marker'", "x=1; sudo -n touch assigned.marker"]
+SUDO_ASKED = ("sudo-one", "sudo-two", "multi-a", "multi-b", "tail-a", "tail-b")
+SUDO_BLOCKED = ("wrapped", "env", "nested", "assigned")
+GIT_COMMANDS = ["./ordinary.sh", "./private-denied.sh", "./project-denied.sh", "git commit --allow-empty -m parity-one",
             "git commit --allow-empty -m parity-two",
             "git commit --amend --allow-empty -m parity-amended", "git push"]
+COMMANDS = SUDO_COMMANDS if SUDO else GIT_COMMANDS
 STATE = {}
 
 
@@ -97,7 +109,7 @@ def git(repo, *args):
 
 async def run_case(source, mode, decision, base, server):
     host = os.environ.get("PARITY_HOST_PROBE") == "1"
-    case = f"{'host-' if host else ''}{mode}-{decision}"
+    case = f"{'host-' if host else 'sudo-' if SUDO else ''}{mode}-{decision}"
     root = Path(tempfile.mkdtemp(prefix=f"claude-parity-{case}-", dir="/tmp"))
     repo, home = root / "repo", root / "home"
     repo.mkdir()
@@ -121,7 +133,7 @@ async def run_case(source, mode, decision, base, server):
     (project / "settings.json").write_text(json.dumps({"permissions": {
         "allow": ["Bash"], "ask": [], "deny": ["Bash(./project-denied.sh)"]}}))
     (project / "settings.local.json").write_text(json.dumps({"permissions": {
-        "allow": ["Bash(git commit:*)", "Bash(git push:*)"], "ask": []}}))
+        "allow": ["Bash(git commit:*)", "Bash(git push:*)", "Bash(sudo:*)"], "ask": []}}))
     settings = copy.deepcopy(source)
     settings["permissions"]["ask"] = []
     settings["permissions"]["defaultMode"] = mode
@@ -142,7 +154,8 @@ async def run_case(source, mode, decision, base, server):
                 return PermissionResultAllow(updated_input=inputs, updated_permissions=[
                     PermissionUpdate(type="addRules", behavior="allow", destination="session",
                         rules=[PermissionRuleValue(tool_name="Bash", rule_content="git commit:*"),
-                               PermissionRuleValue(tool_name="Bash", rule_content="git push:*")])])
+                               PermissionRuleValue(tool_name="Bash", rule_content="git push:*"),
+                               PermissionRuleValue(tool_name="Bash", rule_content="sudo:*")])])
             return PermissionResultDeny(message="Fixture declined this operation")
 
         env = {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / "claude"),
@@ -156,7 +169,7 @@ async def run_case(source, mode, decision, base, server):
                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
         options = ClaudeAgentOptions(cwd=str(repo), settings=json.dumps(settings),
                   setting_sources=["user", "project", "local"], tools=["Bash"], can_use_tool=permission,
-                  env=env, model="claude-sonnet-4-6", max_turns=8,
+                  env=env, model="claude-sonnet-4-6", max_turns=len(COMMANDS) + 2,
                   stderr=lambda line: emit("stderr", text=line))
         if os.environ.get("PARITY_CLAUDE_CLI"):
             options.cli_path = os.environ["PARITY_CLAUDE_CLI"]
@@ -178,6 +191,18 @@ async def run_case(source, mode, decision, base, server):
         print(json.dumps(result), flush=True)
         assert effective == [mode], result
         assert (result["classifier_requests"] > 0) == (mode == "auto"), result
+        if SUDO:
+            markers = {name: (repo / f"{name}.marker").exists() for name in SUDO_ASKED + SUDO_BLOCKED}
+            emit("sudo_markers", **markers)
+            for name in SUDO_ASKED:
+                assert f"{name}.marker" not in STATE["classifier_text"], result
+            # Each direct call asks once for the whole call, even after an allow added a session rule.
+            assert asks == COMMANDS[1:5], result
+            assert result["ordinary"], result
+            assert all(markers[name] == (decision == "allow") for name in SUDO_ASKED), markers
+            assert not any(markers[name] for name in SUDO_BLOCKED), markers
+            assert result["model_steps"] == len(COMMANDS) + 1, result
+            return
         # Commit, amend and push must be decided by the ask rules, never by the classifier.
         assert "git commit" not in STATE["classifier_text"], result
         assert "git push" not in STATE["classifier_text"], result
@@ -197,7 +222,11 @@ async def main():
     assert os.geteuid() != 0, "run native CLI as the developer"
     policy = Path("/etc/claude-code/managed-settings.d/50-subyard-git-approval.json")
     assert policy.is_file(), "managed drop-in missing"
-    assert ("ask" in json.loads(policy.read_text()).get("permissions", {})) != PROMPTS_OFF, "drop-in mode mismatch"
+    asked = json.loads(policy.read_text()).get("permissions", {}).get("ask", [])
+    if SUDO:
+        assert "Bash(sudo:*)" in asked, "drop-in lacks the sudo ask rules"
+    else:
+        assert any(rule.startswith("Bash(git ") for rule in asked) != PROMPTS_OFF, "drop-in mode mismatch"
     source = json.loads(Path(sys.argv[1]).read_text())
     base = Path(sys.argv[2]).resolve()
     base.mkdir(parents=True, exist_ok=True)
@@ -216,7 +245,7 @@ async def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         modes = (["default"] if os.environ.get("PARITY_HOST_PROBE") == "1" else
-                 [source["permissions"]["defaultMode"]] if PROMPTS_OFF else
+                 [source["permissions"]["defaultMode"]] if PROMPTS_OFF and not SUDO else
                  [source["permissions"]["defaultMode"], "default", "auto"])
         for mode in modes:
             for decision in ["deny", "allow"]:

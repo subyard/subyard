@@ -154,7 +154,7 @@ func TestPersistentAssignmentKeepsExistingMultilineCRLF(t *testing.T) {
 func TestPersistentAssignmentRefusesUnreadableOutput(t *testing.T) {
 	configHome := testkit.TempDir(t)
 	path := filepath.Join(configHome, "config.env")
-	const initial = "DEV_SUDO=0\n"
+	const initial = "DEV_SUDO=no\n"
 	testkit.WriteFile(t, path, []byte(initial), 0o600)
 	for _, test := range []struct{ key, value, reason string }{
 		{"BAD KEY", "value", "invalid variable name"},

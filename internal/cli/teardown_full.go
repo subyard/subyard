@@ -639,7 +639,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 	engine.Category = "bin/yard-engine"
 	execution.SourceAssets = append(execution.SourceAssets, engine)
-	execution.Schema, execution.Stage = 1, uninstall.RecoveryPrepared
+	execution.Schema, execution.Stage = uninstall.RecoverySchema, uninstall.RecoveryPrepared
 	execution.SourceRoot = cli.options.RepositoryRoot
 	execution.Assessed = true
 	return nil

@@ -21,7 +21,7 @@ func TestLegacySSHSourceCleanupRetainsDefinitionsModesAndUnrelatedOwners(t *test
 		"hosts/owner-a/yards/named/config.env":               "SSH_PORT=2301\n",
 		"hosts/owner-a/overrides/agents/sample/settings.env": "SSH_PORT=asset-content\n",
 		"hosts/owner-b/config.env":                           "SSH_PORT=2400\n",
-		"shared/config.env":                                  "DEV_SUDO=0\n",
+		"shared/config.env":                                  "DEV_SUDO=no\n",
 	}
 	for path, content := range files {
 		writeConfigCommandFile(t, filepath.Join(root, path), content, 0o640)

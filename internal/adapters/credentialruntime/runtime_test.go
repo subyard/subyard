@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -40,6 +41,24 @@ func TestInspectInitializationNamesMissingPathsWithoutWriting(t *testing.T) {
 	partial, err := runtime.PartialIdentity()
 	if refusal := runtime.Initialize(context.Background()); partial != runtime.ageIdentity || err != nil || refusal == nil || !strings.Contains(refusal.Error(), "incomplete key identity") {
 		t.Fatalf("partial identity %q %v is not the one init refuses: %v", partial, err, refusal)
+	}
+}
+
+func TestAtomicWriteRefusesCredentialStateSymlink(t *testing.T) {
+	root := testkit.TempDir(t)
+	target, link := filepath.Join(root, "target"), filepath.Join(root, "counter")
+	testkit.WriteFile(t, target, []byte("untouched"), 0o600)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(link, []byte("changed"), 0o600); !errors.Is(err, safefs.ErrSymlink) {
+		t.Fatalf("write through symlink = %v", err)
+	}
+	if destination, err := os.Readlink(link); err != nil || destination != target {
+		t.Fatalf("state symlink = %q, %v", destination, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "untouched" {
+		t.Fatalf("state symlink target = %q, %v", data, err)
 	}
 }
 
@@ -268,7 +287,7 @@ func TestRecordParsingOwnsLayoutEncryptionAndGraphValidation(t *testing.T) {
 }
 
 func TestArchiveExtractionAndQuarantineRejectUnsafeTrees(t *testing.T) {
-	destination := t.TempDir()
+	destination := testkit.TempDir(t)
 	if err := extractLedgerArchive(credentialTar(t, map[string]string{
 		".ledger": "fixture",
 		"records/cred-0123456789abcdef0123456789abcdef/revision.json": "ciphertext",
@@ -278,7 +297,7 @@ func TestArchiveExtractionAndQuarantineRejectUnsafeTrees(t *testing.T) {
 	assertCredentialFileContains(t, filepath.Join(destination, ".ledger"), "fixture")
 	if err := extractLedgerArchive(credentialTar(t, map[string]string{
 		"../escape": "bad",
-	}), t.TempDir()); err == nil {
+	}), testkit.TempDir(t)); err == nil {
 		t.Fatal("archive path traversal was accepted")
 	}
 	var link bytes.Buffer
@@ -289,12 +308,12 @@ func TestArchiveExtractionAndQuarantineRejectUnsafeTrees(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractLedgerArchive(link.Bytes(), t.TempDir()); err == nil {
+	if err := extractLedgerArchive(link.Bytes(), testkit.TempDir(t)); err == nil {
 		t.Fatal("archive symlink was accepted")
 	}
 
 	runtime := credentialFixture(t)
-	tree := t.TempDir()
+	tree := testkit.TempDir(t)
 	record := filepath.Join(tree, "records", "cred-id", "revision.json")
 	writeCredentialFile(t, record, "ciphertext", 0o600)
 	writeCredentialFile(t, record+".sig", "signature", 0o600)
@@ -317,7 +336,7 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 		t.Fatal("empty secret stdin was accepted")
 	}
 
-	source := filepath.Join(t.TempDir(), "credential.env")
+	source := filepath.Join(testkit.TempDir(t), "credential.env")
 	writeCredentialFile(t, source, "TOKEN=fixture", 0o600)
 	if resolved, err := runtime.validateImportPath(source); err != nil || resolved != source {
 		t.Fatalf("protected source was rejected: %q err=%v", resolved, err)
@@ -328,7 +347,7 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 	if _, err := runtime.validateImportPath(source); err == nil {
 		t.Fatal("broad source permissions were accepted")
 	}
-	oauth := filepath.Join(t.TempDir(), ".codex", "auth.json")
+	oauth := filepath.Join(testkit.TempDir(t), ".codex", "auth.json")
 	writeCredentialFile(t, oauth, "{}", 0o600)
 	if _, err := runtime.validateImportPath(oauth); err == nil {
 		t.Fatal("mutable coding-agent OAuth store was accepted")
@@ -336,7 +355,7 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 
 	blocked := "production-token"
 	digest := sha256.Sum256([]byte(blocked))
-	denylist := filepath.Join(t.TempDir(), "fingerprints")
+	denylist := filepath.Join(testkit.TempDir(t), "fingerprints")
 	writeCredentialFile(t, denylist, hex.EncodeToString(digest[:])+" fixture\n", 0o600)
 	runtime.env["SUBYARD_KEYS_PROD_FINGERPRINTS"] = denylist
 	for _, candidate := range []string{
@@ -460,7 +479,7 @@ func TestPreparedDryRunAndAutoSyncPolicyAreDirectlyTestable(t *testing.T) {
 	runtime := credentialFixture(t)
 	var output bytes.Buffer
 	runtime.config.Stdout = &output
-	source := filepath.Join(t.TempDir(), "fixture.env")
+	source := filepath.Join(testkit.TempDir(t), "fixture.env")
 	writeCredentialFile(t, source, "TOKEN=fixture\n", 0o600)
 	prepared, err := runtime.Prepare(context.Background(), "", []string{
 		"import", source, "--dry-run", "--label", "fixture",
@@ -550,7 +569,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 	t.Run("protected file boundaries are validated before confirmation", func(t *testing.T) {
 		runtime := credentialFixture(t)
 		installCredentialIdentity(t, runtime)
-		missing := filepath.Join(t.TempDir(), "missing-secret")
+		missing := filepath.Join(testkit.TempDir(t), "missing-secret")
 		if _, err := runtime.Prepare(context.Background(), "", []string{
 			"add", "fixture", "--file", missing,
 		}); err == nil {
@@ -559,7 +578,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 
 		head := credentialMetadata("actor-a-000000000001-aaaaaaaa", "actor-a", 1)
 		writeCredentialRecord(t, runtime, sharedLedger, head)
-		unsafe := filepath.Join(t.TempDir(), "replacement")
+		unsafe := filepath.Join(testkit.TempDir(t), "replacement")
 		writeCredentialFile(t, unsafe, "protected", 0o644)
 		if _, err := runtime.Prepare(context.Background(), "", []string{
 			"rotate", credentialID, "--file", unsafe,
@@ -575,7 +594,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 			t.Fatalf("resolve --rotate deferred protected source mode validation: %v", err)
 		}
 
-		safe := filepath.Join(t.TempDir(), "safe-replacement")
+		safe := filepath.Join(testkit.TempDir(t), "safe-replacement")
 		writeCredentialFile(t, safe, "protected", 0o600)
 		prepared, err := runtime.Prepare(context.Background(), "", []string{
 			"resolve", credentialID, "--rotate", "--file", safe,
@@ -595,7 +614,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 	t.Run("rotate validates current head before protected source", func(t *testing.T) {
 		runtime := credentialFixture(t)
 		installCredentialIdentity(t, runtime)
-		source := filepath.Join(t.TempDir(), "replacement")
+		source := filepath.Join(testkit.TempDir(t), "replacement")
 		writeCredentialFile(t, source, "protected", 0o000)
 		if _, err := runtime.Prepare(context.Background(), "", []string{
 			"rotate", credentialID, "--file", source,
@@ -792,7 +811,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 				if err != nil {
 					t.Fatal(err)
 				}
-				counter := filepath.Join(t.TempDir(), "identity-calls")
+				counter := filepath.Join(testkit.TempDir(t), "identity-calls")
 				dispatcher := filepath.Join(runtime.config.RepositoryRoot, "credential-target")
 				body := "#!/bin/sh\nset -eu\n" +
 					"case \"$*\" in\n" +
@@ -963,7 +982,7 @@ func TestLocalTargetUsesUnresolvedCommandEnvironment(t *testing.T) {
 
 func credentialFixture(t *testing.T) *Runtime {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	tools := filepath.Join(root, "tools")
 	for _, name := range []string{"sops", "age-keygen"} {
 		writeCredentialFile(t, filepath.Join(tools, "bin", name), "#!/bin/sh\nexit 0\n", 0o700)

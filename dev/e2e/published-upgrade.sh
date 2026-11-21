@@ -260,3 +260,34 @@ case " $PUBLISHED_AGENTS " in *" claude "*)
   ;;
 esac
 ok 'update reached Ready with the same instance and guest data'
+
+# A published release that ships the candidate's exact registry stays its rollback target.
+runtime="$OPERATOR_HOME/.subyard/runtime"
+registry_relation=0
+operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json" \
+  "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" || registry_relation=$?
+# cmp exits 1 for different registries and 2 when either cannot be read.
+[ "$registry_relation" -le 1 ] || die 'cannot compare the published and candidate registries'
+if [ "$registry_relation" = 0 ]; then
+  history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
+  info "rolling back to the published v$OLD_VERSION"
+  operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \
+    || { cat "$STATE_ROOT/published-rollback.log" >&2; die 'rollback to the published release failed'; }
+  [ "$(operator_env readlink "$runtime/current")" = "$OLD_RELEASE_TARGET" ] \
+    && [ "$(operator_env readlink "$runtime/previous")" = "$CANDIDATE_RELEASE_TARGET" ] \
+    && [ "$(operator_yard --version)" = "yard $OLD_VERSION" ] \
+    || die 'rollback did not activate the published release'
+  [ "$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')" = "$history_before" ] \
+    || die 'rollback changed the migration checkpoint'
+  operator_yard migrate --check --json >"$STATE_ROOT/rollback-migrate-check.log" 2>&1 \
+    && jq -e '(.outcome // .inspection.outcome).status == "ready"' "$STATE_ROOT/rollback-migrate-check.log" >/dev/null \
+    || die 'published release does not report Ready after rollback'
+  ok 'rollback to the published release kept migration history'
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSION="$CANDIDATE_VERSION" \
+    "$OPERATOR_HOME/.local/bin/yard" update --yes \
+    || { report_failed_transition; die 'update after rollback failed'; }
+  [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
+    || die 'update after rollback did not reactivate the candidate'
+  assert_ready
+  ok 'update after rollback reached Ready again'
+fi

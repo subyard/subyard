@@ -5,7 +5,6 @@ import os
 import pathlib
 import tempfile
 import subprocess
-import sys
 import signal
 import shlex
 import time
@@ -42,12 +41,14 @@ class SinkOwnershipTests(unittest.TestCase):
                     (peer / "foreign.control").write_text("preserve")
                     (home / "e2e/foreign.control").write_text("preserve")
                 paths = [item["path"].replace("{yard}", "default") for item in declaration.get("managed_paths", []) if item["root"] == "data"]
-                tree = owner.guard.capture_tree({"Path": str(home), "Entries": [], "Scoped": True, "OwnedPaths": paths})
+                engine = str(owner.ROOT / "bin/yard")
+                tree = json.loads(subprocess.run([engine, "_teardown-guard", "capture-tree"], input=json.dumps({"Path": str(home), "Entries": [], "Scoped": True, "OwnedPaths": paths}).encode(),
+                                                 check=True, capture_output=True).stdout)
                 plan = {"Installation": {"operatorUid": os.getuid()}, "Trees": [tree]}
                 path = self.root / (mode + ".plan.json")
                 body = json.dumps(plan).encode()
                 self.write(path, body, 0o600)
-                subprocess.run([sys.executable, "-B", str(owner.ROOT / "scripts/lib/teardown-files.py")],
+                subprocess.run([engine, "_teardown-guard", "remove-files"],
                                env=dict(os.environ, SUBYARD_TEARDOWN_PLAN=str(path), SUBYARD_TEARDOWN_PLAN_SHA256=hashlib.sha256(body).hexdigest()), check=True, capture_output=True)
                 self.assertFalse(route.exists())
                 if mode == "empty":

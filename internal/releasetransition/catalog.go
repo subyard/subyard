@@ -205,34 +205,6 @@ func (catalog CapabilityCatalog) SupportsSourceMetadata(source Fingerprint, regi
 	return registry.Validate(historical) == nil
 }
 
-func (catalog CapabilityCatalog) supportsV0111PostActivationRecovery(source Fingerprint) bool {
-	if source == catalog.Digest() {
-		return true
-	}
-	// Published v0.11.1 bound only kind/domain/version. Its exact migration
-	// implementations are compatible when only rollback metadata was added.
-	const publishedV0111 Fingerprint = "49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2"
-	if source != publishedV0111 {
-		return false
-	}
-	if _, known := SupportedBuiltinCatalog(catalog.Digest()); !known {
-		return false
-	}
-	descriptors := slices.Clone(PreviousBuiltinCapabilityCatalog().descriptors)
-	for _, descriptor := range descriptors {
-		current, ok := catalog.descriptor(descriptor.Kind)
-		if !ok || current != descriptor {
-			return false
-		}
-	}
-	for index := range descriptors {
-		descriptors[index].RollbackCompatibility = ""
-		descriptors[index].LegacyMinimumVersion = ""
-	}
-	historical, err := NewCapabilityCatalog(descriptors)
-	return err == nil && historical.Digest() == publishedV0111
-}
-
 func fingerprintPayload(payload []byte) Fingerprint {
 	digest := sha256.Sum256(payload)
 	return Fingerprint(hex.EncodeToString(digest[:]))

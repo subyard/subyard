@@ -20,38 +20,24 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func clientProjectsFixture(t *testing.T) (string, []string) {
+func clientProjectsFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
-	path := filepath.Join(root, "config", "commands.registry")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, path, append(content, []byte("desktop||@client-projects|synthetic|local|mutate|never|public|projects|integration|desktop <command>|export projects|--check --config --help|export open\n")...), 0o600)
-	for _, name := range []string{"named", "remote"} {
-		if err := os.MkdirAll(filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "yards", name), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return root, append(environment, "SUBYARD_HOST_ID=local-owner")
+	// These constructors leave WorkingDir empty, as before the fixture.
+	fixture := newFixture(t, append([]fixtureOption{withWorkingDir(""), withYards("named", "remote"), withEnv("SUBYARD_HOST_ID=local-owner")}, options...)...)
+	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"desktop||@client-projects|synthetic|local|mutate|never|public|projects|integration|desktop <command>|export projects|--check --config --help|export open\n")
+	return fixture
 }
 
 func TestClientProjectsSelectsExactlyOneLocalYard(t *testing.T) {
 	for _, selector := range []string{"default", "named", "local-owner/default", "local-owner/named"} {
 		t.Run(selector, func(t *testing.T) {
-			root, environment := clientProjectsFixture(t)
-			environment = append(environment, "SUBYARD_NO_AUDIT=")
-			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-			testkit.WriteFile(t, filepath.Join(configHome, "yards", "named", "config.env"), []byte("SSH_PORT=2223\n"), 0o600)
+			fixture := clientProjectsFixture(t, withEnv("SUBYARD_NO_AUDIT="))
+			environment := fixture.Environment
+			fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "named", "config.env"), "SSH_PORT=2223\n")
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				"subyard/yard": {Status: "RUNNING"}, "subyard-named/yard-named": {Status: "RUNNING"},
 			}}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-				Arguments: []string{"-Y", selector, "desktop", "export", "--check"}, Incus: incus})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"-Y", selector, "desktop", "export", "--check"}, Incus: incus})
 			base, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -107,7 +93,7 @@ func TestClientProjectsSelectsExactlyOneLocalYard(t *testing.T) {
 }
 
 func TestClientProjectsOpenAndRetryAfterUnchangedExport(t *testing.T) {
-	root, environment := clientProjectsFixture(t)
+	fixture := clientProjectsFixture(t)
 	var stdout, stderr bytes.Buffer
 	changes := []bool{true, false, false}
 	opens, applies := 0, 0
@@ -116,7 +102,7 @@ func TestClientProjectsOpenAndRetryAfterUnchangedExport(t *testing.T) {
 		instance := incus.Instances["subyard/yard"]
 		instance.Status = "RUNNING"
 		incus.Instances["subyard/yard"] = instance
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+		program := fixture.New(Options{
 			Arguments: []string{"desktop", "open"}, Incus: incus, Stdout: &stdout, Stderr: &stderr,
 			ClientYardProbe: func(context.Context, domain.Context, domain.OwnerYard) error { return nil },
 			ClientProjects: func(context.Context, string, clientprojects.Export, string) (clientprojects.Plan, error) {
@@ -131,9 +117,6 @@ func TestClientProjectsOpenAndRetryAfterUnchangedExport(t *testing.T) {
 					}}, nil
 			},
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		code := program.Run(context.Background())
 		if (index == 0 && code != 1) || (index != 0 && code != 0) {
 			t.Fatalf("retry %d: exit=%d stderr=%s", index, code, stderr.String())
@@ -147,7 +130,8 @@ func TestClientProjectsOpenAndRetryAfterUnchangedExport(t *testing.T) {
 func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 	for _, scenario := range []string{"canonical", "legacy", "unreachable", "identity", "missing-route", "probe", "ambiguous", "drift"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment := clientProjectsFixture(t)
+			fixture := clientProjectsFixture(t)
+			environment := fixture.Environment
 			live := inventoryResult("remote-owner", "default", "Live").inventory
 			live.Yards[0].Projects[0].Target = "synthetic-profile"
 			if scenario == "identity" {
@@ -168,7 +152,7 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 			if scenario == "ambiguous" {
 				live.Yards[0].Name = "named"
 				writeHostRPCFixture(t, filepath.Join(bin, "response"), live)
-				testkit.WriteFile(t, filepath.Join(configHome, "yards", "named", "config.env"), []byte("SSH_PORT=2223\n"), 0o600)
+				fixture.Write(filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=2223\n")
 			}
 			if err := store.Write(connection); err != nil {
 				t.Fatal(err)
@@ -189,7 +173,7 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 			selector := "remote-owner/default"
 			if scenario == "legacy" {
 				selector = "remote"
-				testkit.WriteFile(t, filepath.Join(configHome, "yards", "remote", "config.env"), []byte("ACCESS_KIND=remote\nOWNER_ENDPOINT=owner-alias\nOWNER_YARD_NAME=default\nSSH_HOST=yard-remote\n"), 0o600)
+				fixture.Write(filepath.Join(configHome, "yards", "remote", "config.env"), "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner-alias\nOWNER_YARD_NAME=default\nSSH_HOST=yard-remote\n")
 			}
 			if scenario == "ambiguous" {
 				selector = "named"
@@ -201,7 +185,7 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 			instance.Status = "RUNNING"
 			incus.Instances["subyard/yard"] = instance
 			incus.Instances["subyard-named/yard-named"] = ports.InstanceInfo{Status: "RUNNING"}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+			program := fixture.New(Options{
 				Arguments: []string{"-Y", selector, "desktop", "export"}, Incus: incus, Stdout: &stdout, Stderr: &stderr,
 				ClientYardProbe: func(_ context.Context, route domain.Context, yard domain.OwnerYard) error {
 					if scenario == "probe" {
@@ -222,9 +206,6 @@ func TestClientProjectsRemoteFreshAndFailClosed(t *testing.T) {
 					return clientprojects.Plan{Target: "/synthetic/config", Changed: true, Apply: func(context.Context) error { applies++; return nil }}, nil
 				},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			code := program.Run(context.Background())
 			wantOK := scenario == "canonical" || scenario == "legacy"
 			wantPrepared := 0
@@ -260,15 +241,16 @@ func TestClientYardProbeRejectsOwnerOrMissingAlias(t *testing.T) {
 			if scenario == "missing" {
 				body = "hostname yard-synthetic\nuser dev\nport 22\n"
 			}
-			probe := "printf 'yard-synthetic\\ndev\\nsubyard-workspaces\\n'"
+			probe := testkit.Reply{Stdout: "yard-synthetic\ndev\nsubyard-workspaces\n"}
 			if scenario == "owner" {
-				probe = "printf 'owner-host\\ndev\\nsubyard-workspaces\\n'"
+				probe = testkit.Reply{Stdout: "owner-host\ndev\nsubyard-workspaces\n"}
 			}
 			if scenario == "unreachable" {
-				probe = "exit 255"
+				probe = testkit.Reply{Exit: 255}
 			}
-			programPath := filepath.Join(root, "ssh")
-			testkit.WriteFile(t, programPath, []byte("#!/bin/sh\nif [ \"${1-}\" = -G ]; then printf '"+body+"'; exit 0; fi\n"+probe+"\n"), 0o700)
+			testkit.NewExecFake(t, root, "ssh").
+				On(testkit.Match{Prefix: []string{"-G"}}, testkit.Reply{Stdout: body}).
+				On(testkit.Match{}, probe)
 			t.Setenv("PATH", root+":"+os.Getenv("PATH"))
 			program := &CLI{env: map[string]string{}}
 			err := program.probeClientYard(context.Background(), domain.Context{SSHHost: "synthetic-alias"}, domain.OwnerYard{Instance: "yard-synthetic", DevUser: "dev", SSHPort: 2222})
@@ -280,8 +262,8 @@ func TestClientYardProbeRejectsOwnerOrMissingAlias(t *testing.T) {
 }
 
 func TestClientProjectsRPCRefusedBeforePreparation(t *testing.T) {
-	root, environment := clientProjectsFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	fixture := clientProjectsFixture(t)
+	program := fixture.New(Options{
 		ClientYardProbe: func(context.Context, domain.Context, domain.OwnerYard) error {
 			t.Fatal("RPC reached the native SSH probe")
 			return nil
@@ -290,9 +272,6 @@ func TestClientProjectsRPCRefusedBeforePreparation(t *testing.T) {
 			return clientprojects.Plan{}, nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

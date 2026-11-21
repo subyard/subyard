@@ -133,19 +133,6 @@ func (store *POSIXV2Store) ReadSupersededJournal(
 	)
 }
 
-func (store *POSIXV2Store) CreateSupersededJournal(
-	transaction TransactionID,
-	payload []byte,
-) error {
-	if err := validateTransactionID(transaction); err != nil {
-		return err
-	}
-	return store.createImmutable(
-		[]string{"release-transition", "v2", "transactions", string(transaction)},
-		"superseded-journal.json", payload,
-	)
-}
-
 var replacedJournalParts = []string{"release-transition-replaced-journals", "v1"}
 
 // PreserveReplacedJournal keeps the exact bytes of an unfinished journal that a
@@ -248,105 +235,6 @@ func (store *POSIXV2Store) journalIsReserved(transaction TransactionID) (bool, e
 		}
 	}
 	return false, nil
-}
-
-// ResolveSupersededJournalTransaction admits a proposed successor only after
-// validating the complete immutable archive graph with its new predecessor
-// edge. An exact pre-CAS archive is reused across process restarts.
-func (store *POSIXV2Store) ResolveSupersededJournalTransaction(
-	proposed TransactionID,
-	replacement JournalReplacement,
-	authorizationPlan PlanToken,
-) (TransactionID, error) {
-	if store == nil {
-		return "", errors.New("release transition store is required")
-	}
-	if err := validateTransactionID(proposed); err != nil {
-		return "", err
-	}
-	if err := replacement.Validate(); err != nil {
-		return "", err
-	}
-	if replacement.Reason != JournalReplacementPostActivationScopeV0111 {
-		return "", invalid("superseded journal requires post-activation replacement")
-	}
-	if err := validatePlanToken(authorizationPlan); err != nil {
-		return "", err
-	}
-	graph, err := store.readTransactionGraph()
-	if err != nil {
-		return "", err
-	}
-	if graph == nil {
-		graph = &v2TransactionGraph{
-			directories: map[TransactionID]struct{}{},
-			known:       map[TransactionID]struct{}{},
-			archives:    map[TransactionID]SupersededJournalRecord{},
-			edges:       map[TransactionID]TransactionID{},
-			successors:  map[TransactionID]TransactionID{},
-		}
-	}
-	if err := graph.validateMissingPredecessors(); err != nil {
-		return "", err
-	}
-	if successor, exists := graph.successors[replacement.Transaction]; exists {
-		archive := graph.archives[successor]
-		if archive.AuthorizationPlan == authorizationPlan && archive.Replacement == replacement {
-			return successor, nil
-		}
-		return "", errors.New("journal replacement source already has a different successor")
-	}
-	if _, exists := graph.edges[replacement.Transaction]; exists {
-		return "", errors.New("journal replacement source already has a predecessor")
-	}
-	if proposed == replacement.Transaction {
-		return "", errors.New("journal replacement transaction would form a cycle")
-	}
-	if _, exists := graph.known[proposed]; exists {
-		matches, matchErr := store.pendingSupersededJournalMatches(
-			proposed, replacement, authorizationPlan,
-		)
-		if matchErr != nil {
-			return "", matchErr
-		}
-		if matches {
-			return proposed, nil
-		}
-		return "", errors.New("journal replacement transaction already exists")
-	}
-	if len(graph.entries)+1 > maxTransactionGraphEntries {
-		return "", errors.New("release transition recovery transaction graph is too large")
-	}
-	return proposed, nil
-}
-
-func (store *POSIXV2Store) pendingSupersededJournalMatches(
-	transaction TransactionID,
-	replacement JournalReplacement,
-	authorizationPlan PlanToken,
-) (bool, error) {
-	root := filepath.Join(
-		store.configHome, "release-transition", "v2", "transactions", string(transaction),
-	)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return false, err
-	}
-	const pendingName = ".superseded-journal.json.pending"
-	if len(entries) != 1 || entries[0].Name() != pendingName {
-		return false, nil
-	}
-	snapshot, err := store.readRecord(
-		[]string{"release-transition", "v2", "transactions", string(transaction)}, pendingName,
-	)
-	if err != nil || !snapshot.Exists {
-		return false, err
-	}
-	archive, err := ParseSupersededJournal(snapshot.Payload)
-	if err != nil {
-		return false, err
-	}
-	return archive.AuthorizationPlan == authorizationPlan && archive.Replacement == replacement, nil
 }
 
 func (store *POSIXV2Store) ReadCompatibilityEvidence(

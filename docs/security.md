@@ -1,5 +1,25 @@
 # Security boundary
 
+## Threat model
+
+Don't keep hostile agents in your backyard. A yard is for your own agents: it protects the host
+and personal data from their mistakes, and it favors efficient use and reuse of compute
+resources over full isolation. A wrong command, a broken dependency or a runaway process affects
+one yard, and a damaged yard can be deleted and recreated without cleaning the host.
+
+Subyard is not designed to contain an agent that turns hostile, for example after memory
+poisoning or prompt injection from a repository, web page or tool output. Container yards share
+the host kernel, and caches, session history and services inside a yard are shared on purpose.
+Such an agent can use everything the yard was given: project files, forwarded or delivered
+credentials, GitHub authorization, network access and shared session history. Commit and push
+prompts belong to the coding tool and are not a credential boundary.
+
+Run untrusted code or untrusted input in a separate yard without credentials, or in a
+[disposable VM](test-vms.md). See the
+[trust boundary decision](reference/decisions-and-glossary.md#subyard-model) for the rationale.
+
+## Container boundary
+
 Subyard's default yard is a restricted, unprivileged Incus container. This separates the yard's
 users, files, processes, devices, and managed network from the owner host while mapping container
 root to an unprivileged host identity.

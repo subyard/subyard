@@ -71,7 +71,7 @@ class ReleaseObservationTest(unittest.TestCase):
                 'STORAGE_PATH': str(root), 'HOST_BASE': str(root), 'RESTRICTED_DISK_PATHS': str(root),
                 'ACCESS_KIND': 'local', 'YARD_KIND': 'container', 'YARD_INSTANCE_NAME': 'yard',
                 'INCUS_PROJECT': 'subyard', 'INCUS_BRIDGE': 'fixture', 'SSH_HOST': '127.0.0.1',
-                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': '0',
+                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': 'no',
                 'FORWARD_SSH_AGENT': '0', 'NESTED_E2E_VMS': '0', 'ENVIRONMENT_PROFILES': '',
             }
 

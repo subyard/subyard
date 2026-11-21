@@ -228,16 +228,6 @@ func TestInfrastructureServiceLifecycleExecutesOnlyParentApproval(t *testing.T) 
 					t.Fatal(err)
 				}
 				selection := infrastructureFixture(t, program, incus, "fixture-service")
-				if action == "remove" {
-					helper, err := os.ReadFile("../../scripts/lib/teardown-plan.py")
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := os.MkdirAll(filepath.Join(root, "scripts/lib"), 0o700); err != nil {
-						t.Fatal(err)
-					}
-					testkit.WriteFile(t, filepath.Join(root, "scripts/lib/teardown-plan.py"), helper, 0o644)
-				}
 				loaded, err := program.loadContext("default")
 				if err != nil {
 					t.Fatal(err)

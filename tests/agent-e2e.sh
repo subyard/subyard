@@ -96,7 +96,6 @@ done
 (
   eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
     lane_vm_count preflight_lane dependency_lane clean_peers cleanup_lane)"
-  BROKER_RECOVERY_ONLY=0
   P0_NESTED_VM=1
   for P0_LANE in smoke full peer; do
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
@@ -107,9 +106,6 @@ done
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2
   [ "$(lane_vm_count)" = 2 ] || fail 'explicit VM2 nested teardown lost its selected guest'
-  BROKER_RECOVERY_ONLY=1
-  [ "$(lane_vm_count)" = 1 ] || fail 'broker diagnostic requested an unused outer guest'
-  BROKER_RECOVERY_ONLY=0
   for P0_LANE in smoke full-uninstall; do
     ENVIRONMENT_TYPE=subyard-pair
     eval "$(sed -n '/^LEASE_PURPOSE="p0-/,/^acquire_lease$/ { /^acquire_lease$/d; p; }' "$ROOT/dev/e2e/p0-acceptance.sh")"
@@ -2750,121 +2746,12 @@ for owner_sink_scenario in success absent metadata-only busy-lock unsafe-lock un
       esac
     ' || fail "P0 owner sink cleanup violated $owner_sink_scenario isolation"
 done
-remove_reclaim_fixture_source="$(sed -n \
-  '/^remove_reclaim_fixture() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-reclaim_cleanup_attempts="$TMP/reclaim-cleanup-attempts"
-: > "$reclaim_cleanup_attempts"
-set +e
-REMOVE_RECLAIM_FIXTURE_SOURCE="$remove_reclaim_fixture_source" \
-  RECLAIM_CLEANUP_ATTEMPTS="$reclaim_cleanup_attempts" bash -c '
-    set -u
-    eval "$REMOVE_RECLAIM_FIXTURE_SOURCE"
-    RECLAIM_MARKER=subyard-p0-release-reclaim-v1:1234abcd
-    RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
-    ssh() {
-      target=
-      for argument do
-        case "$argument" in e2e-vm-[12]) target=$argument ;; esac
-      done
-      printf "%s\n" "$target" >> "$RECLAIM_CLEANUP_ATTEMPTS"
-      [ "$target" != e2e-vm-1 ]
-    }
-    remove_reclaim_fixture fixture-config
-  '
-reclaim_cleanup_rc=$?
-set -e
-[ "$reclaim_cleanup_rc" -ne 0 ] \
-  && [ "$(cat "$reclaim_cleanup_attempts")" = $'e2e-vm-1\ne2e-vm-2' ] \
-  || fail "reclaim cleanup did not preserve VM1 failure while attempting VM2: rc=$reclaim_cleanup_rc"
-# Disposable release must prove both instance and root-volume absence. An empty
-# instance inventory alone must not hide retained disk resources.
-slot_empty_source="$(sed -n '/^assert_slot_empty() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-for slot_inventory_case in empty instances root-volume foreign-project; do
-  set +e
-  SLOT_EMPTY_SOURCE="$slot_empty_source" SLOT_INVENTORY_CASE="$slot_inventory_case" bash -c '
-    set -euo pipefail
-    eval "$SLOT_EMPTY_SOURCE"
-    die() { exit 2; }
-    outer_root() {
-      case "$*" in
-        "incus project get subyard-e2e-vms-slot-2 user.subyard.managed")
-          if [ "$SLOT_INVENTORY_CASE" = foreign-project ]; then printf "foreign\n";
-          else printf "test-vms-v1\n"; fi ;;
-        "incus list --project subyard-e2e-vms-slot-2 --format json")
-          if [ "$SLOT_INVENTORY_CASE" = instances ]; then printf "[{\"name\":\"e2e-vm-1\"}]\n";
-          else printf "[]\n"; fi ;;
-        "incus storage volume list default --project subyard-e2e-vms-slot-2 --format json")
-          if [ "$SLOT_INVENTORY_CASE" = root-volume ]; then printf "[{\"type\":\"virtual-machine\"}]\n";
-          else printf "[]\n"; fi ;;
-        *) exit 3 ;;
-      esac
-    }
-    assert_slot_empty 2
-  '
-  slot_inventory_rc=$?
-  set -e
-  if [ "$slot_inventory_case" = empty ]; then
-    [ "$slot_inventory_rc" = 0 ] || fail 'empty owned disposable slot was rejected'
-  else
-    [ "$slot_inventory_rc" = 2 ] \
-      || fail "disposable release accepted $slot_inventory_case: rc=$slot_inventory_rc"
-  fi
-done
-grep -Fq '"$runtime_root/current/bin/yard" update \' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && ! grep -Fq 'scripts/install-runtime-release.sh' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  || fail 'P0 broker recovery bypasses the release-transition owner'
-recovery_wait_source="$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" wait_for_slot_state)"
-recovery_clock="$TMP/recovery-clock"
-recovery_status_budgets="$TMP/recovery-status-budgets"
-recovery_sleep_log="$TMP/recovery-sleep-log"
-printf '0\n' > "$recovery_clock"
-: > "$recovery_status_budgets"
-: > "$recovery_sleep_log"
-set +e
-recovery_wait_output="$({
-  RECOVERY_WAIT_SOURCE="$recovery_wait_source" \
-    RECOVERY_CLOCK="$recovery_clock" \
-    RECOVERY_STATUS_BUDGETS="$recovery_status_budgets" \
-    RECOVERY_SLEEP_LOG="$recovery_sleep_log" bash -c '
-      set -eu
-      eval "$RECOVERY_WAIT_SOURCE"
-      RECOVERY_POLL_SECONDS=2
-      RECOVERY_STATUS_TIMEOUT_SECONDS=30
-      RECOVERY_STATUS_KILL_AFTER_SECONDS=10
-      recovery_monotonic_seconds() { cat "$RECOVERY_CLOCK"; }
-      status() {
-        request_timeout=$1
-        printf "%s\n" "$request_timeout" >> "$RECOVERY_STATUS_BUDGETS"
-        now="$(cat "$RECOVERY_CLOCK")"
-        printf "%s\n" "$((now + request_timeout + RECOVERY_STATUS_KILL_AFTER_SECONDS))" \
-          > "$RECOVERY_CLOCK"
-        return 124
-      }
-      sleep() {
-        printf "%s\n" "$1" >> "$RECOVERY_SLEEP_LOG"
-        now="$(cat "$RECOVERY_CLOCK")"
-        printf "%s\n" "$((now + $1))" > "$RECOVERY_CLOCK"
-      }
-      wait_for_slot_state slot-001 available 65
-    '
-} 2>&1)"
-recovery_wait_rc=$?
-set -e
-[ "$recovery_wait_rc" = 1 ] \
-  && [ "$(cat "$recovery_clock")" = 65 ] \
-  && [ "$(cat "$recovery_status_budgets")" = $'30\n13' ] \
-  && [ "$(cat "$recovery_sleep_log")" = 2 ] \
-  || fail "P0 broker recovery wait exceeded its wall-clock deadline: rc=$recovery_wait_rc output=$recovery_wait_output"
 (
   holder_pid=''
   trap '
     [ -z "$holder_pid" ] || kill -KILL -- "-$holder_pid" >/dev/null 2>&1 || true
   ' EXIT
-  eval "$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" \
+  eval "$(fixture_functions "$ROOT/dev/e2e/lease-holder.sh" \
     recovery_monotonic_seconds start_holder_child stop_holder_child)"
   # Consumed by the dynamically extracted helper.
   # shellcheck disable=SC2034
@@ -2882,11 +2769,7 @@ set -e
   stop_holder_child "$holder_pid" 2>/dev/null
   [ "$((SECONDS - started))" -le 4 ] \
     && ! kill -0 -- "-$holder_pid" >/dev/null 2>&1
-) || fail 'P0 broker recovery readiness timeout does not bound holder process-group shutdown'
-if grep -Fq 'mask --runtime --now incus.service' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh"; then
-  fail "P0 broker recovery fault injection drains unrelated held leases"
-fi
+) || fail 'lease holder process-group shutdown exceeded its deadline'
 grep -Fq 'SOURCE_INGRESS_ROOT' "$ROOT/dev/bootstrap-runtime.sh" \
   && grep -Fq 'Sources before v0.11.0 are unsupported.' "$ROOT/dev/bootstrap-runtime.sh" \
   && [ ! -e "$ROOT/scripts/migrate-source-install.sh" ] \
@@ -5234,7 +5117,7 @@ smoke_rollback_fixture_contract() {
   (
     set -euo pipefail
     local scenario="$1" fixture="$TMP/smoke-rollback-$1"
-    for function_name in verify_smoke_state capture_smoke_release_state establish_smoke_ownership verify_predecessor_rollback_refusal finish_smoke; do
+    for function_name in verify_smoke_state capture_smoke_release_state establish_smoke_ownership verify_predecessor_rollback_refusal history_verdict verify_retired_prefix_rollback finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
     for function_name in assert_registered_ownership establish_registered_ownership; do
@@ -5243,8 +5126,10 @@ smoke_rollback_fixture_contract() {
     eval "$(sed -n '/^classify_epoch_rollback_refusal() {/,/^}/p' "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh")"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+    RETIRED_RELEASE_ROOT="$STATE_ROOT/retired-release" RETIRED_VERSION=retired
     OLD_VERSION=predecessor CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+    smoke_retired_target=releases/retired-bbbbbbbbbbbb
     OLD_RELEASE_TARGET=releases/predecessor-bbbbbbbbbbbb
     V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
     V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
@@ -5301,9 +5186,24 @@ smoke_rollback_fixture_contract() {
         stat)
           if [ "$3" = '%a:%u' ]; then printf '%s:2000\n' "$(stat -c '%a' "$4")"; else "$@"; fi ;;
         grep|jq|sha256sum|test) "$@" ;;
+        "$OPERATOR_HOME/.subyard/runtime/current/bin/yard-engine")
+          [ "$*" = "$1 _history-compatibility $OPERATOR_HOME/.subyard/runtime $OPERATOR_HOME/.config/subyard ${5}" ] \
+            || die 'unexpected history verdict arguments'
+          local current
+          current="$(cat "$STATE_ROOT/current")"
+          if [ "$current" = "$smoke_retired_target" ] && [ "$5" = "${CANDIDATE_RELEASE_TARGET#releases/}" ]; then
+            [ "$scenario" != retired-refused ] || { printf '{"admitted":false,"kind":"equivalent","registry":"differs"}\n'; return 1; }
+            printf '{"admitted":true,"kind":"equivalent","registry":"differs","successor":false,"declaredPredecessor":true,"declaredSuccessor":false}\n'
+          elif [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$5" = "${smoke_retired_target#releases/}" ]; then
+            [ "$scenario" != retired-successor-refused ] || { printf '{"admitted":false,"kind":"equivalent","successor":true}\n'; return 1; }
+            printf '{"admitted":true,"kind":"equivalent","registry":"differs","successor":true,"declaredPredecessor":false,"declaredSuccessor":true}\n'
+          else
+            die 'unexpected history verdict target'
+          fi ;;
         env)
           [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] \
             || [ "$2" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] \
+            || [ "$2" = "YARD_RELEASE_BASE_URL=file://$RETIRED_RELEASE_ROOT" ] \
             || die 'unexpected release source'
           if [ "$3" = "$RELEASE_ROOT/subyard-install.sh" ]; then
             [ "$*" = "env YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT $RELEASE_ROOT/subyard-install.sh --version $CANDIDATE_VERSION --publish-only --yes" ] \
@@ -5384,10 +5284,15 @@ smoke_rollback_fixture_contract() {
             esac
             return 1
           fi
-          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] \
-            && [ "$previous" = releases/compatible-bbbbbbbbbbbb ] || die 'unexpected compatible rollback'
+          { [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$previous" = releases/compatible-bbbbbbbbbbbb ]; } \
+            || { [ "$current" = "$smoke_retired_target" ] && [ "$previous" = "$CANDIDATE_RELEASE_TARGET" ]; } \
+            || die 'unexpected compatible rollback'
           [ "$scenario" != rollback-fail ] || return 45
           next="$previous"
+          ;;
+        'update --version retired --yes')
+          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'retired update started from foreign runtime'
+          next="$smoke_retired_target"
           ;;
         'update --version compatible --yes')
           [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'compatible setup started from foreign runtime'
@@ -5430,8 +5335,8 @@ smoke_rollback_fixture_contract() {
     [ ! -e "$STATE_ROOT/restart" ] && [ ! -e "$STATE_ROOT/probes" ] \
       || die 'ordinary init added an unnecessary restart or probe'
     assert_registered_ownership
-    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
-    [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$smoke_retired_target"
+    [ "$(wc -l < "$STATE_ROOT/updates")" = 8 ] || die 'compatible or retired smoke cycle lost a transition'
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
   )
 }
@@ -5444,7 +5349,8 @@ for smoke_rollback_scenario in success \
   missing-history-checkpoint.json missing-ledger.json missing-journal.json \
   wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
   rollback-fail rollforward-fail other-blocker epoch-blocker registry-blocker registry-wrong-code \
-  registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change; do
+  registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change \
+  retired-refused retired-successor-refused; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
@@ -5496,9 +5402,15 @@ for smoke_rollback_scenario in success \
           || fail 'release smoke enrolled without registered ownership' ;;
     esac
     case "$smoke_rollback_scenario" in
-      unexpected-grant|installation-change|rollback-fail|rollforward-fail) ;;
+      unexpected-grant|installation-change|rollback-fail|rollforward-fail|retired-refused|retired-successor-refused) ;;
       *) [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
         || fail 'release smoke continued after invalid ownership, init, enrollment or predecessor refusal' ;;
+    esac
+    case "$smoke_rollback_scenario" in
+      retired-refused) grep -Fq 'release smoke retired-prefix verdict is not a declared predecessor' "$smoke_rollback_log" \
+        || fail 'release smoke did not stop at the retired-prefix verdict' ;;
+      retired-successor-refused) grep -Fq 'release smoke candidate does not admit its retired successor' "$smoke_rollback_log" \
+        || fail 'release smoke did not stop at the retired successor verdict' ;;
     esac
   fi
 done
@@ -6223,7 +6135,7 @@ operator_yard() {
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
-    'config set '*|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
@@ -6240,6 +6152,10 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
+# The creation runtime removes the DEV_SUDO assignment before the hop update.
+[ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
+  -e "yard update --version $HOP_VERSION --yes" "$trace")" \
+  = "yard config unset DEV_SUDO --scope host --yes"$'\n'"yard update --version $HOP_VERSION --yes" ]
 jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
 PUBLISHED_OWNER
 

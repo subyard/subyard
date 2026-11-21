@@ -3,6 +3,7 @@ package releasetransition
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 
 	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
@@ -149,6 +150,37 @@ func (registry RegistryV2) MigrationPrefixDigest(domain string, throughEpoch int
 		digest = fingerprintPayload(payload)
 	}
 	return digest, nil
+}
+
+// RetirePrefixes re-expresses the registry with each named domain's history
+// through the given epoch retired: the floor rises to that epoch, the covered
+// definitions leave and MigrationPrefixDigest of this registry becomes the
+// retired digest. Later definitions stay unchanged, since prefix digests chain
+// them. The result is not validated.
+func (registry RegistryV2) RetirePrefixes(through map[string]int) (RegistryV2, error) {
+	retired := RegistryV2{
+		SchemaVersion: registry.SchemaVersion,
+		MinimumEpochs: maps.Clone(registry.MinimumEpochs), CurrentEpochs: maps.Clone(registry.CurrentEpochs),
+		RetiredPrefixes: maps.Clone(registry.RetiredPrefixes),
+	}
+	if len(through) != 0 && retired.RetiredPrefixes == nil {
+		retired.RetiredPrefixes = make(map[string]RetiredMigrationPrefixV2, len(through))
+	}
+	for domain, epoch := range through {
+		digest, err := registry.MigrationPrefixDigest(domain, epoch)
+		if err != nil {
+			return RegistryV2{}, err
+		}
+		retired.MinimumEpochs[domain] = epoch
+		retired.RetiredPrefixes[domain] = RetiredMigrationPrefixV2{ThroughEpoch: epoch, Digest: digest}
+	}
+	for _, migration := range registry.Migrations {
+		if epoch, retiring := through[migration.Domain]; retiring && migration.ToEpoch <= epoch {
+			continue
+		}
+		retired.Migrations = append(retired.Migrations, migration)
+	}
+	return retired, nil
 }
 
 func migrationPrefixSeed(domain string, epoch int) (Fingerprint, error) {

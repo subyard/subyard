@@ -390,6 +390,15 @@ BASELINE_CONFIG
   incus stop "$INSTANCE" --project "$PROJECT"
   operator_env jq -e '.schemaVersion == 1 and (.files | length) > 0' \
     "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
+  # No DEV_SUDO value is valid on both runtimes. As the release notes ask, the operator
+  # removes the assignment with the old engine and updates; absent means the old runtime's
+  # passwordless sudo and the candidate's default prompt.
+  # The hop runtime saves no local settings before the Git settings migration, so the
+  # removal uses the creation runtime.
+  operator_yard config unset DEV_SUDO --scope host --yes
+  if operator_env grep -q '^DEV_SUDO=' "$OPERATOR_HOME/.config/subyard/config.env"; then
+    die 'baseline DEV_SUDO assignment was not removed'
+  fi
   manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
   # A below-anchor install follows the printed route through the hop release.
   IFS=$'\t' read -r hop_version _ hop_sha _ < <(published_hop)
@@ -516,6 +525,19 @@ bootstrap_candidate() {
   fi
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'standalone installer invoked Go'
+}
+
+# The documented route from the hop is a plain yard update; the candidate is packaged locally.
+update_candidate() { # <release> <version>
+  local release="$1" version="$2" status=0
+  operator_no_go env YARD_RELEASE_BASE_URL="file://$release" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --yes || status=$?
+  if [ "$status" -ne 0 ]; then
+    bootstrap_failure_diagnostics || true
+    return "$status"
+  fi
+  operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
+    || die 'release update invoked Go'
 }
 
 verify_v2_release_transition() { # <version>
@@ -989,7 +1011,10 @@ prepare() {
   seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
-  if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
+  if incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then
+    die 'the baseline runtime installed Codex sudo prompts'
+  fi
+  if update_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
     update_rc=$?
@@ -999,10 +1024,19 @@ prepare() {
   grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
+  # The old default converges to prompt without operator action: release activation
+  # reprovisions the running yard's agents with sudo prompts and keeps the grant.
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml \
+    || die 'update did not install the default Codex sudo prompts'
+  incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- runuser -u dev -- sudo -n true \
+    || die 'update removed the passwordless grant'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
     && [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
     || die 'update changed the retained legacy owner'
   recreate_legacy_test_owner
+  # Config commands follow the settings migration that recreation performs.
+  grep -Fxq 'effective: prompt' <<<"$(operator_yard config show DEV_SUDO)" \
+    || die 'updated runtime does not default DEV_SUDO to prompt'
   incus project set "$PROJECT" user.p0-source="$MARKER"
   [ "$(operator_yard version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'

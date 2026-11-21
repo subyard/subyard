@@ -96,16 +96,21 @@ func (edit StartupEdit) PrepareApply() (StartupEdit, error) {
 	if edit.Pending != nil || len(edit.Blocks) == 0 || len(edit.Before.Entries) == 0 {
 		return edit, nil
 	}
-	err := nativeArtifact("prepare-startup", edit, &edit)
-	return edit, err
+	prepared, err := edit.prepare()
+	if err != nil {
+		return edit, classify("prepare-startup", err)
+	}
+	return prepared, nil
 }
 func (edit StartupEdit) CommitApply() (Tree, error) {
 	if edit.Pending == nil {
 		return edit.Before, nil
 	}
-	var updated Tree
-	err := nativeArtifact("commit-startup", edit, &updated)
-	return updated, err
+	updated, err := edit.commit()
+	if err != nil {
+		return Tree{}, classify("commit-startup", err)
+	}
+	return updated, nil
 }
 
 // KeepBinPath preserves a PATH entry when any neighboring executable or

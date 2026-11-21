@@ -8,17 +8,87 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestImmutableRetrySyncsRecordDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory read permission used to induce a sync failure")
+	}
+	directory := testkit.TempDir(t)
+	path := filepath.Join(directory, "record.json")
+	payload := []byte("same record")
+	testkit.WriteFile(t, path, payload, 0o600)
+	if err := os.Chmod(directory, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(directory, 0o700)
+	if err := writeImmutableDurable(path, payload, 0o600); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("equal-content retry without a readable parent = %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != string(payload) {
+		t.Fatalf("equal-content retry changed the record: %q, %v", data, err)
+	}
+}
+
+func TestImmutableAdoptionChangesGroupOnOpenRecord(t *testing.T) {
+	currentGID := os.Getegid()
+	var newGID int
+	if os.Geteuid() == 0 {
+		newGID = currentGID + 1
+	} else {
+		newGID = currentGID
+		groups, err := os.Getgroups()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, gid := range groups {
+			if gid != currentGID {
+				newGID = gid
+				break
+			}
+		}
+		if newGID == currentGID {
+			t.Skip("a second permitted gid is required")
+		}
+	}
+	path := filepath.Join(testkit.TempDir(t), "record.json")
+	payload := []byte("original")
+	testkit.WriteFile(t, path, payload, 0o600)
+	record, err := safefs.OpenRegular(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer record.Close()
+	moved := path + ".moved"
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("replacement"), 0o600)
+	if err := compareImmutable(record, payload, &safefs.Ownership{UID: -1, GID: newGID}, false); err != nil {
+		t.Fatal(err)
+	}
+	for path, gid := range map[string]int{moved: newGID, path: currentGID} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group := int(info.Sys().(*syscall.Stat_t).Gid); group != gid {
+			t.Fatalf("record %s group = %d, want %d", path, group, gid)
+		}
+	}
+}
 
 func TestEventRecorderPersistsRedactedImmutableSpoolAndAcknowledges(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return now },
 	}
@@ -112,7 +182,7 @@ func TestLeaseContextTreatsRollbackDroppedYardAsUnknownV2(t *testing.T) {
 func TestHostSinkReplayIsIdempotentAndOpenIncidentIsNotRotated(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return now },
 	}
@@ -142,7 +212,7 @@ func TestHostSinkReplayIsIdempotentAndOpenIncidentIsNotRotated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataHome := t.TempDir()
+	dataHome := testkit.TempDir(t)
 	ackFails := true
 	runner := &fakeRunner{handler: func(
 		_ string,
@@ -204,7 +274,7 @@ func TestHostSinkReplayIsIdempotentAndOpenIncidentIsNotRotated(t *testing.T) {
 func TestHostSinkRotatesOnlyResolvedIncidents(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return created },
 	}
@@ -235,7 +305,7 @@ func TestHostSinkRotatesOnlyResolvedIncidents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataHome := t.TempDir()
+	dataHome := testkit.TempDir(t)
 	sink := &HostSink{
 		DataHome:    dataHome,
 		Now:         func() time.Time { return created.Add(31 * 24 * time.Hour) },
@@ -272,7 +342,7 @@ func TestHostSinkResolvedIncidentCapRemovesOldestFirst(t *testing.T) {
 	) (SpoolBatch, IncidentArtifact) {
 		t.Helper()
 		recorder := EventRecorder{
-			StateDir: t.TempDir(),
+			StateDir: testkit.TempDir(t),
 			Source:   "test-yard",
 			Now:      func() time.Time { return at },
 		}
@@ -310,7 +380,7 @@ func TestHostSinkResolvedIncidentCapRemovesOldestFirst(t *testing.T) {
 		Events:        append(firstBatch.Events, secondBatch.Events...),
 		Incidents:     append(firstBatch.Incidents, secondBatch.Incidents...),
 	}
-	dataHome := t.TempDir()
+	dataHome := testkit.TempDir(t)
 	sink := &HostSink{
 		DataHome:          dataHome,
 		Now:               func() time.Time { return secondAt.Add(time.Hour) },
@@ -349,7 +419,7 @@ func TestHostSinkResolvedIncidentCapRemovesOldestFirst(t *testing.T) {
 func TestHostSinkBoundsEventsWithoutDroppingRetainedIncidentTimeline(t *testing.T) {
 	created := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return created },
 	}
@@ -387,7 +457,7 @@ func TestHostSinkBoundsEventsWithoutDroppingRetainedIncidentTimeline(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataHome := t.TempDir()
+	dataHome := testkit.TempDir(t)
 	sink := &HostSink{
 		DataHome:          dataHome,
 		Now:               func() time.Time { return created.Add(91 * 24 * time.Hour) },
@@ -410,7 +480,7 @@ func TestHostSinkBoundsEventsWithoutDroppingRetainedIncidentTimeline(t *testing.
 	}
 
 	secondRecorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return created.Add(92 * 24 * time.Hour) },
 	}
@@ -466,7 +536,7 @@ func TestHostSinkBoundsEventsWithoutDroppingRetainedIncidentTimeline(t *testing.
 func TestBrokerEventsKeepProducerOrderAtTheSameTimestamp(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	recorder := EventRecorder{
-		StateDir: t.TempDir(),
+		StateDir: testkit.TempDir(t),
 		Source:   "test-yard",
 		Now:      func() time.Time { return now },
 	}
@@ -482,7 +552,7 @@ func TestBrokerEventsKeepProducerOrderAtTheSameTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataHome := t.TempDir()
+	dataHome := testkit.TempDir(t)
 	if err := (&HostSink{DataHome: dataHome, OperatorGID: -1, Now: recorder.Now}).Ingest(batch); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +590,7 @@ func TestHostSinkSkipsProducerWithoutSpoolSchemaMarker(t *testing.T) {
 		}]`), nil, nil
 	}}
 	sink := &HostSink{
-		DataHome:    t.TempDir(),
+		DataHome:    testkit.TempDir(t),
 		Runner:      runner,
 		OperatorGID: -1,
 	}
@@ -559,7 +629,7 @@ func TestHostSinkAcceptsImmediatePreviousProducerDuringRollback(t *testing.T) {
 		}
 	}}
 	sink := &HostSink{
-		DataHome:    t.TempDir(),
+		DataHome:    testkit.TempDir(t),
 		Runner:      runner,
 		OperatorGID: -1,
 	}
@@ -655,7 +725,7 @@ func TestEventRecorderKeepsRecentQMPRecordsAfterFullRedaction(t *testing.T) {
 
 func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	recorder := EventRecorder{StateDir: t.TempDir(), Source: "test-yard", Now: func() time.Time { return created }}
+	recorder := EventRecorder{StateDir: testkit.TempDir(t), Source: "test-yard", Now: func() time.Time { return created }}
 	builder, err := recorder.SaveIncident(LeaseSlot{SlotID: "slot-000"}, errors.New("builder not ready"), map[string]string{"resource": `{"resource_kind":"base_builder","project":"test-builder","vm":"e2e-base-1"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -668,7 +738,7 @@ func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := HostSink{DataHome: t.TempDir(), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
+	sink := HostSink{DataHome: testkit.TempDir(t), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
 	if err := sink.Ingest(batch); err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +770,7 @@ func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
 	}
 	// A receipt for another source or another kind cannot close this builder.
 	otherRecorder := recorder
-	otherRecorder.StateDir, otherRecorder.Source = t.TempDir(), "other-yard"
+	otherRecorder.StateDir, otherRecorder.Source = testkit.TempDir(t), "other-yard"
 	wrong, err := otherRecorder.Record(BrokerEvent{Kind: "base_builder.cleaned", IncidentID: builder.IncidentID})
 	if err != nil {
 		t.Fatal(err)
@@ -736,7 +806,7 @@ func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
 
 func TestHostSinkRealSlotBuilderSurvivesSlotRecoveryUntilExactCleanup(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	recorder := EventRecorder{StateDir: t.TempDir(), Source: "test-yard", Now: func() time.Time { return created }}
+	recorder := EventRecorder{StateDir: testkit.TempDir(t), Source: "test-yard", Now: func() time.Time { return created }}
 	slot := LeaseSlot{SlotID: "slot-001", ResourceGeneration: 4, LeaseEpoch: 7}
 	builder, err := recorder.SaveIncident(slot, errors.New("builder not ready"), map[string]string{"resource": `{"resource_kind":"base_builder","project":"test-builder","vm":"e2e-base-1"}`})
 	if err != nil {
@@ -750,7 +820,7 @@ func TestHostSinkRealSlotBuilderSurvivesSlotRecoveryUntilExactCleanup(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := HostSink{DataHome: t.TempDir(), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
+	sink := HostSink{DataHome: testkit.TempDir(t), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
 	if err := sink.Ingest(batch); err != nil {
 		t.Fatal(err)
 	}

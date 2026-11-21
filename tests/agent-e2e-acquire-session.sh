@@ -3,13 +3,14 @@
 # shellcheck disable=SC2089,SC2090
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TMP="$(mktemp -d /tmp/subyard-acquire-session.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 # Capacity fixtures must fail fast unless they explicitly request a wait.
 unset SUBYARD_E2E_CAPACITY_WAIT
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 reservation_json='{"schema_version":1,"status":"reserved","grant":{"slot_id":"slot-001","lease_id":"aabb","lease_epoch":1,"capability":"ccdd"}}'
 ready='{"schema_version":1,"status":"ok","grant":{"slot_id":"slot-001","lease_id":"aabb","lease_epoch":1,"capability":"ccdd"}}'

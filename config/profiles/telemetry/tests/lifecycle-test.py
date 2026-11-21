@@ -5,6 +5,7 @@ import importlib.util
 import io
 from contextlib import ExitStack, closing, redirect_stderr
 import os
+import re
 from pathlib import Path
 import select
 import shutil
@@ -42,7 +43,7 @@ class LifecycleTest(unittest.TestCase):
                     unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
                 self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
 
-    def test_recorded_collector_startup_with_another_disk_budget_is_stale_not_foreign(self):
+    def test_recorded_collector_unit_with_any_startup_is_stale_not_foreign(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -53,27 +54,175 @@ class LifecycleTest(unittest.TestCase):
             for directory in ('control', 'units'):
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
-            path = units/guest.COLLECTOR
-            for current, loaded in (('2147483648', ''), ('2147483648', ' --disk-bytes 1073741824'), ('', ' --disk-bytes 1073741824')):
-                with self.subTest(current=current, loaded=loaded), patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=current):
-                    runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', units, root/'bin',
-                                            account=account, etc=root/'etc')
-                    desired = runtime.starts[guest.COLLECTOR]
-                    # The v0.30 startup named the analytics token; the loaded one keeps its own budget.
-                    previous = desired.removesuffix(runtime.budget).replace(str(runtime.auth), str(runtime.data/'auth.token'))+loaded
-                    unit = runtime.assets[path][0].replace(desired.encode(), previous.encode(), 1)
+            path, inventory = units/guest.COLLECTOR, root/'control/assets.json'
+            with patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES='2147483648'):
+                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', units, root/'bin',
+                                        account=account, etc=root/'etc')
+            desired = runtime.starts[guest.COLLECTOR]
+            current = runtime.assets[path][0]
+            v030 = desired.removesuffix(' --disk-bytes 2147483648').replace(str(runtime.auth), str(runtime.data/'auth.token'))
+            # Previous and future releases may start the collector with any arguments and environment.
+            for command, environment in ((v030, ''), (desired.replace('2147483648', '1073741824'), ''),
+                                         (desired.replace(str(runtime.auth), '/var/lib/subyard/other/second.token'), ''),
+                                         (desired+' --future-flag --budget-file /etc/x', ''), (desired, 'GOMEMLIMIT=200MiB'),
+                                         (desired.removeprefix('/usr/bin/setpriv --no-new-privs '), '')):
+                with self.subTest(command=command, environment=environment):
+                    unit = current.replace(('ExecStart='+desired).encode(), ('ExecStart='+command).encode(), 1)
+                    if environment:
+                        unit = unit.replace(b'ExecStart=', ('Environment='+environment+'\nExecStart=').encode(), 1)
                     path.write_bytes(unit)
                     fields = dict(LoadState='loaded', FragmentPath=str(path), User='dev', Group=str(account.pw_gid), Type='simple',
                                   UMask='0077', LimitCORE='0', NoNewPrivileges='yes', DropInPaths='', KillMode='control-group',
                                   MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms', ActiveState='active',
-                                  ExecStart='{ path=/usr/bin/setpriv ; argv[]='+previous+' ; ignore_errors=no ; start_time=x ; }')
-                    show = '\n'.join(f'{key}={value}' for key, value in fields.items())
-                    with patch.object(guest, 'systemctl', return_value=show):
-                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(b'other').hexdigest()}))
-                        with self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                                  ExecStart='{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; start_time=x ; }',
+                                  Environment=environment, NeedDaemonReload='no')
+                    def show(fields=fields):
+                        return '\n'.join(f'{key}={value}' for key, value in fields.items())
+                    def refused():
+                        with patch.object(guest, 'systemctl', side_effect=lambda *args: show()), \
+                             self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
                             runtime.manager(guest.COLLECTOR)
-                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(unit).hexdigest()}))
+                    recorded = {str(path): hashlib.sha256(unit).hexdigest()}
+                    inventory.write_text(json.dumps(recorded))
+                    with patch.object(guest, 'systemctl', side_effect=lambda *args: show()):
                         self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+                    # The inventory proves ownership; an unrecorded file or a drop-in is foreign.
+                    inventory.write_text(json.dumps({str(path): hashlib.sha256(b'other').hexdigest()}))
+                    refused()
+                    inventory.write_text(json.dumps(recorded))
+                    for changed in ({'DropInPaths': '/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
+                                    {'FragmentPath': '/etc/systemd/system/'+guest.COLLECTOR}, {'NeedDaemonReload': 'yes'}):
+                        with self.subTest(changed=changed):
+                            refused_fields = {**fields, **changed}
+                            with patch.object(guest, 'systemctl', return_value=show(refused_fields)), self.assertRaises(ValueError):
+                                runtime.manager(guest.COLLECTOR)
+            # A recorded unit's own fields are ours too: a later release may change any of them.
+            for changed in ({'User': 'other'}, {'Group': '0'}, {'KillMode': 'process'}, {'MemoryMax': '536870912'}, {'TasksMax': '128'},
+                            {'CPUQuotaPerSecUSec': '500ms'}, {'Type': 'notify'}, {'UMask': '0027'}, {'NoNewPrivileges': 'no'},
+                            {'ExecStartPre': '{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; }'}):
+                with self.subTest(owned=changed), patch.object(guest, 'systemctl', return_value=show({**fields, **changed})):
+                    self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+            # Also when the startup is this release's and only such a field differs.
+            unit = current.replace(b'MemoryMax=256M', b'MemoryMax=512M', 1)
+            path.write_bytes(unit)
+            inventory.write_text(json.dumps({str(path): hashlib.sha256(unit).hexdigest()}))
+            fields.update(ExecStart='{ path=/usr/bin/setpriv ; argv[]='+desired+' ; ignore_errors=no ; }', Environment='', MemoryMax='536870912')
+            with patch.object(guest, 'systemctl', return_value=show(fields)):
+                self.assertEqual(runtime.manager(guest.COLLECTOR)['MemoryMax'], '536870912')
+            # Stopping the manager must leave its delegated workloads running.
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'FragmentPath': str(units/guest.MANAGER)})), \
+                 self.assertRaisesRegex(ValueError, 'foreign loaded unit stop policy'):
+                runtime.manager(guest.MANAGER)
+            # A recorded unit may carry only the stock LXC guest's type-wide drop-in.
+            service = root/'service.d'
+            service.mkdir(mode=0o755)
+            service.chmod(0o755)
+            dropin = service/'zzz-lxc-service.conf'
+            def write_dropin(content, mode=0o644):
+                dropin.unlink(missing_ok=True)
+                dropin.write_bytes(content)
+                dropin.chmod(mode)
+                # Older than the replaced unit file, as loaded before it.
+                os.utime(dropin, ns=(path.stat().st_mtime_ns-10**9,)*2, follow_symlinks=False)
+            for state, loaded, saved in (
+                    ('previous file loaded', unit, {str(path): hashlib.sha256(unit).hexdigest()}),
+                    ('replaced file loaded', current, {str(path): hashlib.sha256(current).hexdigest(),
+                                                      guest.REPLACED: {str(path): hashlib.sha256(unit).hexdigest()}})):
+                path.write_bytes(loaded)
+                inventory.write_text(json.dumps(saved))
+                stale = {**fields, 'DropInPaths': str(dropin), 'NoNewPrivileges': 'no',
+                         'NeedDaemonReload': 'no' if loaded == unit else 'yes'}
+                with patch.object(guest, 'TYPE_DROPINS', (service,)), patch.object(guest, 'systemctl', return_value=show(stale)):
+                    stock = b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\nProtectKernelTunables=no\n' \
+                            b'NoNewPrivileges=no\nLoadCredential=\nPrivateNetwork=no\nImportCredential=\n'
+                    for content in (stock, stock.removesuffix(b'\n'), b'[Service]\nProcSubset=all\n'):
+                        write_dropin(content)
+                        with self.subTest(state=state, dropin=content):
+                            self.assertEqual(runtime.manager(guest.COLLECTOR)['MemoryMax'], '536870912')
+                    # Only the stock lines, exactly: other values, keys, spellings and systemd syntax are refused.
+                    for content in (b'[Service]\nLoadCredential=x:/etc/shadow\n', b'[Service]\nImportCredential=*\n',
+                                    b'[Service]\nPrivateNetwork=yes\n', b'ProcSubset=all\n', b'', b'[Unit]\nProcSubset=all\n',
+                                    b'[Service]\n\nProcSubset=all\n', b'[Service]\n# Generated\nProcSubset=all\n',
+                                    b'[Service]\nProtectProc = default\n', b'[Service]\nProcSubset=all\n\n', b'[Service]\r\nProcSubset=all\r\n',
+                                    b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',
+                                    b'[Service]\nUser=root\n', b'[Service]\nGroup=root\n', b'[Service]\nExecStart=\nExecStart=/bin/sh\n',
+                                    b'[Service]\nExecStartPre=/bin/true\n', b'[Service]\n  Environment = A=1\n',
+                                    b'[Service]\nEnvironment\\\n=A=1\n', b'[Service]\nProcSubset=all\n# note \\\nEnvironment=A=1\n',
+                                    b'[Service]\nProcSubset=all\\\\\n', b'[Service]\nProcSubset=all\0Environment=A=1\n',
+                                    b'[Service]\nLoadCredential=a \\\nProcSubset=all\n',
+                                    b'[Service]\nProcSubset=all\rEnvironment=A=1\n', b'[Service]\nAmbientCapabilities=CAP_SYS_ADMIN\n',
+                                    b'[Service]\nSupplementaryGroups=root\n', b'[Service]\nPassEnvironment=LD_PRELOAD\n',
+                                    b'[Service]\nBindReadOnlyPaths=/tmp/x:/usr/local/lib\n', b'[Service]\nDynamicUser=yes\n',
+                                    b'[Service]\nRootDirectory=/tmp/x\n', b'.include /tmp/x\n'):
+                        write_dropin(content)
+                        with self.subTest(state=state, dropin=content), self.assertRaisesRegex(ValueError, 'foreign loaded unit drop-in'):
+                            runtime.manager(guest.COLLECTOR)
+                    # A drop-in that cannot be read safely may hide any of these.
+                    lxc = b'[Service]\nProcSubset=all\n'
+                    for case in ('missing', 'writable', 'symlink', 'oversized', 'binary', 'writable directory'):
+                        write_dropin(lxc)
+                        if case == 'missing':
+                            dropin.unlink()
+                        elif case == 'writable':
+                            dropin.chmod(0o666)
+                        elif case == 'symlink':
+                            dropin.unlink()
+                            (root/'lxc.conf').write_bytes(lxc)
+                            dropin.symlink_to(root/'lxc.conf')
+                        elif case == 'oversized':
+                            # Stock lines fill the read bound exactly; the rest is never read.
+                            short, long = b'ProcSubset=all\n', b'NoNewPrivileges=no\n'
+                            size = guest.native.CONFIG_LIMIT+1-len(b'[Service]\n')
+                            count = next(count for count in range(len(short)) if (size-count*len(long)) % len(short) == 0)
+                            write_dropin(b'[Service]\n'+long*count+short*((size-count*len(long))//len(short))+b'Environment=A=1\n')
+                        elif case == 'binary':
+                            write_dropin(lxc+b'\xff\n')
+                        else:
+                            service.chmod(0o775)
+                        with self.subTest(state=state, unreadable=case), self.assertRaisesRegex(ValueError, 'foreign loaded unit drop-in'):
+                            runtime.manager(guest.COLLECTOR)
+                        service.chmod(0o755)
+                        dropin.unlink(missing_ok=True)
+                    # Until daemon-reload, a drop-in changed after the unit file was replaced is not the loaded one.
+                    write_dropin(lxc)
+                    os.utime(dropin, ns=(path.stat().st_mtime_ns,)*2)
+                    with self.subTest(state=state, dropin='changed since load'):
+                        if loaded == unit:
+                            runtime.manager(guest.COLLECTOR)
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'foreign loaded unit drop-in'):
+                                runtime.manager(guest.COLLECTOR)
+            # Over the current file, another loaded startup or environment comes from a drop-in.
+            path.write_bytes(current)
+            inventory.write_text(json.dumps({str(path): hashlib.sha256(current).hexdigest()}))
+            fields.update(ExecStart='{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no ; }', Environment='', NeedDaemonReload='no',
+                          MemoryMax=str(256*1024*1024))
+            for changed in ({}, {'ExecStart': '{ path=/usr/bin/setpriv ; argv[]='+desired+' ; ignore_errors=no ; }', 'Environment': 'X=1'},
+                            {'ExecStart': '{ path=/usr/bin/setpriv ; argv[]='+desired+' ; ignore_errors=no ; } '
+                                          '{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no ; }'}):
+                with self.subTest(over_current=changed), patch.object(guest, 'systemctl', return_value=show({**fields, **changed})), \
+                     self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                    runtime.manager(guest.COLLECTOR)
+            # An apply interrupted before daemon-reload recorded both versions; the replaced one stays loaded.
+            inventory.write_text(json.dumps({str(path): hashlib.sha256(current).hexdigest(), guest.REPLACED: {str(path): 'x'*64}}))
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})):
+                self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+            # A symlinked or missing unit file is not a regular unit this profile wrote.
+            path.unlink()
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})), \
+                 self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                runtime.manager(guest.COLLECTOR)
+            (root/'elsewhere').write_bytes(current)
+            path.symlink_to(root/'elsewhere')
+            with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})), self.assertRaises(ValueError):
+                runtime.manager(guest.COLLECTOR)
+
+    def test_stock_lxc_dropin_is_the_one_the_host_bwrap_policy_accepts(self):
+        policy = (Path(guest.__file__).parents[3]/'internal/adapters/reconcileruntime/bwrap_policy.sh').read_text()
+        header, = re.findall(r'NR == 1 \{ if \(\$0 != "(.*)"\) exit 1; next \}', policy)
+        lines, = re.findall(r'!/\^\((.*)\)\$/ \{ exit 1 \}', policy)
+        self.assertEqual(header, '[Service]')
+        self.assertCountEqual(lines.split('|'), guest.LXC_DROPIN)
 
     def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
         profile = Path(guest.__file__).parent
@@ -850,7 +999,7 @@ for path, value in (
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             units=Path(name)
             command='/usr/bin/setpriv --no-new-privs /usr/local/lib/subyard-telemetry/subyard-telemetry serve'
-            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},budget='',
+            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},
                 data=units/'data',auth=units/'data-private/auth.token',
                 assets={units/guest.COLLECTOR:(b'known unit',0o644)})
             fields=dict(LoadState='loaded',FragmentPath=str(units/guest.COLLECTOR),User='dev',Group='1000',
@@ -1001,6 +1150,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                         KillMode='process' if unit==guest.MANAGER else 'control-group',Delegate='yes',
                         MemoryMax=str(256*1024*1024),TasksMax='64',CPUQuotaPerSecUSec='250ms')
                     fields.update(states[unit])
+                    # A startup other than the file's stays loaded until daemon-reload drops it.
+                    fields.setdefault('NeedDaemonReload', 'no' if 'argv[]='+command+' ; ' in fields['ExecStart'] else 'yes')
                     return '\n'.join(f'{key}={value}' for key,value in fields.items())
                 if args[0] == 'enable':
                     for unit in args[2:]:
@@ -1018,11 +1169,18 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 if args[0] == 'daemon-reload':
                     for state in states.values():
                         state.pop('ExecStart', None)
+                        state.pop('Environment', None)
                 if args[0] in ('stop','start'):
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
+            # The LXC guest's type-wide drop-in leaves startup, account and environment alone.
+            (root/'service.d').mkdir(mode=0o755)
+            (root/'service.d').chmod(0o755)
+            lxc = root/'service.d/zzz-lxc-service.conf'
+            lxc.write_text('[Service]\nProcSubset=all\nNoNewPrivileges=no\n')
+            lxc.chmod(0o644)
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
-                 patch.object(guest.Runtime, 'prepare_store'), \
+                 patch.object(guest, 'TYPE_DROPINS', (lxc.parent,)), patch.object(guest.Runtime, 'prepare_store'), \
                  patch.object(guest.Runtime, 'policy_status', return_value='present'), \
                  patch.object(guest.records, 'sanitize_state', side_effect=lambda _family, value, _binary: value), \
                  patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
@@ -1180,7 +1338,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     legacy=runtime.assets[path][0].replace(b'/usr/bin/setpriv --no-new-privs ',b'',1)
                     path.write_bytes(legacy)
                     saved[str(path)]=hashlib.sha256(legacy).hexdigest()
-                    states[unit].update(DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf',NoNewPrivileges='no')
+                    states[unit].update(DropInPaths=str(lxc),NoNewPrivileges='no')
                     command = runtime.starts[unit].removeprefix('/usr/bin/setpriv --no-new-privs ')
                     states[unit]['ExecStart'] = '{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; }'
                 (root/'control/assets.json').write_text(json.dumps(saved))
@@ -1212,6 +1370,23 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(calls[-3:], [('stop',guest.COLLECTOR), ('daemon-reload',),
                                              ('enable','--now',guest.COLLECTOR,guest.MANAGER)])
                 self.assertEqual(runtime.observe()['state'],'current')
+                # Rolling back from a later release that changed the startup: its recorded
+                # units are stale, not foreign, and apply rewrites them with this startup.
+                saved=json.loads((root/'control/assets.json').read_text())
+                for unit in (guest.COLLECTOR,guest.MANAGER):
+                    path=root/'units'/unit
+                    future=runtime.assets[path][0].replace(b' --data-dir ',b' --future-flag --data-dir ',1)
+                    future=future.replace(b'ExecStart=',b'Environment=FUTURE=1\nExecStart=',1)
+                    path.write_bytes(future)
+                    saved[str(path)]=hashlib.sha256(future).hexdigest()
+                    states[unit]['Environment']='FUTURE=1'
+                (root/'control/assets.json').write_text(json.dumps(saved))
+                self.assertEqual(runtime.observe()['state'],'stale')
+                runtime.apply()
+                self.assertIn(('stop',guest.COLLECTOR,guest.MANAGER),calls)
+                self.assertEqual(runtime.observe()['state'],'current')
+                for unit in (guest.COLLECTOR,guest.MANAGER):
+                    self.assertEqual((root/'units'/unit).read_bytes(),runtime.assets[root/'units'/unit][0])
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},
                                 {'DropInPaths':'/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
                                 {'KillMode':'process'},{'MemoryMax':'infinity'},{'Environment':'PRIVATE=unsafe'},

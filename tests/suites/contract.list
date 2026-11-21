@@ -30,6 +30,7 @@ test-runner.sh
 test-vms.sh
 workflow-real-adapter-gate.sh
 pr-stats.sh
+cli-fixture-slice-check.sh
 yard-extras-convergence.sh
 yard-usage.sh
 installed-runtime-refresh.sh

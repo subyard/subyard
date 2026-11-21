@@ -1,18 +1,22 @@
 package testvmsruntime
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -335,7 +339,7 @@ func (recorder EventRecorder) acknowledgeSpool(eventIDs, incidentIDs []string) e
 			}
 		}
 		if len(group.ids) != 0 {
-			if err := syncDirectory(group.directory); err != nil && !os.IsNotExist(err) {
+			if err := safefs.SyncDir(group.directory); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
@@ -600,76 +604,57 @@ func sanitizeBrokerText(value string) string {
 }
 
 func writeImmutableDurable(path string, payload []byte, mode os.FileMode) error {
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	if current, err := os.ReadFile(path); err == nil {
-		if string(current) == string(payload) {
-			return nil
-		}
-		return errors.New("immutable broker record already exists with different contents")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".")
-	if err != nil {
-		return err
-	}
-	temp := file.Name()
-	defer os.Remove(temp)
-	defer func() {
-		_ = file.Close()
-	}()
-	if err := file.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := file.Write(payload); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(temp, path); err != nil {
-		if os.IsExist(err) {
-			current, readErr := os.ReadFile(path)
-			if readErr == nil && string(current) == string(payload) {
-				return nil
-			}
-			return errors.New("immutable broker record already exists with different contents")
-		}
-		return err
-	}
-	if err := os.Remove(temp); err != nil {
-		return err
-	}
-	return syncDirectory(directory)
+	return writeImmutableOwned(path, payload, mode, nil)
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
+func writeImmutableOwned(path string, payload []byte, mode os.FileMode, owner *safefs.Ownership) error {
+	file, err := safefs.OpenRegular(path)
+	if err == nil {
+		return compareImmutable(file, payload, owner, false)
+	}
+	if !os.IsNotExist(err) {
 		return err
 	}
-	defer directory.Close()
-	return directory.Sync()
+	err = safefs.WriteFile(path, payload, safefs.Options{
+		Mode: mode, Owner: owner, ParentMode: 0o700, NoReplace: true,
+		TempPattern: "." + filepath.Base(path) + ".*",
+	})
+	if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	file, err = safefs.OpenRegular(path)
+	if err != nil {
+		return errors.New("immutable broker record already exists with different contents")
+	}
+	return compareImmutable(file, payload, owner, true)
+}
+
+func compareImmutable(file *os.File, payload []byte, owner *safefs.Ownership, collision bool) error {
+	defer file.Close()
+	current, err := io.ReadAll(file)
+	if err != nil && !collision {
+		return err
+	}
+	if err != nil || !bytes.Equal(current, payload) {
+		return errors.New("immutable broker record already exists with different contents")
+	}
+	if owner != nil {
+		// Adopt matching records left by an older writer that set the group after publish.
+		if err := file.Chown(owner.UID, owner.GID); err != nil {
+			return err
+		}
+	}
+	return safefs.SyncDir(filepath.Dir(file.Name()))
 }
 
 func withFileLock(path string, operation func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.Lock(context.Background(), path, false, 0)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release()
 	return operation()
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 // This deliberately boots only empty firmware, never an OS or the full broker.
@@ -46,7 +48,7 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	owner, err := randomToken(16)
 	must(err)
 	name := "subyard-storage-" + owner[:12]
-	rt := &Runtime{Config: Config{Project: name, Prefix: "e2e-vm", StateDir: t.TempDir(), Incus: "incus"}, Runner: ProcessRunner{}, Now: time.Now}
+	rt := &Runtime{Config: Config{Project: name, Prefix: "e2e-vm", StateDir: testkit.TempDir(t), Incus: "incus"}, Runner: ProcessRunner{}, Now: time.Now}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	command := func(args ...string) string {

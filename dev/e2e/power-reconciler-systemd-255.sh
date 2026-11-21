@@ -19,6 +19,7 @@ INSTALL_ROOT="/var/tmp/subyard-e2e-power-install-$RUN_ID"
 INSTALL_ARCHIVE="$INSTALL_ROOT.tar.gz"
 INSTALL_RECONCILER_PATH="/usr/local/libexec/subyard-e2e-power-$RUN_ID/reconciler"
 TEMPORARY=''
+BUILD_CACHE=''
 PROJECT_CREATED=0
 INCUS_COMMAND_TIMEOUT="${SUBYARD_SYSTEMD255_INCUS_TIMEOUT_SECONDS:-30}"
 INCUS_IMAGE_TIMEOUT="${SUBYARD_SYSTEMD255_IMAGE_TIMEOUT_SECONDS:-900}"
@@ -143,6 +144,12 @@ cleanup() {
       *) cleanup_failed=1 ;;
     esac
   fi
+  if [ -n "$BUILD_CACHE" ]; then
+    case "$BUILD_CACHE" in
+      /var/tmp/subyard-e2e-systemd255-go.*) find "$BUILD_CACHE" -depth -delete || cleanup_failed=1 ;;
+      *) cleanup_failed=1 ;;
+    esac
+  fi
   if [ "$PROJECT_CREATED" = 1 ]; then
     if ! bounded_incus project show "$PROJECT" >/dev/null 2>&1; then
       printf 'power-reconciler-systemd-255: project lookup failed during cleanup: %s\n' \
@@ -250,10 +257,12 @@ if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   [ "$(sha256sum "$runtime_bundle" | cut -d' ' -f1)" = "$(jq -er '.runtime_sha256' "$ROOT/.subyard-acceptance/candidate.json")" ] \
     || die 'packaged runtime checksum changed'
 else
-  candidate_version=0.19.1-test.systemd255
+  candidate_version=1.0.0-test.systemd255
   release_root="$TEMPORARY/release"
-  bash "$ROOT/dev/package-engine.sh" --output-dir "$release_root" --version "$candidate_version" >/dev/null
-  runtime_bundle="$TEMPORARY/release/subyard-0.19.1-test.systemd255-linux-amd64.tar.gz"
+  # A disposable build cache keeps the operator's shared Go cache unchanged.
+  BUILD_CACHE="$(mktemp -d "/var/tmp/subyard-e2e-systemd255-go.$RUN_ID.XXXXXX")"
+  GOCACHE="$BUILD_CACHE" bash "$ROOT/dev/package-engine.sh" --output-dir "$release_root" --version "$candidate_version" >/dev/null
+  runtime_bundle="$TEMPORARY/release/subyard-$candidate_version-linux-amd64.tar.gz"
 fi
 tar -C "$release_root" --exclude=.build.lock -czf "$TEMPORARY/product.tar.gz" .
 # This fixture proves unit parsing and boot execution with no managed yard.
@@ -348,7 +357,7 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
   SSH_HOST=yard \
   DEV_USER=dev \
   DEV_UID=2000 \
-  DEV_SUDO=1 \
+  DEV_SUDO=yes \
   FORWARD_SSH_AGENT=1 \
   NESTED_E2E_VMS=0 \
   SUBYARD_POWER_ENGINE_SOURCE="$INSTALL_ROOT/fixture-engine" \

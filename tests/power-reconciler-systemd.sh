@@ -5,13 +5,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_LIB_DIE_STATUS=1
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
 V072_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.7.2.service.in"
 
-fail() {
-  printf 'power-reconciler-systemd: %s\n' "$*" >&2
-  exit 1
-}
+fail() { die "power-reconciler-systemd: $*"; }
 
 command -v systemd-analyze >/dev/null 2>&1 \
   || fail 'systemd-analyze is required for the real unit parser contract'

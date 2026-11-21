@@ -10,7 +10,7 @@ state="/var/tmp/subyard-full-uninstall-$token"
 marker="subyard-full-uninstall-$token"
 operator="subyardfull${token:0:20}"
 home="/home/$operator"
-version="0.19.1-p0.full.$token"
+version="1.0.0-p0.full.t$token"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -151,7 +151,7 @@ PY_PROCESSES
   printf 'ok: approved artifacts absent; foreign workload, shared pool, user service, host project, SSH and shell controls preserved\n'
 }
 interrupt_full_removal() {
-  local runner="$1" data_root="$2" config_root="$3" launcher="$4" prefix="$5" wrapper caller
+  local runner="$1" data_root="$2" config_root="$3" launcher="$4" prefix="$5" resumer="${6:-}" wrapper caller
   # Watch native config-directory loss and kill the original caller. Its
     # retained engine/adapters must then complete from a fresh process.
     "$runner" bash -c 'printf "%s\n" "$$" > "$1"; chmod 644 "$1"; shift; exec setsid "$@"' _ "$state/${prefix}full.pid" "$launcher" teardown --full --yes > "$state/${prefix}full.log" 2>&1 &
@@ -195,8 +195,10 @@ PY
     wait "$wrapper" 2>/dev/null || true
     [ ! -e "$config_root" ] || fail 'interruption did not remove config'
     for _ in {1..100}; do [ -x "$data_root.uninstall/runtime/bin/yard" ] && break; sleep 0.1; done
-    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" < /dev/null > "$state/${prefix}retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
-    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" --yes > "$state/${prefix}retry.log" 2>&1
+    # By default the retained engine resumes; a newer resumer must accept the older checkpoint.
+    resumer="${resumer:-$data_root.uninstall/runtime/bin/yard}"
+    "$runner" "$resumer" _uninstall-resume "$data_root.uninstall" < /dev/null > "$state/${prefix}retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
+    "$runner" "$resumer" _uninstall-resume "$data_root.uninstall" --yes > "$state/${prefix}retry.log" 2>&1
 
 }
 
@@ -233,7 +235,7 @@ case "$mode" in
     sudo -n chmod 0750 "$state"
     sudo -n install -d -o dev -g dev -m 0700 "$state/release"
     sudo -n install -d -o root -g root -m 0755 "$state/host-helper"
-    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network legacy-install.log legacy-context.log legacy-init.log legacy-refusal.log legacy-stage.log legacy-foreign-refusal.log legacy-full.log legacy-retry-preview.log legacy-retry.log legacy-clean-install.log legacy-clean-remove.log legacy-result.log; do
+    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network legacy-install.log legacy-context.log legacy-init.log legacy-refusal.log legacy-stage.log legacy-foreign-refusal.log legacy-full.log legacy-retry-preview.log legacy-retry.log legacy-clean-install.log legacy-clean-remove.log legacy-result.log released-install.log released-full.log released-retry-preview.log released-retry.log; do
       sudo -n install -o dev -g dev -m 0600 /dev/null "$state/$file"
     done
     incus profile device get default root pool --project default > "$state/baseline-pool"
@@ -270,6 +272,7 @@ case "$mode" in
     operator_env env YARD_RELEASE_BASE_URL="file://$state/release" YARD_BIN_DIR="$state/bin" \
       YARD_SHELL_RC="$state/shell.rc" YARD_LOGIN_RC="$state/login.rc" \
       bash "$state/bootstrap.sh" --version "$version" --yes >/dev/null
+    released_checkpoint_resume
     operator_env mkdir -p "$state/config/yards"
     operator_env bash -c 'cat > "$1/config/config.env" <<CONFIG
 INCUS_PROJECT=subyard-full-$2
@@ -469,14 +472,14 @@ chmod 644 "$HOME/.config/systemd/user/$1"' _ "$foreign_unit"
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \
       SUBYARD_OPERATOR_HOME="$home" STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host" \
       ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT="subyard-full-$token" INCUS_BRIDGE="$bridge" \
-      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
+      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
       bash "$state/runtime/current/scripts/install-ssh-relay.sh" --ensure 24226 "$relay_ip"
     operator_env bash -c 'exec 5<>/dev/tcp/127.0.0.1/24226; IFS= read -r -t 2 greeting <&5; exec 5<&-; exec 5>&-'
     # Establish the sink before a refused plan is saved: retry retains its exact inventory.
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \
       SUBYARD_OPERATOR_HOME="$home" STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host" \
       ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT="subyard-full-$token" INCUS_BRIDGE="$bridge" \
-      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
+      SSH_HOST="full-$token" DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0 \
       SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE="$state/runtime/current/bin/yard-engine" \
       bash "$state/runtime/current/scripts/install-test-vms-host-sink.sh" --yes
     # Retained matching evidence is unreadable to the ordinary owner. The

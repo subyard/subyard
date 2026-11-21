@@ -64,7 +64,7 @@ case "$command" in
     read -r protocol _ _ _ yard project run purpose _ _ slot count _ <<<"$command"
     log "$protocol yard=$yard project=$project purpose=$purpose slot=$slot count=${count:-}"
     case "$(cat "$FAKE/scenario" 2>/dev/null || true)" in
-      busy)
+      busy|busy-wait)
         printf '%s\n' '{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Other#run-a","yard":"other","project":"Other","run":"run-a","purpose":"tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:20:00Z"},"message":"requested slot is unavailable"}'
         exit 0 ;;
       capacity)
@@ -163,6 +163,9 @@ for protocol in v3 v4; do
   handle="$(client acquire --yard test-yard --slot 2 --purpose skill-check 2>"$TMP/acquire.err")" \
     || { cat "$TMP/acquire.err" >&2; fail "$protocol acquire failed"; }
   [[ "$handle" =~ ^[0-9a-f]{8}$ ]] || fail "$protocol acquire printed no handle: $handle"
+  banner="$(grep '^E2E lease: ' "$TMP/acquire.err")"
+  [[ "$banner" =~ ^E2E\ lease:\ yard=hermes\ project=hermes\ run=[0-9a-f]{8}\ purpose=skill-check\ slot=slot-002\ type=subyard-pair\ vms=1\ base=[a-f0-9]{64}$ ]] \
+    || fail "$protocol acquire banner lost canonical attribution or disclosed private fields"
   grep -Fq "acquire-$( [ "$protocol" = v4 ] && echo v4 || echo v3) yard=hermes project=hermes purpose=skill-check slot=slot-002 count=1" "$TMP/facade.log" \
     || fail "$protocol acquire lost attribution or the singleton request: $(cat "$TMP/facade.log")"
   if [ "$protocol" = v4 ]; then
@@ -336,19 +339,26 @@ rm -f "$TMP/release-error-code-ok"
 client release "$handle" 2>/dev/null || fail 'release after a refused release failed'
 
 # Refusals leave no handle and keep the typed outcome and holder.
-for scenario in busy capacity; do
+for scenario in busy busy-wait capacity; do
   printf '%s\n' "$scenario" > "$TMP/scenario"
+  wait_args=()
+  [ "$scenario" != busy-wait ] || wait_args=(--wait 2s)
   set +e
-  client acquire --yard test-yard --slot 2 >/dev/null 2>"$TMP/err"
+  client acquire --yard test-yard --slot 2 "${wait_args[@]}" >"$TMP/refused-handle" 2>"$TMP/err"
   rc=$?
   set -e
   case "$scenario" in
     busy) [ "$rc" = 2 ] && grep -Fq 'state=held reason=busy; owner=other/Other run=run-a purpose=tests' "$TMP/err" \
       || fail "busy refusal: rc=$rc $(cat "$TMP/err")" ;;
+    busy-wait) [ "$rc" = 4 ] \
+      && grep -E -q '^[^:]+: timed out waiting for slot-002: state=held reason=busy$' "$TMP/err" \
+      && grep -E -q '^[^:]+: owner=other/Other run=run-a purpose=tests acquired=2026-08-24T12:00:00Z expires=2026-08-24T12:20:00Z label=Other#run-a$' "$TMP/err" \
+      || fail "busy wait: rc=$rc $(cat "$TMP/err")" ;;
     capacity) [ "$rc" = 4 ] && grep -Fq 'retryable capacity refusal for slot-002: resource=memory' "$TMP/err" \
       || fail "capacity refusal: rc=$rc $(cat "$TMP/err")" ;;
   esac
-  [ -z "$(ls -A "$TMP/client/handles")" ] || fail "$scenario refusal left a handle"
+  [ ! -s "$TMP/refused-handle" ] && [ -z "$(ls -A "$TMP/client/handles")" ] \
+    || fail "$scenario refusal left a handle"
 done
 rm -f "$TMP/scenario"
 

@@ -162,6 +162,8 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 		"teardown-physical.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
 			"internal/cli/prepared_command.go",
+			// Full uninstall retains it as a required public recovery asset; it never runs it.
+			"internal/uninstall/publish.go",
 		},
 	}
 

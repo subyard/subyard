@@ -51,7 +51,7 @@ func TestServiceContextRereadsShippedPresetAndPreservesCustomPort(t *testing.T) 
 		write("config/"+name, "", 0o644)
 	}
 	write("config/agents.env", "CODING_TOOL_INTEGRATIONS=\n", 0o644)
-	write("config/subyard.env", fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data/storage"), filepath.Join(root, "host"), filepath.Join(root, "host")), 0o644)
+	write("config/subyard.env", fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data/storage"), filepath.Join(root, "host"), filepath.Join(root, "host")), 0o644)
 	write("state/yards/test-yard/config.env", "YARD_TEMPLATE=test-vms\nSSH_PORT=2299\nDEV_UID=2007\n", 0o600)
 	home := filepath.Join(root, "home")
 	environment := map[string]string{"HOME": home, "SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": filepath.Join(root, "state"), "SUBYARD_HOME": filepath.Join(root, "data"), "SUBYARD_NO_AUDIT": "1"}

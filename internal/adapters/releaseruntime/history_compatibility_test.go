@@ -21,7 +21,7 @@ import (
 // retained-runtime boundary, kept for the frozen rollback contract test.
 func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
 	return releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: target.registryDigest, TargetRegistry: target.registryDigest,
+		Active: &registry, Target: &registry,
 		History: retainedHistoryEvidence(target, registry, ledger, checkpoint),
 	}).Refusal()
 }
@@ -246,6 +246,118 @@ func TestHistoryCompatibilityVerb(t *testing.T) {
 	}
 }
 
+// An active release whose registry only retires prefixes admits its declared
+// predecessor without writing; an undeclared release keeps the refusal.
+func TestHistoryCompatibilityVerbAdmitsDeclaredEquivalent(t *testing.T) {
+	const active, target = "1.1.0-aaaaaaaaaaaa", "1.0.0-bbbbbbbbbbbb"
+	for _, test := range []struct {
+		name     string
+		declared bool
+		code     int
+	}{{name: "declared predecessor", declared: true, code: 0}, {name: "undeclared", code: 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHistoryFixture(t)
+			retired, _, predecessor := fixture.retiredRegistry(t)
+			if !test.declared {
+				predecessor = releasetransition.Fingerprint(strings.Repeat("f", 64))
+			}
+			fixture.writeRelease(t, fixture.runtimeRoot, active, map[string][]byte{
+				"config/release-transition.json": retired,
+				"config/release-rollback.json":   rollbackDeclarationPayload(predecessor),
+			}, nil)
+			fixture.activate(t, active)
+			fixture.writeCompleteLedger(t)
+			fixture.writeRelease(t, fixture.runtimeRoot, target, map[string][]byte{"config/release-transition.json": fixture.registry}, nil)
+			before := treeDigest(t, filepath.Dir(fixture.runtimeRoot))
+			code, report, stderr := runHistoryVerb(t, fixture.runtimeRoot, fixture.configHome, target)
+			if code != test.code || report.Kind != releasetransition.HistoryEquivalent || report.Registry != releasetransition.RegistryDiffers ||
+				report.Admitted != test.declared || report.DeclaredPredecessor != test.declared {
+				t.Fatalf("verdict %d %#v, stderr %q", code, report, stderr)
+			}
+			if test.declared && len(report.Refusals) != 0 || !test.declared && (len(report.Refusals) != 1 ||
+				report.Refusals[0].Reason != releasetransition.HistoryRegistryDiffers) {
+				t.Fatalf("refusals = %#v", report.Refusals)
+			}
+			if after := treeDigest(t, filepath.Dir(fixture.runtimeRoot)); after != before {
+				t.Fatal("history verdict changed the installation")
+			}
+		})
+	}
+}
+
+// A declaration that cannot be verified refuses only an Equivalent target, for
+// the verb as for the runtime selection and the engine. The verb reports that
+// refusal as a verification error.
+func TestHistoryCompatibilityVerbDeclarationErrorsRefuseOnlyEquivalent(t *testing.T) {
+	const active, target = "1.1.0-aaaaaaaaaaaa", "1.0.0-bbbbbbbbbbbb"
+	for _, test := range []struct {
+		name                       string
+		retireActive, retireTarget bool
+		// targetDeclaration formats the target's declaration around the
+		// quoted predecessor digest; empty is the schema 1 declaration.
+		targetDeclaration string
+		code              int
+		kind              releasetransition.HistoryCompatibilityKind
+	}{
+		{name: "identical", code: 0, kind: releasetransition.HistoryIdentity},
+		{name: "equivalent predecessor", retireActive: true, code: 2},
+		{name: "equivalent successor with a malformed digest", retireTarget: true, code: 2,
+			targetDeclaration: `{"schemaVersion":1,"predecessorRegistryDigest":"AAAA","migrations":[],"profileFormats":[]}`},
+		{name: "equivalent successor without a schema version", retireTarget: true, code: 2,
+			targetDeclaration: `{"predecessorRegistryDigest":%q}`},
+		{name: "equivalent successor with readable declaration", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent},
+		// A newer release's declaration is read only for its predecessor digest.
+		{name: "equivalent successor with unknown fields", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[],"registryFeatures":["retired-dependencies"]}`},
+		{name: "equivalent successor with a higher schema", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":2,"predecessorRegistryDigest":%q}`},
+		{name: "equivalent successor with entries", retireTarget: true, code: 0, kind: releasetransition.HistoryEquivalent,
+			targetDeclaration: `{"schemaVersion":2,"predecessorRegistryDigest":%q,"migrations":[{"id":"future"}],"profileFormats":[{"profile":"future","format":2}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHistoryFixture(t)
+			retired, _, canonical := fixture.retiredRegistry(t)
+			activeRegistry, targetRegistry := fixture.registry, fixture.registry
+			if test.retireActive {
+				activeRegistry = retired
+			}
+			targetFiles := map[string][]byte{}
+			if test.retireTarget {
+				targetRegistry = retired
+				targetFiles["config/release-rollback.json"] = rollbackDeclarationPayload(canonical)
+				if test.targetDeclaration != "" {
+					declaration := test.targetDeclaration
+					if strings.Contains(declaration, "%q") {
+						declaration = fmt.Sprintf(declaration, canonical)
+					}
+					targetFiles["config/release-rollback.json"] = []byte(declaration)
+				}
+			}
+			targetFiles["config/release-transition.json"] = targetRegistry
+			fixture.writeRelease(t, fixture.runtimeRoot, active, map[string][]byte{
+				"config/release-transition.json": activeRegistry,
+				"config/release-rollback.json":   rollbackDeclarationPayload("AAAA"),
+			}, nil)
+			fixture.activate(t, active)
+			fixture.writeCompleteLedger(t)
+			fixture.writeRelease(t, fixture.runtimeRoot, target, targetFiles, nil)
+			code, report, stderr := runHistoryVerb(t, fixture.runtimeRoot, fixture.configHome, target)
+			if code != test.code {
+				t.Fatalf("verdict %d %#v, stderr %q", code, report, stderr)
+			}
+			if code == 2 {
+				if !strings.Contains(stderr, "rollback declaration of the release pair cannot be verified") {
+					t.Fatalf("stderr = %q", stderr)
+				}
+				return
+			}
+			if !report.Admitted || report.Kind != test.kind || report.Successor != test.retireTarget || report.DeclaredSuccessor != test.retireTarget {
+				t.Fatalf("verdict %#v", report)
+			}
+		})
+	}
+}
+
 // The verb shares the runtime's input assembly: a sole published current
 // release without history is a first publication its own engine initializes.
 func TestHistoryCompatibilityVerbMatchesRuntimeSelection(t *testing.T) {
@@ -297,43 +409,84 @@ func TestHistoryCompatibilityVerbMatchesRuntimeSelection(t *testing.T) {
 	}
 }
 
-// Callers read the registry relation, not admission: identical registries with
-// a history refusal are neither a registry difference nor an admission.
-func TestHistorySelectionReadsTheRegistryRelation(t *testing.T) {
+// retiredRegistry retires the shipped project-state prefix, which has no
+// definitions: the smallest registry that differs only in retired prefixes.
+func (fixture historyFixture) retiredRegistry(t *testing.T) ([]byte, releasetransition.RegistryV2, releasetransition.Fingerprint) {
+	t.Helper()
+	retired, err := fixture.parsed.RetirePrefixes(map[string]int{"project-state": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatalf("retired registry: %v", err)
+	}
+	predecessor, err := fixture.parsed.CanonicalDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload, parsed, predecessor
+}
+
+// Callers read registry admission, not whole admission. A declared equivalent
+// predecessor behaves like identical registries; an undeclared one like
+// differing registries. A history refusal is neither a registry refusal nor
+// an admission.
+func TestHistorySelectionReadsRegistryAdmission(t *testing.T) {
+	fixture := newHistoryFixture(t)
+	olderPayload, _ := fixture.olderRegistry(t)
+	older, _, err := releasetransition.ParseRegistryV2(olderPayload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, retired, predecessor := fixture.retiredRegistry(t)
+	corrupt := &releasetransition.HistoryEvidence{Registry: fixture.parsed, Ledger: releasetransition.ProtectedSnapshot{Exists: true, Payload: []byte("{}")}}
 	publication := errors.New("cannot list published releases")
-	historyRefused := releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{
-		ActiveRegistry: "x", TargetRegistry: "x",
-		History: &releasetransition.HistoryEvidence{Ledger: releasetransition.ProtectedSnapshot{Exists: true, Payload: []byte("{}")}},
-	})
-	differs := releasetransition.HistoryCompatibility(releasetransition.HistoryCompatibilityInput{ActiveRegistry: "x", TargetRegistry: "y"})
-	if historyRefused.Admitted() || historyRefused.Registry != releasetransition.RegistryIdentical || differs.Registry != releasetransition.RegistryDiffers {
-		t.Fatalf("fixture verdicts = %#v / %#v", historyRefused, differs)
-	}
-	refused := historySelection{targetRegistry: "x", verdict: historyRefused, publicationErr: publication}
-	if refused.needsSourceFloor() {
-		t.Fatal("a history refusal with identical registries reached the source floor")
-	}
-	if _, cause := refused.refusal(); !errors.Is(cause, publication) {
-		t.Fatalf("identical-registry refusal dropped first-publication evidence: %v", cause)
-	}
-	different := historySelection{targetRegistry: "y", verdict: differs, publicationErr: publication}
-	if !different.needsSourceFloor() {
-		t.Fatal("differing registries skipped the source floor")
-	}
-	if message, cause := different.refusal(); cause != nil || message != "the selected release's migration registry differs from the active release's registry" {
-		t.Fatalf("registry refusal = %q, %v", message, cause)
-	}
-	if !(historySelection{targetRegistry: "x", missingHistory: true, verdict: historyRefused}).needsSourceFloor() {
-		t.Fatal("an installed registry without history skipped the source floor")
-	}
-	for name, test := range map[string]struct {
-		verdict releasetransition.HistoryCompatibilityVerdict
-		want    bool
-	}{"history refusal": {historyRefused, false}, "registry differs": {differs, true}} {
-		selection := &releaseSelection{request: releasetransition.ProcessRequest{Target: "1.0.0-aaaaaaaaaaaa"}, compatibility: &test.verdict}
-		if got := unapprovedBootstrapPublication(selection); got != test.want {
-			t.Errorf("%s: unapproved bootstrap publication = %v", name, got)
-		}
+	differs := "the selected release's migration registry differs from the active release's registry"
+	for _, test := range []struct {
+		name     string
+		input    releasetransition.HistoryCompatibilityInput
+		kind     releasetransition.HistoryCompatibilityKind
+		relation releasetransition.HistoryRegistryRelation
+		admitted bool
+	}{
+		{name: "identical with history refusal", kind: releasetransition.HistoryIdentity, relation: releasetransition.RegistryIdentical, admitted: true,
+			input: releasetransition.HistoryCompatibilityInput{Active: &fixture.parsed, Target: &fixture.parsed, History: corrupt}},
+		{name: "declared equivalent with history refusal", kind: releasetransition.HistoryEquivalent, relation: releasetransition.RegistryDiffers, admitted: true,
+			input: releasetransition.HistoryCompatibilityInput{Active: &retired, Target: &fixture.parsed, Predecessor: predecessor, History: corrupt}},
+		{name: "undeclared equivalent", kind: releasetransition.HistoryEquivalent, relation: releasetransition.RegistryDiffers,
+			input: releasetransition.HistoryCompatibilityInput{Active: &retired, Target: &fixture.parsed, History: corrupt}},
+		{name: "registry differs", kind: releasetransition.HistoryRefuse, relation: releasetransition.RegistryDiffers,
+			input: releasetransition.HistoryCompatibilityInput{Active: &fixture.parsed, Target: &older}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verdict := releasetransition.HistoryCompatibility(test.input)
+			if verdict.Admitted() || verdict.Kind != test.kind || verdict.Registry != test.relation || verdict.RegistryAdmitted() != test.admitted {
+				t.Fatalf("fixture verdict = %#v", verdict)
+			}
+			history := historySelection{targetRegistry: "x", verdict: verdict, publicationErr: publication}
+			if history.needsSourceFloor() == test.admitted {
+				t.Fatalf("source floor = %v", history.needsSourceFloor())
+			}
+			message, cause := history.refusal()
+			if errors.Is(cause, publication) != test.admitted || !test.admitted && message != differs {
+				t.Fatalf("refusal = %q, %v", message, cause)
+			}
+			selection := &releaseSelection{request: releasetransition.ProcessRequest{Target: "1.0.0-aaaaaaaaaaaa"}, compatibility: &verdict}
+			if unapprovedBootstrapPublication(selection) == test.admitted {
+				t.Fatal("bootstrap publication refusal does not follow registry admission")
+			}
+			if !test.admitted {
+				return
+			}
+			if !(historySelection{targetRegistry: "x", missingHistory: true, verdict: verdict}).needsSourceFloor() {
+				t.Fatal("an installed registry without history skipped the source floor")
+			}
+		})
 	}
 }
 
@@ -392,21 +545,45 @@ func TestRollbackDeclarationRequiresSealedManifest(t *testing.T) {
 			if scenario == "changed-after-verification" {
 				testkit.WriteFile(t, path, rollbackDeclarationPayload(releasetransition.Fingerprint(strings.Repeat("c", 64))), 0o600)
 			}
-			declaration, err := verifiedRollbackDeclaration(verified)
+			predecessor, err := declaredPredecessor(verified, strictRollbackPredecessor)
 			switch scenario {
 			case "absent":
-				if declaration != nil || err != nil {
-					t.Fatalf("absent declaration = %#v, %v", declaration, err)
+				if predecessor != "" || err != nil {
+					t.Fatalf("absent declaration = %q, %v", predecessor, err)
 				}
 			case "valid":
-				if err != nil || declaration == nil || declaration.PredecessorRegistryDigest != releasetransition.Fingerprint(strings.Repeat("a", 64)) {
-					t.Fatalf("valid declaration = %#v, %v", declaration, err)
+				if err != nil || predecessor != releasetransition.Fingerprint(strings.Repeat("a", 64)) {
+					t.Fatalf("valid declaration = %q, %v", predecessor, err)
 				}
 			default:
-				if err == nil || declaration != nil {
-					t.Fatalf("%s declaration = %#v, %v", scenario, declaration, err)
+				if err == nil || predecessor != "" {
+					t.Fatalf("%s declaration = %q, %v", scenario, predecessor, err)
 				}
 			}
 		})
+	}
+}
+
+func TestEngineRollbackPredecessor(t *testing.T) {
+	root := testkit.TempDir(t)
+	if digest, err := EngineRollbackPredecessor(root); err != nil || digest != "" {
+		t.Fatalf("absent declaration = %q, %v", digest, err)
+	}
+	path := filepath.Join(root, "config", "release-rollback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := strings.Repeat("a", 64)
+	testkit.WriteFile(t, path, []byte(`{"schemaVersion":1,"predecessorRegistryDigest":"`+predecessor+`","migrations":[],"profileFormats":[]}`+"\n"), 0o600)
+	if digest, err := EngineRollbackPredecessor(root); err != nil || digest != releasetransition.Fingerprint(predecessor) {
+		t.Fatalf("declared predecessor = %q, %v", digest, err)
+	}
+	testkit.WriteFile(t, path, []byte(`{"schemaVersion":2}`), 0o600)
+	if digest, err := EngineRollbackPredecessor(root); err == nil || digest != "" {
+		t.Fatalf("invalid declaration = %q, %v", digest, err)
+	}
+	shipped, err := EngineRollbackPredecessor(filepath.Join("..", "..", ".."))
+	if err != nil || shipped == "" {
+		t.Fatalf("shipped declaration = %q, %v", shipped, err)
 	}
 }

@@ -280,6 +280,13 @@ func sourceAccessError(path, role string, err error) error {
 }
 
 func settingValueReason(definition SettingDefinition) string {
+	if len(definition.Enum) != 0 {
+		reason := "invalid value; must be one of " + strings.Join(definition.Enum, ", ")
+		if len(definition.RetiredValues) != 0 {
+			reason += "; " + strings.Join(definition.RetiredValues, " and ") + " are no longer accepted"
+		}
+		return reason
+	}
 	switch definition.Type {
 	case SettingPort:
 		return fmt.Sprintf("invalid port value; must be in range %d..%d", definition.Minimum, definition.Maximum)

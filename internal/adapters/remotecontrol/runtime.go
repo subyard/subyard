@@ -13,13 +13,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshtrust"
 	"golang.org/x/crypto/ssh"
@@ -177,36 +177,19 @@ func (runtime Runtime) lockMutation(ctx context.Context) (func(), error) {
 		return nil, fmt.Errorf("prepare remote mutation lock: %w", err)
 	}
 	path := filepath.Join(directory, ".subyard-remote.lock")
-	fd, err := syscall.Open(path,
-		syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	lock, err := safefs.OpenLock(path, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open remote mutation lock: %w", err)
+		return nil, fmt.Errorf("open remote mutation lock: %w", errors.Unwrap(err))
 	}
-	file := os.NewFile(uintptr(fd), path)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
+	if err := lock.Chmod(0o600); err != nil {
+		lock.Release()
 		return nil, fmt.Errorf("secure remote mutation lock: %w", err)
 	}
-	for {
-		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			_ = file.Close()
-			return nil, fmt.Errorf("lock remote mutation: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, fmt.Errorf("lock remote mutation: %w", context.Cause(ctx))
-		case <-time.After(5 * time.Millisecond):
-		}
+	if err := lock.Acquire(ctx, false, 5*time.Millisecond); err != nil {
+		lock.Release()
+		return nil, fmt.Errorf("lock remote mutation: %w", err)
 	}
-	return func() {
-		_ = syscall.Flock(fd, syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	return lock.Release, nil
 }
 
 func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
@@ -218,7 +201,8 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 		return domain.RemoteResult{}, err
 	}
 	defer unlock()
-	if err := runtime.checkPreparedBinding(prepared); err != nil {
+	sshConfig, err := runtime.checkedSSHConfig(prepared)
+	if err != nil {
 		return domain.RemoteResult{}, err
 	}
 	publicKey, identity, err := runtime.ensureIdentity(ctx)
@@ -228,15 +212,18 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if _, err := runtime.ownerCall(ctx, prepared.Spec, publicKey, "_authorize"); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
 	}
-	return runtime.commitAdd(ctx, prepared, identity)
+	return runtime.commitAdd(ctx, prepared, identity, sshConfig)
 }
 
-func (runtime Runtime) commitAdd(ctx context.Context, prepared domain.RemotePrepared, identity string) (domain.RemoteResult, error) {
+func (runtime Runtime) commitAdd(ctx context.Context, prepared domain.RemotePrepared, identity, sshConfig string) (domain.RemoteResult, error) {
+	if err := runtime.verifySSHConfigTarget(sshConfig); err != nil {
+		return domain.RemoteResult{}, err
+	}
 	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
 		envPath = prepared.Existing.Path
 	}
-	snippet, sshConfig, known, cache := runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
+	snippet, known, cache := runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
 	err := transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		current, err := readOptional(envPath)
 		if err != nil {
@@ -274,6 +261,9 @@ func (runtime Runtime) commitAdd(ctx context.Context, prepared domain.RemotePrep
 		}
 		if err != nil || !reflect.DeepEqual(cached, prepared.Owner) {
 			return errors.New("remote status cache readback differs from approved owner metadata")
+		}
+		if err := runtime.verifySSHConfigTarget(sshConfig); err != nil {
+			return err
 		}
 		return verifyRemoteFiles(expected)
 	})
@@ -319,14 +309,15 @@ func (runtime Runtime) applyAdmittedAdd(ctx context.Context, prepared domain.Rem
 			return result, err
 		}
 		defer releaseKnown()
-		if err = runtime.checkPreparedBinding(prepared); err != nil {
+		sshConfig, err := runtime.checkedSSHConfig(prepared)
+		if err != nil {
 			return result, err
 		}
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
 		if !prepare {
-			return runtime.commitAdd(ctx, prepared, identity)
+			return runtime.commitAdd(ctx, prepared, identity, sshConfig)
 		}
 		before, err := runtime.preparedFiles(prepared)
 		if err != nil {
@@ -411,13 +402,14 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 	if err := runtime.verifyCurrent(ctx, prepared); err != nil {
 		return domain.RemoteResult{}, err
 	}
-	envPath, snippet, sshConfig, known, cache := prepared.Existing.Path, runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
+	envPath, snippet, known, cache := prepared.Existing.Path, runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
 	unlock, err := sshtrust.LockKnownHosts(ctx, known)
 	if err != nil {
 		return domain.RemoteResult{}, err
 	}
 	defer unlock()
-	if err := runtime.checkPreparedBinding(prepared); err != nil {
+	sshConfig, err := runtime.checkedSSHConfig(prepared)
+	if err != nil {
 		return domain.RemoteResult{}, err
 	}
 	err = transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
@@ -455,6 +447,9 @@ func (runtime Runtime) applyRemove(ctx context.Context, prepared domain.RemotePr
 		}
 		if len(knownData) != 0 {
 			expected[known] = removeKnownHost(knownData, hostKeyAlias(prepared.Spec.LegacyAlias))
+		}
+		if err := runtime.verifySSHConfigTarget(sshConfig); err != nil {
+			return err
 		}
 		return verifyRemoteFiles(expected)
 	})
@@ -739,7 +734,12 @@ type snapshot struct {
 
 func transactional(paths []string, apply func() error) error {
 	files := make([]snapshot, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
 	for _, path := range paths {
+		if seen[path] {
+			return errors.New("unsafe remote configuration target")
+		}
+		seen[path] = true
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			files = append(files, snapshot{path: path})
@@ -772,31 +772,13 @@ func transactional(paths []string, apply func() error) error {
 }
 
 func atomicWrite(path string, payload []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+	err := safefs.WriteFile(path, payload, safefs.Options{
+		Mode: mode, ExactMode: true, ParentMode: 0o700, TempPattern: ".subyard-remote-*",
+	})
+	if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotRegular) {
 		return fmt.Errorf("refusing non-regular file %s", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".subyard-remote-*")
-	if err != nil {
-		return err
-	}
-	temporaryName := temporary.Name()
-	defer temporary.Close()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(payload); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryName, path)
+	return err
 }
 
 func readOptional(path string) ([]byte, error) {
