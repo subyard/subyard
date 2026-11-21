@@ -269,6 +269,27 @@ operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json
 # cmp exits 1 for different registries and 2 when either cannot be read.
 [ "$registry_relation" -le 1 ] || die 'cannot compare the published and candidate registries'
 if [ "$registry_relation" = 0 ]; then
+  # Telemetry installs runtime format 2 and the published release reads format 1. Rollback
+  # refuses while telemetry is enabled; a first command converts the disabled installation.
+  info 'preparing installed telemetry for the rollback'
+  operator_yard profile enable telemetry --yes >"$STATE_ROOT/telemetry-enable.log" 2>&1 \
+    || die 'telemetry did not enable on the candidate'
+  status=0
+  operator_yard update --rollback --yes >"$STATE_ROOT/telemetry-rollback-refusal.log" 2>&1 || status=$?
+  [ "$status" != 0 ] && grep -Fq 'telemetry is enabled' "$STATE_ROOT/telemetry-rollback-refusal.log" \
+    && [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
+    || { cat "$STATE_ROOT/telemetry-rollback-refusal.log" >&2; die "rollback did not refuse enabled telemetry (exit=$status)"; }
+  operator_yard profile disable telemetry --yes >"$STATE_ROOT/telemetry-disable.log" 2>&1 \
+    || die 'telemetry did not disable on the candidate'
+  guest test -f /etc/systemd/system/subyard-telemetry.service || die 'disabled telemetry left no collector unit'
+  status=0
+  operator_yard update --rollback --yes >"$STATE_ROOT/telemetry-rollback-prepare.log" 2>&1 || status=$?
+  [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
+    && guest grep -Fq -- '--auth-file /var/lib/subyard/telemetry/auth.token' /etc/systemd/system/subyard-telemetry.service \
+    && guest test -f /var/lib/subyard/telemetry/auth.token \
+    && ! guest test -e /var/lib/subyard/telemetry-private/auth.token \
+    || { cat "$STATE_ROOT/telemetry-rollback-prepare.log" >&2; die "rollback did not prepare telemetry (exit=$status)"; }
+  ok 'rollback refused enabled telemetry and prepared the disabled installation'
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
   operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \

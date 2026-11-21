@@ -3,7 +3,7 @@
   "selected_provision_only": true,
   "owner_service": "profile.sh",
   "startup_readiness": "profile.sh",
-  "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh"},
+  "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh", "format": 2, "prepares_rollback_to": 1},
   "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}],
   "advisories": {"storage-capacity": "raw OTLP is refused for space; inside the yard run /usr/local/lib/subyard-telemetry/subyard-telemetry prune --data-dir /var/lib/subyard/telemetry --older-than 60d"},
   "settings": [
