@@ -33,6 +33,7 @@ TTL = 1200
 HEARTBEAT = 300
 BOOT_TIMEOUT = 1200
 BOOT_SAMPLE_INTERVAL = 2
+BOOT_SAMPLE_GAP_MARGIN = 2  # Consecutive probes can take different amounts of time.
 BOOT_SETTLE_SECONDS = 20
 BOOT_CPU_PRESSURE_LIMIT = 20.0
 BOOT_MEMORY_PRESSURE_LIMIT = 5.0
@@ -1116,13 +1117,13 @@ class Runtime:
         stable_since = stable_framework = first_package = peak_pressure = peak_memory_pressure = None
         framework = pressure = memory_pressure = last_sample = None
         settled = False
-        while time.monotonic() < deadline:
+        while (probe_started := time.monotonic()) < deadline:
             require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
             # Probe the existing ADB server directly. An adb CLI here could auto-start an
             # unowned root daemon outside the runtime cgroup when the server is not ready yet.
             process = None
             framework = None
-            probe_deadline = min(deadline, time.monotonic() + 5)
+            probe_deadline = min(deadline, probe_started + 5)
             try:
                 require(self.pid(slot, deadline=probe_deadline) > 0, 'boot', 'Android runtime exited before readiness')
                 process = self.connect(slot, deadline=probe_deadline)
@@ -1159,14 +1160,13 @@ class Runtime:
                     or memory_pressure is None or memory_pressure > BOOT_MEMORY_PRESSURE_LIMIT):
                 stable_since = None
             elif (stable_since is None or stable_framework != framework
-                  or now - last_sample > BOOT_SAMPLE_INTERVAL):
+                  or now - last_sample > BOOT_SAMPLE_INTERVAL + BOOT_SAMPLE_GAP_MARGIN):
                 stable_since, stable_framework = now, framework
             elif now - stable_since >= BOOT_SETTLE_SECONDS and now < deadline:
                 settled = True
                 break
             last_sample = now
-            # Leave time for the next probe within the maximum sample interval.
-            cancel.wait(min(BOOT_SAMPLE_INTERVAL / 2, max(0, deadline - now)))
+            cancel.wait(max(0, min(deadline, probe_started + BOOT_SAMPLE_INTERVAL) - now))
         finished = time.monotonic()
         print(f'android boot readiness cores={cores} settled={str(settled).lower()} '
               f'boot_to_ready_seconds={finished - launched:.1f} elapsed_seconds={finished - started:.1f} '

@@ -1092,7 +1092,6 @@ class Leases(unittest.TestCase):
                 cancel = SimpleNamespace(is_set=lambda: False, wait=advance)
                 with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now[0]), \
                      patch.object(poolmod, 'BOOT_TIMEOUT', 10), patch.object(poolmod, 'BOOT_SETTLE_SECONDS', 4), \
-                     patch.object(poolmod, 'BOOT_SAMPLE_INTERVAL', 4), \
                      patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
                      patch.object(runtime, 'adb_ready', side_effect=[(sample, False) for sample in samples]), \
                      patch.object(runtime, 'boot_pressure', side_effect=lambda _, resource: next(pressures[resource])), \
@@ -1111,6 +1110,36 @@ class Leases(unittest.TestCase):
                 self.assertEqual(now[0], elapsed)
                 self.assertIn(f'settled={str(not failure).lower()} boot_to_ready_seconds={elapsed + 3}.0 '
                               f'elapsed_seconds={elapsed}.0', journal.getvalue())
+
+    def test_pool_boot_wait_accounts_for_probe_duration_and_missed_samples(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        for first_probe_seconds, next_start in ((1.1, 2), (0.1, 2), (1.1, 30)):
+            with self.subTest(first_probe_seconds=first_probe_seconds, next_start=next_start):
+                now = 0.0
+                probe_starts = []
+
+                def ready(*args, **kwargs):
+                    nonlocal now
+                    probe_starts.append(now)
+                    now += first_probe_seconds if len(probe_starts) == 1 else 1.1
+                    return b'101', False
+
+                def wait(seconds):
+                    nonlocal now
+                    now += seconds
+                    if len(probe_starts) == 1 and next_start == 30:
+                        now = next_start
+
+                cancel = SimpleNamespace(is_set=lambda: False, wait=wait)
+                with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now), \
+                     patch.object(poolmod, 'BOOT_TIMEOUT', 60), \
+                     patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
+                     patch.object(runtime, 'adb_ready', side_effect=ready), \
+                     patch.object(runtime, 'boot_pressure', return_value=0), contextlib.redirect_stderr(io.StringIO()):
+                    runtime.wait_for_boot({}, cancel, 2, 0)
+                expected_ready = 51.1 if next_start == 30 else 21.1
+                self.assertAlmostEqual(now, expected_ready)
+                self.assertEqual(probe_starts, [0, *range(next_start, int(expected_ready), 2)])
 
     def test_boot_pressure_reads_emulator_unit_instead_of_broker(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
