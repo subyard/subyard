@@ -293,3 +293,63 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 	}
 	return admissionErr
 }
+
+// unfinishedSourceAnchorError gives explicit selections the child's existing
+// refusal before outer routing can select another release. An unreadable journal
+// or unverified source stays with the ordinary protected inspection diagnostics.
+func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtimeRoot, configHome string) error {
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return nil
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return nil
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint == releasetransition.JournalComplete {
+		return nil
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+	if err != nil {
+		return nil
+	}
+	observed, err := links.Observe()
+	if err != nil {
+		return nil
+	}
+	verified, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{
+		release: observed.Active, root: filepath.Join(runtimeRoot, "releases", string(observed.Active)),
+	}, runtimeRoot, nil)
+	if err != nil {
+		return nil
+	}
+	defer verified.Close()
+	version, err := semver.Parse(verified.version)
+	if err == nil && strings.HasPrefix(string(observed.Active), verified.version+"-") &&
+		version.GTE(semver.MustParse(MinimumSourceVersion)) && version.LT(semver.MustParse(UpdateAnchorVersion)) {
+		return unfinishedBelowAnchorError(journal)
+	}
+	return nil
+}
+
+// protectedInspectionRefusals renders why the installed owner's successful
+// inspection cannot finish its transaction: each blocker of an
+// operator-action-required outcome, or that outcome when it names none. A
+// resumable outcome adds nothing; the source-anchor refusal already says to
+// let the installed release finish it.
+func protectedInspectionRefusals(protected *protectedTransitionInspection) []error {
+	if protected == nil || protected.inspection.Outcome == nil ||
+		protected.inspection.Outcome.Status != releasetransition.StatusOperatorActionRequired {
+		return nil
+	}
+	if len(protected.inspection.Blockers) == 0 {
+		return []error{transitionOutcomeError(*protected.inspection.Outcome)}
+	}
+	refusals := make([]error, 0, len(protected.inspection.Blockers))
+	for _, blocker := range protected.inspection.Blockers {
+		refusals = append(refusals, fmt.Errorf("release transition blocker: code=%s resource=%s; %s; next: %s",
+			blocker.Code, blocker.Resource, blocker.Message, blocker.Retry))
+	}
+	return refusals
+}

@@ -961,6 +961,99 @@ jq -e '.version == "1.1.0-test" and .rpc.min == 1 and .rpc.max == 1 and
   "$artifact_two.manifest.json" >/dev/null
 rpc_negotiate "$artifact_two" 1.1.0-test 1 compatible artifact-two-v1
 
+# Retry fixtures for an installation whose first runtime link has no previous release.
+retry_environment() { # <home>
+  export HOME="$1" SUBYARD_OPERATOR_HOME="$1"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  mkdir -m 0700 "$HOME"
+}
+publish_first() { # <bundle>
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$1" --checksum "$1.sha256" --manifest "$1.manifest.json" \
+    --provenance "$1.provenance.json" >/dev/null
+}
+fresh_power_ledger='{"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}'
+# A first install stopped before any protected record, retried with another
+# version: the newer release initializes the installation and activates itself.
+(
+  retry_environment "$TMP/bootstrap-other-version-home"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  publish_first "$bundle_one"
+  first_target="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  [[ "$first_target" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
+    || fail 'other-version retry precondition was not established'
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-other-version-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-other-version-retry.log" >&2; fail 'interrupted first install did not resume with another version'; }
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  grep -Fq 'Status: ready' "$TMP/bootstrap-other-version-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && jq -e '.checkpoint == "complete"' "$protected/journal.json" >/dev/null \
+    && jq -e --argjson power "$fresh_power_ledger" '.domains["power-metadata"] == $power' "$protected/ledger.json" >/dev/null \
+    && [ -x "$YARD_BIN_DIR/yard" ] && [ -x "$YARD_BIN_DIR/sy" ] \
+    || { cat "$TMP/bootstrap-other-version-retry.log" >&2; fail 'other-version retry omitted readiness, protected history or entrypoints'; }
+)
+# A first install stopped right after its authorized journal (a non-directory
+# transactions entry blocks evidence), retried with another version: the newer
+# release takes over the unfinished journal and completes the installation.
+(
+  retry_environment "$TMP/bootstrap-killed-home"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  publish_first "$bundle_one"
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME" "$SUBYARD_CONFIG_HOME/release-transition" "$protected"
+  : > "$protected/transactions"
+  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed.log" 2>&1; then
+    fail 'interrupted initial activation fixture unexpectedly completed'
+  fi
+  rm -f -- "$protected/transactions"
+  # The unfinished journal is the newer release's own, with every historical step.
+  [ "$(find "$SUBYARD_CONFIG_HOME" -mindepth 1 -not -type d -printf '%P\n' | sort)" = $'migrations/update.lock\nrelease-transition/v2/journal.json' ] \
+    && jq -e '.checkpoint == "authorized" and (.goal.target | startswith("1.1.0-test-")) and
+      ([.steps[] | .id + ":" + .checkpoint] | length == 7 and all(endswith(".ledger:intent")))' "$protected/journal.json" >/dev/null \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    || { cat "$TMP/bootstrap-killed.log" >&2; fail 'interrupted initial activation precondition was not established'; }
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-killed-retry.log" >&2; fail 'interrupted initial activation did not resume'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-killed-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && jq -e --argjson power "$fresh_power_ledger" '.domains["power-metadata"] == $power' "$protected/ledger.json" >/dev/null \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/previous")" == releases/1.0.0-test-* ]] \
+    && jq -e '.checkpoint == "complete"' "$protected/journal.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] && [ -x "$YARD_BIN_DIR/yard" ] \
+    || { cat "$TMP/bootstrap-killed-retry.log" >&2; fail 'resumed initial activation omitted readiness, history or entrypoints'; }
+)
+# The older release's own first install stops right after its authorized
+# journal; a retry with the newer installer takes over that journal's owner,
+# completes it and updates to the newer release.
+(
+  retry_environment "$TMP/bootstrap-cross-owner-home"
+  export YARD_RELEASE_BASE_URL="file://$release"
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME" "$SUBYARD_CONFIG_HOME/release-transition" "$protected"
+  : > "$protected/transactions"
+  if YARD_RELEASE_VERSION=1.0.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-cross-owner.log" 2>&1; then
+    fail 'interrupted older first install unexpectedly completed'
+  fi
+  rm -f -- "$protected/transactions"
+  first_target="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  [[ "$first_target" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    && [ ! -e "$protected/ledger.json" ] \
+    && jq -e --arg target "${first_target#releases/}" '.checkpoint == "authorized" and .goal.target == $target' \
+      "$protected/journal.json" >/dev/null \
+    || { cat "$TMP/bootstrap-cross-owner.log" >&2; fail 'interrupted older first install precondition was not established'; }
+  YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-cross-owner-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-cross-owner-retry.log" >&2; fail 'newer installer did not take over the older first install'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-cross-owner-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && [ "$(readlink "$YARD_RUNTIME_ROOT/previous")" = "$first_target" ] \
+    && jq -e '.checkpoint == "complete"' "$protected/journal.json" >/dev/null \
+    && jq -e --argjson power "$fresh_power_ledger" '.domains["power-metadata"] == $power' "$protected/ledger.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] && [ -x "$YARD_BIN_DIR/yard" ] \
+    || { cat "$TMP/bootstrap-cross-owner-retry.log" >&2; fail 'cross-owner first-install retry omitted readiness, history or previous'; }
+)
+
 # A verified standalone bootstrap is the one-time bridge for an active runtime
 # whose installed release installer predates immutable publish-only support.
 # The candidate must own the transition; the legacy installer is never asked

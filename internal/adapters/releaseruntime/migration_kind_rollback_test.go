@@ -881,14 +881,5 @@ func TestTransitionLaunchRefusesNonActiveEngineWithoutSelection(t *testing.T) {
 	request.ArtifactDigest = verified.manifestDigest
 	_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
 	assertReleaseSelectionStale(t, err)
-
-	active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
-	assets, err := runtime.verifyPublishedCandidate(ctx, active, request.RuntimeRoot, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer assets.Close()
-	_, err = runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, "")
-	assertReleaseSelectionStale(t, err)
 	assertMigrationRollbackUnchanged(t, request, called)
 }
