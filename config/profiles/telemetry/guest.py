@@ -35,6 +35,9 @@ BINARY_LIMIT = 64*1024*1024
 REPLACED = 'replaced'
 # Drop-in directories systemd applies to every service, such as the LXC guest's.
 TYPE_DROPINS = (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d'))
+# Settings of the stock LXC guest drop-in, the type-wide one a recognized previous unit may carry.
+LXC_SETTINGS = ('ProcSubset', 'ProtectProc', 'ProtectControlGroups', 'ProtectKernelTunables', 'NoNewPrivileges',
+                'LoadCredential', 'PrivateNetwork', 'ImportCredential')
 
 
 def systemctl(*args):
@@ -45,24 +48,31 @@ def systemctl(*args):
     return result.stdout.decode().strip()
 
 
-def changes_startup(path):
-    """Whether a type-wide drop-in sets the command, account or environment, or cannot be read."""
+def stock_dropin(path, before=None):
+    """Whether a type-wide drop-in is a root-owned regular file, older than `before` when given,
+    that sets only what the stock LXC guest drop-in sets. Each physical line stands alone."""
     try:
         native.safe(path)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, 'rb') as stream:
             info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode)
+            if (not stat.S_ISREG(info.st_mode) or (before is not None and info.st_mtime_ns >= before)
                     or any(entry.st_uid != os.getuid() or entry.st_mode & 0o022 for entry in (info, path.parent.stat()))):
-                return True
+                return False
             content = stream.read(native.CONFIG_LIMIT+1)
-        if len(content) > native.CONFIG_LIMIT:
-            return True
-        text = content.decode()
+        if len(content) > native.CONFIG_LIMIT or b'\0' in content:
+            return False
+        lines = [line.strip() for line in content.decode().splitlines()]
     except (OSError, ValueError):
-        return True
-    keys = [line.split('=', 1)[0].strip() for line in text.replace('\\\n', ' ').splitlines() if '=' in line]
-    return any(key in ('Environment', 'EnvironmentFile', 'User', 'Group') or key.startswith('Exec') for key in keys)
+        return False
+    for line in lines:
+        if line.endswith('\\'):
+            return False
+        if not line or line[0] in '#;' or line.startswith('[') and line.endswith(']'):
+            continue
+        if line.partition('=')[0].strip() not in LXC_SETTINGS:
+            return False
+    return True
 
 
 class Runtime:
@@ -324,8 +334,10 @@ class Runtime:
                         or hashlib.sha256(content).hexdigest() not in self.recorded_digests(saved, path)
                         or not (replacing or fields.get('NeedDaemonReload') == 'no' and content != self.assets[path][0])):
                     raise ValueError('foreign loaded unit envelope')
-                # Its own fields are ours; a type-wide drop-in must not change how it starts.
-                if any(changes_startup(Path(dropin)) for dropin in dropins):
+                # Its own fields are ours; type-wide drop-ins may only be the stock LXC one. Before
+                # daemon-reload, one changed after the unit file was replaced is not the loaded one.
+                before = None if fields.get('NeedDaemonReload') == 'no' else path.stat().st_mtime_ns
+                if not all(stock_dropin(Path(dropin), before) for dropin in dropins):
                     raise ValueError('foreign loaded unit drop-in')
         return fields
 

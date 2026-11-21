@@ -112,7 +112,7 @@ class LifecycleTest(unittest.TestCase):
             with patch.object(guest, 'systemctl', return_value=show({**fields, 'FragmentPath': str(units/guest.MANAGER)})), \
                  self.assertRaisesRegex(ValueError, 'foreign loaded unit stop policy'):
                 runtime.manager(guest.MANAGER)
-            # A type-wide drop-in, like the LXC guest's, must not change how a recorded unit starts.
+            # A recorded unit may carry only the stock LXC guest's type-wide drop-in.
             service = root/'service.d'
             service.mkdir(mode=0o755)
             service.chmod(0o755)
@@ -121,6 +121,8 @@ class LifecycleTest(unittest.TestCase):
                 dropin.unlink(missing_ok=True)
                 dropin.write_bytes(content)
                 dropin.chmod(mode)
+                # Older than the replaced unit file, as loaded before it.
+                os.utime(dropin, ns=(path.stat().st_mtime_ns-10**9,)*2, follow_symlinks=False)
             for state, loaded, saved in (
                     ('previous file loaded', unit, {str(path): hashlib.sha256(unit).hexdigest()}),
                     ('replaced file loaded', current, {str(path): hashlib.sha256(current).hexdigest(),
@@ -130,13 +132,21 @@ class LifecycleTest(unittest.TestCase):
                 stale = {**fields, 'DropInPaths': str(dropin), 'NoNewPrivileges': 'no',
                          'NeedDaemonReload': 'no' if loaded == unit else 'yes'}
                 with patch.object(guest, 'TYPE_DROPINS', (service,)), patch.object(guest, 'systemctl', return_value=show(stale)):
-                    write_dropin(b'[Service]\nProcSubset=all\nProtectProc=default\nNoNewPrivileges=no\nLoadCredential=\n')
+                    write_dropin(b'# Generated\n\n[Service]\nProcSubset=all\nProtectProc = default\nProtectControlGroups=no\n'
+                                 b'ProtectKernelTunables=no\n ; Container\nNoNewPrivileges=no\nLoadCredential=\nPrivateNetwork=no\nImportCredential=\n')
                     with self.subTest(state=state, dropin='lxc'):
                         self.assertEqual(runtime.manager(guest.COLLECTOR)['MemoryMax'], '536870912')
+                    # systemd drops comments before joining continuation lines and ends lines at NUL.
                     for content in (b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',
                                     b'[Service]\nUser=root\n', b'[Service]\nGroup=root\n', b'[Service]\nExecStart=\nExecStart=/bin/sh\n',
                                     b'[Service]\nExecStartPre=/bin/true\n', b'[Service]\n  Environment = A=1\n',
-                                    b'[Service]\nEnvironment\\\n=A=1\n'):
+                                    b'[Service]\nEnvironment\\\n=A=1\n', b'[Service]\nProcSubset=all\n# note \\\nEnvironment=A=1\n',
+                                    b'[Service]\nProcSubset=all\\\\\n', b'[Service]\nProcSubset=all\0Environment=A=1\n',
+                                    b'[Service]\nLoadCredential=a \\\nProcSubset=all\n',
+                                    b'[Service]\nProcSubset=all\rEnvironment=A=1\n', b'[Service]\nAmbientCapabilities=CAP_SYS_ADMIN\n',
+                                    b'[Service]\nSupplementaryGroups=root\n', b'[Service]\nPassEnvironment=LD_PRELOAD\n',
+                                    b'[Service]\nBindReadOnlyPaths=/tmp/x:/usr/local/lib\n', b'[Service]\nDynamicUser=yes\n',
+                                    b'[Service]\nRootDirectory=/tmp/x\n', b'.include /tmp/x\n'):
                         write_dropin(content)
                         with self.subTest(state=state, dropin=content), self.assertRaisesRegex(ValueError, 'foreign loaded unit drop-in'):
                             runtime.manager(guest.COLLECTOR)
@@ -162,6 +172,15 @@ class LifecycleTest(unittest.TestCase):
                             runtime.manager(guest.COLLECTOR)
                         service.chmod(0o755)
                         dropin.unlink(missing_ok=True)
+                    # Until daemon-reload, a drop-in changed after the unit file was replaced is not the loaded one.
+                    write_dropin(lxc)
+                    os.utime(dropin, ns=(path.stat().st_mtime_ns,)*2)
+                    with self.subTest(state=state, dropin='changed since load'):
+                        if loaded == unit:
+                            runtime.manager(guest.COLLECTOR)
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'foreign loaded unit drop-in'):
+                                runtime.manager(guest.COLLECTOR)
             # Over the current file, another loaded startup or environment comes from a drop-in.
             path.write_bytes(current)
             inventory.write_text(json.dumps({str(path): hashlib.sha256(current).hexdigest()}))
