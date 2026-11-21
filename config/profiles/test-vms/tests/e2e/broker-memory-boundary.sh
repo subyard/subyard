@@ -65,7 +65,7 @@ YARD=test-yard
 # These functions own the keeper, release capability and bounded process cleanup.
 # shellcheck disable=SC1090
 . <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  start_lease_keeper$/a\
+  "$ROOT/dev/e2e/lease-holder.sh" | sed '/^  start_lease_keeper$/a\
   printf "%s\\t%s\\n" "$BASHPID" "$LEASE_KEEPER_PID" > "$STATE_PARENT/$client.processes"')
 
 die() { printf 'broker-memory-boundary: %s\n' "$*" >&2; exit 2; }
@@ -73,6 +73,87 @@ outer_exec() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 runtime_yard() { "$SUBYARD_HOME/runtime/current/bin/yard" "$@"; }
 fixture_yard() {
   if [ "$TELEMETRY_ONLY" = 1 ]; then runtime_yard "$@"; else ./bin/yard "$@"; fi
+}
+
+verify_slot_forwarding_isolation() {
+  # Work inside the installed broker container before it acquires any VMs.
+  outer_exec timeout --kill-after=5 45 bash -se <<'PROBE'
+set -euo pipefail
+nft list chain inet subyard_e2e forward >/dev/null
+first="subyard-e2e-forward-$$-1"
+second="subyard-e2e-forward-$$-2"
+left=e2e-vm-net-90
+right=e2e-vm-net-91
+control=sy-e2e-open
+created=()
+cleanup_probe() {
+  local rc=$? ns
+  for ns in "${created[@]}"; do ip netns delete "$ns" || rc=1; done
+  exit "$rc"
+}
+trap cleanup_probe EXIT
+trap 'exit 143' TERM
+
+pair() {
+  local ns="$1" iface="$2" host_ip="$3" guest_ip="$4" peer_subnet="$5"
+  ip netns add "$ns"
+  created+=("$ns")
+  ip link add "$iface" type veth peer name probe0 netns "$ns"
+  ip addr add "$host_ip/30" dev "$iface"
+  ip link set "$iface" up
+  ip -n "$ns" addr add "$guest_ip/30" dev probe0
+  ip -n "$ns" link set probe0 up
+  ip -n "$ns" route add "$peer_subnet" via "$host_ip"
+}
+rename_peer() {
+  ip link set "$1" down
+  ip link set "$1" name "$2"
+  ip link set "$2" up
+}
+pair "$first" "$left" 198.18.0.1 198.18.0.2 198.18.0.4/30
+pair "$second" "$control" 198.18.0.5 198.18.0.6 198.18.0.0/30
+
+routed_tcp() {
+  python3 - "$first" "$second" "$1" <<'PYTCP'
+import select, subprocess, sys
+
+first, second, expected = sys.argv[1:]
+server = '''import socket, sys
+with socket.socket() as sock:
+    sock.bind((sys.argv[1], 0))
+    sock.listen()
+    print(sock.getsockname()[1], flush=True)
+    sock.accept()[0].close()
+'''
+client = '''import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2).close()
+except TimeoutError:
+    sys.exit(4)
+'''
+for source, destination, address in ((first, second, '198.18.0.6'), (second, first, '198.18.0.2')):
+    with subprocess.Popen(['ip', 'netns', 'exec', destination, 'python3', '-c', server, address],
+                          stdout=subprocess.PIPE, text=True) as listener:
+        try:
+            if not select.select([listener.stdout], [], [], 5)[0]:
+                raise SystemExit('slot forwarding probe listener timed out')
+            port = listener.stdout.readline().strip()
+            if not port.isdecimal():
+                raise SystemExit('slot forwarding probe listener did not bind')
+            result = subprocess.run(['ip', 'netns', 'exec', source, 'python3', '-c', client, address, port], timeout=5)
+            if result.returncode != int(expected):
+                raise SystemExit(f'slot forwarding probe TCP exit {result.returncode}, expected {expected}')
+        finally:
+            listener.terminate()
+PYTCP
+}
+
+routed_tcp 0
+rename_peer "$control" "$right"
+routed_tcp 4
+rename_peer "$right" "$control"
+routed_tcp 0
+PROBE
 }
 
 prepare_native_route() {
@@ -1052,7 +1133,7 @@ OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
 install_owner_runtime
 [ -x "$SUBYARD_HOME/runtime/current/config/profiles/github/bin/broker" ] \
   || die 'installed owner runtime lacks its required native GitHub helper'
-if [ "$TELEMETRY_ONLY" = 0 ] && [ "$PREGRANT_ONLY" = 0 ]; then prepare_broker_recovery_update; fi
+if [ "$TELEMETRY_ONLY" = 0 ] && [ "$PREGRANT_ONLY" = 0 ]; then prepare_broker_update_artifact; fi
 prepare_owner_image_cache_project "$PROJECT"
 write_owner_registration test-yard test-vms 2224 1
 REGISTRATION="$OWNER_YARD_DIR/test-yard.env"
@@ -1149,6 +1230,10 @@ project_marker="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
 incus project set "$PROJECT" user.subyard-e2e.image-cache="$MARKER"
 [ "$(incus project get "$PROJECT" user.subyard-e2e.image-cache)" = "$MARKER" ] \
   || die 'broker fixture project lost its P0 marker'
+if [ "$LEASE_EXPIRY" = 1 ]; then
+  verify_slot_forwarding_isolation || die 'installed firewall did not isolate slot networks'
+  printf '  [ ok ] installed firewall drops TCP forwarding between slot networks\n'
+fi
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"
 assert_memory_accounting
@@ -1250,14 +1335,14 @@ fi
 
 
 if [ "$TELEMETRY_ONLY" = 0 ]; then
-release="$(dirname "$P0_BROKER_RECOVERY_UPDATE_ARTIFACT")"
+release="$(dirname "$P0_BROKER_UPDATE_ARTIFACT")"
 runtime_root="$SUBYARD_HOME/runtime"
 old_hash="$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')"
 remove_owned_device
 YARD_RELEASE_BASE_URL="file://$release" runtime_yard update \
-  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update --check >/dev/null
+  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-update --check >/dev/null
 YARD_RELEASE_BASE_URL="file://$release" runtime_yard update \
-  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-recovery-update --yes >/dev/null
+  --runtime-root "$runtime_root" --version 0.29.1-p0.broker-update --yes >/dev/null
 assert_owned_device
 assert_held_unchanged
 assert_memory_accounting

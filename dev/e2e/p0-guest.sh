@@ -204,14 +204,6 @@ prepare_owner_go_cache() {
   export SUBYARD_TEST_VMS_SINK_TIMER_PATH="$OWNER_TEST_VMS_SINK_TIMER"
 }
 
-require_broker_fixture_capacity() {
-  local memory_kib
-  memory_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-  # Two simultaneous pairs reserve 8GiB plus per-VM overhead and host headroom.
-  [[ "$memory_kib" =~ ^[0-9]+$ ]] && [ "$memory_kib" -ge $((15 * 1024 * 1024)) ] \
-    || die 'nested broker acceptance requires an allocated host with at least 16GiB RAM; the default 4GiB pair VM is too small'
-}
-
 write_owner_registration() { # <yard> <template> <ssh-port> [slot-count] [vm-cpu]
   local yard="$1" template="$2" port="$3" slots="${4:-2}" cpu="${5:-1}" registration
   local base_image="${OWNER_BASE_IMAGE_REFERENCE:-$OWNER_BASE_IMAGE}"
@@ -305,17 +297,17 @@ p0_apply_release_update() {
     "$yard" update --runtime-root "$runtime_root" --version "$version" --yes >/dev/null
 }
 
-prepare_broker_recovery_update() {
+prepare_broker_update_artifact() {
   local arch release artifact
   arch="$(go env GOARCH)"
-  release="$ROOT/.build/p0-broker-recovery-update"
-  artifact="$release/subyard-0.29.1-p0.broker-recovery-update-linux-$arch"
+  release="$ROOT/.build/p0-broker-update"
+  artifact="$release/subyard-0.29.1-p0.broker-update-linux-$arch"
   dev/package-engine.sh \
     --output-dir "$release" \
-    --version 0.29.1-p0.broker-recovery-update \
+    --version 0.29.1-p0.broker-update \
     --arch "$arch" >/dev/null
-  P0_BROKER_RECOVERY_UPDATE_ARTIFACT="$artifact"
-  export P0_BROKER_RECOVERY_UPDATE_ARTIFACT
+  P0_BROKER_UPDATE_ARTIFACT="$artifact"
+  export P0_BROKER_UPDATE_ARTIFACT
 }
 
 canonical_broker_release_migration_contract() {
@@ -647,24 +639,13 @@ ensure_owner_base_image() {
   OWNER_BASE_IMAGE_CREATED=1
 }
 
-reclaim_broker_recovery_capacity() {
+reclaim_owner_build_capacity() {
   if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
     incus image delete "$OWNER_BASE_IMAGE" --project default >/dev/null
     OWNER_BASE_IMAGE_CREATED=0
   fi
   p0_capacity_remove_build_cache
   p0_capacity_use_build_cache
-}
-
-run_nested_broker_acceptance() {
-  local script="$1"
-  env \
-    SUBYARD_E2E_TEST_MODE=1 \
-    SUBYARD_E2E_WORKSPACES_ROOT="$(dirname "$(dirname "$ROOT")")" \
-    SUBYARD_E2E_PROJECT_LABEL=Subyard-2 \
-    SUBYARD_E2E_PROJECT_YARD=test-yard \
-    SUBYARD_E2E_YARD=test-yard \
-    bash "$ROOT/$script"
 }
 
 owner() (
@@ -735,42 +716,6 @@ owner_migration() (
   prepare_owner_image_cache_project subyard-test-yard
   owner_release_contract
   printf 'ok: VM1 supported broker update, rollback and fresh current owner\n'
-)
-
-broker_recovery_owner() (
-  [ "$SUBYARD_E2E_VM" = 1 ] || die 'broker recovery owner lane requires VM1'
-  require_broker_fixture_capacity
-  trap owner_cleanup EXIT
-  prepare_owner_go_cache
-  YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
-  dev/build-profiles.sh >/dev/null
-  ensure_owner_incus
-  OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
-  OWNER_BASELINE_CAPTURED=1
-  ensure_owner_base_image
-  OWNER_DIAGNOSTIC_VM_MEMORY="${P0_BROKER_RECOVERY_VM_MEMORY:-2GiB}"
-  install_owner_runtime
-  prepare_broker_recovery_update
-  prepare_owner_image_cache_project subyard-test-yard
-  write_owner_registration test-yard test-vms 2224 1
-  ./bin/yard -Y test-yard init --yes
-  ./bin/yard -Y test-yard start --yes
-  p0_capacity_remove_build_cache
-  p0_capacity_use_build_cache
-  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
-  write_owner_registration test-yard test-vms 2224 3
-  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
-  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
-  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
-  run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
-  write_owner_registration test-yard test-vms 2224 2
-  p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
-  p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
-  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
-  reclaim_broker_recovery_capacity
-  run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
-  ./bin/yard -Y test-yard teardown --yes
-  printf 'ok: VM1 broker leases, slot resizing, logging and quarantine rebuild acceptance\n'
 )
 
 install_peer_wrapper() {
@@ -2030,7 +1975,6 @@ capacity_verify_cleanup() {
     ;;
   owner) owner ;;
   owner-migration) owner_migration ;;
-  broker-recovery-owner) broker_recovery_owner ;;
   peer-prepare) peer_prepare ;;
   peer-prepare-resume) peer_incus_ready; peer_prepare_finish ;;
   peer-info) peer_info ;;

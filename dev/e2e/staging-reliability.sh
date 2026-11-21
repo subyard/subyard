@@ -55,7 +55,7 @@ HOLDER_STOP_GRACE_SECONDS=30
 HOLDER_KILL_GRACE_SECONDS=10
 # shellcheck disable=SC1090
 . <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p; /^reaper_pause() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  acquire_lease /i\
+  "$ROOT/dev/e2e/lease-holder.sh" | sed '/^  acquire_lease /i\
   VM_COUNT_REQUESTED=1\n  resolve_vm_count')
 
 die() { printf 'staging-reliability: %s\n' "$*" >&2; exit 2; }
@@ -462,7 +462,7 @@ PYCONSUMED
   # fingerprint so alias drift cannot delete another image.
   if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
     OWNER_BASE_IMAGE="$actual"
-    reclaim_broker_recovery_capacity || return
+    reclaim_owner_build_capacity || return
     printf 'STAGING_CONSUMED_OWNER_IMAGE={"fingerprint":"%s","created_by_run":true}\n' "$actual"
   fi
 }
@@ -1499,6 +1499,14 @@ timeout --signal=TERM --kill-after=10 300 bash -c '
 timeout --signal=TERM --kill-after=10 310 incus exec "$INSTANCE" --project "$PROJECT" --   incus exec e2e-vm-1 --project subyard-e2e-vms-slot-1 -- timeout --kill-after=10 300 cloud-init status --wait --long >/dev/null
 boot_after="$(timeout --signal=TERM --kill-after=10 15 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id </dev/null)"
 [ -n "$boot_before" ] && [ -n "$boot_after" ] && [ "$boot_before" != "$boot_after" ] || die 'singleton did not boot again'
+timeout --signal=TERM --kill-after=10 15 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- \
+  'systemctl is-enabled --quiet subyard-e2e-lease-context.service &&
+   ip -4 route show default | grep "^default " >/dev/null && cat /run/subyard-e2e-lease.json' </dev/null \
+  | jq -e --argjson lease "$(jq -c '.pool.slots[0]' <<<"$held")" '
+      .schema_version == 2 and .yard == $lease.yard and .project == $lease.project and
+      .run == $lease.run and .purpose == $lease.purpose and .slot == $lease.slot_id and
+      (has("checkout") | not)' >/dev/null \
+  || die 'second boot did not restore the lease context, enabled service and default route'
 printf 'STAGING_SECOND_BOOT_IDENTITY_BEGIN\n'
 timeout --signal=TERM --kill-after=10 30 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- \
   'uname -r; systemctl show incus-agent.service -p ActiveState -p ActiveEnterTimestampMonotonic; journalctl -b -u incus-agent.service --no-pager -n 80' </dev/null
