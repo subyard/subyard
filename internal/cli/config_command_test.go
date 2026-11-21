@@ -4175,11 +4175,12 @@ func loadConfigCommandContext(t *testing.T, root string, environment []string, y
 func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 	t.Helper()
 	appendObservationSteps(t, fake, loaded, func(asset configAsset) string {
-		hash, err := config.HashRegularFile(asset.Source)
+		source := config.MaterializedAsset{Source: asset.Source, ApprovalSources: asset.ApprovalSources}
+		payload, err := source.ReadContent(loaded.ProspectiveFiles.ReadAsset)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return hash
+		return fmt.Sprintf("%x", sha256.Sum256(payload))
 	}, true)
 }
 
