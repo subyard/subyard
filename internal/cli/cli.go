@@ -507,7 +507,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if name == "_uninstall-resume" {
 		cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission
-		return cli.runFullTeardownRecovery(ctx, remaining[1:])
+		code, noStore := cli.runFullTeardownRecovery(ctx, remaining[1:])
+		if noStore {
+			cli.errorf("No saved full uninstall plan. Run 'yard teardown --full' again.")
+			return 1
+		}
+		return code
 	}
 	commandArguments := append([]string(nil), remaining[1:]...)
 	if yes {
