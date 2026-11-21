@@ -10,12 +10,9 @@ import (
 	"syscall"
 )
 
-// ApprovalGateSets are the approval_sources keys: the prompt gates a variant carries.
-var ApprovalGateSets = []string{"git", "sudo", "git sudo"}
-
 // IntegrationArtifact is semantic data; native sources are bound by the package loader.
 // Modes and ownership retain the existing raw and structured writer policies.
-// ApprovalSources replace Source for the named set of active prompt gates.
+// ApprovalSources are JSON overlays on the shipped Source, one per prompt gate.
 type IntegrationArtifact struct {
 	ID              string            `json:"id"`
 	Label           string            `json:"label,omitempty"`
@@ -60,8 +57,8 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 		if artifact.Format != "raw" && artifact.Format != "json" && artifact.Format != "toml" && artifact.Format != "destination" {
 			return errors.New("invalid integration artifact format")
 		}
-		for gates, path := range artifact.ApprovalSources {
-			if artifact.Kind != "config" || !slices.Contains(ApprovalGateSets, gates) || !textSafe(path) || !relative(path) {
+		for gate, path := range artifact.ApprovalSources {
+			if artifact.Kind != "config" || (gate != "git" && gate != "sudo") || !textSafe(path) || !relative(path) {
 				return errors.New("invalid approval artifact source")
 			}
 		}

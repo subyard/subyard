@@ -1,9 +1,6 @@
 {
-  "$schema": "https://opencode.ai/config.json",
   "permission": {
-    "*": "allow",
     "bash": {
-      "*": "allow",
       "sudo": "ask",
       "sudo *": "ask",
       "su": "ask",

@@ -9,9 +9,8 @@
       "kind": "config",
       "source": "opencode.jsonc",
       "approval_sources": {
-        "git": "opencode-git.jsonc",
-        "sudo": "opencode-sudo.jsonc",
-        "git sudo": "opencode-git-sudo.jsonc"
+        "git": "50-subyard-git-approval.jsonc",
+        "sudo": "51-subyard-sudo-approval.jsonc"
       },
       "destination": ".config/opencode/opencode.jsonc",
       "format": "destination"

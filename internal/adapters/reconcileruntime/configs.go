@@ -31,6 +31,7 @@ type guestConfigFile struct {
 	source              string
 	destination         string
 	followSymlinks      bool
+	approvalSources     []string
 	previewInstructions bool
 	previewSource       string
 	ownedFormat         string
@@ -511,7 +512,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat, initOnly: source.PreviewInstructions}
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, approvalSources: asset.ApprovalSources, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat, initOnly: source.PreviewInstructions}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
@@ -529,7 +530,8 @@ func (file guestConfigFile) readSourceAsset(asset config.MaterializedAsset) ([]b
 }
 
 func (file guestConfigFile) readSource() ([]byte, error) {
-	payload, sourceErr := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
+	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks, ApprovalSources: file.approvalSources}
+	payload, sourceErr := asset.ReadContent(file.readSourceAsset)
 	if sourceErr != nil && !os.IsNotExist(sourceErr) {
 		return nil, sourceErr
 	}

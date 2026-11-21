@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,12 +17,13 @@ import (
 // MaterializedAsset identifies a desired file and its policy in the developer home.
 // Policy follows the consumer destination, including after import renames a source.
 type MaterializedAsset struct {
-	Name           string
-	Setting        string
-	Source         string
-	Destination    string
-	OwnedFormat    string
-	FollowSymlinks bool
+	Name            string
+	Setting         string
+	Source          string
+	Destination     string
+	OwnedFormat     string
+	FollowSymlinks  bool
+	ApprovalSources []string
 }
 
 // MaterializedAssets resolves CONFIG and RULES assets. Host instruction files are
@@ -52,12 +54,12 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 				}
 				declaredKinds[artifact.ID] = true
 				artifact.Source = filepath.Join(definition.Root, artifact.Source)
-				if len(artifact.ApprovalSources) != 0 {
-					variants := make(map[string]string, len(artifact.ApprovalSources))
-					for gates, source := range artifact.ApprovalSources {
-						variants[gates] = filepath.Join(definition.Root, source)
+				if len(artifact.ApprovalSources) > 0 {
+					sources := make(map[string]string, len(artifact.ApprovalSources))
+					for gate, path := range artifact.ApprovalSources {
+						sources[gate] = filepath.Join(definition.Root, path)
 					}
-					artifact.ApprovalSources = variants
+					artifact.ApprovalSources = sources
 				}
 				artifacts = append(artifacts, artifact)
 			}
@@ -78,9 +80,6 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			if !present {
 				source = artifact.Source
 			}
-			if variant, ok := artifact.ApprovalSources[ApprovalGates(values)]; ok && source == artifact.Source {
-				source = variant
-			}
 			destination, present := values[setting+"_DEST"]
 			if !present {
 				destination = artifact.Destination
@@ -98,7 +97,23 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			} else if format == "destination" {
 				format = ownedDestinationFormat(clean)
 			}
-			assets = append(assets, MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format})
+			asset := MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format}
+			if source == artifact.Source {
+				for _, gate := range []struct {
+					name   string
+					active bool
+				}{
+					{"git", !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"])},
+					{"sudo", SudoApprovalPrompt(values["DEV_SUDO"])},
+				} {
+					if path := artifact.ApprovalSources[gate.name]; gate.active && path != "" {
+						asset.ApprovalSources = append(asset.ApprovalSources, path)
+						assets = append(assets, MaterializedAsset{Name: asset.Name + "." + gate.name,
+							Source: path, Destination: filepath.Join(filepath.Dir(clean), filepath.Base(path))})
+					}
+				}
+			}
+			assets = append(assets, asset)
 		}
 	}
 	destinations := make([]string, 0, len(assets))
@@ -109,6 +124,46 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 		return nil, err
 	}
 	return assets, nil
+}
+
+// ReadContent composes installed JSON overlays using the same source reader as
+// the base and the independently managed copies of each overlay.
+func (asset MaterializedAsset) ReadContent(read func(MaterializedAsset) ([]byte, error)) ([]byte, error) {
+	payload, err := read(MaterializedAsset{Source: asset.Source, FollowSymlinks: asset.FollowSymlinks})
+	if err != nil || len(asset.ApprovalSources) == 0 {
+		return payload, err
+	}
+	for _, path := range asset.ApprovalSources {
+		fragment, err := read(MaterializedAsset{Source: path})
+		if err != nil {
+			return nil, fmt.Errorf("read approval overlay: %v", err)
+		}
+		payload, err = mergeApprovalJSON(payload, fragment)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return payload, nil
+}
+
+func mergeApprovalJSON(base, overlay json.RawMessage) (json.RawMessage, error) {
+	var fields, extra map[string]json.RawMessage
+	if json.Unmarshal(base, &fields) != nil || fields == nil ||
+		json.Unmarshal(overlay, &extra) != nil || extra == nil {
+		return nil, errors.New("approval overlay requires JSON objects")
+	}
+	for name, value := range extra {
+		if previous := fields[name]; len(previous) > 0 && previous[0] == '{' && value[0] == '{' {
+			merged, err := mergeApprovalJSON(previous, value)
+			if err != nil {
+				return nil, err
+			}
+			value = merged
+		}
+		fields[name] = value
+	}
+	payload, err := json.MarshalIndent(fields, "", "  ")
+	return append(payload, '\n'), err
 }
 
 // validateManagedDestinations keeps files and managed links from replacing each
@@ -190,16 +245,4 @@ func GitApprovalOff(value string) bool {
 // escalation. Unset means the default, prompt.
 func SudoApprovalPrompt(value string) bool {
 	return value == "" || value == "prompt"
-}
-
-// ApprovalGates names the active prompt gates in the order the agent packages accept.
-func ApprovalGates(values map[string]string) string {
-	var gates []string
-	if !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"]) {
-		gates = append(gates, "git")
-	}
-	if SudoApprovalPrompt(values["DEV_SUDO"]) {
-		gates = append(gates, "sudo")
-	}
-	return strings.Join(gates, " ")
 }

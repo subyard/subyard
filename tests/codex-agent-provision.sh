@@ -223,6 +223,9 @@ link="$root/usr/local/bin/codex"
 runtime_link="$root/opt/subyard/codex/codex"
 check="$root/usr/local/bin/codex-policy-check"
 requirements="$root/etc/codex/requirements.toml"
+git_policy="$(dirname "$requirements")/50-subyard-git-approval.rules.inc"
+sudo_policy="$(dirname "$requirements")/51-subyard-sudo-approval.rules.inc"
+hook_policy="$(dirname "$requirements")/49-subyard-approval-hook.toml"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
 run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 3 ] || fail "fresh install did not fetch release redirect, checksum manifest and artifact"
@@ -247,7 +250,8 @@ group, = policy['hooks']['PreToolUse']
 assert group['matcher'] == 'Bash'
 hook, = group['hooks']
 assert hook['type'] == 'command' and hook['timeout'] == 3
-assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), '--plain', 'git']
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), '--plain', '--policies',
+    str(path.parent / '50-subyard-git-approval.rules.inc'), str(path.parent / '51-subyard-sudo-approval.rules.inc')]
 assert policy['allowed_approval_policies'] == ['on-request']
 assert policy['allowed_approvals_reviewers'] == ['user']
 rule, = policy['rules']['prefix_rules']
@@ -299,6 +303,7 @@ assert policy == {'allowed_approval_policies': ['on-request'], 'allowed_approval
                   'check_for_update_on_startup': False}, policy
 PY
 [ "$(stat -c '%a' "$requirements")" = 644 ] || fail "off-mode requirements mode drifted"
+[ ! -e "$git_policy" ] && [ ! -e "$hook_policy" ] || fail "off mode kept Git rules or the hook registration"
 CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "off-mode readiness failed"
 if CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null 2>&1; then
   fail "prompt-mode readiness accepted off-mode requirements"
@@ -311,31 +316,46 @@ run_hook amd64 "$root" >/dev/null
 grep -Fq 'decision = "prompt"' "$requirements" || fail "prompt mode was not restored"
 CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null || fail "restored prompt mode failed readiness"
 
-# DEV_SUDO=prompt, the default, adds escalation prompt rules and the sudo hook gate;
-# yes and no change nothing.
+# Seed pre-split requirements with no fragments.
 cp "$requirements" "$tmp/git-prompt-requirements"
-for git_mode in prompt off; do
-  run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL="$git_mode" DEV_SUDO=prompt >/dev/null
-  python3 - "$requirements" "$git_mode" <<'PY'
+sed -i \
+  -e '/^prefix_rules = \[/a\  { pattern = [{ token = "sudo" }], decision = "prompt" },' \
+  -e "s|^command = .*|command = \"$(dirname "$requirements")/subyard-git-approval-hook --plain git sudo\"|" \
+  "$requirements"
+rm -f "$git_policy" "$hook_policy"
+run_hook amd64 "$root" DEV_SUDO=prompt >/dev/null
+python3 - "$requirements" "$git_policy" "$sudo_policy" "$hook_policy" <<'PY'
 import pathlib, shlex, sys, tomllib
-path = pathlib.Path(sys.argv[1])
+path, git, sudo, registration = map(pathlib.Path, sys.argv[1:])
 policy = tomllib.loads(path.read_text())
-git = [[{'token': 'git'}, {'any_of': ['commit', 'push']}]] if sys.argv[2] == 'prompt' else []
-sudo = [[{'token': name}] for name in ('sudo', 'su', 'doas', 'pkexec', 'sudoedit', 'run0')]
 rules = policy['rules']['prefix_rules']
-assert [rule['pattern'] for rule in rules] == git + sudo, rules
-assert {rule['decision'] for rule in rules} == {'prompt'}, rules
+def fragment(path):
+    return tomllib.loads('rules = [\n' + path.read_text() + ']\n')['rules']
+assert rules == fragment(git) + fragment(sudo)
+assert [rule['pattern'] for rule in fragment(sudo)] == [
+    [{'token': name}] for name in ('sudo', 'su', 'doas', 'pkexec', 'sudoedit', 'run0')]
+assert {rule['decision'] for rule in rules} == {'prompt'}
+assert policy['hooks'] == tomllib.loads(registration.read_text())['hooks']
 hook, = policy['hooks']['PreToolUse'][0]['hooks']
-gates = ['git', 'sudo'] if git else ['sudo']
-assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), '--plain', *gates], hook
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'),
+    '--plain', '--policies', str(git), str(sudo)]
 PY
-  CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "sudo prompt readiness failed with Git $git_mode"
-done
-cp "$requirements" "$tmp/sudo-prompt-requirements"
+installed="$(stat -c '%i:%Y' "$requirements" "$git_policy" "$sudo_policy" "$hook_policy")"
+run_hook amd64 "$root" DEV_SUDO=prompt >/dev/null
+[ "$(stat -c '%i:%Y' "$requirements" "$git_policy" "$sudo_policy" "$hook_policy")" = "$installed" ] \
+  || fail "repeat provision rewrote the approval policies"
+mv "$sudo_policy" "$tmp/sudo-policy"
+if CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null 2>"$tmp/sudo.err"; then
+  fail "missing sudo policy passed readiness"
+fi
+grep -Fq 'managed sudo approval policy is missing' "$tmp/sudo.err"
 (unset DEV_SUDO; run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null)
-cmp "$requirements" "$tmp/sudo-prompt-requirements" || fail "unset DEV_SUDO did not install the prompt rules"
+[ ! -e "$git_policy" ] || fail "sudo-only mode kept Git rules"
+cmp "$sudo_policy" "$tmp/sudo-policy"
+CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null
 for sudo_mode in yes no; do
   run_hook amd64 "$root" DEV_SUDO="$sudo_mode" >/dev/null
+  [ ! -e "$sudo_policy" ] || fail "disabled sudo policy was retained"
   cmp "$requirements" "$tmp/git-prompt-requirements" || fail "DEV_SUDO=$sudo_mode changed the requirements"
 done
 if run_hook amd64 "$root" DEV_SUDO=0 CODING_TOOL_GIT_APPROVAL=sometimes >/dev/null 2>"$tmp/sudo-mode.err"; then
