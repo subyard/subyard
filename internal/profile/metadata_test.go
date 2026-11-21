@@ -228,7 +228,7 @@ func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
 	runtime := func(fields string) []byte {
 		return []byte(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh"` + fields + `}}`)
 	}
-	for fields, want := range map[string][2]int{
+	for fields, want := range map[string][2]RuntimeFormat{
 		``:                                     {1, 0},
 		`,"format":2`:                          {2, 0},
 		`,"format":2,"prepares_rollback_to":1`: {2, 1},
@@ -239,12 +239,13 @@ func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
 			t.Fatalf("%s: %v", fields, err)
 		}
 		hook := metadata.definition().Runtime
-		if got := [2]int{hook.EffectiveFormat(), hook.PreparesRollbackTo}; got != want {
+		if got := [2]RuntimeFormat{hook.EffectiveFormat(), hook.PreparesRollbackTo}; got != want {
 			t.Fatalf("%s: formats %v, want %v", fields, got, want)
 		}
 	}
 	for _, fields := range []string{
-		`,"format":-1`, `,"prepares_rollback_to":-1`,
+		`,"format":-1`, `,"prepares_rollback_to":-1`, `,"format":0`, `,"format":null`, `,"format":1.5`,
+		`,"format":2,"prepares_rollback_to":0`, `,"format":2,"prepares_rollback_to":null`,
 		`,"prepares_rollback_to":1`, `,"prepares_rollback_to":3`, `,"format":2,"prepares_rollback_to":2`, `,"format":2,"prepares_rollback_to":3`,
 		`,"format":"2"`,
 	} {

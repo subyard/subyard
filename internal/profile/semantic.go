@@ -403,9 +403,6 @@ func (definition *Definition) validateExtensions() error {
 			definition.Runtime.Custody || definition.OwnerService != "" || definition.InfrastructureService != nil) {
 			return errors.New("runtime failure scope must be yard on a yard-local runtime")
 		}
-		if definition.Runtime.Format < 0 || definition.Runtime.PreparesRollbackTo < 0 {
-			return errors.New("runtime formats must be positive")
-		}
 		if target := definition.Runtime.PreparesRollbackTo; target != 0 && target >= definition.Runtime.EffectiveFormat() {
 			return errors.New("runtime can prepare rollback only to an earlier format")
 		}

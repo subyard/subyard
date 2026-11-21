@@ -2,11 +2,13 @@ package reconcileruntime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -43,10 +45,12 @@ func TestProfileRuntimeRollbackActionsConvertAndVerifyLikeApply(t *testing.T) {
 	if err != nil || observation.State != ports.RuntimeStateStale || observation.Actual != testRuntimeNewDigest || observation.Desired != testRuntimeOldDigest {
 		t.Fatalf("rollback observation = %#v, %v", observation, err)
 	}
-	if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-1", testRuntimeOldDigest, testRuntimeOldDigest); err == nil {
-		t.Fatal("rollback apply accepted a changed assessment")
+	for _, changed := range [][3]string{{testRuntimeOldDigest, testRuntimeOldDigest, ""}, {observation.Actual, observation.Desired, "restart another service"}} {
+		if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-1", changed[0], changed[1], changed[2]); !errors.Is(err, domain.ErrPlanStale) {
+			t.Fatalf("rollback apply accepted a changed assessment %v: %v", changed, err)
+		}
 	}
-	if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-1", observation.Actual, observation.Desired); err != nil {
+	if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-1", observation.Actual, observation.Desired, observation.Consequence); err != nil {
 		t.Fatal(err)
 	}
 	if installed, _ := os.ReadFile(state); string(installed) != "1\n" {
@@ -54,7 +58,7 @@ func TestProfileRuntimeRollbackActionsConvertAndVerifyLikeApply(t *testing.T) {
 	}
 	// Repeating the converged apply is a verified no-op, and the ordinary
 	// observe now reports the forward drift that yard migrate repairs.
-	if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-2", observation.Actual, observation.Desired); err != nil {
+	if err := runtime.ApplyProfileRuntimeRollback(ctx, "synthetic-runtime", "op-2", observation.Actual, observation.Desired, ""); err != nil {
 		t.Fatal(err)
 	}
 	forward, err := runtime.ObserveProfileRuntime(ctx, "synthetic-runtime")
@@ -72,7 +76,7 @@ func TestProfileRuntimeRollbackActionsRequireADeclaredFormatAndRunningYard(t *te
 	if _, err := runtime.ObserveProfileRuntimeRollback(context.Background(), "synthetic-runtime"); err == nil {
 		t.Fatal("rollback-observe ran for a runtime that prepares no format")
 	}
-	if err := runtime.ApplyProfileRuntimeRollback(context.Background(), "synthetic-runtime", "op", testRuntimeOldDigest, testRuntimeNewDigest); err == nil {
+	if err := runtime.ApplyProfileRuntimeRollback(context.Background(), "synthetic-runtime", "op", testRuntimeOldDigest, testRuntimeNewDigest, ""); err == nil {
 		t.Fatal("rollback-apply ran for a runtime that prepares no format")
 	}
 	prepared, _ := rollbackRuntimeFixture(t)
