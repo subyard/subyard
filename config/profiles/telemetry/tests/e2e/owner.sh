@@ -60,6 +60,7 @@ cp config/profiles/telemetry/*.py "$state/source/"
 cp -R config/profiles/telemetry/skills "$state/source/skills"
 cp config/skills/deliver.py "$state/source/agent-skills.py"
 cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
+cp internal/safefs/safefs.py "$state/source/"
 cp "$asset" "$state/source/subyard-telemetry"
 chmod 0755 "$state/source/subyard-telemetry"
 if [ "$mode" != --held-diagnostic ] && [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_only" = 0 ]; then

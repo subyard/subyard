@@ -179,6 +179,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/tomli_w.py' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/TOMLI_W_LICENSE' "$bundle_list" \
+  && grep -Fxq './internal/safefs/safefs.py' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
   && grep -Fxq './scripts/install-ssh-relay.sh' "$bundle_list" \
   && grep -Fxq './scripts/install-test-vms-host-sink.sh' "$bundle_list" \
@@ -214,7 +215,7 @@ grep -Fq "$(basename "$untracked_canary")" "$bundle_list" \
 bundle_extract="$TMP/bundle-extract"
 install -d "$bundle_extract"
 tar -xpzf "$bundle_one" -C "$bundle_extract"
-for directory in config/profiles/package-fixture/bin config/agents/package-fixture/bin internal/adapters/configmaterial; do
+for directory in config/profiles/package-fixture/bin config/agents/package-fixture/bin internal/adapters/configmaterial internal/safefs; do
   [ "$(stat -c '%a' "$bundle_extract/$directory")" = 755 ] \
     || fail 'runtime native or helper directory does not have public mode'
 done
@@ -231,6 +232,9 @@ for support in tomli_w.py TOMLI_W_LICENSE; do
     && cmp -s "$ROOT/internal/adapters/configmaterial/$support" "$bundle_extract/internal/adapters/configmaterial/$support" \
     || fail 'runtime bundle changed shared TOML support bytes or public data mode'
 done
+[ "$(stat -c '%a' "$bundle_extract/internal/safefs/safefs.py")" = 644 ] \
+  && cmp -s "$ROOT/internal/safefs/safefs.py" "$bundle_extract/internal/safefs/safefs.py" \
+  || fail 'runtime bundle changed safefs bytes or public data mode'
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
   || fail 'runtime bundle changed preview helper bytes or executable mode'

@@ -15,11 +15,14 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def copy_skill_assets(repository, profile):
+def copy_shared_assets(repository, profile):
     shutil.copytree(repository/'config/profiles/telemetry/skills', profile/'skills')
     helper = profile.parents[1]/'skills/deliver.py'
     helper.parent.mkdir(parents=True)
     shutil.copyfile(repository/'config/skills/deliver.py', helper)
+    helper = profile.parents[2]/'internal/safefs/safefs.py'
+    helper.parent.mkdir(parents=True)
+    shutil.copyfile(repository/'internal/safefs/safefs.py', helper)
 
 
 class OwnerTest(unittest.TestCase):
@@ -33,7 +36,7 @@ class OwnerTest(unittest.TestCase):
             for path in source.glob('*.py'):
                 shutil.copyfile(path,profile/path.name)
             shutil.copyfile(source/'profile.sh',profile/'profile.sh')
-            copy_skill_assets(repository, profile)
+            copy_shared_assets(repository, profile)
             (root/'scripts/lib').mkdir(parents=True)
             shutil.copyfile(repository/'scripts/lib/engine-context.sh',root/'scripts/lib/engine-context.sh')
             (root/'internal/adapters/configmaterial').mkdir(parents=True)
@@ -60,7 +63,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             destination = stage/member.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(archive.extractfile(member).read())
-    assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file()
+    assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file() and (stage/'safefs.py').is_file()
     if os.environ.get('TELEMETRY_DISK_BUDGET')=='2GiB':
         assert args[args.index('SUBYARD_TELEMETRY_DISK_BYTES=2147483648')-1]=='--env'
     if arguments[0]=='startup':
@@ -164,7 +167,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         profile.mkdir(parents=True)
         for path in source.glob('*.py'):
             shutil.copyfile(path, profile/path.name)
-        copy_skill_assets(repository, profile)
+        copy_shared_assets(repository, profile)
         for name in ('profile.sh', 'runtime.sh'):
             shutil.copyfile(source/name, profile/name)
             (profile/name).chmod(0o755)

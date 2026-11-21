@@ -12,4 +12,7 @@ if [ "${#python_files[@]}" -gt 0 ]; then
   # Ignore repository config/ignores and inspect source bytes without executing Python.
   "$ruff" check --isolated --select F --no-respect-gitignore \
     --cache-dir "$ROOT/.build/tools/ruff-cache" -- "${python_files[@]}"
+  "$ruff" check --force-exclude --no-cache --no-respect-gitignore \
+    --config dev/ruff-safefs.toml -- "${python_files[@]}"
+  python3 -I dev/lint-python-safefs.py "${python_files[@]}"
 fi

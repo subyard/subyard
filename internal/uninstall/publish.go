@@ -341,9 +341,9 @@ func captureAssets(root string) ([]Tree, error) {
 	assets := []Tree{}
 	seen := map[string]bool{}
 	for _, relative := range paths {
-		// Keep the core vendor pair shipped by package-engine.sh; retained
+		// Keep the shared Python assets shipped by package-engine.sh; retained
 		// handlers use it after the original runtime has been removed.
-		if !strings.HasPrefix(relative, "scripts/") && !strings.HasPrefix(relative, "config/") && !strings.HasPrefix(relative, "completions/") && !slices.Contains([]string{"bin/yard", "internal/adapters/configmaterial/tomli_w.py", "internal/adapters/configmaterial/TOMLI_W_LICENSE"}, relative) {
+		if !strings.HasPrefix(relative, "scripts/") && !strings.HasPrefix(relative, "config/") && !strings.HasPrefix(relative, "completions/") && !slices.Contains([]string{"bin/yard", "internal/adapters/configmaterial/tomli_w.py", "internal/adapters/configmaterial/TOMLI_W_LICENSE", "internal/safefs/safefs.py"}, relative) {
 			continue
 		}
 		if filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\r\n\t\x00") || seen[relative] || len(assets) >= 4096 {

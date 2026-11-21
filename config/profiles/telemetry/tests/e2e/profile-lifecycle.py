@@ -365,6 +365,7 @@ def main():
              'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
              'source/config/profiles/telemetry/records.py': args.source/'config/profiles/telemetry/records.py',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
+             'source/internal/safefs/safefs.py': args.source/'internal/safefs/safefs.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',
              'native/bin/codex': (args.native_state/'bin/codex').resolve(), 'native/bin/claude': args.native_state/'bin/claude'}

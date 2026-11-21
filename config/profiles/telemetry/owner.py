@@ -159,6 +159,7 @@ def main():
         if binary is not None:
             archive.add(binary, arcname='subyard-telemetry', recursive=False)
         archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
+        archive.add(source.parents[2]/'internal/safefs/safefs.py', arcname='safefs.py', recursive=False)
         archive.add(source.parents[2]/'config/skills/deliver.py', arcname='agent-skills.py', recursive=False)
         for agent, content in templates.items():
             entry = tarfile.TarInfo(agent+'.template')

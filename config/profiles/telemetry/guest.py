@@ -22,6 +22,7 @@ import tempfile
 import time
 
 import native
+from records import safefs
 import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
@@ -85,6 +86,12 @@ class Runtime:
             raise ValueError('developer account required')
         self.endpoint = 'http://127.0.0.1:14318'
         self.assets = {}
+        # Shared support is outside the telemetry inventory. An older runtime
+        # can roll back its assets while leaving this file in place.
+        self.safefs_path = library.parent/'subyard-python/safefs.py'
+        self.safefs_content = native.snapshot(Path(safefs.__file__).resolve())
+        if self.safefs_content is None:
+            raise ValueError('missing profile asset')
         # Paths whose contents an unselected run neither needs nor installs. They
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
@@ -253,31 +260,69 @@ class Runtime:
         return token
 
     def private_directory(self, path, refusal):
-        """Create a developer-owned 0700 directory, or finish creating our own.
-
-        mkdir, chmod and chown are separate steps. Only the deploying account can
-        create entries in the root-owned parent, so an empty directory it owns
-        without group or other access is one an interrupted run left behind."""
         try:
-            path.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except OSError:
+            parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                if self.uid != os.geteuid():
+                    try:
+                        os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        self.create_developer_directory(parent, path.name)
+                fd, _ = safefs.open_dir(path.name, dir_fd=parent, owner=(self.uid, self.gid))
+                try:
+                    info = os.fstat(fd)
+                    if stat.S_IMODE(info.st_mode) != 0o700 or info.st_gid != self.gid:
+                        raise ValueError(refusal)
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(parent)
+        except (OSError, safefs.Unsafe):
             raise ValueError(refusal) from None
-        try:
-            info = os.fstat(fd)
-            if info.st_uid in (os.getuid(), self.uid) and not info.st_mode & 0o077 and not os.listdir(fd):
-                os.fchmod(fd, 0o700)
-                os.fchown(fd, self.uid, self.gid)
-                info = os.fstat(fd)
-            if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
-                raise ValueError(refusal)
-            if info.st_gid != self.gid:
-                os.fchown(fd, self.uid, self.gid)
-        finally:
-            os.close(fd)
+
+    def create_developer_directory(self, parent, name):
+        # The developer cannot write the destination parent. Give it access
+        # through a descriptor to an empty staging directory on the same mount.
+        # The outer directory keeps staging inaccessible by pathname.
+        with tempfile.TemporaryDirectory(prefix='.telemetry-dir-', dir=f'/proc/self/fd/{parent}') as staging:
+            path = Path(staging)/'create'
+            os.mkdir(path, 0o700)
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fchown(fd, -1, self.gid)
+                os.fchmod(fd, 0o770)
+                with native.developer_files(self.uid, self.gid):
+                    safefs.ensure_dir(name, dir_fd=fd)
+                try:
+                    safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
+                except FileExistsError:
+                    # Another apply created it. The caller validates its metadata.
+                    pass
+            finally:
+                os.close(fd)
+
+    def safefs_state(self):
+        path = self.safefs_path
+        native.safe(path)
+        directory_mode = None
+        if path.parent.exists():
+            directory = path.parent.stat()
+            if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid() or directory.st_mode & 0o022:
+                raise ValueError('foreign control directory')
+            directory_mode = stat.S_IMODE(directory.st_mode)
+        before = self.asset_snapshot(path)
+        if before is None:
+            return None, None
+        info = path.stat()
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise ValueError('managed asset changed')
+        return before, stat.S_IMODE(info.st_mode) if directory_mode in (0o755, 0o1755) else None
+
+    def publish_safefs(self):
+        before, mode = self.safefs_state()
+        if mode != 0o644 or before != self.safefs_content:
+            safefs.ensure_dir(self.safefs_path.parent, mode=0o755)
+            native.publish(self.safefs_path, self.safefs_content, before, mode=0o644)
 
     def prepare_auth(self):
         self.private_directory(self.operational, 'foreign telemetry operational directory')
@@ -385,12 +430,15 @@ class Runtime:
             return result
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
-        ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
+        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
+        ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
+        support, support_mode = self.safefs_state()
+        files[str(self.safefs_path)] = (hashlib.sha256(support or b'').hexdigest(), support_mode)
+        ready = ready and support == self.safefs_content and support_mode == 0o644
         cutover_pending = self.selected and (self.data/CUTOVER).exists()
         policy_status = self.policy_status() if self.selected else 'present'
         policy_current = policy_status == 'present'
-        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
         ready = ready and not cutover_pending and not (self.data/'auth.token').exists() and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
@@ -426,6 +474,10 @@ class Runtime:
                     diagnostics.append({'parameter': 'telemetry.asset.' + path.name, 'installed': 'missing' if snapshot is None else 'changed', 'desired': 'current'})
                 elif stat.S_IMODE(path.stat().st_mode) != mode:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
+            if support != self.safefs_content:
+                diagnostics.append({'parameter': 'telemetry.asset.safefs.py', 'installed': 'missing' if support is None else 'changed', 'desired': 'current'})
+            elif support_mode != 0o644:
+                diagnostics.append({'parameter': 'telemetry.mode.safefs.py', 'installed': 'mismatch', 'desired': 'matched'})
             if not native_current:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             if not skill_current:
@@ -466,6 +518,7 @@ class Runtime:
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
+                 'safefs': hashlib.sha256(self.safefs_content).hexdigest(),
                  'selected': self.selected, 'agents': self.agents,
                  'templates': {agent: hashlib.sha256(content).hexdigest() for agent, content in self.templates.items()}}
         if self.retained:
@@ -708,7 +761,7 @@ class Runtime:
             # Reserve a generated destination so an interrupted retry cannot
             # overwrite the previous operational state.
             archive = Path(tempfile.mkdtemp(prefix='legacy-', dir=target))
-            old.rename(archive/name)
+            old.rename(archive/name)  # safefs: allow archive of existing state
             records.sync_directory(archive)
             records.sync_directory(target)
         records.sync_directory(self.data)
@@ -788,6 +841,7 @@ class Runtime:
             self.as_developer(self.retire_operational_state)
         if old_auth.exists() or old_auth.is_symlink():
             self.as_developer(lambda: self.remove_old_auth(old_auth))
+        self.publish_safefs()
         if self.selected and not prepared:
             binary = self.library/'subyard-telemetry'
             self.publish_asset(binary, saved)
@@ -904,7 +958,7 @@ def failure_diagnostic(error):
         if filename in ('guest.py', 'native.py'):
             location = filename+':'+str(trace.tb_lineno)
         trace = trace.tb_next
-    kind = 'ValueError' if isinstance(error, native.Refusal) else type(error).__name__
+    kind = 'ValueError' if isinstance(error, (native.Refusal, safefs.Unsafe)) else type(error).__name__
     return 'telemetry: local reconciliation failed ('+kind+' at '+location+')'
 
 

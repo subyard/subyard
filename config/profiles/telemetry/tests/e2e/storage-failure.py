@@ -286,6 +286,7 @@ def preflight():
         source = Path(__file__).resolve().parents[2]
         for name in ('broker-correlation.py', 'records.py', 'sources.py', 'resources.py'):
             private_file(hook/name, (source/name).read_bytes())
+        private_file(hook/'safefs.py', (source.parents[2]/'internal/safefs/safefs.py').read_bytes())
         # The local preflight injects publication errors, independently of the
         # installed privacy canary and the real filesystem fault below.
         records_source = (hook/'records.py').read_bytes()+b'\ndef sanitize_state(_family, value):\n    return value\n'
