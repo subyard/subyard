@@ -365,6 +365,7 @@ a = module("acceptance", "dev/release-acceptance.py")
 assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
                                 "836bbd8229d65149c75731a2f9ea46f2aa45e241",
                                 "14d5180368026f77db2f4890ec5b3d0fd9706a24",
+                                "bf7eea8d8a2ddc4073a7fe7d4be8a6ce6475a13e",
                                 a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()

@@ -454,6 +454,8 @@ CI_HOSTED_POLICIES = frozenset({
     "14d5180368026f77db2f4890ec5b3d0fd9706a24",
     # Evidence artifacts are named per attempt, so a rerun job uploads beside the earlier attempt.
     "bf7eea8d8a2ddc4073a7fe7d4be8a6ce6475a13e",
+    # actions/setup-go pinned to v7.1.0; commands unchanged.
+    "dcccabd1926c795ef9749c89e770a89875eeaf50",
 })
 
 
