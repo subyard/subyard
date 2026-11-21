@@ -21,7 +21,8 @@ func TestConfigRegistrationRepairDoesNotRecoverUnrelatedOwnerState(t *testing.T)
 	for _, recovery := range []string{"HostID rename", "owner inventory"} {
 		for _, mode := range []string{"check", "decline"} {
 			t.Run(recovery+"/"+mode, func(t *testing.T) {
-				root, home, configHome, environment := configCommandFixture(t)
+				fixture := newFixture(t, withCheckoutConfig())
+				home, configHome := fixture.Home, fixture.ConfigHome
 				writeConfigCommandFile(t, filepath.Join(configHome, "yards/named/config.env"), "# nested\n")
 				writeConfigCommandFile(t, filepath.Join(configHome, "yards/named.env"), "# flat\n")
 				if recovery == "HostID rename" {
@@ -39,14 +40,10 @@ func TestConfigRegistrationRepairDoesNotRecoverUnrelatedOwnerState(t *testing.T)
 				}
 				prompt := &testkit.Prompt{Answers: []bool{false}}
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{
-					RepositoryRoot: root, Program: "yard", Arguments: arguments,
-					Environment: environment, WorkingDir: root, Prompt: prompt,
+				program := fixture.New(Options{
+					Arguments: arguments, Prompt: prompt,
 					Stdout: &stdout, Stderr: &stderr,
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				wantCode, wantPrompts := 0, 0
 				if mode == "decline" {
 					wantCode, wantPrompts = 1, 1
@@ -65,7 +62,8 @@ func TestConfigRegistrationRepairDoesNotRecoverUnrelatedOwnerState(t *testing.T)
 func TestConfigRegistrationRepairBlocksUnfinishedReleaseBeforePrompt(t *testing.T) {
 	for _, version := range []string{"v1", "v2"} {
 		t.Run(version, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			addRegistrationRepairFixtureCommand(t, root)
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			runtimeRoot := filepath.Join(root, "runtime")
@@ -80,14 +78,11 @@ func TestConfigRegistrationRepairBlocksUnfinishedReleaseBeforePrompt(t *testing.
 			before := nativeTreeSnapshot(t, root)
 			prompt := &testkit.Prompt{Answers: []bool{false}}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "repair-registration", "named"},
-				Environment: environment, WorkingDir: root, Prompt: prompt,
+			program := fixture.New(Options{
+				Arguments:   []string{"config", "repair-registration", "named"},
+				Environment: environment, Prompt: prompt,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			code := program.Run(context.Background())
 			if version == "v1" {
 				if len(prompt.Requests) != 1 || strings.Contains(stderr.String(), "release transition") {
@@ -104,9 +99,9 @@ func TestConfigRegistrationRepairBlocksUnfinishedReleaseBeforePrompt(t *testing.
 }
 
 func TestConfigRegistrationRepairCanonicalRemoteRefusalPreservesOwnerRoutes(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=owner-a"))
+	root, environment := fixture.Root, fixture.Environment
 	addRegistrationRepairFixtureCommand(t, root)
-	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/named/config.env"), "# nested\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/named.env"), "# flat\n")
@@ -126,15 +121,11 @@ func TestConfigRegistrationRepairCanonicalRemoteRefusalPreservesOwnerRoutes(t *t
 	before := nativeTreeSnapshot(t, root)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"-Y", "remote-owner/default", "config", "repair-registration", "named", "--check"},
-		Environment: environment, WorkingDir: root, Prompt: prompt,
-		Stdout: &stdout, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"-Y", "remote-owner/default", "config", "repair-registration", "named", "--check"},
+		Prompt:    prompt,
+		Stdout:    &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "registration owner") {
 		t.Fatalf("remote repair did not reach safe local-only refusal: code=%d prompts=%d stderr=%s", code, len(prompt.Requests), stderr.String())
 	}

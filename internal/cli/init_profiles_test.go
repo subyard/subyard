@@ -209,14 +209,12 @@ func TestInitProfileSetupPreservesExistingCustomConfig(t *testing.T) {
 }
 
 func TestPreparedInitOnlyOffersProfileAtInteractiveBoundary(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProfileSetupDeclaration(t, root)
 	platform := newInitPlatformFixture()
 	var output bytes.Buffer
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{InitPlatform: platform, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output})
 	cli.promptInputTerminal = func() bool { return true }
 	loaded, err := cli.loadContext("default")
 	if err != nil {
@@ -304,14 +302,12 @@ func TestInitProfileSetupInitializesKeysBeforeCredential(t *testing.T) {
 }
 
 func TestInitProfileSetupDetectsProfileDrift(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProfileSetupDeclaration(t, root)
 	path := filepath.Join(root, "state", "yards", "default", "config.env")
 	writeProfileTestFile(t, path, []byte("ENVIRONMENT_PROFILES=fixture\n"), 0o600)
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: newInitPlatformFixture()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{InitPlatform: newInitPlatformFixture()})
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -335,17 +331,16 @@ func TestInitProfileSetupDetectsProfileDrift(t *testing.T) {
 func TestInitProfileDirectCommandConfirmsOnce(t *testing.T) {
 	for _, approve := range []bool{false, true} {
 		t.Run(strconv.FormatBool(approve), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root := fixture.Root
 			writeProfileSetupDeclaration(t, root)
 			keyPath := filepath.Join(root, "state", "generated", "fixture", "key.pem")
 			writeProfileSetupPEM(t, keyPath)
 			prompt := &testkit.Prompt{Answers: []bool{approve}}
 			platform := newInitPlatformFixture()
 			var output bytes.Buffer
-			cli, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"init"}, InitPlatform: platform, Prompt: prompt, Stdin: strings.NewReader("42\n987\n"), Stdout: &output, Stderr: &output})
-			if err != nil {
-				t.Fatal(err)
-			}
+			cli := fixture.New(Options{Arguments: []string{"init"}, InitPlatform: platform, Prompt: prompt, Stdin: strings.NewReader("42\n987\n"), Stdout: &output, Stderr: &output})
+			var err error
 			cli.promptInputTerminal = func() bool { return true }
 			code := cli.Run(context.Background())
 			if (code == 0) != approve {

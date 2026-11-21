@@ -152,11 +152,9 @@ func TestResourceIngressRefreshRejectsChangedPersistedSettings(t *testing.T) {
 		{"endpoint", "YARD_KIND=vm\nENVIRONMENT_PROFILES=sample\nRESOURCE_RELAY_PORT=42001\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""), withYards("private"))
+			root := fixture.Root
 			yardFile := filepath.Join(root, "state", "yards", "private", "config.env")
-			if err := os.MkdirAll(filepath.Dir(yardFile), 0o700); err != nil {
-				t.Fatal(err)
-			}
 			writeCLIFile(t, yardFile, "YARD_KIND=vm\nENVIRONMENT_PROFILES=sample\nRESOURCE_RELAY_PORT=42000\n", 0o600)
 			resourceDir := filepath.Join(root, "config", "profiles", "sample", "resources")
 			if err := os.MkdirAll(filepath.Join(resourceDir, "relay"), 0o700); err != nil {
@@ -173,10 +171,7 @@ BRINGUP=up
 SHUTDOWN=down
 `, 0o600)
 			writeCLIFile(t, filepath.Join(resourceDir, "relay", "handler.sh"), "#!/bin/sh\nexit 0\n", 0o700)
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("private")
 			if err != nil {
 				t.Fatal(err)
@@ -192,7 +187,8 @@ SHUTDOWN=down
 }
 
 func TestResourceShutdownProbeWaitsForReadOnlyGuestAssessment(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
+	root := fixture.Root
 	handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	writeCLIFile(t, handler, `#!/bin/sh
 set -eu
@@ -204,10 +200,7 @@ if [ ! -e "$counter" ]; then
 fi
 printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed":false,"consequences":[]}\n'
 `, 0o700)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +221,8 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed
 func TestResourceShutdownProbeRetainsBoundedFailureHistory(t *testing.T) {
 	for _, stop := range []string{"deadline", "cancelled"} {
 		t.Run(stop, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
+			root := fixture.Root
 			handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 			writeCLIFile(t, handler, `#!/bin/sh
 set -eu
@@ -244,10 +238,7 @@ printf 'attempt\n' >>"$counter"
 : >"$SUBYARD_REPOSITORY_ROOT/shutdown-blocked"
 exec sleep 60
 `, 0o700)
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -321,13 +312,11 @@ func TestResourceShutdownProbeTerminalRefusalsHideHandlerContents(t *testing.T) 
 		{"assessment", "printf 'synthetic-private-output\\n'\n", "assessment_invalid", resource.ErrResourcePlanInvalid},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
+			root := fixture.Root
 			handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 			writeCLIFile(t, handler, "#!/bin/sh\n"+test.script, 0o700)
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -351,16 +340,14 @@ func TestResourceShutdownProbeTerminalRefusalsHideHandlerContents(t *testing.T) 
 }
 
 func TestResourceShutdownProbeRejectsRemainingRuntime(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	writeCLIFile(t, handler, `#!/bin/sh
 set -eu
 printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed":true,"consequences":["fixture remains enabled"]}\n'
 `, 0o700)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

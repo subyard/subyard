@@ -19,7 +19,8 @@ import (
 )
 
 func TestHardCleanupRuntimePreservesReportingPolicy(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	environment := fixture.Environment
 	server, err := testkit.NewIncusServer(testkit.TempDir(t))
 	if err != nil {
 		t.Fatal(err)
@@ -29,10 +30,7 @@ func TestHardCleanupRuntimePreservesReportingPolicy(t *testing.T) {
 	environment = append(environment, "SUBYARD_INCUS_SOCKET="+server.SocketPath)
 	// Caller-controlled preservation must not affect an admitted creation.
 	environment = append(environment, "SUBYARD_PRESERVE_VM_REPORTING=1")
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{Environment: environment})
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -265,12 +263,9 @@ func (platform *cleanupBasePlatformFixture) ProvisionBase(context.Context) error
 }
 
 func TestCleanupBootstrapsBeforeRestoreAndPlansHooksAfterRetry(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	platform := &cleanupBasePlatformFixture{initPlatformFixture: &initPlatformFixture{converged: map[ports.ReconcileStageID]bool{ports.ReconcileStageIncus: true}}}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -304,15 +299,12 @@ func TestCleanupBootstrapsBeforeRestoreAndPlansHooksAfterRetry(t *testing.T) {
 }
 
 func TestCleanupBaseProvisionFailureDefersRestoreAndCanRetry(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	failed := errors.New("base provisioning interrupted")
 	platform := &cleanupBasePlatformFixture{initPlatformFixture: newInitPlatformFixture(), baseErr: failed}
 	platform.converged[ports.ReconcileStageProject] = true
 	platform.converged[ports.ReconcileStageProvision] = false
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

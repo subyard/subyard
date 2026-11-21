@@ -19,23 +19,16 @@ import (
 )
 
 func TestAppliedIdentityHintPublishesVerifiedIdentityAfterRecreation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	for _, name := range []string{"transition.py", "subids.py", "accounts.py"} {
 		body, err := os.ReadFile(filepath.Join("../../config/identity", name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(root, "config/identity", name)
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, path, body, 0600)
+		fixture.Write(filepath.Join("config/identity", name), string(body))
 	}
 	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{Incus: native, Executor: native})
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -79,13 +72,10 @@ func TestAppliedIdentityHintPublishesVerifiedIdentityAfterRecreation(t *testing.
 // Fresh hosts run init before Incus exists: identity inspection must leave installation to
 // ordinary init, while a pending rename still refuses without its native proof.
 func TestIdentityInspectionLeavesUnreachableIncusToOrdinaryInit(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	unreachable := errors.New(`connect to Incus: dial unix /var/lib/incus/unix.socket: connect: no such file or directory`)
 	native := &testkit.Incus{Err: unreachable}
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{Incus: native, Executor: native})
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -119,17 +109,15 @@ func TestIdentityInspectionLeavesUnreachableIncusToOrdinaryInit(t *testing.T) {
 func TestStoppedIdentityInspectionCapturesPrivateApprovalScope(t *testing.T) {
 	for _, scenario := range []string{"missing", "match", "mismatch", "foreign", "source", "desired", "uuid", "hint"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root := fixture.Root
 			dispatcher, err := os.ReadFile("../../config/projects-changed.sh")
 			if err != nil {
 				t.Fatal(err)
 			}
 			testkit.WriteFile(t, root+"/config/projects-changed.sh", dispatcher, 0755)
 			native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-			cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
-			if err != nil {
-				t.Fatal(err)
-			}
+			cli := fixture.New(Options{Incus: native, Executor: native})
 			loaded, err := cli.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -267,27 +255,22 @@ func TestStoppedIdentityInspectionImportsPowerBeforePhysicalStart(t *testing.T) 
 // Its guarded start must still receive the preparation result, or a passwordless sudo
 // user falls back to an interactive sudo prompt inside the lifecycle guard.
 func TestStoppedIdentityInspectionStartReceivesSudoPreauthorization(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	bin := filepath.Join(root, "bin")
-	if err := os.MkdirAll(bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withWorkingDir(""), withCommands("systemctl", "sudo", "scripts/lifecycle-guard.sh"))
+	root := fixture.Root
 	dispatcher, err := os.ReadFile("../../config/projects-changed.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, root+"/config/projects-changed.sh", dispatcher, 0755)
 	record := filepath.Join(root, "guard.env")
-	writeCLIFile(t, filepath.Join(bin, "systemctl"), "#!/bin/sh\nprintf 'active\\n'\n", 0o700)
-	writeCLIFile(t, filepath.Join(bin, "sudo"), "#!/bin/sh\n[ \"$*\" = \"-n true\" ]\n", 0o700)
-	writeCLIFile(t, filepath.Join(root, "scripts", "lifecycle-guard.sh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" \"${SUBYARD_SUDO_PREAUTHORIZED:-unset}\" > \"$GUARD_RECORD\"\nexit 1\n", 0o700)
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	environment = append(environment, "PATH="+bin+":"+os.Getenv("PATH"), "GUARD_RECORD="+record)
+	// The guard records its arguments and the sudo preparation it received, then fails.
+	fixture.Exec().
+		On(testkit.Match{Tool: "systemctl"}, testkit.Reply{Stdout: "active\n"}).
+		On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}}, testkit.Reply{}).
+		On(testkit.Match{Tool: "scripts/lifecycle-guard.sh"}, testkit.Reply{Script: "printf '%s\\n' \"$*\" \"${SUBYARD_SUDO_PREAUTHORIZED:-unset}\" > \"$GUARD_RECORD\"\nreturn 1"})
+	environment := append(fixture.Environment, "GUARD_RECORD="+record)
 	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native, NetworkPolicy: allowTestNetworkPolicy()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := fixture.New(Options{Environment: environment, Incus: native, Executor: native, NetworkPolicy: allowTestNetworkPolicy()})
 	cli.effectiveUID = func() int { return 1000 }
 	loaded, err := cli.loadContext("default")
 	if err != nil {
