@@ -10,6 +10,9 @@ import tempfile
 
 CONFIG_LIMIT = 4*1024*1024
 POLICY_MODE = 0o640
+# Exporters read the collector bearer through this helper; no policy names it.
+HELPER = '/usr/local/lib/subyard-telemetry/otlp-headers'
+HELPER_REFRESH_MS = 300000
 AGENTS = {
     'claude': ('claude-code/managed-settings.d/60-subyard-telemetry.json', '.claude/settings.json', 'env'),
     'codex': ('codex/managed_config.toml', '.codex/config.toml', 'otel'),
@@ -96,30 +99,28 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
             os.unlink(temporary)
 
 
-def desired(agent, endpoint, token):
+def desired(agent, endpoint, helper=HELPER):
+    """The managed document. Exporters get Authorization only from the helper."""
     if agent == 'codex':
         # Agent responses carry the only child-thread link; the collector keeps their IDs, not the text.
         result = {'log_user_prompt': False, 'log_agent_responses': True}
+        result |= {'headers_helper': helper, 'headers_helper_refresh_interval_ms': HELPER_REFRESH_MS}
         for key, path in [('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')]:
-            result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary',
-                                       'headers': {'Authorization': 'Bearer '+token if token else MISSING},
-                                       'tls': {}}}
-        return result
+            result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary', 'tls': {}}}
+        return {'otel': result}
     result = {'CLAUDE_CODE_ENABLE_TELEMETRY': '1', 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA': '1',
               'OTEL_LOG_USER_PROMPTS': '0', 'OTEL_LOG_TOOL_DETAILS': '0', 'OTEL_LOG_TOOL_CONTENT': '0'}
     for signal in ('LOGS', 'METRICS', 'TRACES'):
         result['OTEL_'+signal+'_EXPORTER'] = 'otlp'
         result['OTEL_EXPORTER_OTLP_'+signal+'_ENDPOINT'] = endpoint+'/v1/'+signal.lower()
         result['OTEL_EXPORTER_OTLP_'+signal+'_PROTOCOL'] = 'http/protobuf'
-        result['OTEL_EXPORTER_OTLP_'+signal+'_HEADERS'] = 'Authorization=Bearer '+token if token else MISSING
-    return result
+    return {'env': result, 'otelHeadersHelper': helper}
 
 
-def policy(agent, fields, writer):
+def policy(agent, document, writer):
     if agent == 'claude':
-        document = {'$comment': 'Managed by Subyard Telemetry', 'env': fields}
-        return (json.dumps(document, indent=2)+'\n').encode()
-    return MARKERS[agent]+writer.dumps({'otel': fields}).encode()
+        return (json.dumps({'$comment': 'Managed by Subyard Telemetry', **document}, indent=2)+'\n').encode()
+    return MARKERS[agent]+writer.dumps(document).encode()
 
 
 def parse(agent, data):
@@ -133,7 +134,7 @@ def parse(agent, data):
 
 def template_conflicts(template, fields, path):
     if not isinstance(template, dict) or not isinstance(fields, dict):
-        return [] if fields is not MISSING and semantic_equal(template, fields) else [path]
+        return [] if semantic_equal(template, fields) else [path]
     conflicts = []
     for key, value in fields.items():
         if key in template:
@@ -287,20 +288,24 @@ def contains_token(path, token):
 def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
     before, entries = legacy_receipt(receipt_path)
     if before is None:
-        return None, [], token, set()
+        return None, [], [token] if token else [], set()
     headers = list(recorded_headers(entries))
-    if headers and not token:
+    private = token
+    if headers:
+        # After a rollback to v0.30 and another upgrade, the receipt names the
+        # token that release minted, not the private one the collector keeps.
         token = recorded_token(entries)
-    if headers and (not token or any(value != prefix+token for value, prefix in headers)):
-        failures.append(('legacy-token-unverified',))
-    token_bytes = token.encode() if token else None
+        if not token:
+            failures.append(('legacy-token-unverified',))
+    # The recorded token is scrubbed; neither it nor the private one may remain.
+    tokens = [value for value in dict.fromkeys((token, private)) if value]
     covered = {agent for agent in AGENTS if entries.get(agent)}
     edits = []
     with developer_files(uid, gid):
         for agent, (_, relative, section) in AGENTS.items():
             path = home/relative
             if agent not in covered:
-                if token and contains_token(path, token):
+                if any(contains_token(path, value) for value in tokens):
                     failures.append(('legacy-token-remains', agent))
                 continue
             try:
@@ -329,9 +334,9 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     payload = ((json.dumps(cleaned, indent=2)+'\n') if agent == 'claude' else writer.dumps(cleaned)).encode()
                 # A saved value stays user-owned even if it contains the live
                 # token. Refuse rather than deleting or publishing that value.
-                unsafe_restore = token and any(not semantic_equal(value, scrub_token(value, token))
-                                               for value in restored_values)
-                if unsafe_restore or (token_bytes and token_bytes in payload):
+                unsafe_restore = any(not semantic_equal(value, scrub_token(value, secret))
+                                     for value in restored_values for secret in tokens)
+                if unsafe_restore or any(value.encode() in payload for value in tokens):
                     failures.append(('legacy-token-remains', agent))
                 elif payload != raw:
                     info = path.lstat()
@@ -341,7 +346,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     edits.append((path, payload, raw, info.st_mode & 0o600))
             except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
                 failures.append(('legacy-config', agent))
-    return before, edits, token, covered
+    return before, edits, tokens, covered
 
 
 class Refusal(ValueError):
@@ -368,10 +373,10 @@ def refusal_messages(reasons):
             case ('legacy-receipt',):
                 messages.append('invalid legacy telemetry receipt')
             case ('legacy-token-unverified',):
-                messages.append('cannot identify the collector token in the legacy telemetry receipt; '
-                                'write the Bearer token from the legacy home agent configuration to '
-                                '/var/lib/subyard/telemetry-private/auth.token, a developer-owned file with '
-                                'mode 0600 in a developer-owned directory with mode 0700, then retry')
+                messages.append('the legacy telemetry receipt names no single collector token; inside the yard, '
+                                'remove the collector Bearer tokens from the developer\'s ~/.claude/settings.json '
+                                'and ~/.codex/config.toml, then remove the receipt '
+                                '/var/lib/subyard/telemetry-control/native.json and retry')
             case ('legacy-token-remains', agent) if agent in AGENTS:
                 messages.append('collector token remains in legacy '+agent+' configuration')
             case ('legacy-config', agent) if agent in AGENTS:
@@ -383,7 +388,7 @@ def refusal_messages(reasons):
             case ('invalid-template', agent) if agent in AGENTS:
                 messages.append('invalid '+agent+' telemetry template')
             case ('template-conflict', agent, *paths) if agent in AGENTS and paths:
-                known = set(field_paths({AGENTS[agent][2]: desired(agent, '', '')}))
+                known = set(field_paths(desired(agent, '')))
                 if len(paths) > len(known) or any(path not in known for path in paths):
                     raise ValueError('invalid telemetry refusal field')
                 detail = paths[0]
@@ -404,18 +409,18 @@ def policy_readable(path, uid, gid, file_current):
                 and (not file_current or os.access(path, os.R_OK, effective_ids=True)))
 
 
-def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid, templates, check=False):
+def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid, templates, check=False, helper=HELPER):
     failures = []
     policies = []
     for agent, (relative, _, section) in AGENTS.items():
         path = etc/relative
         enabled = agent in agents
-        fields = desired(agent, endpoint, token) if enabled else {}
+        document = desired(agent, endpoint, helper) if enabled else {}
+        fields = document.get(section, {})
         if enabled and agent in templates:
             try:
                 template = parse(agent, templates[agent])
-                # A first install has no collector token to match a template header.
-                conflicts = template_conflicts(template, {section: fields}, '')
+                conflicts = template_conflicts(template, document, '')
                 # An alternative Codex exporter variant makes the merged TOML invalid.
                 if agent == 'codex' and isinstance(template.get(section), dict):
                     for key, value in fields.items():
@@ -431,7 +436,8 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
                 failures.append(('invalid-template', agent))
         try:
             before, info = policy_snapshot(etc, path, agent)
-            wanted = policy(agent, fields, writer) if enabled and token else None
+            # Write policies only once the token file the helper reads exists.
+            wanted = policy(agent, document, writer) if enabled and token else None
             metadata_current = info is None or (stat.S_IMODE(info.st_mode), info.st_gid) == (POLICY_MODE, gid)
             if enabled and not policy_readable(path, uid, gid, info is not None and metadata_current):
                 failures.append(('unreadable-policy', agent))
@@ -454,14 +460,13 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
         with developer_files(uid, gid):
             for path, payload, before, mode in edits:
                 publish(path, payload, before, mode=mode)
-            if legacy:
-                for agent, (_, relative, _) in AGENTS.items():
-                    try:
-                        if (legacy.encode() in (snapshot(home/relative) or b'') if agent in covered
-                                else contains_token(home/relative, legacy)):
-                            failures.append(('legacy-token-remains', agent))
-                    except (OSError, ValueError):
-                        failures.append(('legacy-config', agent))
+            for agent, (_, relative, _) in AGENTS.items():
+                try:
+                    if any(value.encode() in (snapshot(home/relative) or b'') if agent in covered
+                           else contains_token(home/relative, value) for value in legacy):
+                        failures.append(('legacy-token-remains', agent))
+                except (OSError, ValueError):
+                    failures.append(('legacy-config', agent))
         if failures:
             raise Refusal(failures)
         if snapshot(receipt_path) != receipt:
