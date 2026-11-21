@@ -18,6 +18,7 @@ const RollbackPrepTransactionPrefixV1 = "rollback-prep-v1-"
 
 // Fault points of the down transaction, in order.
 const (
+	FaultAfterRollbackJournal = "after-rollback-journal"
 	FaultAfterRollbackHook    = "after-rollback-hook"
 	FaultBeforeTargetDispatch = "before-target-dispatch"
 )
@@ -30,13 +31,17 @@ const (
 )
 
 // RollbackPrepItem is one profile runtime owner in one yard, as its
-// rollback-observe reports it against the format it prepares.
+// rollback-observe reports it against the format it prepares. Instance names
+// the native guest the hook ran against; Consequence is the hook's declared
+// effect of applying.
 type RollbackPrepItem struct {
-	Owner   string      `json:"owner"`
-	Yard    string      `json:"yard"`
-	State   string      `json:"state"`
-	Actual  Fingerprint `json:"actual,omitempty"`
-	Desired Fingerprint `json:"desired,omitempty"`
+	Owner       string      `json:"owner"`
+	Yard        string      `json:"yard"`
+	Instance    string      `json:"instance,omitempty"`
+	State       string      `json:"state"`
+	Actual      Fingerprint `json:"actual,omitempty"`
+	Desired     Fingerprint `json:"desired,omitempty"`
+	Consequence string      `json:"consequence,omitempty"`
 }
 
 func (item RollbackPrepItem) Validate() error {
@@ -45,6 +50,12 @@ func (item RollbackPrepItem) Validate() error {
 	}
 	if !domain.SafeName(item.Yard) {
 		return invalid("rollback preparation yard is not a safe name")
+	}
+	if err := validateText(item.Instance, "rollback preparation instance", maxDiagnosticText, false); err != nil {
+		return err
+	}
+	if err := validateText(item.Consequence, "rollback preparation consequence", maxDiagnosticText, false); err != nil {
+		return err
 	}
 	switch item.State {
 	case RollbackPrepAbsent:
@@ -70,8 +81,11 @@ type RollbackPrepHooks interface {
 
 // RollbackPrep is the down transaction the active release runs after the
 // operator confirmed a rollback and before the target owns it. Items are the
-// confirmed observations. Gate proves the target accepts the prepared state;
-// Dispatch hands the rollback to the target. A failure at any step leaves the
+// confirmed observations. Admit revalidates protected history and returns
+// while holding what keeps it unchanged until the journal is written. Gate
+// proves the target accepts the prepared state; Dispatch hands the rollback to
+// the target, when given; without it the active release stays active and a
+// rerun confirms the target's own plan. A failure before dispatch leaves the
 // active release active; its runtime owners then report drift for yard migrate.
 type RollbackPrep struct {
 	ConfigHome                     string
@@ -79,9 +93,57 @@ type RollbackPrep struct {
 	ArtifactDigest, RegistryDigest Fingerprint
 	Items                          []RollbackPrepItem
 	Hooks                          RollbackPrepHooks
+	Admit                          func(context.Context) (func(), error)
 	Gate, Dispatch                 func(context.Context) error
 	NewTransactionID               func() TransactionID
 	fault                          func(string) error
+}
+
+// RollbackPrepInterrupted is a failure after the down journal was written:
+// hooks may have run, so the operator repairs forward or retries.
+type RollbackPrepInterrupted struct {
+	Transaction TransactionID
+	Err         error
+}
+
+func (err RollbackPrepInterrupted) Error() string { return err.Err.Error() }
+
+func (err RollbackPrepInterrupted) Unwrap() error { return err.Err }
+
+// RollbackPrepConsequences is the down plan's effect, shared by the preview
+// and the journal: one line per owner to prepare and each distinct effect its
+// hooks declare.
+func RollbackPrepConsequences(items []RollbackPrepItem, target ReleaseID) []string {
+	yards := map[string]int{}
+	owners := []string{}
+	declared := []string{}
+	for _, item := range items {
+		if item.State != RollbackPrepStale {
+			continue
+		}
+		if yards[item.Owner] == 0 {
+			owners = append(owners, item.Owner)
+		}
+		yards[item.Owner]++
+		if item.Consequence != "" && !slices.Contains(declared, item.Consequence) {
+			declared = append(declared, item.Consequence)
+		}
+	}
+	consequences := make([]string, 0, len(owners)+len(declared))
+	for _, owner := range owners {
+		consequences = append(consequences, fmt.Sprintf("prepare profile runtime %s for release %s in %d yard(s)", owner, target, yards[owner]))
+	}
+	return append(consequences, declared...)
+}
+
+// Plan validates the down plan within the journal's limits before consent
+// and returns its authorization plan token.
+func (prep RollbackPrep) Plan() (PlanToken, error) {
+	if prep.Active == prep.Target {
+		return "", invalid("rollback preparation requires a distinct target")
+	}
+	record, err := prep.journal(TransactionID(RollbackPrepTransactionPrefixV1+strings.Repeat("0", 32)), "plan")
+	return record.AuthorizationPlan, err
 }
 
 // RollbackPrepBinding fingerprints confirmed observations for a plan binding.
@@ -105,8 +167,8 @@ func RollbackPrepBinding(items []RollbackPrepItem) (Fingerprint, error) {
 // transaction, converts the stale owners, passes the gate and dispatches.
 // Resume is a new run: owners already converted observe as current.
 func (prep RollbackPrep) Run(ctx context.Context, authorization Authorization) error {
-	if prep.Hooks == nil || prep.Gate == nil || prep.Dispatch == nil || authorization == "" {
-		return errors.New("rollback preparation requires hooks, a gate, a dispatcher and an authorization")
+	if prep.Hooks == nil || prep.Gate == nil || authorization == "" {
+		return errors.New("rollback preparation requires hooks, a gate and an authorization")
 	}
 	if prep.Active == prep.Target {
 		return invalid("rollback preparation requires a distinct target")
@@ -120,8 +182,29 @@ func (prep RollbackPrep) Run(ctx context.Context, authorization Authorization) e
 			return fmt.Errorf("%w: rollback preparation of %s in yard %s changed after confirmation", domain.ErrPlanStale, item.Owner, item.Yard)
 		}
 	}
-	transaction, err := prep.publish(authorization)
+	transaction, err := prep.admitAndPublish(ctx, authorization)
 	if err != nil {
+		return err
+	}
+	if err := prep.prepare(ctx, transaction); err != nil {
+		return RollbackPrepInterrupted{Transaction: transaction, Err: err}
+	}
+	return nil
+}
+
+func (prep RollbackPrep) admitAndPublish(ctx context.Context, authorization Authorization) (TransactionID, error) {
+	if prep.Admit != nil {
+		release, err := prep.Admit(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
+	return prep.publish(authorization)
+}
+
+func (prep RollbackPrep) prepare(ctx context.Context, transaction TransactionID) error {
+	if err := prep.inject(FaultAfterRollbackJournal); err != nil {
 		return err
 	}
 	for _, item := range prep.Items {
@@ -140,6 +223,9 @@ func (prep RollbackPrep) Run(ctx context.Context, authorization Authorization) e
 	}
 	if err := prep.inject(FaultBeforeTargetDispatch); err != nil {
 		return err
+	}
+	if prep.Dispatch == nil {
+		return nil
 	}
 	return prep.Dispatch(ctx)
 }
@@ -208,32 +294,28 @@ func (prep RollbackPrep) journal(transaction TransactionID, authorization Author
 	if err != nil {
 		return JournalRecord{}, err
 	}
-	consequences := []string{}
 	decisions := []RedactedDecision{}
 	for _, item := range prep.Items {
 		decision := RedactedDecision{Resource: "rollback-prep." + item.Owner, Scope: "yard." + item.Yard, Decision: DecisionPreserve, Result: item.State}
 		if item.State == RollbackPrepStale {
 			decision.Decision = DecisionTransform
-			consequences = append(consequences, fmt.Sprintf("prepare %s in yard %s for release %s", item.Owner, item.Yard, prep.Target))
 		}
 		decisions = append(decisions, decision)
 	}
-	assessment, err := assessV2Action(policy, true, false, consequences)
-	if err != nil {
-		return JournalRecord{}, err
-	}
-	planPayload, err := json.Marshal(struct {
-		Contract string      `json:"contract"`
-		Releases ReleasePair `json:"releases"`
-		Artifact Fingerprint `json:"artifact"`
-		Registry Fingerprint `json:"registry"`
-		Scope    Fingerprint `json:"scope"`
-	}{RollbackPrepTransactionPrefixV1, releases, prep.ArtifactDigest, prep.RegistryDigest, scope})
+	assessment, err := assessV2Action(policy, true, false, RollbackPrepConsequences(prep.Items, prep.Target))
 	if err != nil {
 		return JournalRecord{}, err
 	}
 	catalog := BuiltinCapabilityCatalog().Digest()
-	plan := PlanToken("plan-v1-" + string(fingerprintPayload(planPayload)))
+	plan, err := BindPlan(PlanFacts{
+		Goal: goal, Releases: releases, Links: ReleaseLinks{Active: prep.Active, Previous: &target},
+		ArtifactDigest: prep.ArtifactDigest, RegistryDigest: prep.RegistryDigest, CatalogDigest: catalog,
+		ObservationScope: scope, Assessment: assessment, Decisions: slices.Clone(decisions),
+		Observations: []ResourceObservation{}, Intents: []PlannerStepIntent{}, Blockers: []Blocker{},
+	})
+	if err != nil {
+		return JournalRecord{}, err
+	}
 	resume, err := BindResumePlan(ResumePlanFacts{
 		Goal: goal, Releases: releases, ArtifactDigest: prep.ArtifactDigest,
 		RegistryDigest: prep.RegistryDigest, CatalogDigest: catalog, ObservationScope: scope,

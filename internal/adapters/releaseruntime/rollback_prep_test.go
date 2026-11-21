@@ -3,7 +3,6 @@ package releaseruntime
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,196 +23,6 @@ const (
 	prepNew = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
-// rollbackPrepRoots declares a synthetic runtime in both releases. The active
-// release's declaration and the target's format decide preparation.
-func rollbackPrepRoots(t *testing.T, active, target string) (*Runtime, string, string, string, *[]string) {
-	t.Helper()
-	runtime, activeRoot, targetRoot, home, _ := retainedRuntimeFixture(t)
-	declare := func(root, runtime string) {
-		testkit.WriteFile(t, filepath.Join(root, "config/profiles/sample/profile.json"),
-			[]byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh"`+runtime+`}}`), 0o600)
-	}
-	declare(activeRoot, active)
-	declare(targetRoot, target)
-	declareRollbackPrepYard(t, home, "named")
-	calls := &[]string{}
-	runtime.config.ProfileRuntimeRollbackObservation = func(_ context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
-		*calls = append(*calls, "rollback-observe "+loaded.Context.YardName+" "+id+" "+filepath.Base(root))
-		return ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: prepNew, Desired: prepOld}, nil
-	}
-	runtime.config.ProfileRuntimeRollbackApply = func(context.Context, string, config.Loaded, string, string, string, string) error {
-		return errors.New("planning must not apply")
-	}
-	return runtime, activeRoot, targetRoot, home, calls
-}
-
-func TestRollbackPreparationSelectsOwnersByDeclaredFormats(t *testing.T) {
-	for _, test := range []struct {
-		name, active, target string
-		prepared             bool
-		refusal              string
-	}{
-		{name: "undeclared formats", prepared: false},
-		{name: "same declared format", active: `,"format":2`, target: `,"format":2`},
-		{name: "absent target format is 1", active: `,"format":2,"prepares_rollback_to":1`, prepared: true},
-		{name: "declared target format", active: `,"format":3,"prepares_rollback_to":2`, target: `,"format":2`, prepared: true},
-		{name: "unprepared format", active: `,"format":2`, refusal: "profile runtime sample-runtime format 2 cannot be prepared for the retained release's format 1"},
-		{name: "other prepared format", active: `,"format":3,"prepares_rollback_to":2`, refusal: "format 3 cannot be prepared for the retained release's format 1"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, active, target, home, calls := rollbackPrepRoots(t, test.active, test.target)
-			prep, refusals, err := runtime.planRollbackPreparation(context.Background(), active, target, home)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.refusal != "" {
-				if refusals == nil || !strings.Contains(refusals.Error(), test.refusal) || prep != nil || len(*calls) != 0 {
-					t.Fatalf("refusal = %v, prep %#v, calls %v", refusals, prep, *calls)
-				}
-				return
-			}
-			if refusals != nil || (prep != nil) != test.prepared {
-				t.Fatalf("prep = %#v, refusals %v", prep, refusals)
-			}
-			if !test.prepared {
-				if len(*calls) != 0 {
-					t.Fatalf("an unprepared rollback ran hooks: %v", *calls)
-				}
-				return
-			}
-			want := []string{"rollback-observe default sample-runtime active", "rollback-observe named sample-runtime active"}
-			if strings.Join(*calls, "|") != strings.Join(want, "|") || len(prep.items) != 2 ||
-				prep.items[0] != (releasetransition.RollbackPrepItem{Owner: "sample-runtime", Yard: "default", State: "stale", Actual: prepNew, Desired: prepOld}) {
-				t.Fatalf("observed %v, items %#v", *calls, prep.items)
-			}
-		})
-	}
-}
-
-// Every independent refusal is reported: a stopped yard, an owner that cannot
-// be observed and a format this release does not prepare.
-func TestRollbackPreparationCollectsEveryRefusalWithTypedNextStep(t *testing.T) {
-	runtime, active, target, home, _ := rollbackPrepRoots(t, `,"format":2,"prepares_rollback_to":1`, ``)
-	other := filepath.Join(active, "config/profiles/other")
-	if err := os.MkdirAll(other, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(other, "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
-	testkit.WriteFile(t, filepath.Join(other, "profile.json"), []byte(`{"schema_version":1,"runtime":{"activation_id":"other-runtime","handler":"runtime.sh","format":4}}`), 0o600)
-	otherTarget := filepath.Join(target, "config/profiles/other")
-	if err := os.MkdirAll(otherTarget, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(otherTarget, "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
-	testkit.WriteFile(t, filepath.Join(otherTarget, "profile.json"), []byte(`{"schema_version":1,"runtime":{"activation_id":"other-runtime","handler":"runtime.sh","format":3}}`), 0o600)
-	declareRollbackPrepYard(t, home, "third")
-	runtime.config.ProfileRuntimeRollbackObservation = func(_ context.Context, _ string, loaded config.Loaded, _ string) (ports.RuntimeObservation, error) {
-		switch loaded.Context.YardName {
-		case "named":
-			return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}, nil
-		case "third":
-			return ports.RuntimeObservation{}, errors.New("private native detail")
-		}
-		return ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: prepOld, Desired: prepOld}, nil
-	}
-	_, refusals, err := runtime.planRollbackPreparation(context.Background(), active, target, home)
-	if err != nil || refusals == nil {
-		t.Fatalf("refusals = %v, err %v", refusals, err)
-	}
-	outcome := rollbackPrepOutcome(releasetransition.ReleaseLinks{Active: "b"}, "a", refusals)
-	for _, part := range []string{
-		"profile runtime other-runtime format 4 cannot be prepared for the retained release's format 3",
-		"profile runtime sample-runtime in yard third cannot be observed for rollback preparation",
-		"yard named is stopped, so profile runtime sample-runtime cannot be prepared for rollback",
-	} {
-		if !strings.Contains(outcome.Message, part) {
-			t.Fatalf("outcome %q lacks %q", outcome.Message, part)
-		}
-	}
-	if strings.Contains(outcome.Message, "private") || outcome.Code != releasetransition.CodeRollbackIncompatible ||
-		outcome.Retry != "keep the current release active and retain a release whose profile runtime formats this release prepares, then run yard update --check" {
-		t.Fatalf("outcome = %#v", outcome)
-	}
-	stopped := rollbackPrepOutcome(releasetransition.ReleaseLinks{Active: "b"}, "a", stoppedYardRefusal("sample-runtime", "named"))
-	if action, _, ok := domain.ParseRetry(stopped.Retry); !ok || action != (domain.Action{Verb: domain.VerbStart, Yard: "named"}) {
-		t.Fatalf("stopped yard retry = %q", stopped.Retry)
-	}
-}
-
-func TestRollbackPreparationGateObservesTheTargetFromItsOwnRoot(t *testing.T) {
-	runtime, active, target, home, _ := rollbackPrepRoots(t, `,"format":2,"prepares_rollback_to":1`, ``)
-	prep, refusals, err := runtime.planRollbackPreparation(context.Background(), active, target, home)
-	if err != nil || refusals != nil || prep == nil {
-		t.Fatalf("prep = %#v, %v, %v", prep, refusals, err)
-	}
-	states := map[string]ports.RuntimeObservation{
-		"default": {State: ports.RuntimeStateStale, Desired: prepOld},
-		"named":   {State: ports.RuntimeStateCurrent, Actual: prepOld, Desired: prepOld},
-	}
-	var roots []string
-	runtime.config.ProfileRuntimeObservation = func(_ context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
-		roots = append(roots, filepath.Base(root)+" "+filepath.Base(loaded.Context.Paths.RepositoryRoot)+" "+id)
-		if state, ok := states[loaded.Context.YardName]; ok {
-			return state, nil
-		}
-		return ports.RuntimeObservation{}, errors.New("target rejects the prepared state")
-	}
-	if err := prep.gate(context.Background(), runtime.config); err != nil {
-		t.Fatal(err)
-	}
-	for _, root := range roots {
-		if !strings.HasPrefix(root, "target ") {
-			t.Fatalf("gate observed from another root: %v", roots)
-		}
-	}
-	states["named"] = ports.RuntimeObservation{State: ports.RuntimeStateDeferred}
-	delete(states, "default")
-	err = prep.gate(context.Background(), runtime.config)
-	outcome := rollbackPrepOutcome(releasetransition.ReleaseLinks{Active: "b"}, "a", err)
-	if !strings.Contains(outcome.Message, "does not accept the prepared profile runtime sample-runtime in yard default") ||
-		!strings.Contains(outcome.Message, "yard named is stopped") || outcome.Retry != "run yard migrate" {
-		t.Fatalf("gate refusal = %#v", outcome)
-	}
-}
-
-func TestRollbackPrepRefusalsJoinCompatibilityRefusals(t *testing.T) {
-	links := releasetransition.ReleaseLinks{Active: "b"}
-	compatibility := publicReleaseInspectionError{outcome: publicReleaseOutcome(links, "a", nil, releasetransition.CodeRollbackIncompatible, "registry refused", "compat retry")}
-	compatibility.cause = transitionOutcomeError(compatibility.outcome)
-	prep := stoppedYardRefusal("sample-runtime", "named")
-	var merged publicReleaseInspectionError
-	if err := mergeRollbackPrepRefusals(links, "a", prep, compatibility); !errors.As(err, &merged) ||
-		!strings.HasPrefix(merged.outcome.Message, "registry refused; yard named is stopped") || merged.outcome.Retry != "compat retry" {
-		t.Fatalf("merged = %v", err)
-	}
-	if err := mergeRollbackPrepRefusals(links, "a", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := mergeRollbackPrepRefusals(links, "a", prep, nil); !errors.As(err, &merged) || merged.outcome.Retry != "run yard -Y named start" {
-		t.Fatalf("prep-only refusal = %v", err)
-	}
-}
-
-func TestFreshRollbackPlanAdmission(t *testing.T) {
-	transaction := releasetransition.TransactionID("tx-1")
-	plain := []string{"reactivate the verified retained previous runtime", "apply the exact typed migration and release activation plan"}
-	for name, test := range map[string]struct {
-		fresh Prepared
-		retry string
-	}{
-		"plain":       {Prepared{Consequences: plain}, ""},
-		"blocked":     {Prepared{Consequences: plain, inspection: releasetransition.Inspection{Blockers: []releasetransition.Blocker{{Code: releasetransition.CodePlanStale, Message: "x"}}}}, "run yard migrate"},
-		"resume":      {Prepared{Consequences: plain, inspection: releasetransition.Inspection{Resume: &transaction}}, "run yard migrate"},
-		"consequence": {Prepared{Consequences: append(slices.Clone(plain), "canonicalize setting YARD_TEMPLATE")}, "run yard update --rollback"},
-	} {
-		err := admitFreshRollbackPlan(test.fresh)
-		var refusal rollbackPrepRefusal
-		if test.retry == "" && err != nil || test.retry != "" && (!errors.As(err, &refusal) || refusal.retry != test.retry) {
-			t.Fatalf("%s: admission %v", name, err)
-		}
-	}
-}
-
 func declareRollbackPrepYard(t *testing.T, home, yard string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(home, "yards", yard), 0o700); err != nil {
@@ -222,39 +31,48 @@ func declareRollbackPrepYard(t *testing.T, home, yard string) {
 	testkit.WriteFile(t, filepath.Join(home, "yards", yard, "config.env"), []byte("\n"), 0o600)
 }
 
-// preparedRollbackFixture publishes an active release whose sample runtime
-// has format 2 and prepares format 1, and a retained target at format 1.
-// The target engine logs each inspection, noting whether the down journal
-// already exists, and fails its convergence after logging it.
+// preparedRollbackFixture publishes sealed active and retained releases with
+// a synthetic sample runtime in yards default and named. Each yard's state is
+// format 2 (the active release's) or 1. The target engine logs inspections,
+// noting whether the down journal exists, and fails its convergence.
 type preparedRollbackFixture struct {
-	runtime                *Runtime
-	runtimeRoot, home, log string
-	activeID, targetID     string
-	formats                map[string]int
-	applies, gates         []string
-	gateErr                error
+	runtime                 *Runtime
+	runtimeRoot, home, log  string
+	data                    string
+	activeID, targetID      string
+	formats                 map[string]int
+	consequence             map[string]string
+	observed, applies, gate []string
+	gateErr, applyErr       error
 }
 
-// consequences are the target plan's own; a plain rollback has only the
-// engine's generic line.
-func newPreparedRollbackFixture(t *testing.T, consequences ...string) *preparedRollbackFixture {
+type preparedRollbackOptions struct {
+	active, target string // the sample runtime's extra declaration fields
+	seed           func(active, target string)
+}
+
+var preparedSample = preparedRollbackOptions{active: `,"format":2,"prepares_rollback_to":1`}
+
+func newPreparedRollbackFixture(t *testing.T, options preparedRollbackOptions) *preparedRollbackFixture {
 	t.Helper()
-	consequenceJSON, err := json.Marshal(append([]string{"apply the exact typed migration and release activation plan"}, consequences...))
-	if err != nil {
-		t.Fatal(err)
-	}
 	runtime, active, target, home, _ := retainedRuntimeFixture(t)
 	t.Cleanup(func() { _ = runtime.Close() })
 	declareRollbackPrepYard(t, home, "named")
 	root := filepath.Dir(active)
 	fixture := &preparedRollbackFixture{runtime: runtime, runtimeRoot: filepath.Join(root, "runtime"), home: home, log: filepath.Join(root, "engine.log"),
-		activeID: "0.31.0-active", targetID: UpdateAnchorVersion + "-target", formats: map[string]int{"default": 2, "named": 1}}
+		data: filepath.Join(root, "data"), activeID: "0.31.0-active", targetID: UpdateAnchorVersion + "-target",
+		formats: map[string]int{"default": 2, "named": 1}, consequence: map[string]string{}}
 	if err := os.MkdirAll(filepath.Join(fixture.runtimeRoot, "releases"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(active, "config/profiles/sample/profile.json"),
-		[]byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","format":2,"prepares_rollback_to":1},"managed_paths":[{"root":"data","path":"service/{yard}"}]}`), 0o600)
-	inspection := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":%s},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, consequenceJSON, fixture.activeID, fixture.targetID, fixture.targetID)
+	for path, fields := range map[string]string{active: options.active, target: options.target} {
+		testkit.WriteFile(t, filepath.Join(path, "config/profiles/sample/profile.json"),
+			[]byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh"`+fields+`},"managed_paths":[{"root":"data","path":"service/{yard}"}]}`), 0o600)
+	}
+	if options.seed != nil {
+		options.seed(active, target)
+	}
+	inspection := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, fixture.activeID, fixture.targetID, fixture.targetID)
 	journal := filepath.Join(home, "release-transition/v2/journal.json")
 	// The active release's own inspection after a down transaction reports
 	// its owners' prepared state as drift.
@@ -302,29 +120,24 @@ esac
 		}
 	}
 	writeRollbackFixtureBaselineLedger(t, home)
-	observe := func(yard string) ports.RuntimeObservation {
-		if fixture.formats[yard] == 1 {
-			return ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: prepOld, Desired: prepOld}
-		}
-		return ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: prepNew, Desired: prepOld}
-	}
-	runtime.config.ProfileRuntimeRollbackObservation = func(_ context.Context, root string, loaded config.Loaded, _ string) (ports.RuntimeObservation, error) {
-		if filepath.Base(root) != fixture.activeID {
-			t.Errorf("rollback-observe ran from %s", root)
-		}
-		return observe(loaded.Context.YardName), nil
+	runtime.config.ProfileRuntimeRollbackObservation = func(_ context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+		fixture.observed = append(fixture.observed, loaded.Context.YardName+" "+id+" "+releaseRootName(t, root))
+		return fixture.observe(loaded.Context.YardName), nil
 	}
 	runtime.config.ProfileRuntimeRollbackApply = func(_ context.Context, root string, loaded config.Loaded, id, operation, actual, desired string) error {
-		if observed := observe(loaded.Context.YardName); string(observed.Actual) != actual || string(observed.Desired) != desired {
+		if observed := fixture.observe(loaded.Context.YardName); string(observed.Actual) != actual || string(observed.Desired) != desired {
 			return domain.ErrPlanStale
 		}
+		if fixture.applyErr != nil {
+			return fixture.applyErr
+		}
 		fixture.formats[loaded.Context.YardName] = 1
-		fixture.applies = append(fixture.applies, loaded.Context.YardName+" "+id+" "+operation)
+		fixture.applies = append(fixture.applies, loaded.Context.YardName+" "+id+" "+operation+" "+loaded.Context.YardInstanceName+" "+releaseRootName(t, root))
 		return nil
 	}
 	runtime.config.ProfileRuntimeObservation = func(_ context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
-		if filepath.Base(root) == fixture.targetID {
-			fixture.gates = append(fixture.gates, loaded.Context.YardName+" "+id)
+		if releaseRootName(t, root) == fixture.targetID {
+			fixture.gate = append(fixture.gate, loaded.Context.YardName+" "+id)
 			return ports.RuntimeObservation{State: ports.RuntimeStateStale, Desired: prepOld}, fixture.gateErr
 		}
 		return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
@@ -335,9 +148,53 @@ esac
 	return fixture
 }
 
-func (fixture *preparedRollbackFixture) prepare(t *testing.T, arguments ...string) (Prepared, error) {
+func (fixture *preparedRollbackFixture) observe(yard string) ports.RuntimeObservation {
+	switch fixture.formats[yard] {
+	case 0:
+		return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}
+	case 1:
+		return ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: prepOld, Desired: prepOld}
+	}
+	return ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: prepNew, Desired: prepOld, Consequence: fixture.consequence[yard]}
+}
+
+// releaseRootName names the release a pinned or plain root resolves to.
+func releaseRootName(t *testing.T, root string) string {
 	t.Helper()
-	return fixture.runtime.PrepareTransition(context.Background(), append([]string{"--rollback", "--runtime-root", fixture.runtimeRoot}, arguments...), fixture.home, "default")
+	if resolved, err := os.Readlink(root); err == nil {
+		root = resolved
+	}
+	return filepath.Base(root)
+}
+
+func (fixture *preparedRollbackFixture) verified(t *testing.T) (*verifiedPublishedCandidate, *verifiedPublishedCandidate) {
+	t.Helper()
+	var candidates []*verifiedPublishedCandidate
+	for _, id := range []string{fixture.activeID, fixture.targetID} {
+		candidate, err := fixture.runtime.verifyPublishedCandidate(context.Background(), publishedCandidate{
+			release: releasetransition.ReleaseID(id), root: filepath.Join(fixture.runtimeRoot, "releases", id)}, fixture.runtimeRoot, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = candidate.Close() })
+		candidates = append(candidates, candidate)
+	}
+	return candidates[0], candidates[1]
+}
+
+func (fixture *preparedRollbackFixture) plan(t *testing.T) (*rollbackPreparation, error) {
+	t.Helper()
+	active, target := fixture.verified(t)
+	prep, refusals, err := fixture.runtime.planRollbackPreparation(context.Background(), active, target, fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prep, refusals
+}
+
+func (fixture *preparedRollbackFixture) prepare(t *testing.T) (Prepared, error) {
+	t.Helper()
+	return fixture.runtime.PrepareTransition(context.Background(), []string{"--rollback", "--runtime-root", fixture.runtimeRoot}, fixture.home, "default")
 }
 
 func (fixture *preparedRollbackFixture) engineLog(t *testing.T) string {
@@ -381,8 +238,159 @@ func (fixture *preparedRollbackFixture) journal(t *testing.T) *releasetransition
 	return &journal
 }
 
-func TestPreparedRollbackRunsTheDownTransactionBeforeTheTargetPlan(t *testing.T) {
-	fixture := newPreparedRollbackFixture(t)
+func outcomeOf(t *testing.T, err error) releasetransition.Outcome {
+	t.Helper()
+	outcome, ok := TransitionOutcome(err)
+	if !ok {
+		t.Fatalf("untyped refusal: %v", err)
+	}
+	return outcome
+}
+
+func TestRollbackPreparationSelectsOwnersByDeclaredFormats(t *testing.T) {
+	for _, test := range []struct {
+		name, active, target string
+		prepared             bool
+		refusal              string
+	}{
+		{name: "undeclared formats"},
+		{name: "same declared format", active: `,"format":2`, target: `,"format":2`},
+		{name: "absent target format is 1", active: `,"format":2,"prepares_rollback_to":1`, prepared: true},
+		{name: "declared target format", active: `,"format":3,"prepares_rollback_to":2`, target: `,"format":2`, prepared: true},
+		{name: "unprepared format", active: `,"format":2`, refusal: "this release cannot convert profile runtime sample-runtime from format 2 back to the retained release's format 1"},
+		{name: "other prepared format", active: `,"format":3,"prepares_rollback_to":2`, refusal: "from format 3 back to the retained release's format 1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{active: test.active, target: test.target})
+			prep, refusals := fixture.plan(t)
+			if test.refusal != "" {
+				if refusals == nil || !strings.Contains(refusals.Error(), test.refusal) || prep != nil || len(fixture.observed) != 0 {
+					t.Fatalf("refusal = %v, prep %#v, observed %v", refusals, prep, fixture.observed)
+				}
+				return
+			}
+			if refusals != nil || (prep != nil) != test.prepared {
+				t.Fatalf("prep = %#v, refusals %v", prep, refusals)
+			}
+			if !test.prepared {
+				if len(fixture.observed) != 0 {
+					t.Fatalf("an unprepared rollback ran hooks: %v", fixture.observed)
+				}
+				return
+			}
+			want := []string{"default sample-runtime " + fixture.activeID, "named sample-runtime " + fixture.activeID}
+			if !slices.Equal(fixture.observed, want) || len(prep.items) != 2 ||
+				prep.items[0] != (releasetransition.RollbackPrepItem{Owner: "sample-runtime", Yard: "default", Instance: prep.active["default"].Context.IncusProject + "/" + prep.active["default"].Context.YardInstanceName,
+					State: "stale", Actual: prepNew, Desired: prepOld}) || prep.items[0].Instance == "/" {
+				t.Fatalf("observed %v, items %#v", fixture.observed, prep.items)
+			}
+		})
+	}
+}
+
+// Every independent refusal is reported with its cause: a format this release
+// does not prepare, an owner that cannot be observed, a yard that cannot be
+// loaded and a stopped yard holding installed state. A stopped yard without
+// it has nothing to prepare.
+func TestRollbackPreparationCollectsEveryRefusalWithTypedNextStep(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{active: preparedSample.active, seed: func(active, target string) {
+		for root, format := range map[string]int{active: 4, target: 3} {
+			other := filepath.Join(root, "config/profiles/other")
+			if err := os.MkdirAll(other, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(other, "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
+			testkit.WriteFile(t, filepath.Join(other, "profile.json"), []byte(fmt.Sprintf(`{"schema_version":1,"runtime":{"activation_id":"other-runtime","handler":"runtime.sh","format":%d}}`, format)), 0o600)
+		}
+	}})
+	declareRollbackPrepYard(t, fixture.home, "third")
+	declareRollbackPrepYard(t, fixture.home, "spare")
+	declareRollbackPrepYard(t, fixture.home, "broken")
+	testkit.WriteFile(t, filepath.Join(fixture.home, "yards/broken/config.env"), []byte("NOT_A_SETTING=1\n"), 0o600)
+	if err := os.MkdirAll(filepath.Join(fixture.data, "service/named"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.formats = map[string]int{"default": 1}
+	observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
+	fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+		if loaded.Context.YardName == "third" {
+			return ports.RuntimeObservation{}, errors.New("guest exec failed")
+		}
+		return observe(ctx, root, loaded, id)
+	}
+	prep, refusals := fixture.plan(t)
+	if refusals == nil {
+		t.Fatal("no refusals")
+	}
+	if prep == nil || !slices.ContainsFunc(prep.items, func(item releasetransition.RollbackPrepItem) bool {
+		return item.Yard == "spare" && item.State == releasetransition.RollbackPrepAbsent
+	}) {
+		t.Fatalf("a stopped yard without installed state was not absent: %#v", prep)
+	}
+	outcome := outcomeOf(t, mergeRollbackPrepRefusals(releasetransition.ReleaseLinks{Active: "b"}, "a", refusals, nil))
+	for _, part := range []string{
+		"this release cannot convert profile runtime other-runtime from format 4 back to the retained release's format 3",
+		"profile runtime sample-runtime in yard third cannot be observed for rollback preparation: guest exec failed",
+		"yard broken configuration cannot be loaded for rollback preparation",
+		"yard named is stopped, so its installed profile runtime sample-runtime cannot be prepared for rollback",
+	} {
+		if !strings.Contains(outcome.Message, part) {
+			t.Fatalf("outcome %q lacks %q", outcome.Message, part)
+		}
+	}
+	if strings.Contains(outcome.Message, "spare") || outcome.Code != releasetransition.CodeRollbackIncompatible || outcome.Retry == "" {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+	stopped := outcomeOf(t, mergeRollbackPrepRefusals(releasetransition.ReleaseLinks{Active: "b"}, "a", stoppedYardRefusal("sample-runtime", "named"), nil))
+	if action, _, ok := domain.ParseRetry(stopped.Retry); !ok || action != (domain.Action{Verb: domain.VerbStart, Yard: "named"}) {
+		t.Fatalf("stopped yard retry = %q", stopped.Retry)
+	}
+}
+
+func TestRollbackPreparationGateObservesTheTargetFromItsOwnRoot(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	prep, refusals := fixture.plan(t)
+	if refusals != nil || prep == nil {
+		t.Fatalf("prep = %#v, %v", prep, refusals)
+	}
+	if err := prep.gate(context.Background(), fixture.runtime.config); err != nil || !slices.Equal(fixture.gate, []string{"default sample-runtime", "named sample-runtime"}) {
+		t.Fatalf("gate = %v, observed %v", err, fixture.gate)
+	}
+	fixture.gateErr = errors.New("target rejects the prepared state")
+	outcome := outcomeOf(t, mergeRollbackPrepRefusals(releasetransition.ReleaseLinks{Active: "b"}, "a", prep.gate(context.Background(), fixture.runtime.config), nil))
+	if !strings.Contains(outcome.Message, "does not accept the prepared profile runtime sample-runtime in yard default") || outcome.Retry != "run yard migrate" {
+		t.Fatalf("gate refusal = %#v", outcome)
+	}
+}
+
+func TestRollbackPrepRefusalsJoinCompatibilityRefusalsAndKeepEveryCause(t *testing.T) {
+	links := releasetransition.ReleaseLinks{Active: "b"}
+	compatibility := publicReleaseInspectionError{outcome: publicReleaseOutcome(links, "a", nil, releasetransition.CodeUnsupportedKind, "registry refused", "compat retry")}
+	compatibility.cause = transitionOutcomeError(compatibility.outcome)
+	prep := stoppedYardRefusal("sample-runtime", "named")
+	merged := outcomeOf(t, mergeRollbackPrepRefusals(links, "a", prep, compatibility))
+	if !strings.HasPrefix(merged.Message, "registry refused; yard named is stopped") || merged.Retry != "compat retry" || merged.Code != releasetransition.CodeUnsupportedKind {
+		t.Fatalf("merged = %#v", merged)
+	}
+	if err := mergeRollbackPrepRefusals(links, "a", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var many []error
+	for index := range 40 {
+		many = append(many, stoppedYardRefusal("sample-runtime", fmt.Sprintf("yard%02d", index)))
+	}
+	err := mergeRollbackPrepRefusals(links, "a", domain.CollectRefusals(many...), nil)
+	if outcome := outcomeOf(t, err); len(outcome.Message) > maximumOutcomeMessage || !strings.HasSuffix(outcome.Message, "...") ||
+		!strings.Contains(err.Error(), "yard yard39 is stopped") {
+		t.Fatalf("bounded outcome %q lost causes: %v", outcome.Message, err)
+	}
+}
+
+// Step 1 confirms only the down plan; it prepares the owners, passes the gate
+// and stops with this release active. Step 2 confirms the target's own plan.
+func TestPreparedRollbackTakesTwoConfirmations(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	fixture.consequence["default"] = "restart the sample service"
 	prepared, err := fixture.prepare(t)
 	if err != nil {
 		t.Fatal(err)
@@ -391,125 +399,174 @@ func TestPreparedRollbackRunsTheDownTransactionBeforeTheTargetPlan(t *testing.T)
 		t.Fatalf("planning inspected the target or mutated: log %q applies %v", log, fixture.applies)
 	}
 	if prepared.Action != "update.rollback" || !prepared.Changed ||
-		!slicesContains(prepared.Consequences, "prepare profile runtime sample-runtime in yard default for release "+fixture.targetID) ||
-		slicesContains(prepared.Consequences, "prepare profile runtime sample-runtime in yard named for release "+fixture.targetID) {
-		t.Fatalf("down plan = %#v", prepared)
+		!slices.Contains(prepared.Consequences, "prepare profile runtime sample-runtime for release "+fixture.targetID+" in 1 yard(s)") ||
+		!slices.Contains(prepared.Consequences, "restart the sample service") ||
+		slices.Contains(prepared.Consequences, reactivateRetainedConsequence) || slices.ContainsFunc(prepared.Consequences, func(line string) bool {
+		return strings.Contains(line, "under this confirmation")
+	}) {
+		t.Fatalf("down plan = %#v", prepared.Consequences)
 	}
-	err = prepared.Execute(context.Background())
-	if err == nil {
-		t.Fatal("the fixture target's convergence failure was lost")
+	if err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	journal := fixture.journal(t)
 	if journal == nil || !strings.HasPrefix(string(journal.Transaction), releasetransition.RollbackPrepTransactionPrefixV1) ||
 		journal.Checkpoint != releasetransition.JournalComplete || journal.Goal.Target != releasetransition.ReleaseID(fixture.activeID) {
 		t.Fatalf("down journal = %#v", journal)
 	}
-	if len(fixture.applies) != 1 || fixture.applies[0] != "default sample-runtime "+string(journal.Transaction) {
+	if len(fixture.applies) != 1 || !strings.HasPrefix(fixture.applies[0], "default sample-runtime "+string(journal.Transaction)+" ") ||
+		!strings.HasSuffix(fixture.applies[0], " "+fixture.activeID) {
 		t.Fatalf("applies = %v", fixture.applies)
 	}
-	if strings.Join(fixture.gates, "|") != "default sample-runtime|named sample-runtime" {
-		t.Fatalf("gate observations = %v", fixture.gates)
-	}
-	if log := fixture.engineLog(t); log != "inspect prepared\nconverge\n" {
-		t.Fatalf("target engine log = %q after %v", log, err)
+	if !slices.Equal(fixture.gate, []string{"default sample-runtime", "named sample-runtime"}) || fixture.engineLog(t) != "" {
+		t.Fatalf("gate %v, target engine log %q", fixture.gate, fixture.engineLog(t))
 	}
 	fixture.assertLinks(t)
-}
+	inspection, err := prepared.Check(context.Background())
+	if err != nil || inspection.Outcome.Status != releasetransition.StatusReady || inspection.Outcome.Retry != preparedRollbackRetry ||
+		inspection.Outcome.Active != releasetransition.ReleaseID(fixture.activeID) || !strings.Contains(inspection.Outcome.Message, "prepared for "+fixture.targetID) {
+		t.Fatalf("step 1 result = %#v, %v", inspection.Outcome, err)
+	}
 
-func TestPreparedRollbackRefusesBeforeTheTargetWhenTheGateFails(t *testing.T) {
-	fixture := newPreparedRollbackFixture(t)
-	fixture.gateErr = errors.New("target observer rejects the state")
-	prepared, err := fixture.prepare(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = prepared.Execute(context.Background())
-	outcome, ok := TransitionOutcome(err)
-	if !ok || outcome.Code != releasetransition.CodeRollbackIncompatible || outcome.Retry != "run yard migrate" ||
-		!strings.Contains(outcome.Message, "does not accept the prepared profile runtime sample-runtime in yard default") {
-		t.Fatalf("gate refusal = %#v, %v", outcome, err)
-	}
-	if log := fixture.engineLog(t); log != "" {
-		t.Fatalf("a refused gate reached the target: %q", log)
-	}
-	fixture.assertLinks(t)
-}
-
-func TestPreparedRollbackRechecksConfirmedObservations(t *testing.T) {
-	fixture := newPreparedRollbackFixture(t)
-	prepared, err := fixture.prepare(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.formats["named"] = 2
-	if err := prepared.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
-		t.Fatalf("changed observation = %v", err)
-	}
-	if fixture.journal(t) != nil || len(fixture.applies) != 0 || fixture.engineLog(t) != "" {
-		t.Fatalf("a stale down plan had effects: applies %v", fixture.applies)
-	}
-}
-
-func TestPreparedRollbackRefusesAStoppedYard(t *testing.T) {
-	fixture := newPreparedRollbackFixture(t)
-	observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
-	fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
-		if loaded.Context.YardName == "named" {
-			return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}, nil
-		}
-		return observe(ctx, root, loaded, id)
-	}
-	_, err := fixture.prepare(t)
-	outcome, ok := TransitionOutcome(err)
-	if !ok || outcome.Retry != "run yard -Y named start" || !strings.Contains(outcome.Message, "yard named is stopped") {
-		t.Fatalf("stopped yard = %#v, %v", outcome, err)
-	}
-	fixture.assertLinks(t)
-}
-
-func TestPreparedRollbackStopsAfterTheGateForAPlanNeedingItsOwnConfirmation(t *testing.T) {
-	const extra = "compact completed migration history checkpoint"
-	fixture := newPreparedRollbackFixture(t, extra)
-	prepared, err := fixture.prepare(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = prepared.Execute(context.Background())
-	outcome, ok := TransitionOutcome(err)
-	if !ok || outcome.Retry != "run yard update --rollback" || !strings.Contains(outcome.Message, "needs its own confirmation") {
-		t.Fatalf("fresh plan refusal = %#v, %v", outcome, err)
-	}
-	if len(fixture.applies) != 1 || len(fixture.gates) != 2 || fixture.engineLog(t) != "inspect prepared\n" {
-		t.Fatalf("refusal did not stop after the hooks and gate: applies %v gates %v log %q", fixture.applies, fixture.gates, fixture.engineLog(t))
-	}
-	fixture.assertLinks(t)
-
-	// The rerun finds every owner current and confirms the target's own plan.
+	// Step 2 skips the current hooks and confirms the target's own plan.
+	fixture.gate = nil
 	rerun, err := fixture.prepare(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slicesContains(rerun.Consequences, extra) || slicesContains(rerun.Consequences, "prepare profile runtime sample-runtime in yard default for release "+fixture.targetID) {
-		t.Fatalf("rerun plan = %#v", rerun.Consequences)
+	if !slices.Contains(rerun.Consequences, reactivateRetainedConsequence) || slices.ContainsFunc(rerun.Consequences, func(line string) bool {
+		return strings.HasPrefix(line, "prepare profile runtime")
+	}) || len(fixture.gate) != 2 {
+		t.Fatalf("rerun plan = %#v, gate %v", rerun.Consequences, fixture.gate)
 	}
 	fixture.formats["named"] = 2
-	if err := rerun.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+	if err := rerun.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) || strings.Contains(fixture.engineLog(t), "converge") {
 		t.Fatalf("rerun ignored a changed prepared owner: %v", err)
 	}
 	fixture.formats["named"] = 1
 	if err := rerun.Execute(context.Background()); err == nil {
 		t.Fatal("the fixture target's convergence failure was lost")
 	}
-	if len(fixture.applies) != 1 || !strings.HasSuffix(fixture.engineLog(t), "converge\n") {
+	if len(fixture.applies) != 1 || !strings.Contains(fixture.engineLog(t), "inspect prepared\n") || !strings.HasSuffix(fixture.engineLog(t), "converge\n") {
 		t.Fatalf("rerun did not dispatch the confirmed target plan alone: applies %v log %q", fixture.applies, fixture.engineLog(t))
 	}
 }
 
-func slicesContains(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
+// A refusal after the down journal names the forward repair, or its own
+// resuming step, and keeps this release active.
+func TestPreparedRollbackFailuresAfterTheJournalNameTheForwardRepair(t *testing.T) {
+	for name, test := range map[string]struct {
+		arrange func(*preparedRollbackFixture)
+		message string
+		retry   string
+	}{
+		"gate refusal": {func(fixture *preparedRollbackFixture) { fixture.gateErr = errors.New("rejected") },
+			"does not accept the prepared profile runtime sample-runtime in yard default", "run yard migrate"},
+		"apply failure": {func(fixture *preparedRollbackFixture) { fixture.applyErr = errors.New("conversion failed") },
+			"prepare sample-runtime in yard default for rollback: conversion failed", "run yard migrate"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPreparedRollbackFixture(t, preparedSample)
+			prepared, err := fixture.prepare(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.arrange(fixture)
+			outcome := outcomeOf(t, prepared.Execute(context.Background()))
+			if outcome.Retry != test.retry || !strings.Contains(outcome.Message, test.message) ||
+				!strings.Contains(outcome.Message, "stays active") || !strings.Contains(outcome.Message, "yard migrate repairs them forward") {
+				t.Fatalf("refusal = %#v", outcome)
+			}
+			if fixture.journal(t) == nil || fixture.engineLog(t) != "" {
+				t.Fatal("the down transaction left no journal or reached the target")
+			}
+			fixture.assertLinks(t)
+		})
+	}
+}
+
+// Execution rechecks the confirmed facts before the down journal: hook
+// observations and their declared effects, protected history, yard
+// registrations, a stopped yard, and the verified release roots.
+func TestPreparedRollbackRechecksBeforeAnyEffect(t *testing.T) {
+	for name, test := range map[string]struct {
+		change func(*testing.T, *preparedRollbackFixture)
+		retry  string
+	}{
+		"observation":     {change: func(_ *testing.T, fixture *preparedRollbackFixture) { fixture.formats["named"] = 2 }},
+		"declared effect": {change: func(_ *testing.T, fixture *preparedRollbackFixture) { fixture.consequence["default"] = "restart" }},
+		"protected history": {change: func(t *testing.T, fixture *preparedRollbackFixture) {
+			writeRollbackFixtureLedgerEpoch(t, fixture.home, 2)
+		}},
+		"yard registration": {change: func(t *testing.T, fixture *preparedRollbackFixture) {
+			testkit.WriteFile(t, filepath.Join(fixture.home, "yards/named/config.env"), []byte("YARD_INSTANCE_NAME=changed-guest\n"), 0o600)
+		}},
+		"stopped yard": {change: func(t *testing.T, fixture *preparedRollbackFixture) {
+			fixture.formats["named"] = 0
+			if err := os.MkdirAll(filepath.Join(fixture.data, "service/named"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, retry: "run yard -Y named start"},
+		"active release": {change: func(t *testing.T, fixture *preparedRollbackFixture) {
+			testkit.WriteFile(t, filepath.Join(fixture.runtimeRoot, "releases", fixture.activeID, "config/profiles/sample/runtime.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPreparedRollbackFixture(t, preparedSample)
+			prepared, err := fixture.prepare(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(t, fixture)
+			err = prepared.Execute(context.Background())
+			if test.retry != "" {
+				if outcome := outcomeOf(t, err); outcome.Retry != test.retry || strings.Contains(outcome.Message, "stays active") {
+					t.Fatalf("refusal = %#v", outcome)
+				}
+			} else if !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("changed %s = %v", name, err)
+			}
+			if fixture.journal(t) != nil || len(fixture.applies) != 0 || fixture.engineLog(t) != "" {
+				t.Fatalf("a stale down plan had effects: applies %v", fixture.applies)
+			}
+		})
+	}
+}
+
+func writeRollbackFixtureLedgerEpoch(t *testing.T, configHome string, epoch int) {
+	t.Helper()
+	testkit.WriteFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), []byte(fmt.Sprintf(`{"schemaVersion":2,"domains":{"settings":{"epoch":%d,"applied":[]}}}`, epoch)), 0o600)
+}
+
+func TestPreparedRollbackRunsNoHookFromAnUnverifiedRelease(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	testkit.WriteFile(t, filepath.Join(fixture.runtimeRoot, "releases", fixture.activeID, "config/profiles/sample/runtime.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	if _, err := fixture.prepare(t); err == nil || len(fixture.observed) != 0 {
+		t.Fatalf("unverified active release: err %v, observed %v", err, fixture.observed)
+	}
+}
+
+func TestDowngradeActivationRefusesAnUnpreparedFormat(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	active, target := fixture.verified(t)
+	links, err := fixture.runtime.inspectRuntimeLinks(fixture.runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.home,
+		Target: target.candidate.release, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: target.manifestDigest}
+	selection, err := fixture.runtime.captureReleaseSelection(context.Background(), target, request, links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for retained, retry := range map[bool]string{true: rollbackRetry, false: "keep the current release active"} {
+		refusal := asRollbackRefusal(fixture.runtime.downgradeFormatRefusal(selection, target, retained))
+		if refusal.retry != retry || !strings.Contains(refusal.message, "reads profile runtime sample-runtime in format 1, but its installed state has format 2") {
+			t.Fatalf("downgrade refusal = %#v", refusal)
 		}
 	}
-	return false
+	// Equal formats need nothing.
+	if err := fixture.runtime.downgradeFormatRefusal(selection, active, false); err != nil {
+		t.Fatal(err)
+	}
 }

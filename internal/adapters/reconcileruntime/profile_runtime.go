@@ -293,6 +293,13 @@ func (runtime Runtime) observeProfileRuntimesWith(
 	if err != nil {
 		return nil, fmt.Errorf("inspect yard for profile runtimes: %w", err)
 	}
+	// Nothing is installed to prepare for rollback in a never-provisioned guest.
+	if never && action == profileRuntimeRollback.observe {
+		for _, definition := range definitions {
+			observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
+		}
+		return observations, nil
+	}
 	if strings.EqualFold(instance.Status, "stopped") || never {
 		for _, definition := range definitions {
 			observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateDeferred}

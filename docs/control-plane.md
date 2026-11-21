@@ -1235,28 +1235,30 @@ release's declaration, which can come from a newer release, is read only for
 tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
 well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
-When a profile runtime must be prepared for the rollback target, the active release runs a down
-transaction before the target owns the rollback. Planning runs `rollback-observe` for each prepared
-owner in every local yard; a stopped yard refuses with `yard -Y NAME start`, and every independent
-refusal is reported beside the rollback compatibility refusals. The one confirmation covers the
-preparation and the target's own plan, which exists only after preparation. Execution rechecks the
-confirmed observations and the exact active and target artifacts, then records the authorized
-transaction as a completed `rollback-prep-v1-` journal of the active release with no steps, before
-the first hook. It then runs `rollback-apply` for each stale owner. The gate observes every
-prepared owner with the target's own handler from the target's root and checks the history
-verdict again. Finally the active release inspects the target afresh. The confirmation covers
-that plan only when it has no blockers, no unfinished transaction and no consequence beyond a plain
-rollback; the active release then dispatches the ordinary retained execution, which switches the
-links. Any other plan stops after the gate: a blocked plan names `yard migrate`, and one with its
-own consequences names `yard update --rollback`. Data is not converted.
+When a profile runtime must be prepared for the rollback target, rollback takes two confirmations.
+The first `yard update --rollback` confirms only the active release's down transaction. Planning
+runs `rollback-observe` for each prepared owner in every local yard, from the verified active
+release, and the plan shows each owner's declared consequence. A stopped yard holding the owner's
+state refuses with `yard -Y NAME start`; a yard that never had it has nothing to prepare. Every
+independent refusal is reported beside the rollback compatibility refusals. Execution rechecks the
+exact active and target artifacts, the yard registrations and native instances, the confirmed
+observations and the protected history, then records the authorized transaction as a completed
+`rollback-prep-v1-` journal of the active release with no steps, before the first hook. It runs
+`rollback-apply` for each stale owner, and the gate observes every prepared owner with the target's
+own handler from the target's root and checks the history verdict again. The command then stops
+with the active release still active and names the next step: run `yard update --rollback` to
+review and confirm the rollback. The rerun finds every owner current, checks the gate during
+planning, and asks to confirm the retained release's own plan; its execution rechecks that every
+prepared owner still observes as confirmed. Data is not converted.
 
 Every hook is an idempotent observe/apply pair, so an interrupted down transaction resumes by
-observing again. Rerunning `yard update --rollback` finds the converted owners current, checks the
-gate during planning, and asks to confirm the target's own plan; execution rechecks that every
-prepared owner still observes as confirmed. The fault points `after-rollback-hook` and
-`before-target-dispatch` cover both interruptions. Any failure leaves the active release active.
-Its own runtime owners then report the prepared state as drift, the completed down journal is
-ordinary history, and `yard migrate` repairs forward.
+observing again. The fault points `after-rollback-journal`, `after-rollback-hook` and
+`before-target-dispatch` cover the interruptions. A failure after the down journal leaves the
+active release active and names `yard migrate`, or the step that resumes the rollback: the
+release's own runtime owners report the prepared state as drift, the completed down journal is
+ordinary history, and `yard migrate` repairs forward. `yard update --version` refuses an older
+release that reads an owner in an earlier format than the installed one; when it is the retained
+release and the active release prepares that format, the refusal names `yard update --rollback`.
 
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the

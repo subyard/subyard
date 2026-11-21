@@ -406,8 +406,8 @@ func (definition *Definition) validateExtensions() error {
 		if definition.Runtime.Format < 0 || definition.Runtime.PreparesRollbackTo < 0 {
 			return errors.New("runtime formats must be positive")
 		}
-		if target := definition.Runtime.PreparesRollbackTo; target != 0 && target == definition.Runtime.EffectiveFormat() {
-			return errors.New("runtime cannot prepare rollback to its own format")
+		if target := definition.Runtime.PreparesRollbackTo; target != 0 && target >= definition.Runtime.EffectiveFormat() {
+			return errors.New("runtime can prepare rollback only to an earlier format")
 		}
 		seen := map[string]bool{}
 		for _, path := range definition.Runtime.ProjectsChangedHooks {
