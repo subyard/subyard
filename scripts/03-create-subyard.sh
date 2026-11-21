@@ -493,6 +493,17 @@ if [ "$created" = 1 ]; then
   elif [ "$tmp_state" != 0 ]; then
     die 'new yard temporary storage could not be verified'
   fi
+  if timezone=$(subyard_host_timezone /etc); then
+    # The guest shell receives the zone as a positional argument.
+    # shellcheck disable=SC2016
+    timeout --signal=TERM --kill-after=5 30 incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -c '
+      zonefile=/usr/share/zoneinfo/$1
+      if [ -f "$zonefile" ] && [ "$(head -c 4 -- "$zonefile")" = TZif ]; then
+        umask 022
+        ln -sfnT -- "$zonefile" /etc/localtime && printf "%s\n" "$1" > /etc/timezone
+      fi
+    ' _ "$timezone" </dev/null || warn 'could not set the new yard timezone from the host'
+  fi
 fi
 # Cloud-image seeding can replace QEMU during the agent wait.
 # Scope its replacement before guest preparation can fail.

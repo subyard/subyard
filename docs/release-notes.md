@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- New yards inherit the server's timezone when available in the guest and otherwise default to UTC.
 - `DEV_SUDO` now takes `prompt` (default), `yes` or `no`. `prompt` keeps the passwordless
   grant and makes Claude, Codex and OpenCode ask before `sudo`, `su`, `doas`, `pkexec`,
   `sudoedit` and `run0`; it is a guardrail, not a boundary. `yes` keeps the earlier

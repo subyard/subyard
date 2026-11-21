@@ -21,6 +21,8 @@ scope and source, and how they are consumed. Passing one setting name shows ever
 as `effective`, `overridden`, or `unset`. Unknown fields, wrong scopes and invalid values fail
 closed; secret inputs and unrelated environment variables are not settings.
 
+At creation, a yard inherits the server's timezone when that zone is available in the guest, and otherwise keeps the default UTC.
+
 ## Storage roles
 
 The default configuration root is `~/.config/subyard`. It contains several roles, not one monolithic

@@ -182,6 +182,9 @@ case "${1:-} ${2:-} ${3:-}" in
           : > "$MOCK_TMP_CHECK_FILE"
           exit 10
         fi ;;
+      'exec yard --project subyard -T -- sh -c '*)
+        printf '%s\n' "${11}" > "$MOCK_TMP_CHECK_FILE.timezone"
+        exit "${MOCK_TIMEZONE_EXIT:-0}" ;;
       *'ip -4 -o address show dev'*)
         if [ "$MOCK_BOOT_AFTER_RESTART" = 1 ]; then
           [ "$(cat "$MOCK_TMP_CHECK_FILE.boot" 2>/dev/null)" = running ] || exit 1
@@ -550,6 +553,50 @@ MOCK_REBOOT=0
 printf 'ok: a new VM is started once more after a lost first boot; other lost boots refuse at once\n'
 
 rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+
+(
+  # shellcheck source=scripts/lib/instance-create.sh
+  . "$ROOT/scripts/lib/instance-create.sh"
+  timezone_etc="$TMP/timezone-etc"
+  install -d -m 0700 "$timezone_etc"
+  ! subyard_host_timezone "$timezone_etc" || fail 'missing timezone yielded a zone'
+  for zone in '' UTC Etc/UTC 'Europe/../Berlin' 'Europe/Berlin; true'; do
+    printf '%s\n' "$zone" > "$timezone_etc/timezone"
+    ! subyard_host_timezone "$timezone_etc" || fail 'invalid or UTC timezone yielded a zone'
+  done
+  printf '  Asia/Kolkata\n' > "$timezone_etc/timezone"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Asia/Kolkata ] || fail 'timezone file was ignored'
+  printf 'Asia/Kolkata\0junk' > "$timezone_etc/timezone"
+  ! subyard_host_timezone "$timezone_etc" || fail 'timezone file with NUL was accepted'
+  ln -s ../usr/share/zoneinfo/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'localtime link was ignored'
+  ln -sfnT ../usr/share/zoneinfo/right/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = right/Europe/Berlin ] || fail 'right timezone prefix was stripped'
+  ln -sfnT /usr/share/zoneinfo/posix/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'posix timezone prefix was kept'
+
+  # Feed a real fixture symlink to the creation adapter without reading host timezone files.
+  export MOCK_TIMEZONE_LINK="$timezone_etc/localtime"
+  cat > "$TMP/bin/readlink" <<'MOCK'
+#!/usr/bin/env bash
+if [ "$*" = '-z -- /etc/localtime' ]; then
+  exec /usr/bin/readlink -z -- "$MOCK_TIMEZONE_LINK"
+fi
+exec /usr/bin/readlink "$@"
+MOCK
+  chmod 0700 "$TMP/bin/readlink"
+  reset_creation
+  MOCK_TIMEZONE_EXIT=1 run_create
+  [ "$(cat "$MOCK_TMP_CHECK_FILE.timezone")" = Europe/Berlin ] \
+    || fail 'new yard did not receive the timezone argument'
+  grep -Fq 'could not set the new yard timezone from the host' "$TMP/output" \
+    || fail 'timezone failure did not warn'
+  rm -f -- "$MOCK_TMP_CHECK_FILE.timezone"
+  run_create
+  [ ! -e "$MOCK_TMP_CHECK_FILE.timezone" ] || fail 'existing yard received a timezone command'
+  rm -f -- "$TMP/bin/readlink"
+)
+printf 'ok: timezone detection and best-effort inheritance apply only to new yards\n'
 
 # Consume the physical fixture's actual generated inputs through normal creation.
 # The selected project has its own local catalog: a bare default-project cache
