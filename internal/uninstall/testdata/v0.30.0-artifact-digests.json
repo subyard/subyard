@@ -1,0 +1,76 @@
+[
+ {
+  "Entries": [],
+  "Binding": ""
+ },
+ {
+  "Entries": [
+   {
+    "Path": ".",
+    "Mode": 33152,
+    "Size": 8,
+    "Modified": 1763500000123456789,
+    "Device": 2049,
+    "Inode": 131074,
+    "UID": 1000,
+    "GID": 1000,
+    "Changed": 1763500000987654321,
+    "Link": ""
+   }
+  ],
+  "Binding": "a7255c14b905c39b160fe0ce9ca9a1dc614201b9e72895f2b7d42213d24957f3"
+ },
+ {
+  "Entries": [
+   {
+    "Path": ".",
+    "Mode": 16832,
+    "Size": 4096,
+    "Modified": -1,
+    "Device": 18446744073709551615,
+    "Inode": 18446744073709551614,
+    "UID": 4294967294,
+    "GID": 4294967295,
+    "Changed": -1,
+    "Link": ""
+   },
+   {
+    "Path": "link <&>",
+    "Mode": 41471,
+    "Size": 24,
+    "Modified": 0,
+    "Device": 0,
+    "Inode": 0,
+    "UID": 0,
+    "GID": 0,
+    "Changed": 0,
+    "Link": "../target    <script>&amp;"
+   },
+   {
+    "Path": "tab\tnew\nline\rcr\bbs\fff\u0001\u001f",
+    "Mode": 33188,
+    "Size": 0,
+    "Modified": 0,
+    "Device": 0,
+    "Inode": 0,
+    "UID": 0,
+    "GID": 0,
+    "Changed": 0,
+    "Link": ""
+   },
+   {
+    "Path": "quote\"back\\slash/é😀 ",
+    "Mode": 33261,
+    "Size": 0,
+    "Modified": 0,
+    "Device": 0,
+    "Inode": 0,
+    "UID": 0,
+    "GID": 0,
+    "Changed": 0,
+    "Link": ""
+   }
+  ],
+  "Binding": "ed6c7831127cd76e0e54cc9dfd60c86042e5f065865f1d5c191d454a5f460ba6"
+ }
+]

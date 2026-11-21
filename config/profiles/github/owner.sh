@@ -187,7 +187,7 @@ if [ "$enabled" != 1 ]; then
   fi
   if [ "$mode" = remove ]; then
     for artifact in "$unit_file" "$runtime_file" "$broker_engine"; do
-      python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-artifact "$artifact" \
+      teardown_guard guard-artifact "$artifact" \
         || exit 75
     done
   fi
@@ -196,12 +196,12 @@ if [ "$enabled" != 1 ]; then
     # Keep the manager's link to an absolute-path unit until it has stopped.
     user_systemctl stop "$unit"
     if [ "$mode" = remove ]; then
-      python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-artifact "$unit_file" \
+      teardown_guard guard-artifact "$unit_file" \
         || exit 75
     fi
     user_systemctl disable "$unit" >/dev/null
     if [ "$mode" = remove ]; then
-      python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$unit_file" \
+      teardown_guard remove-artifact "$unit_file" \
         || exit 75
     else
       rm -- "$unit_file"
@@ -216,14 +216,14 @@ if [ "$enabled" != 1 ]; then
     incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- rm -f -- "$guest_engine"
   fi
   if [ "$mode" = remove ]; then
-    python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$runtime_file" \
+    teardown_guard remove-artifact "$runtime_file" \
       || exit 75
   else
     [ ! -L "$runtime_file" ] || die 'unsafe GitHub broker runtime file'
     [ ! -e "$runtime_file" ] || rm -- "$runtime_file"
   fi
   if [ "$mode" = remove ]; then
-    python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$broker_engine" \
+    teardown_guard remove-artifact "$broker_engine" \
       || exit 75
   else
     [ ! -L "$broker_engine" ] || die 'unsafe GitHub broker engine path'
