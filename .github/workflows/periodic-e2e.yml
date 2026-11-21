@@ -28,7 +28,7 @@ on:
         type: string
         default: ''
       android_gradle_copies:
-        description: Gradle copy IDs, 1–3 at three emulator cores and 4 at two (requires checks=profile:android/gradle)
+        description: Gradle copy IDs from 1 to 3 (requires checks=profile:android/gradle)
         type: string
         default: ''
       # Set by the reschedule job, which runs nested VM checks again until they land on Intel.
@@ -227,14 +227,14 @@ jobs:
             plan="$(jq -c 'map_values(.include |= map(select(.manual | not)))' <<<"$plan")"
           fi
           if [ -n "${GRADLE_COPIES:-}" ]; then
-            if [ "$ONLY" != profile:android/gradle ] || ! [[ "$GRADLE_COPIES" =~ ^[1-4](\ [1-4])*$ ]]; then
+            if [ "$ONLY" != profile:android/gradle ] || ! [[ "$GRADLE_COPIES" =~ ^[1-3](\ [1-3])*$ ]]; then
               echo 'invalid Gradle copy selection'
               exit 1
             fi
             plan="$(jq -c --arg copies "$GRADLE_COPIES" '
               ($copies | split(" ") | map(tonumber) | unique) as $ids
               | .nested.include |= [.[] as $check | $ids[] as $copy
-                | $check + {copy: $copy, two_cores: ($copy == 4)}]' <<<"$plan")"
+                | $check + {copy: $copy}]' <<<"$plan")"
           elif [ -n "$RETRY" ]; then
             plan="$(jq -c --argjson copies "$NESTED_COPIES" \
               '.nested.include |= [.[] as $check | range(1; $copies + 1) | $check + {copy: .}]' <<<"$plan")"
@@ -449,7 +449,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: ${{ inputs.android_gradle_copies && 4 || 3 }}
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.candidate.outputs.nested) }}
     steps:
       - name: Require Intel, since nested VMs on AMD under Hyper-V are too slow for these checks
@@ -494,7 +494,6 @@ jobs:
         env:
           CHECK_ID: ${{ matrix.id }}
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
-          SUBYARD_E2E_ANDROID_GRADLE_TWO_CORES: ${{ matrix.two_cores && '1' || '' }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \
@@ -546,7 +545,7 @@ jobs:
           extra=()
           if [ -n "${GRADLE_COPIES:-}" ]; then
             copies="$(jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Gradle copy needs an Intel runner" and .conclusion == "success"))
-              | .name | capture("^profile:android/gradle #(?<copy>[1-4])$").copy] | sort | join(" ")' <<<"$jobs")"
+              | .name | capture("^profile:android/gradle #(?<copy>[1-3])$").copy] | sort | join(" ")' <<<"$jobs")"
             checks=''
             if [ -n "$copies" ]; then
               checks=profile:android/gradle
