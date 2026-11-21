@@ -214,19 +214,30 @@ func checkoutSource() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
 }
 
-// trackedCheckoutFiles lists the checkout trees' tracked files, or every file
-// below them in an export without Git metadata.
+// trackedCheckoutFiles lists the checkout trees' tracked files. Only an export,
+// with no .git at its root, falls back to every file below the trees; a
+// checkout whose Git lookup fails is an error.
 func trackedCheckoutFiles(source string) ([]string, error) {
-	git := exec.Command("git", "-C", source, "rev-parse", "--show-prefix")
-	git.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	if prefix, err := git.Output(); err == nil && strings.TrimSpace(string(prefix)) == "" {
+	if _, err := os.Lstat(filepath.Join(source, ".git")); err == nil {
+		environment := append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+		git := exec.Command("git", "-C", source, "rev-parse", "--show-prefix")
+		git.Env = environment
+		prefix, err := git.Output()
+		if err != nil {
+			return nil, fmt.Errorf("list checkout files in %s: %w", source, err)
+		}
+		if strings.TrimSpace(string(prefix)) != "" {
+			return nil, fmt.Errorf("checkout %s is not its Git top level", source)
+		}
 		list := exec.Command("git", append([]string{"-C", source, "ls-files", "-z", "--"}, checkoutTrees...)...)
-		list.Env = git.Env
+		list.Env = environment
 		listed, err := list.Output()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list checkout files in %s: %w", source, err)
 		}
 		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00"), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	var files []string
 	for _, tree := range checkoutTrees {
@@ -545,5 +556,24 @@ func TestCLIFixtureRefusesPathsAndSettingsItDoesNotOwn(t *testing.T) {
 		if fixedSetting(name) != fixed {
 			t.Errorf("%s: fixed=%t", name, !fixed)
 		}
+	}
+}
+
+func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
+	export := testkit.TempDir(t)
+	for _, tree := range checkoutTrees {
+		if err := os.Mkdir(filepath.Join(export, tree), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(export, "config", "subyard.env"), nil, 0o600)
+	if files, err := trackedCheckoutFiles(export); err != nil || !slices.Equal(files, []string{filepath.Join("config", "subyard.env")}) {
+		t.Fatalf("export listing: %q %v", files, err)
+	}
+	// A checkout whose Git lookup fails must not fall back to the walk, which
+	// would copy untracked files.
+	testkit.WriteFile(t, filepath.Join(export, ".git"), []byte("gitdir: "+filepath.Join(export, "missing")+"\n"), 0o600)
+	if files, err := trackedCheckoutFiles(export); err == nil {
+		t.Fatalf("broken checkout listed %q", files)
 	}
 }
