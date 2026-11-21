@@ -329,20 +329,6 @@ android_repeat_provision() {
 }
 android_phase_begin provision
 android_network_received provision before
-if [ "$lane" = gradle ] && [ "${SUBYARD_E2E_ANDROID_GRADLE_TWO_CORES:-}" = 1 ]; then
-  # Only the broker derives ncore from this mask. Its transient emulator service can use the full VM.
-  incus --project "$project" exec "$instance" -- python3 - <<'PY'
-import os
-from pathlib import Path
-
-cpus = sorted(os.sched_getaffinity(0))
-if len(cpus) < 3:
-    raise SystemExit('Gradle two-core comparison requires at least three VM vCPUs')
-directory = Path('/run/systemd/system/subyard-android-pool.service.d')
-directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-(directory / 'gradle-cpu-control.conf').write_text(f'[Service]\nCPUAffinity={cpus[0]} {cpus[1]}\n')
-PY
-fi
 yard provision --yes
 android_network_received provision after
 android_phase_end 0

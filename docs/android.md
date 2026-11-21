@@ -112,8 +112,8 @@ No additional persistent archive cache is enabled.
 
 Provision adequate capacity before use: two devices reserve 7.5 GiB including the pool's
 yard allowance. Yard processes and other workloads need additional capacity; this budget
-does not guarantee that two active emulators fit in 8 GiB. Both presets use the vCPUs available
-to the pool, capped at three, and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtime and renderer. Phone is
+does not guarantee that two active emulators fit in 8 GiB. Both presets use
+two guest vCPUs and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtime and renderer. Phone is
 1080×1920 at 420 dpi; tablet is 800×1280 at 160 dpi (an 800×1280 dp tablet layout).
 These are fixed presets, not a fallback chosen under memory pressure. The tablet stays below
 the emulator's three-million-pixel threshold, which otherwise forces 4 GiB guest RAM in

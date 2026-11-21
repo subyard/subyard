@@ -989,7 +989,7 @@ class Leases(unittest.TestCase):
                 self.assertEqual(launch.returncode, 42, launch.stderr)
                 self.assertEqual(launch.stdout.splitlines(), expected)
 
-    def test_start_caps_available_cores_and_passes_ram_floor_to_avd_and_runtime(self):
+    def test_start_uses_two_cores_and_passes_ram_floor_to_avd_and_runtime(self):
         sdk, image = self.root / 'sdk', self.root / 'image'
         image.mkdir()
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root=str(sdk), size=2,
@@ -1008,28 +1008,23 @@ class Leases(unittest.TestCase):
                   request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
             (dict(slot_id='002', generation=1,
                   request=dict(api=35, variant='google_apis', abi='x86_64', device='tablet')), 2560),
-            (dict(slot_id='003', generation=1,
-                  request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
-            (dict(slot_id='004', generation=1,
-                  request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
         ]
-        core_counts = [(2, 2), (3, 3), (4, 3), (1, 1)]
         with patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3)), \
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
              patch.object(poolmod.pwd, 'getpwnam', return_value=account), \
              patch.object(poolmod.os, 'chown'), patch.object(poolmod, 'run', side_effect=record), \
              patch.object(poolmod.Runtime, 'start_network'), patch.object(runtime, 'wait_for_boot') as wait_for_boot, \
              patch.object(poolmod.Runtime, 'NETNS_ROOT', netns), patch.object(poolmod.time, 'monotonic', return_value=42):
-            for (slot, _), (available, cores) in zip(slots, core_counts, strict=True):
+            for (slot, _), available in zip(slots, (2, 3), strict=True):
                 cancel = threading.Event()
                 with patch.object(poolmod.os, 'sched_getaffinity', return_value=set(range(available))):
                     runtime.start(slot, image, cancel)
-                wait_for_boot.assert_called_with(slot, cancel, cores, 42)
-        for (slot, memory), (_, cores) in zip(slots, core_counts, strict=True):
+                wait_for_boot.assert_called_with(slot, cancel, 2, 42)
+        for slot, memory in slots:
             avd = runtime.root / runtime.unit(slot).removesuffix('.service') / 'home/avd/managed.avd/config.ini'
             self.assertIn('hw.gpu.mode=swiftshader\n', avd.read_text())
             self.assertIn(f'hw.ramSize={memory}\n', avd.read_text())
-            self.assertIn(f'hw.cpu.ncore={cores}\n', avd.read_text())
+            self.assertIn('hw.cpu.ncore=2\n', avd.read_text())
             if slot['request']['device'] == 'tablet':
                 self.assertIn('hw.lcd.width=800\n', avd.read_text())
                 self.assertIn('hw.lcd.height=1280\n', avd.read_text())

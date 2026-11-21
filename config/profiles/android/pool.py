@@ -1071,7 +1071,7 @@ class Runtime:
         avd = avds / 'managed.avd'
         avd.mkdir()
         (avds / 'managed.ini').write_text(f'avd.ini.encoding=UTF-8\npath={avd}\ntarget=android-{request["api"]}\n')
-        cores = min(3, len(os.sched_getaffinity(0)))
+        cores = 2
         config = {'AvdId': 'managed', 'avd.ini.displayname': 'Managed disposable emulator',
                   'abi.type': 'x86_64', 'hw.cpu.arch': 'x86_64', 'hw.cpu.ncore': cores,
                   'hw.lcd.width': width, 'hw.lcd.height': height, 'hw.lcd.density': density,
