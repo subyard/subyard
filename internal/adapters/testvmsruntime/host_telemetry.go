@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type hostMemoryEvidence struct {
@@ -136,10 +138,8 @@ func (sink *HostSink) saveHostEvidence(ctx context.Context, instance outerBroker
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(directory, 0750); err != nil {
-		return err
-	}
-	if err := sink.setOperatorGroup(directory); err != nil {
+	owner := sink.operatorOwnership()
+	if err := safefs.EnsureDir(directory, safefs.DirOptions{Mode: 0o750, ParentMode: 0o750, Owner: owner}); err != nil {
 		return err
 	}
 	for _, incident := range pending {
@@ -147,17 +147,24 @@ func (sink *HostSink) saveHostEvidence(ctx context.Context, instance outerBroker
 		// Concurrent sink retries keep the first observation, whose timestamp is
 		// distinct from the original incident timestamp.
 		err := withFileLock(filepath.Join(directory, ".host-evidence.lock"), func() error {
-			if _, err := os.Stat(path); err == nil {
-				return nil
-			} else if !os.IsNotExist(err) {
+			if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+				if owner == nil {
+					return nil
+				}
+				file, err := safefs.OpenRegular(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				return file.Chown(owner.UID, owner.GID)
+			} else if err != nil && !os.IsNotExist(err) {
 				return err
 			}
-			return writeAtomicDurable(path, append(payload, '\n'), 0640)
+			return safefs.WriteFile(path, append(payload, '\n'), safefs.Options{
+				Mode: 0o640, Owner: owner, TempPattern: "." + filepath.Base(path) + ".*",
+			})
 		})
 		if err != nil {
-			return err
-		}
-		if err := sink.setOperatorGroup(path); err != nil {
 			return err
 		}
 	}

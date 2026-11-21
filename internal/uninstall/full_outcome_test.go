@@ -6,8 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,10 +154,6 @@ func TestQueuedGenerationCannotRecreateRemovedInstallation(t *testing.T) {
 }
 
 func TestPrivateRefinementPersistsBeforeUnlinkAndFreshRetry(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 unavailable")
-	}
 	store, plan := recoveryFixture(t)
 	root := filepath.Join(store.Directory, "private-root")
 	if err := os.Mkdir(root, 0700); err != nil {
@@ -184,25 +181,28 @@ func TestPrivateRefinementPersistsBeforeUnlinkAndFreshRetry(t *testing.T) {
 	if _, err = store.Save(plan, nil); err != nil {
 		t.Fatal(err)
 	}
-	helper := filepath.Join("..", "..", "scripts", "lib", "teardown-files.py")
-	run := func(code string) error {
+	// Each run is a fresh leaf over the protected plan whose caller is gone.
+	run := func(interrupt bool) error {
 		body, err := os.ReadFile(filepath.Join(store.Directory, "plan.json"))
 		if err != nil {
 			return err
 		}
 		sum := sha256.Sum256(body)
-		command := exec.Command(python, "-B", helper)
-		if code != "" {
-			command = exec.Command(python, "-B", "-c", code, helper)
+		t.Setenv("SUBYARD_TEARDOWN_PLAN", filepath.Join(store.Directory, "plan.json"))
+		t.Setenv("SUBYARD_TEARDOWN_PLAN_SHA256", hex.EncodeToString(sum[:]))
+		t.Setenv("SUBYARD_TEARDOWN_PARENT_ID", "0:0")
+		filesInterruption = nil
+		if interrupt {
+			filesInterruption = func() error { return errors.New("intentional interruption") }
 		}
-		command.Env = append(os.Environ(), "SUBYARD_TEARDOWN_PLAN="+filepath.Join(store.Directory, "plan.json"), "SUBYARD_TEARDOWN_PLAN_SHA256="+hex.EncodeToString(sum[:]), "SUBYARD_TEARDOWN_PARENT_ID=0:0")
-		output, err := command.CombinedOutput()
-		if err != nil && !strings.Contains(string(output), "intentional interruption") {
-			t.Log(string(output))
+		defer func() { filesInterruption = nil }()
+		var stderr strings.Builder
+		if code := RunGuard([]string{"remove-files"}, nil, io.Discard, &stderr); code != 0 {
+			return fmt.Errorf("exit %d: %s", code, stderr.String())
 		}
-		return err
+		return nil
 	}
-	if err = run(""); err == nil {
+	if err = run(false); err == nil {
 		releaseOwner()
 		t.Fatal("orphaned physical leaf bypassed live owner barrier")
 	}
@@ -211,12 +211,7 @@ func TestPrivateRefinementPersistsBeforeUnlinkAndFreshRetry(t *testing.T) {
 		t.Fatal("blocked orphan removed data", err)
 	}
 	releaseOwner()
-	interruption := `import importlib.util,sys
-s=importlib.util.spec_from_file_location("fixture",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-def stop(*args,**kwargs): raise RuntimeError("intentional interruption")
-m.guard.remove_entries=stop
-m.main()`
-	if err = run(interruption); err == nil {
+	if err = run(true); err == nil {
 		t.Fatal("fixture interruption did not happen")
 	}
 	saved, _, err := store.Read()
@@ -229,7 +224,7 @@ m.main()`
 	if _, err = os.Stat(filepath.Join(root, "owned")); err != nil {
 		t.Fatal("unlink happened before refinement checkpoint")
 	}
-	if err = run(""); err != nil {
+	if err = run(false); err != nil {
 		t.Fatal("fresh process could not resume exact refined plan", err)
 	}
 	if _, err = os.Stat(filepath.Join(root, "owned")); !errors.Is(err, os.ErrNotExist) {

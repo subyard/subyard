@@ -1052,6 +1052,10 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == ConfigGitSSHWatchdogVerb {
 		os.Exit(RunConfigGitSSHWatchdog(os.Args[2:], os.Stdin))
 	}
+	// Shell teardown fixtures use this executable as their engine dispatcher.
+	if len(os.Args) > 1 && os.Args[1] == "_teardown-guard" {
+		os.Exit(uninstall.RunGuard(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) >= 4 && os.Args[1] == "_profile-services" && os.Getenv("SUBYARD_TEST_DISPATCH_ROOT") != "" {
 		environment := map[string]string{}
 		for _, entry := range os.Environ() {

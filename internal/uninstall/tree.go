@@ -4,17 +4,13 @@
 package uninstall
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -28,13 +24,6 @@ type Entry = ports.ArtifactEntry
 
 // Tree adds native owner operations to the single persisted artifact record.
 type Tree ports.TeardownArtifact
-
-// CaptureArtifact preserves original facts and their canonical native digest.
-func CaptureArtifact(path string) (ports.TeardownArtifact, error) {
-	artifact := ports.TeardownArtifact{Path: path}
-	err := nativeArtifact("capture-artifact", artifact, &artifact)
-	return artifact, err
-}
 
 // Full and selected teardown use the same ancestor-pinned native inventory
 // and remover. Go retains only metadata records for typed assessment/recovery.
@@ -60,20 +49,26 @@ func captureTree(tree Tree, private bool) (Tree, error) {
 		tree.Entries = root.Entries
 		return tree, nil
 	}
-	err = tree.native("capture-tree", &tree)
+	captured, err := tree.capture()
+	err = classify("capture-tree", err)
 	if private && errors.Is(err, os.ErrPermission) {
 		tree.Entries = root.Entries
 		tree.Opaque = true
 		return tree, nil
 	}
-	return tree, err
+	if err != nil {
+		return tree, err
+	}
+	return captured, nil
 }
-func (tree Tree) VerifyRemoved() error { return tree.native("verify-tree", nil) }
+func (tree Tree) VerifyRemoved() error {
+	return classify("verify-tree", tree.verifyRemoved("approved installation artifact remains"))
+}
 func (tree Tree) Remove() error {
 	if tree.Opaque {
 		return errors.New("private uninstall root requires the approved privileged boundary")
 	}
-	return tree.native("remove-tree", nil)
+	return classify("remove-tree", tree.remove())
 }
 func (tree Tree) Check() error {
 	if len(tree.Entries) == 0 || tree.Opaque || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFDIR {
@@ -89,78 +84,7 @@ func (tree Tree) Check() error {
 		}
 		return nil
 	}
-	return tree.native("check-tree", nil)
-}
-
-var artifactGuard atomic.Value
-
-// UseArtifactGuard selects the verified assets or retained guard before removing runtime.
-func UseArtifactGuard(root string) {
-	artifactGuard.Store(filepath.Join(root, "scripts/lib/teardown-plan.py"))
-}
-func (tree Tree) native(mode string, result *Tree) error {
-	if result == nil {
-		return nativeArtifact(mode, tree, nil)
-	}
-	return nativeArtifact(mode, tree, result)
-}
-func nativeArtifact(mode string, input, result any) error {
-	script, _ := artifactGuard.Load().(string)
-	if script == "" {
-		executable, _ := os.Executable()
-		script = filepath.Join(filepath.Dir(executable), "../scripts/lib/teardown-plan.py")
-		if strings.HasSuffix(executable, ".test") {
-			working, _ := os.Getwd()
-			for working != "/" {
-				candidate := filepath.Join(working, "scripts/lib/teardown-plan.py")
-				if _, err := os.Stat(candidate); err == nil {
-					script = candidate
-					break
-				}
-				working = filepath.Dir(working)
-			}
-		}
-	}
-	body, err := json.Marshal(input)
-	if err != nil {
-		return err
-	}
-	barriers, err := borrowOwnerBarriers()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		for _, file := range barriers {
-			file.Close()
-		}
-	}()
-	guard, err := os.Open(script)
-	if err != nil {
-		return fmt.Errorf("open native teardown artifact guard: %w", err)
-	}
-	defer guard.Close()
-	// Asset roots can be process-local FDs, independent of the engine memfd.
-	// Keep owner barriers at their existing indices and pass the opened guard last.
-	command := exec.Command("python3", "-B", fmt.Sprintf("/proc/self/fd/%d", 3+len(barriers)), mode)
-	command.ExtraFiles = append(barriers, guard)
-	command.Stdin = bytes.NewReader(body)
-	output, err := command.Output()
-	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			if exit.ExitCode() == 77 {
-				return os.ErrPermission
-			}
-			if exit.ExitCode() == 75 {
-				return fmt.Errorf("%w: native installation artifact guard", domain.ErrPlanStale)
-			}
-		}
-		return fmt.Errorf("native teardown artifact guard failed (%s): %w", mode, err)
-	}
-	if result != nil {
-		return json.Unmarshal(output, result)
-	}
-	return nil
+	return classify("check-tree", tree.check())
 }
 
 func safePath(path string) error {

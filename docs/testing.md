@@ -227,6 +227,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 | Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
 | Periodic hosted VM image selection | `tests/workflow-real-adapter-gate.sh` checks the dispatch choices, all planned commands, pool boundary and Intel retry | Owning client and broker tests check lease request negotiation, grant validation and Incus alias selection | Periodic E2E on the selected OS, including both optional `periodic:nm-guard/fresh` and `periodic:nm-guard/upgrade` lanes | Changes to Periodic image routing, supported lease images or the NM guard fixture |
 | Test-VM client handles and skill delivery | `config/profiles/test-vms-client/tests/run.sh`: host-access refusal and selection, skill/client delivery with Hermes links and deselection, session handles against a fake facade | `tests/agent-e2e.sh`: the runner built on the same client | `config/profiles/test-vms-client/tests/e2e/acceptance.sh --slot N`: installed candidate provisions the profile into a Hermes-preset yard, then deselection and init retire it; installed copy outside a checkout acquires, runs root commands in two calls of one lease, releases; runner `--verify-boundary` | Shared client, its profile hook or skill, or facade lease protocol changes |
+| Broker slot quarantine, recovery and cross-slot isolation | `go:adapters/testvmsruntime` covers exact-slot identity, quarantine, automatic recovery, public status, release, pool resize and drain before broker recreation through `broker_pool_test.go` and the lease store and facade tests | `tests/test-vms.sh` checks the firewall rule. `config/profiles/test-vms-client/tests/client-handles.sh` checks busy wait and banner attribution | `vm:staging-reliability` checks installed quarantine, reaper recovery and lease context after guest reboot. Test-vms `memory-boundary` checks namespace TCP forwarding, held renewal, requester-death expiry and clean reuse | Broker release, recovery, slot identity, data access, firewall or lease-context changes |
 | Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse. The full profile run repeats the installer check except under `make verify`, whose passed core suite sets `SUBYARD_CORE_INSTALLER_CHECKED=1` | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.28.0 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
 | Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Required full-uninstall and optional Periodic-only source-upgrade lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
 | Static skill inventory, transport and readiness | `go:adapters/reconcileruntime`: `TestAgentSkillSourcesParityWithCapturedReadiness`, unsafe-source refusal and captured-source guest readiness; `tests/agent-skills.sh`: delivery under three umasks | `tests/release-candidate.sh`: actual wrapper against a strict nonexecuting shim, independent synthetic inventory, all checkout/private/frozen layouts and umasks, exact member/command mutants; `go:internal/testkit/cmd/empty-incus`: `TestHistoryReadinessContract` connects public runtime readiness through the native Incus adapter to the migration-history responder | `config/profiles/android/tests/e2e/acceptance.sh --slot N --lane skills`: packaged delivery, repeat refresh, discovery repair and disable with unrelated content retained | Shared skill producer, helpers, source admission or transport changes; local contracts before T3 |
@@ -667,8 +668,12 @@ When the checkout is a Git work-tree root, `./tests/run.sh` ends with `checkout-
 It fails when the run added or removed a path outside `.build/`, in the checkout or in an
 optional `private/` clone. It compares path lists from `git ls-files`, with ignored directories
 collapsed, so content edits and Git status changes of existing paths during the run pass. In
-`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`. Outside
-a Git work-tree root the check is skipped. The runner also sets `PYTHONDONTWRITEBYTECODE=1`.
+`private/` it ignores `tasks/`, `questions/`, `reference/`, `spec/` and top-level `*.md`. It also
+fails when the run rewrote an untracked file of the retired `private/` config overlay
+(`yards/`, `agents/`, `config.env`), which tests seed as checkout fixtures: a leak left by an
+earlier run is otherwise part of the starting state. A run that fails earlier still prints these
+changes. Outside a Git work-tree root the check is skipped.
+The runner also sets `PYTHONDONTWRITEBYTECODE=1`.
 
 `make test`, `./tests/run.sh`, the host-free profile runners and `dev/process-coverage.sh`
 place disposable fixtures in `/tmp`, independently of a workspace-local `TMPDIR`, so Orca
@@ -909,9 +914,8 @@ load capacity, and a diagnostic timeout or interrupted run is incomplete evidenc
 ## Choose the VM allocation
 
 Android acceptance runs on one `android-test` VM (8 GiB RAM / 40 GiB disk). Ordinary full P0
-uses the standard `subyard-pair` (two 4 GiB / 20 GiB guests) for its two-host scenarios. It does
-not recursively run the separate physical broker pool diagnostic. Do not request two 16 GiB
-guests for Android or ordinary full P0.
+uses the standard `subyard-pair` (two 4 GiB / 20 GiB guests) for its two-host scenarios.
+Do not request two 16 GiB guests for Android or ordinary full P0.
 
 `--vm 1` only selects where a command runs; it does not turn a pair allocation into a singleton.
 Use `--vm-count 1` for one standard VM; `--type android-test` retains the larger Android

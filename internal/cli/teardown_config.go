@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type teardownConfigDirectory struct {
@@ -108,30 +108,32 @@ func checkTeardownConfig(before, after *teardownConfigSnapshot) error {
 	return nil
 }
 
+func (cli *CLI) removeTeardownConfigArtifact(ctx context.Context, approved []ports.TeardownArtifactBinding, path string) error {
+	err := uninstall.RemoveArtifact(ctx, path, approved)
+	if errors.Is(err, domain.ErrPlanStale) {
+		return domain.ErrPlanStale
+	}
+	if err != nil {
+		return fmt.Errorf("remove approved local yard settings: %w", err)
+	}
+	return nil
+}
+
 func (cli *CLI) resetTeardownConfiguration(ctx context.Context, loaded config.Loaded, execution *teardownExecution) error {
 	yard := loaded.Context
 	registration := func(path string) bool {
 		return path == filepath.Join(yard.Paths.ConfigHome, "yards", yard.YardName, "config.env") || path == filepath.Join(yard.Paths.ConfigHome, "yards", yard.YardName+".env")
 	}
 	remove := func(registrations bool) error {
-		payload, err := json.Marshal(ports.ArtifactBindings(execution.configSnapshot.Artifacts))
-		if err != nil {
-			return err
-		}
+		approved := ports.ArtifactBindings(execution.configSnapshot.Artifacts)
 		// The flat shadow goes first; the canonical registration remains loadable
 		// through every earlier failure, with its original physical identity.
 		for _, artifact := range execution.configSnapshot.Artifacts {
 			if registration(artifact.Path) != registrations {
 				continue
 			}
-			child := exec.CommandContext(ctx, "python3", "-B", filepath.Join(cli.options.RepositoryRoot, "scripts", "lib", "teardown-plan.py"), "remove-artifact", artifact.Path)
-			child.Env = append(os.Environ(), "SUBYARD_TEARDOWN_ARTIFACTS="+string(payload))
-			if err := child.Run(); err != nil {
-				var exit *exec.ExitError
-				if errors.As(err, &exit) && exit.ExitCode() == 75 {
-					return domain.ErrPlanStale
-				}
-				return fmt.Errorf("remove approved local yard settings: %w", err)
+			if err := cli.removeTeardownConfigArtifact(ctx, approved, artifact.Path); err != nil {
+				return err
 			}
 		}
 		return nil

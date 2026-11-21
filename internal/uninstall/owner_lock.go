@@ -40,26 +40,6 @@ func BorrowOwnerLock(dataHome string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), file.Name()), nil
 }
 
-// Native guard children retain the already-held barriers if their caller is
-// interrupted. They never acquire a new scope or unlock their parent's OFDs.
-func borrowOwnerBarriers() ([]*os.File, error) {
-	ownerFiles.Lock()
-	defer ownerFiles.Unlock()
-	files := []*os.File{}
-	for _, file := range ownerFiles.files {
-		fd, err := syscall.Dup(int(file.Fd()))
-		if err != nil {
-			for _, borrowed := range files {
-				borrowed.Close()
-			}
-			return nil, err
-		}
-		syscall.CloseOnExec(fd)
-		files = append(files, os.NewFile(uintptr(fd), file.Name()))
-	}
-	return files, nil
-}
-
 // OwnerLock is stable account coordination state outside installation removal
 // roots. Never unlink it: an already-waiting setup must keep the same inode.
 func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func(), error) {
@@ -270,11 +250,7 @@ func AdvanceOwnerEpoch(dataHome string, before, after uint64) error {
 	if current != before {
 		return fmt.Errorf("owner installation epoch changed outside the approved cleanup; observed epoch=%d, required epoch=%d", current, before)
 	}
-	return nativeArtifact("advance-epoch", struct {
-		Path          string
-		Before, After uint64
-		UID           uint32
-	}{OwnerEpochPath(dataHome), before, after, uint32(os.Getuid())}, nil)
+	return classify("advance-epoch", advanceEpoch(OwnerEpochPath(dataHome), before, after, uint32(os.Getuid())))
 }
 
 func CheckOwnerLockIdentity(expected Tree) error {

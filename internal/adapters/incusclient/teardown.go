@@ -2,8 +2,6 @@ package incusclient
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -92,13 +90,12 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 	}
 	scoped := server.UseProject(project)
 	var result []ports.TeardownResource
-	add := func(kind, name, pool string, value any) error {
-		payload, err := json.Marshal(value)
+	add := func(kind, name, pool string, observed map[string]any) error {
+		binding, err := ports.TeardownBinding(kind, observed)
 		if err != nil {
 			return err
 		}
-		digest := sha256.Sum256(payload)
-		result = append(result, ports.TeardownResource{Kind: kind, Name: name, Pool: pool, Binding: hex.EncodeToString(digest[:])})
+		result = append(result, ports.TeardownResource{Kind: kind, Name: name, Pool: pool, Binding: binding})
 		return nil
 	}
 	if err := add("project", project, "", map[string]any{"name": config.Name, "config": config.Config, "description": config.Description}); err != nil {
@@ -139,7 +136,7 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 			return nil, normalizeError("read teardown images", err)
 		}
 		for _, image := range images {
-			if err := add("image", image.Fingerprint, "", image.Fingerprint); err != nil {
+			if err := add("image", image.Fingerprint, "", map[string]any{"fingerprint": image.Fingerprint}); err != nil {
 				return nil, err
 			}
 		}
@@ -158,7 +155,7 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 				return nil, normalizeError("read teardown bucket namespace", err)
 			}
 			for _, name := range buckets {
-				if err := add("bucket", name, pool.Name, name); err != nil {
+				if err := add("bucket", name, pool.Name, map[string]any{"name": name}); err != nil {
 					return nil, err
 				}
 			}
@@ -243,7 +240,7 @@ func (client *Client) sharedTeardownInventory(ctx context.Context, poolName, net
 		}
 		return result, nil
 	}
-	add := func(kind, name, path string, usedBy []string, values map[string]string, value any) error {
+	add := func(kind, name, path string, usedBy []string, values map[string]string, observed map[string]any) error {
 		var ownership *ports.InstallationResourceOwner
 		var err error
 		if installation {
@@ -255,9 +252,11 @@ func (client *Client) sharedTeardownInventory(ctx context.Context, poolName, net
 		if err != nil {
 			return err
 		}
-		payload, _ := json.Marshal(value)
-		hash := sha256.Sum256(payload)
-		resources = append(resources, ports.TeardownResource{Kind: kind, Name: name, Path: path, UsedBy: usedBy, Binding: hex.EncodeToString(hash[:]), Owner: ownership})
+		binding, err := ports.TeardownBinding(kind, observed)
+		if err != nil {
+			return err
+		}
+		resources = append(resources, ports.TeardownResource{Kind: kind, Name: name, Path: path, UsedBy: usedBy, Binding: binding, Owner: ownership})
 		return nil
 	}
 	for _, name := range pools {
@@ -297,8 +296,10 @@ func (client *Client) sharedTeardownInventory(ctx context.Context, poolName, net
 	if err != nil {
 		return nil, err
 	}
-	payload, _ := json.Marshal(map[string]any{"name": profile.Name, "config": profile.Config, "devices": profile.Devices, "description": profile.Description})
-	digest := sha256.Sum256(payload)
+	binding, err := ports.TeardownBinding("host-profile", map[string]any{"name": profile.Name, "config": profile.Config, "devices": profile.Devices, "description": profile.Description})
+	if err != nil {
+		return nil, err
+	}
 	bindings := []string{}
 	for _, mask := range []int{1, 2, 3} {
 		devices := cloneDevices(profile.Devices)
@@ -307,10 +308,12 @@ func (client *Client) sharedTeardownInventory(ctx context.Context, poolName, net
 				delete(devices, name)
 			}
 		}
-		payload, _ := json.Marshal(map[string]any{"name": profile.Name, "config": profile.Config, "devices": devices, "description": profile.Description})
-		hash := sha256.Sum256(payload)
-		bindings = append(bindings, hex.EncodeToString(hash[:]))
+		variant, err := ports.TeardownBinding("host-profile", map[string]any{"name": profile.Name, "config": profile.Config, "devices": devices, "description": profile.Description})
+		if err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, variant)
 	}
-	resources = append(resources, ports.TeardownResource{Kind: "host-profile", Name: "default", Binding: hex.EncodeToString(digest[:]), UsedBy: profile.UsedBy, Bindings: bindings})
+	resources = append(resources, ports.TeardownResource{Kind: "host-profile", Name: "default", Binding: binding, UsedBy: profile.UsedBy, Bindings: bindings})
 	return resources, nil
 }

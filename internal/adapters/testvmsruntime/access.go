@@ -14,10 +14,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 func (runtime *Runtime) killAgentSessions(ctx context.Context) {
-	if _, err := user.Lookup(runtime.Config.AgentUser); err != nil {
+	if _, err := runtime.findUser(runtime.Config.AgentUser); err != nil {
 		return
 	}
 	if _, err := runtime.Runner.LookPath("pkill"); err != nil {
@@ -29,37 +31,35 @@ func (runtime *Runtime) killAgentSessions(ctx context.Context) {
 
 func (runtime *Runtime) writeAgentAuthorizedKeys(ip1, ip2 string) error {
 	cfg := runtime.Config
-	if _, err := user.Lookup(cfg.AgentUser); err != nil {
+	account, err := runtime.findUser(cfg.AgentUser)
+	if err != nil {
 		return errors.New("agent bastion account is missing; re-run yard init")
 	}
 	key := ""
 	if cfg.AgentPublicKey != "" {
-		var err error
 		key, err = normalizedPublicKey(cfg.AgentPublicKey)
 		if err != nil {
 			return err
 		}
 	}
 	directory := filepath.Dir(cfg.AgentAuthorizedKeys)
-	mode := os.FileMode(0o600)
+	writeOptions := safefs.Options{
+		Mode: 0o600, ParentMode: 0o700, TempPattern: "." + filepath.Base(cfg.AgentAuthorizedKeys) + ".*",
+	}
 	if os.Geteuid() == 0 {
-		group, err := userGroup(cfg.AgentUser)
+		group, err := strconv.Atoi(account.Gid)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(directory, 0o750); err != nil {
+		owner := &safefs.Ownership{UID: 0, GID: group}
+		if err := safefs.EnsureDir(directory, safefs.DirOptions{Mode: 0o750, Owner: owner, ParentMode: 0o700}); err != nil {
 			return err
 		}
-		if err := os.Chmod(directory, 0o750); err != nil {
-			return err
-		}
-		if err := os.Chown(directory, 0, group); err != nil {
-			return err
-		}
-		mode = 0o640
+		writeOptions.Mode, writeOptions.Owner = 0o640, owner
 	} else if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
+
 	options := `restrict,command="` + cfg.StatusCommand + `"`
 	if ip1 != "" || ip2 != "" {
 		if !safeIPv4(ip1) || (cfg.guestCount() == 2 && !safeIPv4(ip2)) || (cfg.guestCount() == 1 && ip2 != "") {
@@ -75,14 +75,7 @@ func (runtime *Runtime) writeAgentAuthorizedKeys(ip1, ip2 string) error {
 	if key != "" {
 		payload = []byte(options + " " + key + " " + agentKeyMarker + "\n")
 	}
-	if err := writeAtomic(cfg.AgentAuthorizedKeys, payload, mode); err != nil {
-		return err
-	}
-	if os.Geteuid() == 0 {
-		group, _ := userGroup(cfg.AgentUser)
-		return os.Chown(cfg.AgentAuthorizedKeys, 0, group)
-	}
-	return nil
+	return safefs.WriteFile(cfg.AgentAuthorizedKeys, payload, writeOptions)
 }
 
 func (runtime *Runtime) restrictAgentAccess(_ string) error {

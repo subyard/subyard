@@ -2700,8 +2700,9 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional
   `{yard}` substitution; the hook still owns physical cleanup and ownership checks. Teardown and
   `init --reset` carry approved metadata bindings in `SUBYARD_TEARDOWN_ARTIFACTS`. Removal hooks
-  use `scripts/lib/teardown-plan.py guard-artifact PATH` before service mutations and
-  `remove-artifact PATH` at deletion. Bindings cover device/inode, UID/GID, mode, size, mtime,
+  call `teardown_guard guard-artifact PATH` from `scripts/lib/host.sh` (the engine's hidden
+  `_teardown-guard` command) before service mutations and `teardown_guard remove-artifact PATH`
+  at deletion. Bindings cover device/inode, UID/GID, mode, size, mtime,
   ctime and symlink targets without reading file contents. The bounded guard permits an approved
   artifact to disappear, rejects additions or replacement, and returns exit 75 for `plan_stale`.
 
@@ -2891,9 +2892,9 @@ that started recently and is still booting; a guest that is stopped, has been up
 not answer within that bound reports `native-unavailable`.
 
 Full uninstall is a scope of the existing prepared teardown. It aggregates local yard executions
-through the same observation, stale checks, apply and verification methods. The existing
-`teardown-plan.py` owns ancestor-pinned filesystem inventory, removal and private publication;
-`internal/uninstall` carries installation ownership and the exact durable retry record. Installer entrypoints record actual
+through the same observation, stale checks, apply and verification methods. `internal/uninstall` owns
+ancestor-pinned filesystem inventory, removal and private publication, serves shell and profile
+adapters through the hidden `_teardown-guard` engine command, and carries installation ownership and the exact durable retry record. Installer entrypoints record actual
 runtime/data/config/cache/bin and shell integration paths; project and shared-resource owners
 persist public installation contexts while setup is still partial. Host mount setup records
 which namespaces it created, retaining pre-existing content as foreign. Assessment performs

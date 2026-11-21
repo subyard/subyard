@@ -171,9 +171,7 @@ func TestObservationHostProcessCountersKeepRSSAndBlockIOSemantics(t *testing.T) 
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte(value), 0600)
 	}
 	var sample ResourceObservation
 	if err := sample.readProcess(root, "42", 100); err != nil {
@@ -186,9 +184,7 @@ func TestObservationHostProcessCountersKeepRSSAndBlockIOSemantics(t *testing.T) 
 		t.Fatal("mixed RSS/guest memory or logical/block operation counts")
 	}
 	originalGeneration := sample.CounterGeneration
-	if err := os.WriteFile(filepath.Join(root, "42/stat"), []byte(strings.Replace(stat, "999", "1000", 1)), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "42/stat"), []byte(strings.Replace(stat, "999", "1000", 1)), 0600)
 	var successor ResourceObservation
 	if err := successor.readProcess(root, "42", 100); err != nil {
 		t.Fatal(err)
@@ -205,18 +201,14 @@ func TestObservationProcessOwnershipRefusesForeignUUIDAndPIDReuse(t *testing.T) 
 	}
 	uuid := "12345678-1234-1234-1234-123456789abc"
 	path := filepath.Join(root, "42/cmdline")
-	if err := os.WriteFile(path, []byte("/usr/bin/qemu-system-x86_64\x00-uuid\x00"+uuid+"\x00"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("/usr/bin/qemu-system-x86_64\x00-uuid\x00"+uuid+"\x00"), 0600)
 	if !ownedQEMUProcess(root, "42", uuid) {
 		t.Fatal("owned QEMU was not recognized")
 	}
 	if ownedQEMUProcess(root, "42", "00000000-0000-0000-0000-000000000000") {
 		t.Fatal("foreign UUID was accepted")
 	}
-	if err := os.WriteFile(path, []byte("/usr/bin/sleep\x0010\x00"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("/usr/bin/sleep\x0010\x00"), 0600)
 	if ownedQEMUProcess(root, "42", uuid) {
 		t.Fatal("reused PID was accepted")
 	}

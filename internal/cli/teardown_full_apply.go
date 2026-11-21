@@ -80,7 +80,7 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 	store := uninstall.RecoveryStore{Directory: directory, UID: uint32(os.Getuid())}
 	defer func() {
 		if err != nil {
-			fmt.Fprintf(diagnostics, "Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", directory, filepath.Join(directory, "runtime", "bin", "yard"), directory)
+			fmt.Fprint(diagnostics, store.ResumeHint())
 		}
 	}()
 	saved := &execution.RecoveryPlan
@@ -142,7 +142,6 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 			return result, err
 		}
 	}
-	uninstall.UseArtifactGuard(filepath.Join(directory, "runtime"))
 	// All following leaves use the retained engine and public assets, never a
 	// runtime root that this operation may already have removed.
 	clone := *cli
@@ -294,11 +293,7 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 	if err = uninstall.AdvanceOwnerEpoch(saved.Installation.DataHome, saved.EpochBefore, saved.EpochBefore+1); err != nil {
 		return result, err
 	}
-	recovery, captureErr := uninstall.Capture(directory)
-	if captureErr != nil {
-		return result, captureErr
-	}
-	if err = recovery.Remove(); err != nil {
+	if err = store.Remove(); err != nil {
 		return result, err
 	}
 	fmt.Fprintln(diagnostics, "Fully removed this Subyard installation and its local yards.")

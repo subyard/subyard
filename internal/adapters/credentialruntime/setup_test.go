@@ -181,6 +181,38 @@ func TestSetupCredentialImportMaterializeAndResume(t *testing.T) {
 	}
 }
 
+func TestCommitRecordExcludesInterruptedAndPreStagedFiles(t *testing.T) {
+	runtime := setupLedgerFixture(t)
+	ctx := context.Background()
+	if err := runtime.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	metadata := domain.CredentialMetadata{CredentialID: "fixture", RevisionID: "current"}
+	revision := runtime.recordPath(localLedger, metadata.CredentialID, metadata.RevisionID)
+	if err := os.MkdirAll(filepath.Dir(revision), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, revision, []byte("record"), 0o600)
+	testkit.WriteFile(t, revision+".sig", []byte("signature"), 0o600)
+	testkit.WriteFile(t, filepath.Join(filepath.Dir(revision), ".previous.json.tmp-interrupted"), []byte("interrupted"), 0o600)
+	testkit.WriteFile(t, filepath.Join(runtime.local, "previously-staged"), []byte("unrelated"), 0o600)
+	if _, err := runtime.gitRun(ctx, runtime.local, "add", "--", "previously-staged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.commitRecord(ctx, localLedger, metadata); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := runtime.gitRun(ctx, runtime.local, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+	want := "records/fixture/current.json\nrecords/fixture/current.json.sig"
+	if err != nil || strings.TrimSpace(string(changed)) != want {
+		t.Fatalf("committed paths = %q, %v, want %q", changed, err, want)
+	}
+	staged, err := runtime.gitRun(ctx, runtime.local, "diff", "--cached", "--name-only")
+	if err != nil || strings.TrimSpace(string(staged)) != "previously-staged" {
+		t.Fatalf("unrelated staged paths = %q, %v", staged, err)
+	}
+}
+
 func setupLedgerFixture(t *testing.T) *Runtime {
 	t.Helper()
 	runtime := profileCredentialFixture(t)

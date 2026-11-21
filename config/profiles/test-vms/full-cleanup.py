@@ -2,7 +2,6 @@
 """Assess the existing host-wide sink; never select a profile or mutate it."""
 import glob
 import hashlib
-import importlib.util
 import json
 import os
 import pathlib
@@ -14,14 +13,21 @@ import subprocess
 
 sys.dont_write_bytecode = True
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-spec = importlib.util.spec_from_file_location("teardown_guard", ROOT / "scripts/lib/teardown-plan.py")
-guard = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(guard)
 
 
 def binding(path):
-    with guard.artifact_parent(str(path)) as (parent, name):
-        return guard.artifact_digest(guard.artifact_entries(parent, name))
+    # The runtime beside this hook, including a retained one, ships the engine
+    # and its ancestor-pinned metadata guard.
+    result = subprocess.run([str(ROOT / "bin/yard"), "_teardown-guard", "capture-artifact"], input=json.dumps({"Path": str(path)}).encode(),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    if result.returncode == 77:
+        raise PermissionError(str(path))
+    if result.returncode != 0:
+        raise ValueError("sink artifact guard failed")
+    artifact = json.loads(result.stdout)
+    if not artifact["Entries"]:
+        raise FileNotFoundError(str(path))
+    return artifact["Binding"]
 
 
 def owned_regular(path, mode, uid):

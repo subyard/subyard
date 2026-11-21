@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -497,7 +496,7 @@ func (runtime *Runtime) cleanupRetiringSlot(ctx context.Context, slot int) error
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if account, err := user.Lookup(child.Config.AgentUser); err == nil {
+	if account, err := child.findUser(child.Config.AgentUser); err == nil {
 		if account.HomeDir != child.Config.AgentHome {
 			return fmt.Errorf("slot account %q has unexpected home %q",
 				child.Config.AgentUser, account.HomeDir)
@@ -547,14 +546,18 @@ func (runtime *Runtime) slotRuntime(slot int, publicKey string) *Runtime {
 	cfg.Network = cfg.Prefix + "-net-" + suffix
 	cfg.StateDir = filepath.Join(cfg.StateDir, "slots", suffix)
 	cfg.AgentUser = "subyard-e2e-slot-" + suffix
-	cfg.AgentHome = filepath.Join("/var/lib/subyard/e2e-slots", suffix)
+	root := runtime.slotAccountRoot
+	if root == "" {
+		root = "/var/lib/subyard/e2e-slots"
+	}
+	cfg.AgentHome = filepath.Join(root, suffix)
 	cfg.AgentAuthorizedKeys = filepath.Join(cfg.AgentHome, ".ssh", "authorized_keys")
 	cfg.AgentPublicKey = publicKey
 	return &Runtime{
 		Config: cfg, ConfigPath: runtime.ConfigPath, Runner: runtime.Runner,
 		Stdout: runtime.Stdout, Stderr: runtime.Stderr, Now: runtime.Now, Sleep: runtime.Sleep,
 		AvailableBytes: runtime.AvailableBytes, ExecutablePath: runtime.ExecutablePath,
-		Events: runtime.Events,
+		Events: runtime.Events, slotAccountRoot: root, lookupUser: runtime.lookupUser,
 	}
 }
 

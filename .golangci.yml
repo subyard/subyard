@@ -11,10 +11,19 @@ linters:
   default: none
   enable:
     - exhaustive
+    - forbidigo
     - staticcheck
     - unused
     - ineffassign
   settings:
+    forbidigo:
+      forbid:
+        - pattern: '^os\.CreateTemp$'
+          msg: 'publish files with safefs.WriteFile or safefs.Create'
+        - pattern: '^os\.WriteFile$'
+          msg: 'use safefs.WriteFile in product code or testkit.WriteFile in tests'
+        - pattern: '^(t|tb|b)\.TempDir$'
+          msg: 'use testkit.TempDir'
     staticcheck:
       checks: ["SA*", "S1*", "-QF*", "-ST*"]
     exhaustive:
@@ -25,3 +34,13 @@ linters:
         - '.*releasetransition\.(JournalCheckpoint|StepCheckpoint|EvidenceCheckpoint|Direction|PublicStatus|Decision|ProcessMode|SourceIngressRequestKind|RecoveryProcessMode|JournalReplacementReason|RollbackCompatibility|OwnerRegistrationState|OwnerRegistrationProgress)$'
         - '.*migration\.(V1ImportRelease|V1ImportCheckpoint)$'
         - '.*testyardmigration\.(Progress|BrokerRuntimeState)$'
+  exclusions:
+    rules:
+      - linters: [forbidigo]
+        path-except: '^internal/(adapters/(remotecontrol|credentialruntime|statusruntime|testvmsruntime)|sshtrust|ownerservice)/'
+      - linters: [forbidigo]
+        path: '_test\.go$'
+        text: 'publish files with safefs'
+      - linters: [forbidigo]
+        path-except: '_test\.go$'
+        text: 'use testkit\.TempDir'
