@@ -21,9 +21,10 @@ func installationCheckFixture(t *testing.T) *cliFixture {
 	t.Helper()
 	// The installation check constructors leave WorkingDir empty, as before the fixture.
 	fixture := newFixture(t, withAudit(), withWorkingDir(""))
+	root := fixture.Root
 	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"check||@check||forward|read|never|public|lifecycle|simple|check|check|--json --host --help|\n")
 	for _, directory := range []string{"state", "data"} {
-		if err := os.MkdirAll(filepath.Join(fixture.Root, directory), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
