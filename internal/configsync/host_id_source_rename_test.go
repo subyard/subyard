@@ -377,8 +377,9 @@ func (s sourceRenameRecovery) assertConverged(t *testing.T) {
 // failure handling rather than a crash and resume; that limitation remains.
 //
 // Recovery's error path only releases its own index.lock, which a real crash would leave as
-// a hard link to the index image. Interrupted restores that link for every cut taken while
-// the lock was held, so resume must adopt it as after a crash.
+// a hard link to the index image. Every checkpoint except index-lock runs while the lock is
+// held, so Interrupted restores that link for those cuts and resume must adopt it as after
+// a crash.
 //
 // Known gap, left out of the sweep: recovery removes the journal before the index image, so
 // a crash between the two leaves .git/subyard-host-rename-<commit>.index behind with nothing
@@ -447,6 +448,36 @@ func TestRegisteredHostRenameRecoveryKeepsLocalEditAfterSourceCommit(t *testing.
 		}
 	}
 	assertSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
+	s.assertConverged(t)
+}
+
+// Recovery releases index.lock before it removes the journal. A Git index refresh in that
+// window rewrites the stat cache but keeps the published tree, and recovery must accept it.
+func TestRegisteredHostRenameRecoveryAcceptsRefreshedPublishedIndex(t *testing.T) {
+	s := newSourceRenameRecovery(t)
+	if err := s.recoverUntil(t, "journal-cleanup"); !errors.Is(err, interrupt.ErrInjected) {
+		t.Fatalf("recovery=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(s.source.GitDir, "index.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("index.lock is still held: %v", err)
+	}
+	runSyncGit(t, s.fixture.source, "update-index", "-q", "--really-refresh")
+	index, err := os.ReadFile(filepath.Join(s.source.GitDir, "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(index, s.source.AfterIndex) {
+		t.Fatal("the index refresh did not change the published index bytes")
+	}
+	if tree, err := inspectRenameIndexTree(s.source); err != nil || tree != s.source.AfterTree {
+		t.Fatalf("refreshed index tree=%s: %v, want the published tree", tree, err)
+	}
+	if _, pending, err := AssessHostIDRenameRecovery(s.fixture.configHome); err != nil || !pending {
+		t.Fatalf("recovery pending=%v: %v", pending, err)
+	}
+	if err := RecoverHostIDRename(s.fixture.configHome); err != nil {
+		t.Fatal(err)
+	}
 	s.assertConverged(t)
 }
 
@@ -545,9 +576,13 @@ func TestRegisteredHostRenameMissingGitIdentityChangesNothing(t *testing.T) {
 
 func TestHostRenameRecoveryPreservesLocalEditBeforeSourceCommit(t *testing.T) {
 	s := newSourceRenameRecovery(t)
-	// Cut after the subtree move and before HEAD, the source commit point.
+	// Cut after the subtree move and before HEAD, the source commit point. A crash there
+	// leaves the owned index.lock, which rollback must remove.
 	if err := s.recoverUntil(t, "head-update"); !errors.Is(err, interrupt.ErrInjected) {
 		t.Fatalf("recovery=%v", err)
+	}
+	if err := os.Link(renameIndexImage(s.source), filepath.Join(s.source.GitDir, "index.lock")); err != nil {
+		t.Fatal(err)
 	}
 	writeSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
 	if err := RecoverHostIDRename(s.fixture.configHome); !errors.Is(err, ErrPlanStale) {
