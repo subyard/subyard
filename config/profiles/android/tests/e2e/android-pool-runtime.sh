@@ -117,10 +117,10 @@ cleanup() {
       < "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" \
       || printf 'android-sdk-diagnostic retry=unavailable original_failure_preserved=true\n' >&2
   fi
-  # The emulator journal survives lease release; collect it as root before teardown.
+  # The emulator journal includes the guest console and survives lease release.
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
-    printf 'android-gradle evidence: emulator\n' >&2
+    printf 'android-gradle evidence: emulator journal with guest kernel console\n' >&2
     android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' || true
   fi
@@ -427,6 +427,18 @@ if [ "$lane" = gradle ]; then
   yard emu cache prepare --api 36
   android_phase_end 0
   android_phase_begin gradle
+  # Apply only in this disposable yard, before the broker creates the transient slot unit.
+  console_dropin=/run/systemd/system/subyard-android-slot-.service.d/gradle-kernel-console.conf
+  incus --project "$project" exec "$instance" -- bash -se -- "$console_dropin" <<'SH'
+install -d -m 0755 "${1%/*}"
+cat > "$1" <<'CONF'
+[Service]
+Environment=SUBYARD_ANDROID_E2E_SHOW_KERNEL=1
+StandardOutput=journal
+StandardError=journal
+CONF
+systemctl daemon-reload
+SH
   # Default-package build, broker SDK addition and connected tests through one lease.
   # The guest receives the script on stdin; the watcher travels inside it.
   gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh"
@@ -434,6 +446,12 @@ if [ "$lane" = gradle ]; then
     cat "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
+  # A short sample also confirms the console reached the journal if the connected test passes.
+  printf 'android-gradle evidence: guest kernel console sample\n' >&2
+  android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    journalctl --no-pager -q -n 8 -o cat -u 'subyard-android-slot-*' \
+      --grep='^\[[[:space:]]*[0-9]+\.[0-9]+\]' || true
+  incus --project "$project" exec "$instance" -- sh -ec 'rm -- "$1"; systemctl daemon-reload' _ "$console_dropin"
   android_phase_end 0
   android_phase_begin relay-owner
   # The loopback relay refuses a connection owned by another local account.

@@ -39,11 +39,14 @@ for _ in {1..200}; do
 done
 [ -f "$SUBYARD_NETWORK_READY" ] || { echo 'pool egress did not become ready' >&2; exit 1; }
 "$ANDROID_HOME/platform-tools/adb" start-server >/dev/null
+# The disposable Gradle fixture sets this on its slot units to capture output without ADB.
+kernel_console=()
+[ "${SUBYARD_ANDROID_E2E_SHOW_KERNEL:-}" != 1 ] || kernel_console=(-show-kernel)
 if [ "$gpu" = host ]; then
   exec cage -- "$ANDROID_HOME/emulator/emulator" -avd managed -port 5554 -accel on -gpu host \
-    -no-audio -no-snapshot -no-boot-anim -wipe-data -no-metrics -logcat '*:S'
+    -no-audio -no-snapshot -no-boot-anim -wipe-data -no-metrics -logcat '*:S' "${kernel_console[@]}"
 fi
 graphics=()
 [ "$gpu" != software-gles ] || graphics=(-feature -Vulkan)
 exec "$ANDROID_HOME/emulator/emulator" -avd managed -port 5554 -accel on -gpu swiftshader "${graphics[@]}" -no-window \
-  -no-audio -no-snapshot -no-boot-anim -wipe-data -no-metrics -logcat '*:S'
+  -no-audio -no-snapshot -no-boot-anim -wipe-data -no-metrics -logcat '*:S' "${kernel_console[@]}"
