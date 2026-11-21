@@ -55,7 +55,7 @@ HOLDER_STOP_GRACE_SECONDS=30
 HOLDER_KILL_GRACE_SECONDS=10
 # shellcheck disable=SC1090
 . <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p; /^reaper_pause() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  acquire_lease /i\
+  "$ROOT/dev/e2e/lease-holder.sh" | sed '/^  acquire_lease /i\
   VM_COUNT_REQUESTED=1\n  resolve_vm_count')
 
 die() { printf 'staging-reliability: %s\n' "$*" >&2; exit 2; }

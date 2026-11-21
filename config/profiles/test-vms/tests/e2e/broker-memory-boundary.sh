@@ -65,7 +65,7 @@ YARD=test-yard
 # These functions own the keeper, release capability and bounded process cleanup.
 # shellcheck disable=SC1090
 . <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  start_lease_keeper$/a\
+  "$ROOT/dev/e2e/lease-holder.sh" | sed '/^  start_lease_keeper$/a\
   printf "%s\\t%s\\n" "$BASHPID" "$LEASE_KEEPER_PID" > "$STATE_PARENT/$client.processes"')
 
 die() { printf 'broker-memory-boundary: %s\n' "$*" >&2; exit 2; }

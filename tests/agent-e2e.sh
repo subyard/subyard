@@ -2864,7 +2864,7 @@ set -e
   trap '
     [ -z "$holder_pid" ] || kill -KILL -- "-$holder_pid" >/dev/null 2>&1 || true
   ' EXIT
-  eval "$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" \
+  eval "$(fixture_functions "$ROOT/dev/e2e/lease-holder.sh" \
     recovery_monotonic_seconds start_holder_child stop_holder_child)"
   # Consumed by the dynamically extracted helper.
   # shellcheck disable=SC2034

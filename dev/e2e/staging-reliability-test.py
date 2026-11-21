@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-boot-observer-', dir='/tmp') as
     assert rows[0]['reason'] == 'guest-reset' and rows[0]['guest'] is True
     assert 'secret' not in json.dumps(evidence) and 'private' not in json.dumps(evidence)
 
-p0_fixture = pathlib.Path(__file__).with_name('p0-broker-recovery.sh').read_text()
+p0_fixture = pathlib.Path(__file__).with_name('lease-holder.sh').read_text()
 pause_source = p0_fixture.split("<<'PYREAPERPAUSE'\n",1)[1].split('\nPYREAPERPAUSE',1)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-reaper-pause-', dir='/tmp') as directory:
     root=pathlib.Path(directory)/'run/systemd/system'; root.mkdir(parents=True)

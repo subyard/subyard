@@ -27,7 +27,7 @@ HOLDER_KILL_GRACE_SECONDS=10
 STATE_PARENT=''
 INSTALL_ATTEMPTED=0
 # shellcheck disable=SC1090
-. <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  \. "$RUNNER"$/a\
+. <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' "$ROOT/dev/e2e/lease-holder.sh" | sed '/^  \. "$RUNNER"$/a\
   VM_COUNT_REQUESTED=1; VM_COUNT=1')
 
 die() { printf 'service-container: %s\n' "$*" >&2; exit 2; }
