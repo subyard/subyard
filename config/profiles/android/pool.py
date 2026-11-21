@@ -32,6 +32,7 @@ import xml.etree.ElementTree as ET
 TTL = 1200
 HEARTBEAT = 300
 BOOT_TIMEOUT = 1200
+BOOT_SAMPLE_INTERVAL = 2
 BOOT_SETTLE_SECONDS = 20
 BOOT_CPU_PRESSURE_LIMIT = 20.0
 BOOT_MEMORY_PRESSURE_LIMIT = 5.0
@@ -1113,7 +1114,7 @@ class Runtime:
         deadline = started + BOOT_TIMEOUT
         wifi_state = {}
         stable_since = stable_framework = first_package = peak_pressure = peak_memory_pressure = None
-        framework = pressure = memory_pressure = None
+        framework = pressure = memory_pressure = last_sample = None
         settled = False
         while time.monotonic() < deadline:
             require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
@@ -1157,12 +1158,15 @@ class Runtime:
             if (framework is None or pressure is None or pressure > BOOT_CPU_PRESSURE_LIMIT
                     or memory_pressure is None or memory_pressure > BOOT_MEMORY_PRESSURE_LIMIT):
                 stable_since = None
-            elif stable_since is None or stable_framework != framework:
+            elif (stable_since is None or stable_framework != framework
+                  or now - last_sample > BOOT_SAMPLE_INTERVAL):
                 stable_since, stable_framework = now, framework
             elif now - stable_since >= BOOT_SETTLE_SECONDS and now < deadline:
                 settled = True
                 break
-            cancel.wait(min(2, max(0, deadline - now)))
+            last_sample = now
+            # Leave time for the next probe within the maximum sample interval.
+            cancel.wait(min(BOOT_SAMPLE_INTERVAL / 2, max(0, deadline - now)))
         finished = time.monotonic()
         print(f'android boot readiness cores={cores} settled={str(settled).lower()} '
               f'boot_to_ready_seconds={finished - launched:.1f} elapsed_seconds={finished - started:.1f} '
@@ -1433,6 +1437,7 @@ class Pool:
         self.changed = threading.Condition(self.lock)
         self.closed = False
         self.cancelled = {}
+        self.boot_failures = {}
         self.runtime = runtime or Runtime(config)
         self.images = images or Images(self.root / 'images', config['sdk_root'],
                                       config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3, config.get('image_policy', 'latest-stable'))
@@ -1610,12 +1615,19 @@ class Pool:
         require(isinstance(token, str) and re.fullmatch('[a-f0-9]{64}', token), 'credential', 'invalid lease credential')
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def find(self, token):
-        digest = self.digest(token)
+    def find(self, digest):
         for slot in self.slots:
             if secrets.compare_digest(slot.get('credential', ''), digest):
                 return slot
         raise PoolError('stale', 'lease is expired, released or unknown')
+
+    def boot_failure(self, digest):
+        failure = self.boot_failures.get(digest)
+        if failure is not None:
+            expires, message = failure
+            if self.clock() < expires:
+                return message
+        return None
 
     def reserve(self, request, token, owner):
         request = self.normalize(request)
@@ -1636,7 +1648,8 @@ class Pool:
             self.cancelled = {key: expiry for key, expiry in self.cancelled.items() if expiry > self.clock()}
             require(digest not in self.cancelled, 'cancelled', 'allocation was cancelled before reservation')
             require(not self.closed, 'unavailable', 'Android pool is stopping')
-            require(not any(s.get('credential') == digest for s in self.slots), 'credential', 'credential already used')
+            require(self.boot_failure(digest) is None and not any(s.get('credential') == digest for s in self.slots),
+                    'credential', 'credential already used')
             slot = next((s for s in self.slots if s['state'] == 'available' and s['slot_id'] not in self.workers), None)
             require(any(s['state'] != 'quarantined' for s in self.slots),
                     'unavailable', 'all Android emulator slots are quarantined')
@@ -1691,7 +1704,10 @@ class Pool:
 
     def allocation(self, token, renew=False):
         with self.lock:
-            slot = self.find(token)
+            digest = self.digest(token)
+            if (message := self.boot_failure(digest)) is not None:
+                raise PoolError('boot_timeout', message)
+            slot = self.find(digest)
             if slot['state'] in ('draining', 'available') and slot.get('failure'):
                 message = slot.get('failure_message', 'Android provisioning failed')
                 if slot['state'] == 'available':
@@ -1732,6 +1748,11 @@ class Pool:
             with self.lock:
                 stopped = dict(slot, state='available')
                 self.record_observation(stopped, 'stopped')
+                if slot.get('failure') == 'boot_timeout':
+                    # A new reservation can reuse the slot before the client polls.
+                    message = slot.pop('failure_message', 'Android boot timed out') + '; runtime was stopped'
+                    self.boot_failures[slot['credential']] = self.clock() + TTL, message
+                    del slot['failure']
                 # Keep last credential hash solely for idempotent release until next allocation.
                 for key in list(slot):
                     if key not in ('slot_id', 'generation', 'credential', 'failure', 'failure_message'):
@@ -1769,12 +1790,13 @@ class Pool:
 
     def release(self, token):
         with self.lock:
+            digest = self.digest(token)
             try:
-                slot = self.find(token)
+                slot = self.find(digest)
             except PoolError as exc:
                 if exc.code == 'stale':
                     # A cancellation can overtake a reserve while it resolves repository metadata.
-                    self.cancelled[self.digest(token)] = self.clock() + TTL
+                    self.cancelled[digest] = self.clock() + TTL
                     return dict(released=True)
                 raise
             generation = slot['generation']
@@ -1814,8 +1836,10 @@ class Pool:
 
     def reap(self, recovery=False):
         with self.lock:
+            now = self.clock()
+            self.boot_failures = {digest: failure for digest, failure in self.boot_failures.items() if failure[0] > now}
             victims = [(s, s['generation']) for s in self.slots if s['state'] != 'available'
-                       and (recovery or s.get('expires_at', 0) <= self.clock())]
+                       and (recovery or s.get('expires_at', 0) <= now)]
             for slot, _ in victims:
                 self.fence(slot)
         for slot, generation in victims:
@@ -1859,7 +1883,7 @@ class Pool:
 
     def tunnel(self, token, connection):
         with self.lock:
-            slot = self.find(token)
+            slot = self.find(self.digest(token))
             require(slot['state'] == 'held' and self.clock() < slot['expires_at'], 'stale', 'lease is no longer active')
             process = self.runtime.connect(slot)
             connections = self.connections.setdefault(slot['slot_id'], {})
