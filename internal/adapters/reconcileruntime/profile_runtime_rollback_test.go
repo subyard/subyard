@@ -99,3 +99,41 @@ func TestProfileRuntimeRollbackObservesANeverProvisionedGuestAsAbsent(t *testing
 		t.Fatalf("never-provisioned rollback observation = %#v, %v", observation, err)
 	}
 }
+
+// A failing rollback-apply keeps its owner's public refusal and next step;
+// any other stderr stays private.
+func TestProfileRuntimeRollbackApplyKeepsAnOwnersPublicRefusal(t *testing.T) {
+	for _, test := range []struct {
+		name, stderr, message, retry string
+	}{
+		{"public refusal", `subyard-profile-observation-refusal-v1 {"message":"sample store unavailable","retry":"run yard -Y default config paths"}`, "sample store unavailable", "run yard -Y default config paths"},
+		{"private text", `sample store unavailable: /home/owner/secret`, "", ""},
+		{"no executable step", `subyard-profile-observation-refusal-v1 {"message":"sample store unavailable","retry":"ask the owner"}`, "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, _ := rollbackRuntimeFixture(t)
+			script := `#!/bin/sh
+case "$1" in
+rollback-observe) printf '{"state":"stale","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeOldDigest + `"}\n' ;;
+rollback-apply) printf '%s\n' '` + test.stderr + `' >&2; exit 2 ;;
+*) exit 9 ;;
+esac
+`
+			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/synthetic/runtime.sh"), []byte(script), 0o700)
+			err := runtime.ApplyProfileRuntimeRollback(context.Background(), "synthetic-runtime", "op-1", testRuntimeNewDigest, testRuntimeOldDigest, "")
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("rollback apply error = %v", err)
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				if test.retry != "" {
+					t.Fatalf("owner refusal lost: %v", err)
+				}
+				return
+			}
+			if message, retry := diagnostic.ActivationDiagnostic(); message != test.message || retry != test.retry {
+				t.Fatalf("owner refusal = %q, %q", message, retry)
+			}
+		})
+	}
+}

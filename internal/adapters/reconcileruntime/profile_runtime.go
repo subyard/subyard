@@ -83,8 +83,16 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 	if domain.SafeName(definition.Name) && domain.SafeName(runtime.Yard.YardName) {
 		failure.retry = "run yard -Y " + runtime.Yard.YardName + " config paths"
 	}
-	// Only explicitly public owner refusals may add a path and executable step.
-	// Exception text and ordinary stderr remain private.
+	if message, retry, ok := publicOwnerRefusal(stderr); ok {
+		failure.message, failure.retry = message, retry
+	}
+	return failure
+}
+
+// publicOwnerRefusal is the one explicitly public owner refusal in a hook's
+// stderr. Only it may add a path and executable step; exception text and
+// ordinary stderr remain private.
+func publicOwnerRefusal(stderr []byte) (message, retry string, ok bool) {
 	const prefix = "subyard-profile-observation-refusal-v1 "
 	var records []string
 	for _, line := range strings.Split(string(stderr), "\n") {
@@ -92,30 +100,31 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 			records = append(records, strings.TrimPrefix(line, prefix))
 		}
 	}
-	if len(records) == 1 && len(records[0]) <= 2048 {
-		var record struct {
-			Message string `json:"message"`
-			Retry   string `json:"retry"`
+	if len(records) != 1 || len(records[0]) > 2048 {
+		return "", "", false
+	}
+	var record struct {
+		Message string `json:"message"`
+		Retry   string `json:"retry"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(records[0]))
+	decoder.DisallowUnknownFields()
+	valid := func(value string) bool {
+		if value == "" || len(value) > 480 {
+			return false
 		}
-		decoder := json.NewDecoder(strings.NewReader(records[0]))
-		decoder.DisallowUnknownFields()
-		valid := func(value string) bool {
-			if value == "" || len(value) > 480 {
+		for _, r := range value {
+			if unicode.IsControl(r) {
 				return false
 			}
-			for _, r := range value {
-				if unicode.IsControl(r) {
-					return false
-				}
-			}
-			return true
 		}
-		var tail any
-		if decoder.Decode(&record) == nil && decoder.Decode(&tail) == io.EOF && valid(record.Message) && valid(record.Retry) && strings.HasPrefix(record.Retry, "run ") {
-			failure.message, failure.retry = record.Message, record.Retry
-		}
+		return true
 	}
-	return failure
+	var tail any
+	if decoder.Decode(&record) != nil || decoder.Decode(&tail) != io.EOF || !valid(record.Message) || !valid(record.Retry) || !strings.HasPrefix(record.Retry, "run ") {
+		return "", "", false
+	}
+	return record.Message, record.Retry, true
 }
 
 // A runtime hook may state one short plan consequence of applying a stale contract.
@@ -210,11 +219,11 @@ func (runtime Runtime) ProfileRuntimeObservation(ctx context.Context, activation
 
 // profileRuntimeActions names one observe/apply pair of the runtime hook
 // protocol. Rollback preparation uses the same output contract and checks.
-type profileRuntimeActions struct{ observe, apply string }
+type profileRuntimeActions struct{ observe, apply, name string }
 
 var (
-	profileRuntimeRefresh  = profileRuntimeActions{observe: "observe", apply: "apply"}
-	profileRuntimeRollback = profileRuntimeActions{observe: "rollback-observe", apply: "rollback-apply"}
+	profileRuntimeRefresh  = profileRuntimeActions{observe: "observe", apply: "apply", name: "profile runtime refresh"}
+	profileRuntimeRollback = profileRuntimeActions{observe: "rollback-observe", apply: "rollback-apply", name: "profile runtime rollback preparation"}
 )
 
 // ObserveProfileRuntimeRollback runs one declared owner's read-only
@@ -418,7 +427,7 @@ func (runtime Runtime) applyProfileRuntimeWith(
 	consequence *string,
 ) error {
 	if !domain.SafeID(operationID) {
-		return errors.New("profile runtime refresh requires a valid operation ID")
+		return errors.New(actions.name + " requires a valid operation ID")
 	}
 	observations, err := runtime.observeProfileRuntimesWith(ctx, []profile.Definition{definition}, actions.observe)
 	if err != nil {
@@ -442,6 +451,10 @@ func (runtime Runtime) applyProfileRuntimeWith(
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
 		}
+		// A rollback preparation keeps its owner's public refusal and next step.
+		if message, retry, ok := publicOwnerRefusal(stderr); ok && actions == profileRuntimeRollback {
+			return &integrationLifecycleError{cause: err, message: message, retry: retry}
+		}
 		return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
 	}
 	applied, err := decodeProfileRuntimeObservation(stdout)
@@ -449,15 +462,15 @@ func (runtime Runtime) applyProfileRuntimeWith(
 		return fmt.Errorf("validate profile runtime apply result: %w", err)
 	}
 	if applied.State != ports.RuntimeStateCurrent || applied.Actual != desired || applied.Desired != desired {
-		return errors.New("profile runtime refresh did not produce the expected contract")
+		return errors.New(actions.name + " did not produce the expected contract")
 	}
 	verified, err := runtime.observeProfileRuntimesWith(ctx, []profile.Definition{definition}, actions.observe)
 	if err != nil {
-		return fmt.Errorf("verify profile runtime refresh: %w", err)
+		return fmt.Errorf("verify %s: %w", actions.name, err)
 	}
 	result := verified[definition.Runtime.ActivationID]
 	if result.State != ports.RuntimeStateCurrent || result.Actual != desired || result.Desired != desired {
-		return errors.New("profile runtime refresh did not retain the expected contract")
+		return errors.New(actions.name + " did not retain the expected contract")
 	}
 	return nil
 }
