@@ -232,7 +232,7 @@ func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
 		``:                                     {1, 0},
 		`,"format":2`:                          {2, 0},
 		`,"format":2,"prepares_rollback_to":1`: {2, 1},
-		`,"prepares_rollback_to":3`:            {1, 3},
+		`,"format":4,"prepares_rollback_to":3`: {4, 3},
 	} {
 		metadata, err := Decode("synthetic", runtime(fields))
 		if err != nil {
@@ -245,7 +245,7 @@ func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
 	}
 	for _, fields := range []string{
 		`,"format":-1`, `,"prepares_rollback_to":-1`,
-		`,"prepares_rollback_to":1`, `,"format":2,"prepares_rollback_to":2`,
+		`,"prepares_rollback_to":1`, `,"prepares_rollback_to":3`, `,"format":2,"prepares_rollback_to":2`, `,"format":2,"prepares_rollback_to":3`,
 		`,"format":"2"`,
 	} {
 		if _, err := Decode("synthetic", runtime(fields)); err == nil {

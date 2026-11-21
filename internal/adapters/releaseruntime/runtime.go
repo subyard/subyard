@@ -78,7 +78,6 @@ type Prepared struct {
 	run                     func(context.Context) error
 	check                   func(context.Context) (releasetransition.Inspection, error)
 	nativePlan              releasetransition.PlanToken
-	inspection              releasetransition.Inspection
 	currentReport           *currentReport
 	// Set only after the verified owner returns a validated ready convergence.
 	convergedOutcome *releasetransition.Outcome
@@ -921,7 +920,20 @@ func (runtime *Runtime) PrepareTransition(
 	}
 	ctx = selectionContext(ctx, parsed.selection)
 	runtime.progress(parsed, "Checking update requirements...")
+	// An older artifact must not receive state in a format it cannot read,
+	// whichever command selected it.
+	downgrade := runtime.downgradeFormatRefusal(parsed.selection, inspectionCandidate, retainedTarget)
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
+	if downgrade != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Prepared{}, err
+		}
+		var public publicReleaseInspectionError
+		if !errors.As(err, &public) {
+			err = nil
+		}
+		return runtime.inspectionFailure(parsed, mergeRollbackPrepRefusals(releaseLinksFromRuntimeSnapshot(linksBefore), candidate.release, downgrade, err))
+	}
 	if err == nil && completedAdmission != nil {
 		if request.Target == completedAdmission.Metadata.Journal.Goal.Target {
 			// Same-target convergence belongs to the exact sealed original owner and
@@ -1324,10 +1336,22 @@ func (runtime *Runtime) prepareRetainedTransition(
 	ctx = selectionContext(ctx, parsed.selection)
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// The active release prepares owners whose format the target does not
-	// read; its refusals are reported beside the compatibility refusals.
-	prep, prepRefusals, err := runtime.planRollbackPreparation(ctx, activeRoot, candidate.root, configHome)
-	if err != nil {
-		return Prepared{}, verifiedPreparation(err)
+	// read, running hooks only from verified roots; its refusals are reported
+	// beside the compatibility refusals, which include a selection refusal.
+	var prep *rollbackPreparation
+	var prepRefusals error
+	var activeVerified *verifiedPublishedCandidate
+	if parsed.selection.refusal == "" {
+		activeVerified, err = runtime.verifySelectedActive(parsed.selection, &parsed.selection.activeArtifact)
+		if err != nil {
+			prepRefusals = rollbackPrepRefusal{message: "the active release cannot be verified for rollback preparation", retry: "restore the active release, then run yard update --rollback", cause: err}
+		} else {
+			defer activeVerified.Close()
+			prep, prepRefusals, err = runtime.planRollbackPreparation(ctx, activeVerified, verified, configHome)
+			if err != nil {
+				return Prepared{}, verifiedPreparation(err)
+			}
+		}
 	}
 	if err := mergeRollbackPrepRefusals(observed, release, prepRefusals,
 		runtime.inspectRollbackCompatibility(ctx, verified, request, parsed.selection)); err != nil {
@@ -1336,6 +1360,15 @@ func (runtime *Runtime) prepareRetainedTransition(
 			return runtime.preparePublicInspectionOutcome(parsed, refusal.outcome), nil
 		}
 		return Prepared{}, verifiedPreparation(err)
+	}
+	// Owners still to prepare: the down plan alone is confirmed now, and this
+	// release stays active after it.
+	if prep != nil && prep.needsApply() {
+		prepared, err := runtime.prepareRollbackPreparation(parsed, request, activeVerified, verified, prep)
+		if err != nil {
+			return Prepared{}, verifiedPreparation(err)
+		}
+		return prepared, nil
 	}
 	// Absence of the optional query advertises no profile owners. Identical
 	// public core payloads retain their existing historical compatibility path.
@@ -1363,22 +1396,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
 			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
 	}
-	if prep != nil && prep.needsApply() {
-		active, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: observed.Active, root: activeRoot}, parsed.root, nil)
-		if err != nil {
-			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
-				releasetransition.CodeRollbackIncompatible, "the active release cannot be verified for rollback preparation", "restore the active release, then run yard update --rollback")))
-		}
-		activeVerification := candidateVerification{candidate: active.candidate, digest: active.manifestDigest, version: active.version, registryDigest: active.registryDigest}
-		active.Close()
-		prepared, err := runtime.prepareRollbackPreparation(parsed, request, activeVerification, candidateVerification{
-			candidate: verified.candidate, digest: verified.manifestDigest, version: verified.version, registryDigest: verified.registryDigest,
-		}, prep, targetOwners)
-		if err != nil {
-			return Prepared{}, verifiedPreparation(err)
-		}
-		return runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners), nil
-	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1398,7 +1415,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 	}
 	prepared = runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners)
 	if prep != nil {
-		prepared = runtime.guardPreparedOwners(prepared, prep)
+		prepared = runtime.guardPreparedOwners(prepared, parsed.root, prep, verificationOf(activeVerified), verificationOf(verified))
 	}
 	return prepared, nil
 }
@@ -1611,7 +1628,6 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	defer func() {
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
-			prepared.inspection = inspection
 			prepared.Steps = releaseOperationSteps(request, inspection)
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks)
 			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
@@ -1640,7 +1656,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	}
 	consequences := slices.Clone(inspection.Assessment.Consequences)
 	if request.Direction == releasetransition.DirectionActivatePrevious {
-		consequences = append([]string{"reactivate the verified retained previous runtime"}, consequences...)
+		consequences = append([]string{reactivateRetainedConsequence}, consequences...)
 	}
 	for _, decision := range inspection.Decisions {
 		if decision.Scope == releasetransition.YardAttributionScope {

@@ -82,3 +82,16 @@ func TestProfileRuntimeRollbackActionsRequireADeclaredFormatAndRunningYard(t *te
 		t.Fatalf("stopped rollback observation = %#v, %v", observation, err)
 	}
 }
+
+// A running guest that init never provisioned has nothing installed to
+// prepare, so rollback-observe reports it absent instead of deferred.
+func TestProfileRuntimeRollbackObservesANeverProvisionedGuestAsAbsent(t *testing.T) {
+	prepared, _ := rollbackRuntimeFixture(t)
+	prepared.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running",
+		Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "false"}}}}
+	prepared.Executor = &neverInitializedGuest{}
+	observation, err := prepared.ObserveProfileRuntimeRollback(context.Background(), "synthetic-runtime")
+	if err != nil || observation.State != ports.RuntimeStateAbsent {
+		t.Fatalf("never-provisioned rollback observation = %#v, %v", observation, err)
+	}
+}

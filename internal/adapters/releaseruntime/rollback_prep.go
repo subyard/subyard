@@ -2,11 +2,9 @@ package releaseruntime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,93 +16,139 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-// rollbackPreparation is the active release's confirmed down plan: the profile
-// runtime owners whose installed format the rollback target does not read,
-// observed in every local yard through rollback-observe.
+// Rollback through a profile runtime hook takes two confirmations: the
+// active release's down plan, which stops with this release active, then the
+// retained release's own plan.
+const (
+	reactivateRetainedConsequence = "reactivate the verified retained previous runtime"
+	rollbackRetry                 = "run yard update --rollback"
+	preparedRollbackRetry         = "run yard update --rollback to review and confirm the rollback"
+	maximumOutcomeMessage         = 512
+)
+
+var migrateRetry = "run " + domain.RenderAction(domain.Action{Verb: domain.VerbMigrate})
+
+// rollbackPreparation is the active release's down plan: the profile runtime
+// owners whose installed format the rollback target does not read, observed
+// in every local yard through rollback-observe. Hooks run from pinned,
+// verified release roots.
 type rollbackPreparation struct {
 	activeRoot, targetRoot, configHome string
 	owners                             []string
+	definitions                        map[string]profile.Definition
 	yards                              []string
 	active, target                     map[string]config.Loaded
 	items                              []releasetransition.RollbackPrepItem
 }
 
-// rollbackPrepRefusal is one independent refusal of the down plan.
-type rollbackPrepRefusal struct{ message, retry string }
+// rollbackPrepRefusal is one independent refusal with its next step.
+type rollbackPrepRefusal struct {
+	message, retry string
+	cause          error
+}
 
 func (refusal rollbackPrepRefusal) Error() string { return refusal.message }
 
-// planRollbackPreparation selects the owners to prepare and observes them. It
-// returns nil when no owner's format differs, which keeps the ordinary
-// rollback path. Refusals are collected; err reports a read that failed.
-func (runtime *Runtime) planRollbackPreparation(ctx context.Context, activeRoot, targetRoot, configHome string) (*rollbackPreparation, error, error) {
-	active, err := profile.Load(activeRoot)
-	if err != nil {
-		return nil, nil, err
-	}
-	target, err := profile.Load(targetRoot)
-	if err != nil {
-		return nil, nil, err
-	}
+func (refusal rollbackPrepRefusal) Unwrap() error { return refusal.cause }
+
+// pinnedReleaseRoot names a verified root through this process's descriptor,
+// so a hook and its children run the exact verified files.
+func pinnedReleaseRoot(candidate *verifiedPublishedCandidate) string {
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), candidate.root.Fd())
+}
+
+// rollbackFormatOwners selects the active runtimes whose format differs from
+// the format the target's own profile declares. An owner without a prepared
+// hook for that format is refused; one missing from the target is the
+// retained-owner admission's decision.
+func rollbackFormatOwners(active, target []profile.Definition) ([]string, map[string]profile.Definition, []error) {
 	formats := map[string]int{}
 	for _, definition := range target {
 		if definition.Runtime != nil {
 			formats[definition.Runtime.ActivationID] = definition.Runtime.EffectiveFormat()
 		}
 	}
-	prep := &rollbackPreparation{activeRoot: activeRoot, targetRoot: targetRoot, configHome: configHome}
-	var refusals []error
+	owners, definitions, refusals := []string{}, map[string]profile.Definition{}, []error{}
 	for _, definition := range active {
 		hook := definition.Runtime
 		if hook == nil {
 			continue
 		}
-		// A target without the owner is the retained-owner admission's decision.
 		format, retained := formats[hook.ActivationID]
 		if !retained || format == hook.EffectiveFormat() {
 			continue
 		}
 		if hook.PreparesRollbackTo != format {
 			refusals = append(refusals, rollbackPrepRefusal{
-				message: fmt.Sprintf("profile runtime %s format %d cannot be prepared for the retained release's format %d", hook.ActivationID, hook.EffectiveFormat(), format),
-				retry:   "keep the current release active and retain a release whose profile runtime formats this release prepares, then run yard update --check",
+				message: fmt.Sprintf("this release cannot convert profile runtime %s from format %d back to the retained release's format %d", hook.ActivationID, hook.EffectiveFormat(), format),
+				retry:   "keep the current release active",
 			})
 			continue
 		}
-		prep.owners = append(prep.owners, hook.ActivationID)
+		owners = append(owners, hook.ActivationID)
+		definitions[hook.ActivationID] = definition
 	}
-	if len(prep.owners) == 0 {
+	return owners, definitions, refusals
+}
+
+func loadReleaseProfiles(active, target *verifiedPublishedCandidate) ([]profile.Definition, []profile.Definition, []error) {
+	var refusals []error
+	activeDefinitions, err := profile.Load(pinnedReleaseRoot(active))
+	if err != nil {
+		refusals = append(refusals, rollbackPrepRefusal{message: "the active release's profile definitions cannot be read for rollback", retry: "run yard update --check", cause: err})
+	}
+	targetDefinitions, err := profile.Load(pinnedReleaseRoot(target))
+	if err != nil {
+		refusals = append(refusals, rollbackPrepRefusal{message: "the retained release's profile definitions cannot be read for rollback", retry: "keep the current release active", cause: err})
+	}
+	return activeDefinitions, targetDefinitions, refusals
+}
+
+// planRollbackPreparation selects the owners to prepare and observes them. It
+// returns nil when no owner's format differs, which keeps the ordinary
+// rollback path. Refusals are collected; err reports a failure to proceed.
+func (runtime *Runtime) planRollbackPreparation(ctx context.Context, active, target *verifiedPublishedCandidate, configHome string) (*rollbackPreparation, error, error) {
+	activeDefinitions, targetDefinitions, refusals := loadReleaseProfiles(active, target)
+	if len(refusals) != 0 {
+		return nil, domain.CollectRefusals(refusals...), nil
+	}
+	owners, definitions, refusals := rollbackFormatOwners(activeDefinitions, targetDefinitions)
+	if len(owners) == 0 {
 		return nil, domain.CollectRefusals(refusals...), nil
 	}
 	if runtime.config.ProfileRuntimeRollbackObservation == nil || runtime.config.ProfileRuntimeRollbackApply == nil || runtime.config.ProfileRuntimeObservation == nil {
 		return nil, nil, errors.New("profile runtime rollback preparation is unavailable")
 	}
-	if err := prep.loadYards(runtime.config); err != nil {
+	prep := &rollbackPreparation{activeRoot: pinnedReleaseRoot(active), targetRoot: pinnedReleaseRoot(target), configHome: configHome, owners: owners, definitions: definitions}
+	loadRefusals, err := prep.loadYards(runtime.config)
+	if err != nil {
 		return nil, nil, err
 	}
+	refusals = append(refusals, loadRefusals...)
 	hooks := rollbackPrepHooks{runtime: runtime, prep: prep}
 	for _, yard := range prep.yards {
 		for _, owner := range prep.owners {
 			item, err := hooks.Observe(ctx, owner, yard)
-			var refusal rollbackPrepRefusal
-			if errors.As(err, &refusal) {
-				refusals = append(refusals, refusal)
-				continue
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, nil, err
 			}
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil, nil, err
-				}
-				refusals = append(refusals, rollbackPrepRefusal{
-					message: fmt.Sprintf("profile runtime %s in yard %s cannot be observed for rollback preparation", owner, yard),
-					retry:   "run yard update --check",
-				})
+				refusals = append(refusals, observationRefusal(owner, yard, err))
 				continue
 			}
 			prep.items = append(prep.items, item)
 		}
 	}
-	if len(refusals) == 0 && !prep.needsApply() {
+	if len(refusals) != 0 {
+		return prep, domain.CollectRefusals(refusals...), nil
+	}
+	if prep.needsApply() {
+		if _, err := prep.down(active, target, configHome).Plan(); err != nil {
+			refusals = append(refusals, rollbackPrepRefusal{message: "the rollback preparation exceeds what one down transaction records", retry: "keep the current release active", cause: err})
+		}
+	} else {
+		// Every owner is prepared: the rerun confirms the target's own plan
+		// once the target accepts the prepared state.
 		gate := prep.gate(ctx, runtime.config)
 		if errors.Is(gate, context.Canceled) || errors.Is(gate, context.DeadlineExceeded) {
 			return nil, nil, gate
@@ -114,33 +158,77 @@ func (runtime *Runtime) planRollbackPreparation(ctx context.Context, activeRoot,
 	return prep, domain.CollectRefusals(refusals...), nil
 }
 
-func (prep *rollbackPreparation) loadYards(configuration Config) error {
+func observationRefusal(owner, yard string, err error) error {
+	var refusal rollbackPrepRefusal
+	if errors.As(err, &refusal) {
+		return refusal
+	}
+	return rollbackPrepRefusal{
+		message: boundedPrepText(fmt.Sprintf("profile runtime %s in yard %s cannot be observed for rollback preparation: %v", owner, yard, err)),
+		retry:   "run yard update --check", cause: err,
+	}
+}
+
+// loadYards loads every local yard with both releases. A yard that cannot be
+// loaded is a refusal of its own.
+func (prep *rollbackPreparation) loadYards(configuration Config) ([]error, error) {
 	environment := configuration.Inputs.environment(configuration.Context)
 	operator := first(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"])
 	names, err := config.YardNames(prep.configHome)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	prep.active, prep.target = map[string]config.Loaded{}, map[string]config.Loaded{}
+	var refusals []error
+	prep.yards, prep.active, prep.target = nil, map[string]config.Loaded{}, map[string]config.Loaded{}
 	for _, name := range names {
 		load := func(root string) (config.Loaded, error) {
 			return config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: operator, YardName: name, Environment: environment})
 		}
-		active, err := load(prep.activeRoot)
-		if err != nil {
-			return fmt.Errorf("load yard %s for rollback preparation: %w", name, err)
-		}
-		if active.Context.AccessKind != domain.AccessLocal {
+		active, activeErr := load(prep.activeRoot)
+		if activeErr == nil && active.Context.AccessKind != domain.AccessLocal {
 			continue
 		}
-		target, err := load(prep.targetRoot)
-		if err != nil {
-			return fmt.Errorf("load yard %s for the retained release: %w", name, err)
+		target, targetErr := load(prep.targetRoot)
+		if err := errors.Join(activeErr, targetErr); err != nil {
+			refusals = append(refusals, rollbackPrepRefusal{
+				message: fmt.Sprintf("yard %s configuration cannot be loaded for rollback preparation", name),
+				retry:   "run " + domain.RenderAction(domain.Action{Verb: domain.VerbConfigValidate, Yard: name}), cause: err,
+			})
+			continue
 		}
 		prep.yards = append(prep.yards, name)
 		prep.active[name], prep.target[name] = active, target
 	}
-	return nil
+	return refusals, nil
+}
+
+// reload binds the confirmed plan to freshly verified roots and freshly
+// loaded yards before the first effect. The rechecked observations then
+// name each yard's current native instance.
+func (prep *rollbackPreparation) reload(configuration Config, active, target *verifiedPublishedCandidate) (*rollbackPreparation, error) {
+	fresh := &rollbackPreparation{activeRoot: pinnedReleaseRoot(active), targetRoot: pinnedReleaseRoot(target), configHome: prep.configHome,
+		owners: prep.owners, definitions: prep.definitions, items: prep.items}
+	refusals, err := fresh.loadYards(configuration)
+	if err != nil || len(refusals) != 0 || !slices.Equal(fresh.yards, prep.yards) {
+		return nil, fmt.Errorf("%w: yard registrations changed after confirmation", domain.ErrPlanStale)
+	}
+	return fresh, nil
+}
+
+// needsApply reports whether any owner is still stale. A rerun after the
+// down transaction finds every owner current and confirms the retained
+// release's own plan instead.
+func (prep *rollbackPreparation) needsApply() bool {
+	return slices.ContainsFunc(prep.items, func(item releasetransition.RollbackPrepItem) bool {
+		return item.State == releasetransition.RollbackPrepStale
+	})
+}
+
+func (prep *rollbackPreparation) down(active, target *verifiedPublishedCandidate, configHome string) releasetransition.RollbackPrep {
+	return releasetransition.RollbackPrep{
+		ConfigHome: configHome, Active: active.candidate.release, Target: target.candidate.release,
+		ArtifactDigest: active.manifestDigest, RegistryDigest: active.registryDigest, Items: prep.items,
+	}
 }
 
 // rollbackPrepHooks runs the active release's rollback actions per yard.
@@ -150,16 +238,52 @@ type rollbackPrepHooks struct {
 }
 
 func (hooks rollbackPrepHooks) Observe(ctx context.Context, owner, yard string) (releasetransition.RollbackPrepItem, error) {
-	observation, err := hooks.runtime.config.ProfileRuntimeRollbackObservation(ctx, hooks.prep.activeRoot, hooks.prep.active[yard], owner)
+	loaded, ok := hooks.prep.active[yard]
+	if !ok {
+		return releasetransition.RollbackPrepItem{}, fmt.Errorf("%w: yard %s is no longer registered", domain.ErrPlanStale, yard)
+	}
+	observation, err := hooks.runtime.config.ProfileRuntimeRollbackObservation(ctx, hooks.prep.activeRoot, loaded, owner)
 	if err != nil {
 		return releasetransition.RollbackPrepItem{}, err
 	}
-	item := releasetransition.RollbackPrepItem{Owner: owner, Yard: yard, State: string(observation.State),
-		Actual: releasetransition.Fingerprint(observation.Actual), Desired: releasetransition.Fingerprint(observation.Desired)}
+	item := releasetransition.RollbackPrepItem{Owner: owner, Yard: yard, Instance: loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName,
+		State: string(observation.State), Actual: releasetransition.Fingerprint(observation.Actual), Desired: releasetransition.Fingerprint(observation.Desired),
+		Consequence: observation.Consequence}
 	if observation.State == ports.RuntimeStateDeferred {
-		return item, stoppedYardRefusal(owner, yard)
+		installed, err := hooks.prep.possiblyInstalled(owner, yard, loaded)
+		if err != nil {
+			return item, err
+		}
+		if installed {
+			return item, stoppedYardRefusal(owner, yard)
+		}
+		item = releasetransition.RollbackPrepItem{Owner: owner, Yard: yard, Instance: item.Instance, State: releasetransition.RollbackPrepAbsent}
 	}
 	return item, item.Validate()
+}
+
+// possiblyInstalled reports, without the guest, whether a stopped yard may
+// hold the owner's installed state: the profile is selected there or its
+// managed paths exist.
+func (prep *rollbackPreparation) possiblyInstalled(owner, yard string, loaded config.Loaded) (bool, error) {
+	definition := prep.definitions[owner]
+	if definition.Selected(yard, loaded.Environment) {
+		return true, nil
+	}
+	for _, managed := range definition.ManagedPaths {
+		root := loaded.Context.Paths.DataHome
+		if managed.Root == "operator" {
+			root = loaded.Context.Paths.OperatorHome
+		}
+		_, err := os.Lstat(filepath.Join(root, strings.ReplaceAll(managed.Path, "{yard}", yard)))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (hooks rollbackPrepHooks) Apply(ctx context.Context, item releasetransition.RollbackPrepItem, operation releasetransition.TransactionID) error {
@@ -169,49 +293,20 @@ func (hooks rollbackPrepHooks) Apply(ctx context.Context, item releasetransition
 
 func stoppedYardRefusal(owner, yard string) rollbackPrepRefusal {
 	return rollbackPrepRefusal{
-		message: fmt.Sprintf("yard %s is stopped, so profile runtime %s cannot be prepared for rollback; start it, then run yard update --rollback", yard, owner),
+		message: fmt.Sprintf("yard %s is stopped, so its installed profile runtime %s cannot be prepared for rollback; start it, then run yard update --rollback", yard, owner),
 		retry:   "run " + domain.RenderAction(domain.Action{Verb: domain.VerbStart, Yard: yard}),
 	}
 }
 
-// needsApply reports whether any owner is still stale. A rerun after an
-// interrupted or refused down transaction finds every owner current and
-// confirms the retained release's own plan instead.
-func (prep *rollbackPreparation) needsApply() bool {
-	return slices.ContainsFunc(prep.items, func(item releasetransition.RollbackPrepItem) bool {
-		return item.State == releasetransition.RollbackPrepStale
-	})
-}
-
-// guardPreparedOwners rechecks, before the retained release's own plan runs,
-// that every prepared owner still observes as confirmed.
-func (runtime *Runtime) guardPreparedOwners(prepared Prepared, prep *rollbackPreparation) Prepared {
-	run := prepared.run
-	if run == nil {
-		return prepared
-	}
-	prepared.run = func(ctx context.Context) error {
-		hooks := rollbackPrepHooks{runtime: runtime, prep: prep}
-		for _, item := range prep.items {
-			observed, err := hooks.Observe(ctx, item.Owner, item.Yard)
-			if err != nil {
-				return err
-			}
-			if observed != item {
-				return fmt.Errorf("%w: prepared profile runtime %s in yard %s changed after confirmation", domain.ErrPlanStale, item.Owner, item.Yard)
-			}
-		}
-		return run(ctx)
-	}
-	return prepared
-}
-
-// gate proves, after preparation, that the target release observes every
-// prepared owner from its own root. A target that cannot observe the state,
-// or a yard stopped meanwhile, refuses before dispatch.
+// gate proves that the target release observes every prepared owner from
+// its own root. A target that cannot observe the state, or a yard stopped
+// meanwhile, refuses.
 func (prep *rollbackPreparation) gate(ctx context.Context, configuration Config) error {
 	var refusals []error
 	for _, item := range prep.items {
+		if item.State == releasetransition.RollbackPrepAbsent {
+			continue
+		}
 		observation, err := configuration.ProfileRuntimeObservation(ctx, prep.targetRoot, prep.target[item.Yard], item.Owner)
 		switch {
 		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
@@ -219,33 +314,13 @@ func (prep *rollbackPreparation) gate(ctx context.Context, configuration Config)
 		case err != nil:
 			refusals = append(refusals, rollbackPrepRefusal{
 				message: fmt.Sprintf("the retained release does not accept the prepared profile runtime %s in yard %s", item.Owner, item.Yard),
-				retry:   "run " + domain.RenderAction(domain.Action{Verb: domain.VerbMigrate}),
+				retry:   migrateRetry, cause: err,
 			})
 		case observation.State == ports.RuntimeStateDeferred:
 			refusals = append(refusals, stoppedYardRefusal(item.Owner, item.Yard))
 		}
 	}
 	return domain.CollectRefusals(refusals...)
-}
-
-// rollbackPrepOutcome renders collected refusals as one public outcome. The
-// first refusal in stable order supplies the next step.
-func rollbackPrepOutcome(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, refusals error) releasetransition.Outcome {
-	causes := refusalCauses(refusals)
-	messages := make([]string, 0, len(causes))
-	retry := ""
-	for _, cause := range causes {
-		messages = append(messages, cause.Error())
-		var refusal rollbackPrepRefusal
-		if retry == "" && errors.As(cause, &refusal) {
-			retry = refusal.retry
-		}
-	}
-	if retry == "" {
-		retry = "run yard update --check"
-	}
-	return publicReleaseOutcome(links, target, nil, releasetransition.CodeRollbackIncompatible,
-		boundedPrepText(strings.Join(messages, "; ")), retry)
 }
 
 func refusalCauses(refusals error) []error {
@@ -259,250 +334,333 @@ func refusalCauses(refusals error) []error {
 	return []error{refusals}
 }
 
+// asRollbackRefusal keeps a public refusal's own message and next step.
+func asRollbackRefusal(err error) rollbackPrepRefusal {
+	var refusal rollbackPrepRefusal
+	if errors.As(err, &refusal) {
+		return refusal
+	}
+	if outcome, ok := TransitionOutcome(err); ok {
+		return rollbackPrepRefusal{message: outcome.Message, retry: outcome.Retry, cause: err}
+	}
+	return rollbackPrepRefusal{message: err.Error(), cause: err}
+}
+
+// publicRollbackRefusal renders independent refusals as one public outcome;
+// the first one with a next step supplies it unless retry is given. Only the
+// wire message is bounded: the full causes stay on the error when it is cut.
+func publicRollbackRefusal(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, code releasetransition.OutcomeCode,
+	prefix, retry string, causes []error,
+) error {
+	messages := make([]string, 0, len(causes))
+	for _, cause := range causes {
+		refusal := asRollbackRefusal(cause)
+		messages = append(messages, refusal.message)
+		if retry == "" {
+			retry = refusal.retry
+		}
+	}
+	if retry == "" {
+		retry = "run yard update --check"
+	}
+	message := prefix + strings.Join(messages, "; ")
+	outcome := publicReleaseOutcome(links, target, nil, code, boundedPrepText(message), retry)
+	cause := transitionOutcomeError(outcome)
+	if outcome.Message != message {
+		cause = domain.CollectOrderedRefusals(append([]error{cause}, causes...)...)
+	}
+	return publicReleaseInspectionError{cause: cause, outcome: outcome}
+}
+
 // mergeRollbackPrepRefusals reports the down plan's refusals beside the
-// rollback compatibility refusal, which keeps its own next step.
+// rollback compatibility refusal, which comes first and keeps its code and
+// next step.
 func mergeRollbackPrepRefusals(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, prep, compatibility error) error {
 	if prep == nil {
 		return compatibility
 	}
-	outcome := rollbackPrepOutcome(links, target, prep)
-	var public publicReleaseInspectionError
-	if errors.As(compatibility, &public) {
-		merged := public.outcome
-		merged.Message = boundedPrepText(merged.Message + "; " + outcome.Message)
-		return publicReleaseInspectionError{cause: transitionOutcomeError(merged), outcome: merged}
-	}
+	causes := refusalCauses(prep)
+	code := releasetransition.CodeRollbackIncompatible
 	if compatibility != nil {
-		return compatibility
+		outcome, public := TransitionOutcome(compatibility)
+		if !public {
+			return domain.CollectRefusals(publicRollbackRefusal(links, target, code, "", "", causes), compatibility)
+		}
+		code = outcome.Code
+		causes = append([]error{compatibility}, causes...)
 	}
-	return publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
+	return publicRollbackRefusal(links, target, code, "", "", causes)
 }
 
 func boundedPrepText(message string) string {
-	const limit = 1024
-	if len(message) <= limit {
+	if len(message) <= maximumOutcomeMessage {
 		return message
 	}
-	return message[:limit-3] + "..."
+	return message[:maximumOutcomeMessage-3] + "..."
 }
 
 func (prep *rollbackPreparation) consequences(target releasetransition.ReleaseID) []string {
-	consequences := []string{"reactivate the verified retained previous runtime"}
-	for _, item := range prep.items {
-		if item.State == releasetransition.RollbackPrepStale {
-			consequences = append(consequences, fmt.Sprintf("prepare profile runtime %s in yard %s for release %s", item.Owner, item.Yard, target))
-		}
-	}
-	return append(consequences, "inspect the retained release's own plan after preparation and apply it under this confirmation")
+	return append(releasetransition.RollbackPrepConsequences(prep.items, target),
+		"keep this release active; then run yard update --rollback to review and confirm the retained release's own plan")
 }
 
-func (prep *rollbackPreparation) steps(request releasetransition.ProcessRequest) []domain.OperationStep {
+func (prep *rollbackPreparation) steps(target releasetransition.ReleaseID) []domain.OperationStep {
 	steps := []domain.OperationStep{}
 	for _, item := range prep.items {
 		decision := domain.StepSkip
 		if item.State == releasetransition.RollbackPrepStale {
 			decision = domain.StepApply
 		}
+		consequence := fmt.Sprintf("prepare profile runtime %s in yard %s for release %s", item.Owner, item.Yard, target)
+		if item.Consequence != "" {
+			consequence += ": " + item.Consequence
+		}
 		step := domain.OperationStep{ID: fmt.Sprintf("release.rollback-prep.%d", len(steps)), Target: "rollback-prep." + item.Owner + " yard." + item.Yard,
-			Observed: "rollback-observe " + item.State, Desired: "format of release " + string(request.Target), Decision: decision,
-			Preconditions: []string{"the confirmed rollback-observe result is unchanged"},
+			Observed: "rollback-observe " + item.State, Desired: "format of release " + string(target), Decision: decision,
+			Preconditions: []string{"the confirmed rollback-observe result and yard instance are unchanged"},
 			Verify:        "rollback-observe reports current, then the retained release observes the owner",
-			Consequence:   fmt.Sprintf("prepare profile runtime %s in yard %s for release %s", item.Owner, item.Yard, request.Target)}
+			Consequence:   consequence}
 		if len(steps) != 0 {
 			step.DependsOn = []string{steps[len(steps)-1].ID}
 		}
 		steps = append(steps, step)
 	}
-	activate := domain.OperationStep{ID: "release.activate", Target: request.RuntimeRoot + "/current", Observed: "unknown", Desired: "verified active release " + string(request.Target),
-		Decision: domain.StepConditional, Preconditions: []string{"the retained release accepts the prepared state and its own plan is admitted"},
-		Verify: "read actual runtime links and obtain native ready transition inspection", Consequence: "activate and verify release " + string(request.Target)}
-	if len(steps) != 0 {
-		activate.DependsOn = []string{steps[len(steps)-1].ID}
-	}
-	return append(steps, activate)
+	return steps
 }
 
-func (prep *rollbackPreparation) binding(request releasetransition.ProcessRequest, active, target candidateVerification, links any) (string, error) {
-	scope, err := releasetransition.RollbackPrepBinding(prep.items)
-	if err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(struct {
-		Request                        releasetransition.ProcessRequest
-		Scope                          releasetransition.Fingerprint
-		ActiveRoot, TargetRoot         string
-		ActiveDigest, TargetDigest     releasetransition.Fingerprint
-		ActiveRegistry, TargetRegistry releasetransition.Fingerprint
-		Links                          any
-	}{request, scope, active.candidate.root, target.candidate.root, active.digest, target.digest, active.registryDigest, target.registryDigest, links})
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-// Consequences every plain retained rollback plan carries: the adapter's
-// reactivation and the V2 engine's generic plan line, verbatim since v0.28.
-var plainRollbackConsequences = []string{
-	"reactivate the verified retained previous runtime",
-	"apply the exact typed migration and release activation plan",
-}
-
-// admitFreshRollbackPlan decides whether the retained release's own plan,
-// inspected after preparation, runs under the operator's one confirmation of
-// the down plan: only a plan without blockers, an unfinished transaction or
-// consequences beyond a plain rollback. Anything else stops after the gate
-// with the active release still active.
-func admitFreshRollbackPlan(fresh Prepared) error {
-	if len(fresh.inspection.Blockers) != 0 || fresh.inspection.Resume != nil {
-		return rollbackPrepRefusal{
-			message: "the retained release's plan after preparation is blocked; profile runtimes stay prepared and this release stays active",
-			retry:   "run " + domain.RenderAction(domain.Action{Verb: domain.VerbMigrate}),
-		}
-	}
-	for _, consequence := range fresh.Consequences {
-		if !slices.Contains(plainRollbackConsequences, consequence) {
-			return rollbackPrepRefusal{
-				message: "the retained release's plan after preparation needs its own confirmation; profile runtimes stay prepared and this release stays active",
-				retry:   "run yard update --rollback",
-			}
-		}
-	}
-	return nil
-}
-
-// prepareRollbackPreparation offers the down plan for confirmation. Execution
-// runs the down transaction; its dispatch inspects the retained release
-// afresh, admits that plan, and runs the ordinary retained execution.
+// prepareRollbackPreparation offers the down plan for confirmation. Its run
+// prepares the owners and passes the gate; this release stays active and the
+// rerun confirms the retained release's own plan.
 func (runtime *Runtime) prepareRollbackPreparation(
 	parsed options,
 	request releasetransition.ProcessRequest,
-	active, target candidateVerification,
+	activeVerified, targetVerified *verifiedPublishedCandidate,
 	prep *rollbackPreparation,
-	targetOwners map[string]bool,
 ) (Prepared, error) {
-	binding, err := prep.binding(request, active, target, parsed.expectedLinks)
+	active, target := verificationOf(activeVerified), verificationOf(targetVerified)
+	token, err := prep.down(activeVerified, targetVerified, request.ConfigHome).Plan()
 	if err != nil {
 		return Prepared{}, err
 	}
-	converged := new(releasetransition.Outcome)
+	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
+	prepared := releasetransition.Outcome{
+		Status: releasetransition.StatusReady, Active: links.Active, Previous: links.Previous, Target: links.Active,
+		Message: fmt.Sprintf("profile runtimes are prepared for %s; release %s stays active", request.Target, links.Active),
+		Retry:   preparedRollbackRetry,
+	}
 	return Prepared{
 		Request: request, Action: "update.rollback", Changed: true,
 		Consequences:   prep.consequences(request.Target),
 		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 		SourceRelease:  string(active.candidate.release),
 		TargetRelease:  string(target.candidate.release), TargetVersion: target.version,
-		Steps: prep.steps(request), Binding: binding, convergedOutcome: converged,
-		check: func(ctx context.Context) (releasetransition.Inspection, error) {
-			checked, _, err := runtime.inspectCompletedTransition(ctx, request.RuntimeRoot, request.ConfigHome, request.Target, target, request)
-			return checked, err
+		Steps:   prep.steps(request.Target),
+		Binding: releaseOperationBinding(request, releasetransition.Inspection{Plan: token}, active, target, parsed.expectedLinks),
+		check: func(context.Context) (releasetransition.Inspection, error) {
+			if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
+				return releasetransition.Inspection{}, staleRetainedSelection(request.RuntimeRoot, request.Target)
+			}
+			return releasetransition.Inspection{Outcome: &prepared}, nil
 		},
 		run: func(ctx context.Context) error {
-			*converged = releasetransition.Outcome{}
 			ctx = selectionContext(ctx, parsed.selection)
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
 			}
-			verified, err := runtime.reverifyRollbackPrep(ctx, request.RuntimeRoot, active, target)
+			activeNow, targetNow, err := runtime.reverifyRollbackPrep(ctx, request.RuntimeRoot, active, target)
 			if err != nil {
 				return err
 			}
-			defer verified.Close()
+			defer activeNow.Close()
+			defer targetNow.Close()
+			fresh, err := prep.reload(runtime.config, activeNow, targetNow)
+			if err != nil {
+				return err
+			}
 			if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
 				return staleRetainedSelection(request.RuntimeRoot, request.Target)
 			}
-			if err := runtime.inspectRollbackCompatibility(ctx, verified, request, parsed.selection); err != nil {
+			if err := runtime.inspectRollbackCompatibility(ctx, targetNow, request, parsed.selection); err != nil {
 				return err
 			}
 			grant, err := newReleaseTransitionGrant()
 			if err != nil {
 				return err
 			}
-			links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
-			// The down journal changes history, so the gate and the target's
-			// plan use a selection captured after the preparation.
-			prepared := parsed
-			down := releasetransition.RollbackPrep{
-				ConfigHome: request.ConfigHome, Active: active.candidate.release, Target: request.Target,
-				ArtifactDigest: active.digest, RegistryDigest: active.registryDigest,
-				Items: prep.items, Hooks: rollbackPrepHooks{runtime: runtime, prep: prep},
-				Gate: func(ctx context.Context) error {
-					refusals := prep.gate(ctx, runtime.config)
-					if errors.Is(refusals, context.Canceled) || errors.Is(refusals, context.DeadlineExceeded) {
-						return refusals
-					}
-					selection, err := runtime.captureReleaseSelection(ctx, verified, request, *parsed.expectedLinks)
-					if err != nil {
-						return err
-					}
-					prepared.selection = selection
-					return mergeRollbackPrepRefusals(links, request.Target, refusals,
-						runtime.inspectRollbackCompatibility(ctx, verified, request, selection))
-				},
-				Dispatch: func(ctx context.Context) error {
-					return runtime.dispatchPreparedRollback(selectionContext(ctx, prepared.selection), prepared, verified, request, prep, targetOwners, converged)
-				},
+			down := fresh.down(activeNow, targetNow, request.ConfigHome)
+			down.Hooks = rollbackPrepHooks{runtime: runtime, prep: fresh}
+			// Protected history must still be the confirmed one when the down
+			// journal is written.
+			down.Admit = func(ctx context.Context) (func(), error) {
+				unlock, err := runtime.lockReleaseSelection(ctx, false)
+				if err != nil {
+					return nil, err
+				}
+				if err := runtime.revalidateCurrentSnapshot(request.RuntimeRoot, request.ConfigHome, parsed.selection.state); err != nil {
+					unlock()
+					return nil, err
+				}
+				return unlock, nil
 			}
-			return down.Run(ctx, grant)
+			// The down journal changes history, so the gate checks a selection
+			// captured after it.
+			down.Gate = func(ctx context.Context) error {
+				refusals := fresh.gate(ctx, runtime.config)
+				if errors.Is(refusals, context.Canceled) || errors.Is(refusals, context.DeadlineExceeded) {
+					return refusals
+				}
+				selection, err := runtime.captureReleaseSelection(ctx, targetNow, request, *parsed.expectedLinks)
+				if err != nil {
+					return domain.CollectRefusals(refusals, err)
+				}
+				return mergeRollbackPrepRefusals(links, request.Target, refusals, runtime.inspectRollbackCompatibility(ctx, targetNow, request, selection))
+			}
+			return runtime.rollbackPrepResult(ctx, parsed.root, links, request.Target, down.Run(ctx, grant))
 		},
 	}, nil
 }
 
-// reverifyRollbackPrep binds execution to the exact confirmed active and
-// target artifacts and returns the verified target.
-func (runtime *Runtime) reverifyRollbackPrep(ctx context.Context, root string, active, target candidateVerification) (*verifiedPublishedCandidate, error) {
-	current, err := runtime.verifyPublishedCandidate(ctx, active.candidate, root, &active.digest)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the active release changed after confirmation", domain.ErrPlanStale)
+// rollbackPrepResult types a down transaction failure. Before its journal
+// nothing changed and the refusal keeps its own next step. After it, hooks
+// may have run while this release stays active: the refusal names the
+// forward repair, or the refusal's own step when that resumes the rollback.
+func (runtime *Runtime) rollbackPrepResult(ctx context.Context, root string, links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, err error) error {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	registry := current.registryDigest
-	current.Close()
-	if registry != active.registryDigest {
-		return nil, fmt.Errorf("%w: the active release registry changed after confirmation", domain.ErrPlanStale)
+	var interrupted releasetransition.RollbackPrepInterrupted
+	if !errors.As(err, &interrupted) {
+		if _, public := TransitionOutcome(err); public || errors.Is(err, domain.ErrPlanStale) {
+			return err
+		}
+		return publicRollbackRefusal(links, target, releasetransition.CodeRollbackIncompatible, "", rollbackRetryUnlessOwn(err), []error{err})
 	}
-	verified, err := runtime.verifyPublishedCandidate(ctx, target.candidate, root, &target.digest)
-	if err != nil {
-		return nil, staleRetainedSelection(root, target.candidate.release)
+	if observed, linkErr := runtime.inspectRuntimeLinks(root); linkErr != nil || releaseLinksFromRuntimeSnapshot(observed).Active != links.Active {
+		return err
 	}
-	if verified.version != target.version || verified.registryDigest != target.registryDigest {
-		verified.Close()
-		return nil, fmt.Errorf("%w: the retained release changed after confirmation", domain.ErrPlanStale)
+	causes := refusalCauses(interrupted.Err)
+	retry := migrateRetry
+	if first := asRollbackRefusal(causes[0]); first.retry != "" && (strings.HasPrefix(first.retry, "run yard -Y ") || first.retry == rollbackRetry) {
+		retry = first.retry
 	}
-	return verified, nil
+	return publicRollbackRefusal(links, target, releasetransition.CodeRollbackIncompatible,
+		fmt.Sprintf("release %s stays active and its profile runtimes may be partly prepared; yard migrate repairs them forward: ", links.Active), retry, causes)
 }
 
-// dispatchPreparedRollback inspects the retained release afresh, admits its
-// plan and hands the rollback to it through the ordinary retained execution.
-func (runtime *Runtime) dispatchPreparedRollback(
-	ctx context.Context,
-	parsed options,
-	verified *verifiedPublishedCandidate,
-	request releasetransition.ProcessRequest,
-	prep *rollbackPreparation,
-	targetOwners map[string]bool,
-	converged *releasetransition.Outcome,
-) error {
-	fresh, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
+// rollbackRetryUnlessOwn keeps a refusal's own next step; nothing changed,
+// so any other failure retries the rollback.
+func rollbackRetryUnlessOwn(err error) string {
+	var refusal rollbackPrepRefusal
+	if errors.As(err, &refusal) && refusal.retry != "" {
+		return refusal.retry
+	}
+	return rollbackRetry
+}
+
+// guardPreparedOwners rechecks, before the retained release's own plan runs,
+// that every prepared owner still observes as confirmed from freshly
+// verified roots and yard registrations.
+func (runtime *Runtime) guardPreparedOwners(prepared Prepared, root string, prep *rollbackPreparation, active, target candidateVerification) Prepared {
+	run := prepared.run
+	if run == nil {
+		return prepared
+	}
+	prepared.run = func(ctx context.Context) error {
+		activeNow, targetNow, err := runtime.reverifyRollbackPrep(ctx, root, active, target)
+		if err != nil {
+			return err
+		}
+		fresh, err := prep.reload(runtime.config, activeNow, targetNow)
+		if err == nil {
+			hooks := rollbackPrepHooks{runtime: runtime, prep: fresh}
+			for _, item := range prep.items {
+				observed, observeErr := hooks.Observe(ctx, item.Owner, item.Yard)
+				if observeErr != nil {
+					err = observeErr
+					break
+				}
+				if observed != item {
+					err = fmt.Errorf("%w: prepared profile runtime %s in yard %s changed after confirmation", domain.ErrPlanStale, item.Owner, item.Yard)
+					break
+				}
+			}
+		}
+		activeNow.Close()
+		targetNow.Close()
+		if err != nil {
+			return err
+		}
+		return run(ctx)
+	}
+	return prepared
+}
+
+func verificationOf(candidate *verifiedPublishedCandidate) candidateVerification {
+	return candidateVerification{candidate: candidate.candidate, digest: candidate.manifestDigest, version: candidate.version, registryDigest: candidate.registryDigest}
+}
+
+// reverifyRollbackPrep binds execution to the exact confirmed active and
+// target artifacts. The caller closes both.
+func (runtime *Runtime) reverifyRollbackPrep(ctx context.Context, root string, active, target candidateVerification) (*verifiedPublishedCandidate, *verifiedPublishedCandidate, error) {
+	activeNow, err := runtime.verifyPublishedCandidate(ctx, active.candidate, root, &active.digest)
 	if err != nil {
-		return err
+		return nil, nil, fmt.Errorf("%w: the active release changed after confirmation", domain.ErrPlanStale)
 	}
-	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
-	if err := admitFreshRollbackPlan(fresh); err != nil {
-		outcome := rollbackPrepOutcome(links, request.Target, err)
-		return publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
+	if activeNow.registryDigest != active.registryDigest {
+		activeNow.Close()
+		return nil, nil, fmt.Errorf("%w: the active release registry changed after confirmation", domain.ErrPlanStale)
 	}
-	binding, err := runtime.retainedRuntimeBinding(ctx, prep.activeRoot, prep.targetRoot, prep.configHome, targetOwners)
+	targetNow, err := runtime.verifyPublishedCandidate(ctx, target.candidate, root, &target.digest)
 	if err != nil {
-		return transitionOutcomeError(publicReleaseOutcome(links, request.Target, nil, releasetransition.CodeRollbackIncompatible,
-			"the retained release cannot verify installed runtime activation after preparation", "run "+domain.RenderAction(domain.Action{Verb: domain.VerbMigrate})))
+		activeNow.Close()
+		return nil, nil, staleRetainedSelection(root, target.candidate.release)
 	}
-	fresh = runtime.guardRetainedRuntimeInputs(fresh, binding, prep.activeRoot, prep.targetRoot, prep.configHome, targetOwners)
-	if err := fresh.Execute(ctx); err != nil {
-		return err
+	if targetNow.version != target.version || targetNow.registryDigest != target.registryDigest {
+		activeNow.Close()
+		targetNow.Close()
+		return nil, nil, fmt.Errorf("%w: the retained release changed after confirmation", domain.ErrPlanStale)
 	}
-	if fresh.convergedOutcome != nil {
-		*converged = *fresh.convergedOutcome
+	return activeNow, targetNow, nil
+}
+
+// downgradeFormatRefusal refuses an activation of an older artifact that
+// would hand an owner's state to an earlier format without the active
+// release's preparation, whichever command selected it.
+func (runtime *Runtime) downgradeFormatRefusal(selection *releaseSelection, target *verifiedPublishedCandidate, retained bool) error {
+	if selection == nil || selection.refusal != "" {
+		return nil
 	}
-	return nil
+	active, err := runtime.verifySelectedActive(selection, &selection.activeArtifact)
+	if err != nil {
+		return nil
+	}
+	defer active.Close()
+	activeDefinitions, targetDefinitions, unreadable := loadReleaseProfiles(active, target)
+	if len(unreadable) != 0 {
+		return nil
+	}
+	formats := map[string]int{}
+	for _, definition := range targetDefinitions {
+		if definition.Runtime != nil {
+			formats[definition.Runtime.ActivationID] = definition.Runtime.EffectiveFormat()
+		}
+	}
+	var refusals []error
+	for _, definition := range activeDefinitions {
+		hook := definition.Runtime
+		if hook == nil {
+			continue
+		}
+		if format, ok := formats[hook.ActivationID]; ok && format < hook.EffectiveFormat() {
+			retry := "keep the current release active"
+			if retained && hook.PreparesRollbackTo == format {
+				retry = rollbackRetry
+			}
+			refusals = append(refusals, rollbackPrepRefusal{
+				message: fmt.Sprintf("release %s reads profile runtime %s in format %d, but its installed state has format %d", target.candidate.release, hook.ActivationID, format, hook.EffectiveFormat()),
+				retry:   retry,
+			})
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }

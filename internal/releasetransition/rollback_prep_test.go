@@ -17,8 +17,13 @@ import (
 
 // fileRollbackHooks keeps each owner's installed format in a file, so a
 // crashed child process leaves exactly the effects it completed. Format 2 is
-// the active release's, 1 the target's. Every apply is logged.
-type fileRollbackHooks struct{ dir string }
+// the active release's, 1 the target's. An apply has two effects: it writes
+// the converted state, then records the format; crashInside stops between
+// them. Every completed apply is logged.
+type fileRollbackHooks struct {
+	dir         string
+	crashInside bool
+}
 
 func (hooks fileRollbackHooks) formats(t interface{ Fatal(...any) }) map[string]int {
 	payload, err := os.ReadFile(filepath.Join(hooks.dir, "formats.json"))
@@ -63,11 +68,18 @@ func (hooks fileRollbackHooks) Apply(ctx context.Context, item RollbackPrepItem,
 	if err != nil || observed != item {
 		return fmt.Errorf("%w: assessment changed", domain.ErrPlanStale)
 	}
+	key := item.Owner + "@" + item.Yard
+	if err := os.WriteFile(filepath.Join(hooks.dir, "converted-"+key), []byte("format 1\n"), 0o600); err != nil {
+		return err
+	}
+	if hooks.crashInside {
+		os.Exit(97)
+	}
 	formats, err := hooks.read()
 	if err != nil {
 		return err
 	}
-	formats[item.Owner+"@"+item.Yard] = 1
+	formats[key] = 1
 	payload, _ := json.Marshal(formats)
 	if err := os.WriteFile(filepath.Join(hooks.dir, "formats.json"), payload, 0o600); err != nil {
 		return err
@@ -93,6 +105,47 @@ func (hooks fileRollbackHooks) applies(t *testing.T) []string {
 	return strings.Fields(string(payload))
 }
 
+// formatReconciler is the active release's own owner: it converges when
+// every owner holds the active release's format, and repairs by writing it.
+type formatReconciler struct {
+	hooks      fileRollbackHooks
+	reconciles int
+}
+
+var activeFormats = map[string]int{"alpha-runtime@default": 2, "beta-runtime@default": 1, "alpha-runtime@work": 2}
+
+func (reconciler *formatReconciler) ID() string { return "alpha-runtime" }
+
+func (reconciler *formatReconciler) Observe(context.Context, ReleasePair, ReleaseLinks) (V2ActivationObservation, error) {
+	payload, err := os.ReadFile(filepath.Join(reconciler.hooks.dir, "formats.json"))
+	if err != nil {
+		return V2ActivationObservation{}, err
+	}
+	// A converted state is drift even before its hook recorded the format.
+	converted, err := filepath.Glob(filepath.Join(reconciler.hooks.dir, "converted-*"))
+	if err != nil {
+		return V2ActivationObservation{}, err
+	}
+	desired, _ := json.Marshal(activeFormats)
+	actual, wanted := fingerprintPayload(append(payload, strings.Join(converted, "\n")...)), fingerprintPayload(desired)
+	return V2ActivationObservation{Actual: actual, Desired: wanted, Converged: actual == wanted}, nil
+}
+
+func (reconciler *formatReconciler) Reconcile(context.Context, ReleaseLinks) error {
+	reconciler.reconciles++
+	converted, err := filepath.Glob(filepath.Join(reconciler.hooks.dir, "converted-*"))
+	if err != nil {
+		return err
+	}
+	for _, path := range converted {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	payload, _ := json.Marshal(activeFormats)
+	return os.WriteFile(filepath.Join(reconciler.hooks.dir, "formats.json"), payload, 0o600)
+}
+
 var rollbackPrepTargets = [][2]string{{"alpha-runtime", "default"}, {"beta-runtime", "default"}, {"alpha-runtime", "work"}}
 
 type rollbackPrepFixture struct {
@@ -108,7 +161,7 @@ func newRollbackPrepFixture(t *testing.T) rollbackPrepFixture {
 	})
 	seedAppliedV2Ledger(t, configHome)
 	hooks := fileRollbackHooks{dir: testkit.TempDir(t)}
-	formats, _ := json.Marshal(map[string]int{"alpha-runtime@default": 2, "beta-runtime@default": 1, "alpha-runtime@work": 2})
+	formats, _ := json.Marshal(activeFormats)
 	testkit.WriteFile(t, filepath.Join(hooks.dir, "formats.json"), formats, 0o600)
 	return rollbackPrepFixture{configHome: configHome, hooks: hooks, registry: v2RegistryPayload(t)}
 }
@@ -135,7 +188,7 @@ func (fixture rollbackPrepFixture) prep(items []RollbackPrepItem, gate, dispatch
 }
 
 // forward is the active release's own transition, as yard migrate runs it.
-func (fixture rollbackPrepFixture) forward(t *testing.T, reconciler *v2TestReconciler) *V2Transition {
+func (fixture rollbackPrepFixture) forward(t *testing.T, reconciler V2ActivationReconciler) *V2Transition {
 	t.Helper()
 	links := ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}
 	transition, err := NewV2Transition(V2Options{
@@ -223,13 +276,16 @@ func assertRollbackPrepJournal(t *testing.T, journal JournalRecord) {
 
 const rollbackPrepChildEnv = "SUBYARD_TEST_ROLLBACK_PREP_CHILD"
 
+// rollbackPrepFaultInsideHook stops the first hook between its two effects.
+const rollbackPrepFaultInsideHook = "inside-rollback-hook"
+
 // TestRollbackPrepCrashChild is the crashing child of the harness below.
 func TestRollbackPrepCrashChild(t *testing.T) {
 	var spec struct{ ConfigHome, Hooks, Fault string }
 	if json.Unmarshal([]byte(os.Getenv(rollbackPrepChildEnv)), &spec) != nil || spec.ConfigHome == "" {
 		t.Skip("crash harness child")
 	}
-	fixture := rollbackPrepFixture{configHome: spec.ConfigHome, hooks: fileRollbackHooks{dir: spec.Hooks}, registry: v2RegistryPayload(t)}
+	fixture := rollbackPrepFixture{configHome: spec.ConfigHome, hooks: fileRollbackHooks{dir: spec.Hooks, crashInside: spec.Fault == rollbackPrepFaultInsideHook}, registry: v2RegistryPayload(t)}
 	prep := fixture.prep(fixture.plan(t), func(context.Context) error { return nil }, func(context.Context) error {
 		return os.WriteFile(filepath.Join(spec.Hooks, "dispatched"), nil, 0o600)
 	})
@@ -255,11 +311,12 @@ func crashRollbackPrep(t *testing.T, fixture rollbackPrepFixture, fault string) 
 	}
 }
 
-// An interruption at either fault point leaves the active release active
-// with a completed down transaction. Retrying the rollback resumes from the
-// observed hooks and switches; yard migrate instead repairs forward.
+// An interruption at any fault point, or inside a hook, leaves the active
+// release active with a completed down transaction. Retrying the rollback
+// resumes from the observed hooks and switches; yard migrate instead repairs
+// every owner forward to the active release's format.
 func TestRollbackPrepInterruptionResumesRollbackOrMigratesForward(t *testing.T) {
-	for _, fault := range []string{FaultAfterRollbackHook, FaultBeforeTargetDispatch} {
+	for fault, wantApplied := range map[string]int{FaultAfterRollbackJournal: 0, rollbackPrepFaultInsideHook: 0, FaultAfterRollbackHook: 1, FaultBeforeTargetDispatch: 2} {
 		for _, resume := range []string{"rollback", "migrate"} {
 			t.Run(fault+"/"+resume, func(t *testing.T) {
 				fixture := newRollbackPrepFixture(t)
@@ -268,12 +325,11 @@ func TestRollbackPrepInterruptionResumesRollbackOrMigratesForward(t *testing.T) 
 				if _, err := os.Stat(filepath.Join(fixture.hooks.dir, "dispatched")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("an interrupted down transaction dispatched the rollback")
 				}
-				wantApplied := 2
-				if fault == FaultAfterRollbackHook {
-					wantApplied = 1
-				}
 				if applied := fixture.hooks.applies(t); len(applied)/2 != wantApplied {
 					t.Fatalf("applied before %s: %v", fault, applied)
+				}
+				if _, err := os.Stat(filepath.Join(fixture.hooks.dir, "converted-alpha-runtime@default")); (err == nil) != (fault != FaultAfterRollbackJournal) {
+					t.Fatalf("first hook effect after %s: %v", fault, err)
 				}
 				switch resume {
 				case "rollback":
@@ -296,18 +352,26 @@ func TestRollbackPrepInterruptionResumesRollbackOrMigratesForward(t *testing.T) 
 						}
 					}
 				case "migrate":
-					// The converted owner now drifts from the active release.
-					reconciler := &v2TestReconciler{}
+					reconciler := &formatReconciler{hooks: fixture.hooks}
 					transition := fixture.forward(t, reconciler)
 					goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
 					inspection, err := transition.Inspect(context.Background(), goal)
-					if err != nil || len(inspection.Blockers) != 0 || inspection.Resume != nil ||
-						inspection.Outcome.Status != StatusMigrationRequired || inspection.Outcome.Code != CodeTransitionRequired {
+					if err != nil || len(inspection.Blockers) != 0 || inspection.Resume != nil || inspection.Outcome.Status == StatusOperatorActionRequired {
 						t.Fatalf("forward inspection after abandoned preparation = %#v, %v", inspection.Outcome, err)
 					}
-					outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: "migrate-grant"})
-					if err != nil || outcome.Status != StatusReady || outcome.Active != "release-b" || reconciler.reconciles != 1 {
-						t.Fatalf("forward repair = %#v, %v (reconciles %d)", outcome, err, reconciler.reconciles)
+					wantRepair := fault != FaultAfterRollbackJournal
+					if (inspection.Outcome.Status == StatusMigrationRequired) != wantRepair {
+						t.Fatalf("forward inspection after %s = %#v", fault, inspection.Outcome)
+					}
+					if wantRepair {
+						outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: "migrate-grant"})
+						if err != nil || outcome.Status != StatusReady || outcome.Active != "release-b" || reconciler.reconciles != 1 {
+							t.Fatalf("forward repair = %#v, %v (reconciles %d)", outcome, err, reconciler.reconciles)
+						}
+					}
+					converted, _ := filepath.Glob(filepath.Join(fixture.hooks.dir, "converted-*"))
+					if formats := fixture.hooks.formats(t); fmt.Sprint(formats) != fmt.Sprint(activeFormats) || len(converted) != 0 {
+						t.Fatalf("forward repair left formats %v and converted state %v", formats, converted)
 					}
 				}
 			})
@@ -328,6 +392,26 @@ func TestRollbackPrepRefusesBeforeAnyEffect(t *testing.T) {
 		store, _ := NewPOSIXV2Store(fixture.configHome)
 		if snapshot, err := store.ReadCurrentJournal(); err != nil || snapshot.Exists {
 			t.Fatalf("a refused preparation wrote a journal: %v", err)
+		}
+	})
+	t.Run("changed protected history", func(t *testing.T) {
+		fixture := newRollbackPrepFixture(t)
+		prep := fixture.prep(fixture.plan(t), never, never)
+		released := false
+		prep.Admit = func(context.Context) (func(), error) {
+			return nil, fmt.Errorf("%w: protected history changed", domain.ErrPlanStale)
+		}
+		if err := prep.Run(context.Background(), "grant"); !errors.Is(err, domain.ErrPlanStale) || fixture.hooks.applies(t) != nil || released {
+			t.Fatalf("changed history = %v", err)
+		}
+		store, _ := NewPOSIXV2Store(fixture.configHome)
+		if snapshot, err := store.ReadCurrentJournal(); err != nil || snapshot.Exists {
+			t.Fatalf("a refused admission wrote a journal: %v", err)
+		}
+		prep.Admit = func(context.Context) (func(), error) { return func() { released = true }, nil }
+		_ = prep.Run(context.Background(), "grant")
+		if !released {
+			t.Fatal("admission was not released after the journal")
 		}
 	})
 	t.Run("unfinished journal", func(t *testing.T) {
@@ -379,12 +463,37 @@ func TestRollbackPrepGateFailureKeepsActiveReleaseAndDispatchesNothing(t *testin
 	dispatched := false
 	err := fixture.prep(fixture.plan(t), func(context.Context) error { return refused },
 		func(context.Context) error { dispatched = true; return nil }).Run(context.Background(), "grant")
-	if !errors.Is(err, refused) || dispatched {
+	var interrupted RollbackPrepInterrupted
+	if !errors.Is(err, refused) || !errors.As(err, &interrupted) || dispatched {
 		t.Fatalf("gate failure = %v, dispatched %v", err, dispatched)
 	}
 	assertRollbackPrepJournal(t, fixture.currentJournal(t))
 	if applied := fixture.hooks.applies(t); len(applied) != 4 || !strings.HasPrefix(applied[1], RollbackPrepTransactionPrefixV1) || applied[1] != applied[3] {
 		t.Fatalf("hooks did not share the down transaction: %v", applied)
+	}
+}
+
+func TestRollbackPrepPlanSharesConsequencesAndChecksLimitsBeforeConsent(t *testing.T) {
+	fixture := newRollbackPrepFixture(t)
+	items := fixture.plan(t)
+	items[0].Consequence, items[2].Consequence = "restart the service", "restart the service"
+	if got := RollbackPrepConsequences(items, "release-a"); fmt.Sprint(got) != "[prepare profile runtime alpha-runtime for release release-a in 2 yard(s) restart the service]" {
+		t.Fatalf("consequences = %q", got)
+	}
+	plan, err := fixture.prep(items, nil, nil).Plan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	items[2].Consequence = "restart the service twice"
+	if changed, err := fixture.prep(items, nil, nil).Plan(); err != nil || changed == plan {
+		t.Fatalf("a hook consequence is not bound: %v", err)
+	}
+	many := []RollbackPrepItem{}
+	for index := range 64 {
+		many = append(many, RollbackPrepItem{Owner: "alpha-runtime", Yard: fmt.Sprintf("yard%d", index), State: RollbackPrepStale, Actual: digestB, Desired: digestA, Consequence: fmt.Sprintf("effect %d", index)})
+	}
+	if _, err := fixture.prep(many, nil, nil).Plan(); err == nil {
+		t.Fatal("a plan beyond the journal limits passed planning")
 	}
 }
 
