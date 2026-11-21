@@ -3,10 +3,12 @@ package releaseruntime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,15 +196,19 @@ func TestRollbackPrepRefusalsJoinCompatibilityRefusals(t *testing.T) {
 
 func TestFreshRollbackPlanAdmission(t *testing.T) {
 	transaction := releasetransition.TransactionID("tx-1")
+	plain := []string{"reactivate the verified retained previous runtime", "apply the exact typed migration and release activation plan"}
 	for name, test := range map[string]struct {
-		inspection releasetransition.Inspection
-		admitted   bool
+		fresh Prepared
+		retry string
 	}{
-		"plain":   {releasetransition.Inspection{}, true},
-		"blocked": {releasetransition.Inspection{Blockers: []releasetransition.Blocker{{Code: releasetransition.CodePlanStale, Message: "x"}}}, false},
-		"resume":  {releasetransition.Inspection{Resume: &transaction}, false},
+		"plain":       {Prepared{Consequences: plain}, ""},
+		"blocked":     {Prepared{Consequences: plain, inspection: releasetransition.Inspection{Blockers: []releasetransition.Blocker{{Code: releasetransition.CodePlanStale, Message: "x"}}}}, "run yard migrate"},
+		"resume":      {Prepared{Consequences: plain, inspection: releasetransition.Inspection{Resume: &transaction}}, "run yard migrate"},
+		"consequence": {Prepared{Consequences: append(slices.Clone(plain), "canonicalize setting YARD_TEMPLATE")}, "run yard update --rollback"},
 	} {
-		if err := admitFreshRollbackPlan(test.inspection); (err == nil) != test.admitted {
+		err := admitFreshRollbackPlan(test.fresh)
+		var refusal rollbackPrepRefusal
+		if test.retry == "" && err != nil || test.retry != "" && (!errors.As(err, &refusal) || refusal.retry != test.retry) {
 			t.Fatalf("%s: admission %v", name, err)
 		}
 	}
@@ -229,8 +235,14 @@ type preparedRollbackFixture struct {
 	gateErr                error
 }
 
-func newPreparedRollbackFixture(t *testing.T) *preparedRollbackFixture {
+// consequences are the target plan's own; a plain rollback has only the
+// engine's generic line.
+func newPreparedRollbackFixture(t *testing.T, consequences ...string) *preparedRollbackFixture {
 	t.Helper()
+	consequenceJSON, err := json.Marshal(append([]string{"apply the exact typed migration and release activation plan"}, consequences...))
+	if err != nil {
+		t.Fatal(err)
+	}
 	runtime, active, target, home, _ := retainedRuntimeFixture(t)
 	t.Cleanup(func() { _ = runtime.Close() })
 	declareRollbackPrepYard(t, home, "named")
@@ -242,8 +254,11 @@ func newPreparedRollbackFixture(t *testing.T) *preparedRollbackFixture {
 	}
 	testkit.WriteFile(t, filepath.Join(active, "config/profiles/sample/profile.json"),
 		[]byte(`{"schema_version":1,"default_yards":["default"],"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","format":2,"prepares_rollback_to":1},"managed_paths":[{"root":"data","path":"service/{yard}"}]}`), 0o600)
-	inspection := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, fixture.activeID, fixture.targetID, fixture.targetID)
+	inspection := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":%s},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, consequenceJSON, fixture.activeID, fixture.targetID, fixture.targetID)
 	journal := filepath.Join(home, "release-transition/v2/journal.json")
+	// The active release's own inspection after a down transaction reports
+	// its owners' prepared state as drift.
+	drift := strings.NewReplacer(`"previous":"`+fixture.targetID+`","target":"`+fixture.targetID+`"`, `"previous":"`+fixture.targetID+`","target":"`+fixture.activeID+`"`).Replace(inspection)
 	for _, candidate := range []struct{ path, id, version string }{{active, fixture.activeID, "0.31.0"}, {target, fixture.targetID, UpdateAnchorVersion}} {
 		if err := os.MkdirAll(filepath.Join(candidate.path, "bin"), 0o700); err != nil {
 			t.Fatal(err)
@@ -254,11 +269,12 @@ case "${1:-}" in
  _release-transition) request=$(cat); case "$request" in
   *runtime-activation-capabilities*) exit 1 ;;
   *'"mode":"converge"'*) printf 'converge\n' >>%q; exit 64 ;;
+  *'"direction":"activate-target"'*) printf '%%s\n' %q ;;
   *) if grep -q rollback-prep-v1- %q 2>/dev/null; then printf 'inspect prepared\n' >>%q; else printf 'inspect unprepared\n' >>%q; fi; printf '%%s\n' %q ;;
  esac ;;
  *) exit 64 ;;
 esac
-`, candidate.version, fixture.log, journal, fixture.log, fixture.log, inspection)
+`, candidate.version, fixture.log, drift, journal, fixture.log, fixture.log, inspection)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "bin/yard-engine"), []byte(engine), 0o700)
 		testkit.WriteFile(t, filepath.Join(candidate.path, "config/release-transition.json"), []byte(sourceAdmissionRegistry), 0o600)
 		var manifest strings.Builder
@@ -449,6 +465,44 @@ func TestPreparedRollbackRefusesAStoppedYard(t *testing.T) {
 		t.Fatalf("stopped yard = %#v, %v", outcome, err)
 	}
 	fixture.assertLinks(t)
+}
+
+func TestPreparedRollbackStopsAfterTheGateForAPlanNeedingItsOwnConfirmation(t *testing.T) {
+	const extra = "compact completed migration history checkpoint"
+	fixture := newPreparedRollbackFixture(t, extra)
+	prepared, err := fixture.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = prepared.Execute(context.Background())
+	outcome, ok := TransitionOutcome(err)
+	if !ok || outcome.Retry != "run yard update --rollback" || !strings.Contains(outcome.Message, "needs its own confirmation") {
+		t.Fatalf("fresh plan refusal = %#v, %v", outcome, err)
+	}
+	if len(fixture.applies) != 1 || len(fixture.gates) != 2 || fixture.engineLog(t) != "inspect prepared\n" {
+		t.Fatalf("refusal did not stop after the hooks and gate: applies %v gates %v log %q", fixture.applies, fixture.gates, fixture.engineLog(t))
+	}
+	fixture.assertLinks(t)
+
+	// The rerun finds every owner current and confirms the target's own plan.
+	rerun, err := fixture.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slicesContains(rerun.Consequences, extra) || slicesContains(rerun.Consequences, "prepare profile runtime sample-runtime in yard default for release "+fixture.targetID) {
+		t.Fatalf("rerun plan = %#v", rerun.Consequences)
+	}
+	fixture.formats["named"] = 2
+	if err := rerun.Execute(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("rerun ignored a changed prepared owner: %v", err)
+	}
+	fixture.formats["named"] = 1
+	if err := rerun.Execute(context.Background()); err == nil {
+		t.Fatal("the fixture target's convergence failure was lost")
+	}
+	if len(fixture.applies) != 1 || !strings.HasSuffix(fixture.engineLog(t), "converge\n") {
+		t.Fatalf("rerun did not dispatch the confirmed target plan alone: applies %v log %q", fixture.applies, fixture.engineLog(t))
+	}
 }
 
 func slicesContains(values []string, value string) bool {
