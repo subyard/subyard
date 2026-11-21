@@ -96,7 +96,6 @@ done
 (
   eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
     lane_vm_count preflight_lane dependency_lane clean_peers cleanup_lane)"
-  BROKER_RECOVERY_ONLY=0
   P0_NESTED_VM=1
   for P0_LANE in smoke full peer; do
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
@@ -107,9 +106,6 @@ done
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2
   [ "$(lane_vm_count)" = 2 ] || fail 'explicit VM2 nested teardown lost its selected guest'
-  BROKER_RECOVERY_ONLY=1
-  [ "$(lane_vm_count)" = 1 ] || fail 'broker diagnostic requested an unused outer guest'
-  BROKER_RECOVERY_ONLY=0
   for P0_LANE in smoke full-uninstall; do
     ENVIRONMENT_TYPE=subyard-pair
     eval "$(sed -n '/^LEASE_PURPOSE="p0-/,/^acquire_lease$/ { /^acquire_lease$/d; p; }' "$ROOT/dev/e2e/p0-acceptance.sh")"
@@ -2750,115 +2746,6 @@ for owner_sink_scenario in success absent metadata-only busy-lock unsafe-lock un
       esac
     ' || fail "P0 owner sink cleanup violated $owner_sink_scenario isolation"
 done
-remove_reclaim_fixture_source="$(sed -n \
-  '/^remove_reclaim_fixture() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-reclaim_cleanup_attempts="$TMP/reclaim-cleanup-attempts"
-: > "$reclaim_cleanup_attempts"
-set +e
-REMOVE_RECLAIM_FIXTURE_SOURCE="$remove_reclaim_fixture_source" \
-  RECLAIM_CLEANUP_ATTEMPTS="$reclaim_cleanup_attempts" bash -c '
-    set -u
-    eval "$REMOVE_RECLAIM_FIXTURE_SOURCE"
-    RECLAIM_MARKER=subyard-p0-release-reclaim-v1:1234abcd
-    RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
-    ssh() {
-      target=
-      for argument do
-        case "$argument" in e2e-vm-[12]) target=$argument ;; esac
-      done
-      printf "%s\n" "$target" >> "$RECLAIM_CLEANUP_ATTEMPTS"
-      [ "$target" != e2e-vm-1 ]
-    }
-    remove_reclaim_fixture fixture-config
-  '
-reclaim_cleanup_rc=$?
-set -e
-[ "$reclaim_cleanup_rc" -ne 0 ] \
-  && [ "$(cat "$reclaim_cleanup_attempts")" = $'e2e-vm-1\ne2e-vm-2' ] \
-  || fail "reclaim cleanup did not preserve VM1 failure while attempting VM2: rc=$reclaim_cleanup_rc"
-# Disposable release must prove both instance and root-volume absence. An empty
-# instance inventory alone must not hide retained disk resources.
-slot_empty_source="$(sed -n '/^assert_slot_empty() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-for slot_inventory_case in empty instances root-volume foreign-project; do
-  set +e
-  SLOT_EMPTY_SOURCE="$slot_empty_source" SLOT_INVENTORY_CASE="$slot_inventory_case" bash -c '
-    set -euo pipefail
-    eval "$SLOT_EMPTY_SOURCE"
-    die() { exit 2; }
-    outer_root() {
-      case "$*" in
-        "incus project get subyard-e2e-vms-slot-2 user.subyard.managed")
-          if [ "$SLOT_INVENTORY_CASE" = foreign-project ]; then printf "foreign\n";
-          else printf "test-vms-v1\n"; fi ;;
-        "incus list --project subyard-e2e-vms-slot-2 --format json")
-          if [ "$SLOT_INVENTORY_CASE" = instances ]; then printf "[{\"name\":\"e2e-vm-1\"}]\n";
-          else printf "[]\n"; fi ;;
-        "incus storage volume list default --project subyard-e2e-vms-slot-2 --format json")
-          if [ "$SLOT_INVENTORY_CASE" = root-volume ]; then printf "[{\"type\":\"virtual-machine\"}]\n";
-          else printf "[]\n"; fi ;;
-        *) exit 3 ;;
-      esac
-    }
-    assert_slot_empty 2
-  '
-  slot_inventory_rc=$?
-  set -e
-  if [ "$slot_inventory_case" = empty ]; then
-    [ "$slot_inventory_rc" = 0 ] || fail 'empty owned disposable slot was rejected'
-  else
-    [ "$slot_inventory_rc" = 2 ] \
-      || fail "disposable release accepted $slot_inventory_case: rc=$slot_inventory_rc"
-  fi
-done
-grep -Fq '"$runtime_root/current/bin/yard" update \' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && ! grep -Fq 'scripts/install-runtime-release.sh' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  || fail 'P0 broker recovery bypasses the release-transition owner'
-recovery_wait_source="$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" wait_for_slot_state)"
-recovery_clock="$TMP/recovery-clock"
-recovery_status_budgets="$TMP/recovery-status-budgets"
-recovery_sleep_log="$TMP/recovery-sleep-log"
-printf '0\n' > "$recovery_clock"
-: > "$recovery_status_budgets"
-: > "$recovery_sleep_log"
-set +e
-recovery_wait_output="$({
-  RECOVERY_WAIT_SOURCE="$recovery_wait_source" \
-    RECOVERY_CLOCK="$recovery_clock" \
-    RECOVERY_STATUS_BUDGETS="$recovery_status_budgets" \
-    RECOVERY_SLEEP_LOG="$recovery_sleep_log" bash -c '
-      set -eu
-      eval "$RECOVERY_WAIT_SOURCE"
-      RECOVERY_POLL_SECONDS=2
-      RECOVERY_STATUS_TIMEOUT_SECONDS=30
-      RECOVERY_STATUS_KILL_AFTER_SECONDS=10
-      recovery_monotonic_seconds() { cat "$RECOVERY_CLOCK"; }
-      status() {
-        request_timeout=$1
-        printf "%s\n" "$request_timeout" >> "$RECOVERY_STATUS_BUDGETS"
-        now="$(cat "$RECOVERY_CLOCK")"
-        printf "%s\n" "$((now + request_timeout + RECOVERY_STATUS_KILL_AFTER_SECONDS))" \
-          > "$RECOVERY_CLOCK"
-        return 124
-      }
-      sleep() {
-        printf "%s\n" "$1" >> "$RECOVERY_SLEEP_LOG"
-        now="$(cat "$RECOVERY_CLOCK")"
-        printf "%s\n" "$((now + $1))" > "$RECOVERY_CLOCK"
-      }
-      wait_for_slot_state slot-001 available 65
-    '
-} 2>&1)"
-recovery_wait_rc=$?
-set -e
-[ "$recovery_wait_rc" = 1 ] \
-  && [ "$(cat "$recovery_clock")" = 65 ] \
-  && [ "$(cat "$recovery_status_budgets")" = $'30\n13' ] \
-  && [ "$(cat "$recovery_sleep_log")" = 2 ] \
-  || fail "P0 broker recovery wait exceeded its wall-clock deadline: rc=$recovery_wait_rc output=$recovery_wait_output"
 (
   holder_pid=''
   trap '
@@ -2882,11 +2769,7 @@ set -e
   stop_holder_child "$holder_pid" 2>/dev/null
   [ "$((SECONDS - started))" -le 4 ] \
     && ! kill -0 -- "-$holder_pid" >/dev/null 2>&1
-) || fail 'P0 broker recovery readiness timeout does not bound holder process-group shutdown'
-if grep -Fq 'mask --runtime --now incus.service' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh"; then
-  fail "P0 broker recovery fault injection drains unrelated held leases"
-fi
+) || fail 'lease holder process-group shutdown exceeded its deadline'
 grep -Fq 'SOURCE_INGRESS_ROOT' "$ROOT/dev/bootstrap-runtime.sh" \
   && grep -Fq 'Sources before v0.11.0 are unsupported.' "$ROOT/dev/bootstrap-runtime.sh" \
   && [ ! -e "$ROOT/scripts/migrate-source-install.sh" ] \

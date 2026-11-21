@@ -1415,7 +1415,7 @@ p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}
 python3() {{ cat >/dev/null; echo consumed; }}
-reclaim_broker_recovery_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; echo image; OWNER_BASE_IMAGE_CREATED=0; }}
+reclaim_owner_build_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; echo image; OWNER_BASE_IMAGE_CREATED=0; }}
 """+reclaim+'\nreclaim_supported_upgrade_inputs\n'
     result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
     assert (result.returncode==0)==(fault==''),(fault,result)

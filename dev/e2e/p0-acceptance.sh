@@ -28,7 +28,6 @@ FULL_AUX_DURATION=0
 CANDIDATE_HASH=''
 CAPACITY_LOG_DIR=''
 PEERS_ONLY="${SUBYARD_P0_PEERS_ONLY:-0}"
-BROKER_RECOVERY_ONLY="${SUBYARD_P0_BROKER_RECOVERY_ONLY:-0}"
 P0_NESTED_VM="${SUBYARD_P0_NESTED_VM:-1}"
 declare -A CAPACITY_PID=()
 declare -A CAPACITY_FLAG=()
@@ -163,8 +162,6 @@ parse_arguments() {
     || die '--smoke-covered applies only to --lane full'
   [ "${P0_SPLIT_COVERED:-0}" = 0 ] || [ "$P0_LANE" = full ] \
     || die '--split-covered applies only to --lane full'
-  [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
-    || die 'broker-recovery-only cannot be combined with --lane'
   [ -n "$LEASE_REQUESTED_SLOT" ] \
     || die '--slot N is required for every executable P0 lane'
   if [ "$PEERS_ONLY" = 1 ] && [ "$lane_seen" = 0 ]; then
@@ -176,7 +173,6 @@ parse_arguments() {
   esac
 }
 lane_vm_count() {
-  [ "$BROKER_RECOVERY_ONLY" = 0 ] || { printf '1\n'; return; }
   case "$P0_LANE" in
     smoke|full|peer) printf '2\n' ;;
     nested-teardown) printf '%s\n' "$P0_NESTED_VM" ;;
@@ -1473,7 +1469,6 @@ LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test
 [ "$P0_LANE" != full ] || LEASE_PURPOSE=p0-acceptance
-[ "$BROKER_RECOVERY_ONLY" = 0 ] || LEASE_PURPOSE=p0-broker-recovery
 acquire_lease
 start_lease_keeper
 CONFIG="$CLIENT_CONFIG"
@@ -1490,18 +1485,6 @@ printf '  [ .. ] exact public candidate sha256=%s bundle=%s\n' \
 TOKEN="$((16#$LEASE_RUN))${LEASE_EPOCH}"
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'lease token is invalid'
 prepare_run_records
-
-if [ "$BROKER_RECOVERY_ONLY" = 1 ]; then
-  HOME_STATE_BEFORE[1]="$(home_state 1)"
-  run_phase capacity-preflight run_vm 1 capacity-preflight
-  run_phase broker-physical run_vm 1 broker-recovery-owner
-  run_phase cleanup run_vm 1 capacity-verify-cleanup
-  [ "$(home_state 1)" = "${HOME_STATE_BEFORE[1]}" ] \
-    || die 'VM1 operator home permissions or ownership changed'
-  assert_no_worktrees
-  printf 'ok: P0 physical broker leases, slot resizing and recovery acceptance passed\n'
-  exit 0
-fi
 
 vm1_ip="$(ssh -F "$CONFIG" -G e2e-vm-1 | awk '!found && $1=="hostname" {print $2; found=1}')"
 vm2_ip=''
