@@ -14,34 +14,22 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
-	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func installationCheckFixture(t *testing.T) (string, []string) {
+// installationCheckFixture enables audit: the check itself must not write a record.
+func installationCheckFixture(t *testing.T) *cliFixture {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
-	path := filepath.Join(root, "config", "commands.registry")
-	manifest, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeInstallationFixture(t, path, append(manifest, "check||@check||forward|read|never|public|lifecycle|simple|check|check|--json --host --help|\n"...), 0o600)
+	// The installation check constructors leave WorkingDir empty, as before the fixture.
+	fixture := newFixture(t, withAudit(), withWorkingDir(""))
+	root := fixture.Root
+	fixture.Write("config/commands.registry", fixture.Read("config/commands.registry")+"check||@check||forward|read|never|public|lifecycle|simple|check|check|--json --host --help|\n")
 	for _, directory := range []string{"state", "data"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeInstallationFixture(t, filepath.Join(root, "home", ".ssh", "known_hosts"), []byte("retained host key\n"), 0o600)
-	// Audit is enabled: the check itself must not write a record.
-	return root, slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "SUBYARD_NO_AUDIT=") })
-}
-
-func writeInstallationFixture(t *testing.T, path string, data []byte, mode os.FileMode) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, path, data, mode)
+	fixture.Write(filepath.Join(fixture.Home, ".ssh", "known_hosts"), "retained host key\n")
+	return fixture
 }
 
 func runInstallationCheck(t *testing.T, root string, environment []string, arguments ...string) (int, application.ConformanceReport, string) {
@@ -86,7 +74,8 @@ func reportFindings(report application.ConformanceReport) map[string]application
 }
 
 func TestInstallationCheckIsReadOnlyWithNonWritableHomes(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	code, writable, stderr := runInstallationCheck(t, root, environment, "--yes")
 	var sections []string
 	for _, section := range writable.Sections {
@@ -113,16 +102,17 @@ func TestInstallationCheckIsReadOnlyWithNonWritableHomes(t *testing.T) {
 }
 
 func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome, data := filepath.Join(root, "state"), filepath.Join(root, "data")
-	writeInstallationFixture(t, filepath.Join(configHome, "config.env"), []byte("YARD_CAPS=ignored\n"), 0o600)
-	writeInstallationFixture(t, filepath.Join(configHome, "yards", "broken", "config.env"), []byte("UNKNOWN_SETTING=1\n"), 0o600)
+	fixture.Write(filepath.Join(configHome, "config.env"), "YARD_CAPS=ignored\n")
+	fixture.Write(filepath.Join(configHome, "yards", "broken", "config.env"), "UNKNOWN_SETTING=1\n")
 	for _, name := range []string{"a", "b"} {
-		writeInstallationFixture(t, filepath.Join(configHome, "generated", name), []byte("fixture\n"), 0o666)
+		fixture.Write(filepath.Join(configHome, "generated", name), "fixture\n", 0o666)
 	}
-	writeInstallationFixture(t, filepath.Join(data, "owner-inventory", "registration.json"), []byte("{}\n"), 0o600)
-	writeInstallationFixture(t, filepath.Join(data, "cleanup", "token", "journal.json"), []byte("{}\n"), 0o600)
-	writeInstallationFixture(t, filepath.Join(configHome, "projects", "bad.json"), []byte("{"), 0o600)
+	fixture.Write(filepath.Join(data, "owner-inventory", "registration.json"), "{}\n")
+	fixture.Write(filepath.Join(data, "cleanup", "token", "journal.json"), "{}\n")
+	fixture.Write(filepath.Join(configHome, "projects", "bad.json"), "{")
 	code, report, _ := runInstallationCheck(t, root, environment)
 	findings := reportFindings(report)
 	want := map[string]application.FindingClass{
@@ -147,9 +137,10 @@ func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 }
 
 func TestInstallationCheckUsesEnvironmentSuppliedSettings(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root := fixture.Root
 	keys := filepath.Join(root, "custom keys")
-	environment = append(slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
+	environment := append(slices.DeleteFunc(slices.Clone(fixture.Environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
 	_, report, _ := runInstallationCheck(t, root, environment)
 	if message := reportFindings(report)["host.credentials.initialization"].Message; !strings.Contains(message, filepath.Join(keys, "identity.json")) {
 		t.Fatalf("credential inspection ignored SUBYARD_KEYS_ROOT: %q", message)
@@ -163,8 +154,9 @@ func reportOf(t *testing.T, root string, environment []string) (int, map[string]
 }
 
 func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
-	root, environment := installationCheckFixture(t)
-	writeInstallationFixture(t, filepath.Join(root, "state", "generated", "a"), []byte("fixture\n"), 0o666)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
+	fixture.Write(filepath.Join(fixture.ConfigHome, "generated", "a"), "fixture\n", 0o666)
 	directory, err := os.Open(filepath.Join(root, "state"))
 	if err != nil {
 		t.Fatal(err)
@@ -183,11 +175,12 @@ func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
 }
 
 func TestInstallationCheckReportsLegacyInputsWithoutAYardLoad(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := filepath.Join(root, "state")
-	writeInstallationFixture(t, filepath.Join(configHome, "config.env"), []byte("UNKNOWN_SETTING=1\n"), 0o600)
+	fixture.Write(filepath.Join(configHome, "config.env"), "UNKNOWN_SETTING=1\n")
 	for _, name := range []string{"a.env", "b.env"} {
-		writeInstallationFixture(t, filepath.Join(configHome, "secrets", "legacy", name), []byte("fixture\n"), 0o600)
+		fixture.Write(filepath.Join(configHome, "secrets", "legacy", name), "fixture\n")
 	}
 	code, findings := reportOf(t, root, environment)
 	if code != 1 || findings["config.schema.default"].Class != application.FindingBlocker ||
@@ -198,8 +191,9 @@ func TestInstallationCheckReportsLegacyInputsWithoutAYardLoad(t *testing.T) {
 }
 
 func TestInstallationCheckJudgesConfigurationFromPersistedSources(t *testing.T) {
-	root, environment := installationCheckFixture(t)
-	writeInstallationFixture(t, filepath.Join(root, "state", "yards", "other", "config.env"), []byte("SSH_PORT=2224\n"), 0o600)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
+	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "other", "config.env"), "SSH_PORT=2224\n")
 	// The fixture exports SSH_PORT=2222, which would reserve one port for both yards.
 	_, findings := reportOf(t, root, environment)
 	if _, conflict := findings["config.conflicts.listeners"]; conflict {
@@ -218,7 +212,8 @@ func TestInstallationCheckJudgesConfigurationFromPersistedSources(t *testing.T) 
 }
 
 func TestInstallationCheckSeparatesUnreadableCleanupAndConfigPaths(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	data, configHome := filepath.Join(root, "data"), filepath.Join(root, "state")
 	if err := os.MkdirAll(filepath.Join(data, "cleanup", "fifo"), 0o700); err != nil {
 		t.Fatal(err)
@@ -251,10 +246,11 @@ func TestInstallationCheckSeparatesUnreadableCleanupAndConfigPaths(t *testing.T)
 }
 
 func TestInstallationCheckBlocksAPartialIdentityThatInitRefuses(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
+	root := fixture.Root
 	keys := filepath.Join(root, "custom keys")
-	writeInstallationFixture(t, filepath.Join(keys, "identity", "age.txt"), []byte("partial\n"), 0o600)
-	environment = append(slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
+	fixture.Write(filepath.Join(keys, "identity", "age.txt"), "partial\n")
+	environment := append(slices.DeleteFunc(slices.Clone(fixture.Environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
 	_, findings := reportOf(t, root, environment)
 	if finding := findings["host.credentials.initialization"]; finding.Class != application.FindingBlocker || finding.Next != "" || !strings.Contains(finding.Message, "refuses") {
 		t.Fatalf("partial identity: %+v", finding)
@@ -266,14 +262,10 @@ type failingCheckOutput struct{}
 func (failingCheckOutput) Write([]byte) (int, error) { return 0, syscall.ENOSPC }
 
 func TestInstallationCheckOutputFailureIsExitTwo(t *testing.T) {
-	root, environment := installationCheckFixture(t)
+	fixture := installationCheckFixture(t)
 	for _, arguments := range [][]string{{"check", "--help"}, {"check", "--json"}, {"check"}} {
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
-			Environment: environment, Stdout: failingCheckOutput{}, Stderr: &stderr, Incus: lifecycleIncus()})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: arguments, Stdout: failingCheckOutput{}, Stderr: &stderr, Incus: lifecycleIncus()})
 		if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "no space left") {
 			t.Fatalf("%v: code=%d stderr=%q", arguments, code, stderr.String())
 		}
