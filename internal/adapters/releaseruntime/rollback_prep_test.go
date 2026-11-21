@@ -430,8 +430,9 @@ func TestRollbackThroughAProfileHookTakesTwoCommands(t *testing.T) {
 	if err := prepared.Execute(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// The gate is the second command's admission, target inspection included.
 	if !slices.Equal(fixture.applies, []string{"default sample-runtime yard " + fixture.activeID}) ||
-		!slices.Contains(fixture.gate, "default sample-runtime") || fixture.engineLog(t) != "" {
+		!slices.Contains(fixture.gate, "default sample-runtime") || fixture.engineLog(t) != "inspect\n" {
 		t.Fatalf("applies %v, gate %v, target engine log %q", fixture.applies, fixture.gate, fixture.engineLog(t))
 	}
 	fixture.assertUnchanged(t)
@@ -462,24 +463,21 @@ func TestRollbackThroughAProfileHookTakesTwoCommands(t *testing.T) {
 	}
 }
 
-// Only drift of owners prepared for the retained release, in yards whose
-// rollback-observe reports them prepared, admits a rollback from an active
-// release that is not ready; any other drift keeps its repair. The admitted
-// cases are the real engine's inspection, completed history included.
+// Only drift of owners prepared for the retained release admits a rollback
+// from an active release that is not ready; yard attribution is not
+// consulted. Any other decision keeps its repair. The engine cases are the
+// real engine's inspection, completed history included.
 func TestRollbackAdmitsOnlyPreparedOwnerDrift(t *testing.T) {
 	const activation = `{"resource":"activation.sample-runtime","scope":"activation","decision":"canonicalize","result":"converged"}`
 	for name, test := range map[string]struct {
 		decisions string   // hand-written decisions, or
 		yards     []string // the engine's drift attribution
-		absent    string   // a yard whose rollback-observe reports absent
 		admitted  bool
 	}{
 		"prepared yards":         {yards: []string{"default", "named"}, admitted: true},
-		"one prepared yard":      {yards: []string{"default"}, admitted: true},
-		"unprepared yard":        {yards: []string{"default"}, absent: "default"},
-		"unattributed drift":     {yards: []string{}},
-		"another owner":          {decisions: `{"resource":"activation.other-runtime","scope":"activation","decision":"canonicalize","result":"converged"},{"resource":"activation.other-runtime","scope":"yard-attribution","decision":"preserve","result":"drift default"}`},
-		"failed yard":            {decisions: activation + `,{"resource":"activation.sample-runtime","scope":"yard-attribution","decision":"preserve","result":"failed default"}`},
+		"unattributed drift":     {yards: []string{}, admitted: true},
+		"failed yard":            {decisions: activation + `,{"resource":"activation.sample-runtime","scope":"yard-attribution","decision":"preserve","result":"failed default"}`, admitted: true},
+		"another owner":          {decisions: `{"resource":"activation.other-runtime","scope":"activation","decision":"canonicalize","result":"converged"}`},
 		"migration":              {decisions: `{"resource":"migration-history.checkpoint","scope":"migration-history","decision":"transform","result":"compact-migration-history"}`},
 		"other history decision": {decisions: activation + `,{"resource":"transition.source-metadata","decision":"transform","result":"metadata"}`},
 	} {
@@ -491,21 +489,83 @@ func TestRollbackAdmitsOnlyPreparedOwnerDrift(t *testing.T) {
 			} else {
 				fixture.reportEngineDrift(t, test.yards...)
 			}
-			if test.absent != "" {
-				observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
-				fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
-					if loaded.Context.YardName == test.absent {
-						return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
-					}
-					return observe(ctx, root, loaded, id)
-				}
-			}
 			prepared, err := fixture.prepare(t)
-			if test.admitted && (err != nil || prepared.Action != "update.rollback") ||
+			if test.admitted && (err != nil || prepared.Action != rollbackAction) ||
 				!test.admitted && (err == nil || !strings.Contains(err.Error(), "permits only exact target "+fixture.activeID)) {
 				t.Fatalf("action %s, %v", prepared.Action, err)
 			}
 		})
+	}
+}
+
+// Past that rule, rollback-observe alone routes each yard: stale, also
+// partway through a conversion, offers its preparation; a stopped yard or a
+// failed observation refuses with its own next step and cause.
+func TestPreparedDriftRoutesEachYardByRollbackObserve(t *testing.T) {
+	intermediate := strings.Repeat("9", 64)
+	for name, test := range map[string]struct {
+		arrange func(*preparedRollbackFixture)
+		check   func(*testing.T, *preparedRollbackFixture, Prepared, error)
+	}{
+		"partway through a conversion": {func(fixture *preparedRollbackFixture) {
+			observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
+			fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+				observation, err := observe(ctx, root, loaded, id)
+				if loaded.Context.YardName == "default" && fixture.formats["default"] == 3 {
+					observation = ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: intermediate, Desired: prepOld}
+				}
+				return observation, err
+			}
+			fixture.formats["default"] = 3
+		}, func(t *testing.T, fixture *preparedRollbackFixture, prepared Prepared, err error) {
+			if err != nil || prepared.Action != PrepareRollbackAction || len(prepared.Steps) != 2 || prepared.Steps[0].Target != "activation.sample-runtime yard.default" {
+				t.Fatalf("resumed plan = %s %#v, %v", prepared.Action, prepared.Steps, err)
+			}
+		}},
+		"stopped yard": {func(fixture *preparedRollbackFixture) { fixture.formats["default"] = 0 }, func(t *testing.T, _ *preparedRollbackFixture, _ Prepared, err error) {
+			if outcome := outcomeOf(t, err); retryAction(t, outcome.Retry) != (domain.Action{Verb: domain.VerbStart, Yard: "default"}) || !strings.Contains(outcome.Message, "yard default is stopped") {
+				t.Fatalf("stopped prepared yard = %#v", outcome)
+			}
+		}},
+		"failed retained observation": {func(fixture *preparedRollbackFixture) {
+			fixture.gateErr = errors.New("retained observation unavailable")
+		},
+			func(t *testing.T, fixture *preparedRollbackFixture, _ Prepared, err error) {
+				if outcome := outcomeOf(t, err); outcome.Retry != migrateRetry || !errors.Is(err, fixture.gateErr) {
+					t.Fatalf("failed observation = %#v, %v", outcome, err)
+				}
+			}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPreparedRollbackFixture(t, preparedSample)
+			fixture.formats["default"] = 1
+			fixture.reportEngineDrift(t, "default")
+			test.arrange(fixture)
+			prepared, err := fixture.prepare(t)
+			test.check(t, fixture, prepared, err)
+		})
+	}
+}
+
+// The engine omits yard attribution beyond its wire limit; step 2 stays
+// reachable after preparing 255 yards.
+func TestRollbackPreparationOfEveryYardReachesTheRollback(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	fixture.formats["named"] = 2
+	for index := 2; index < 255; index++ {
+		yard := fmt.Sprintf("y%03d", index)
+		declareRollbackPrepYard(t, fixture.home, yard)
+		fixture.formats[yard] = 2
+	}
+	prepared, err := fixture.prepare(t)
+	if err != nil || len(prepared.Steps) != 256 {
+		t.Fatalf("plan = %d steps, %v", len(prepared.Steps), err)
+	}
+	if err := prepared.Execute(context.Background()); err != nil || len(fixture.applies) != 255 {
+		t.Fatalf("preparation = %v, %d conversions", err, len(fixture.applies))
+	}
+	if rollback, err := fixture.prepare(t); err != nil || rollback.Action != rollbackAction {
+		t.Fatalf("after preparation = %s, %v", rollback.Action, err)
 	}
 }
 
@@ -666,7 +726,8 @@ func TestRollbackPreparationRechecksBeforeAnyEffect(t *testing.T) {
 			}
 			// A finding keeps its own next step.
 			if outcome := outcomeOf(t, err); name == "stopped yard" &&
-				(retryAction(t, outcome.Retry) != (domain.Action{Verb: domain.VerbStart, Yard: "named"}) || !strings.Contains(outcome.Message, "yard named is stopped")) {
+				(retryAction(t, outcome.Retry) != (domain.Action{Verb: domain.VerbStart, Yard: "named"}) || !strings.Contains(outcome.Message, "yard named is stopped") ||
+					strings.Count(err.Error(), "nothing was converted") != 1 || strings.Count(err.Error(), "yard named is stopped") != 1) {
 				t.Fatalf("stopped yard after confirmation = %#v", outcome)
 			}
 			fixture.assertUnchanged(t)
@@ -688,9 +749,34 @@ func TestRollbackPreparationRechecksTheRetainedBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = prepared.Execute(context.Background())
-	if outcome := outcomeOf(t, err); outcome.Message != "the retained release cannot verify installed runtime activation" ||
+	if outcome := outcomeOf(t, err); outcome.Code != releasetransition.CodePlanStale || !strings.HasSuffix(outcome.Message, "nothing was converted; "+retainedBindingMessage) ||
 		!strings.Contains(err.Error(), "other-runtime") || len(fixture.applies) != 0 {
 		t.Fatalf("changed installed state = %#v, %v, applies %v", outcome, err, fixture.applies)
+	}
+	fixture.assertUnchanged(t)
+}
+
+// A VM configuration the retained release cannot read, appearing after
+// confirmation, converts nothing.
+func TestRollbackPreparationRechecksVMCompatibility(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	writeVMRollbackSettings(t, fixture.home, "named", "1")
+	headless := false
+	fixture.runtime.config.YardInstance = func(context.Context, config.Loaded) (ports.InstanceInfo, error) {
+		configuration := map[string]string{}
+		if headless {
+			configuration["raw.qemu.conf"] = domain.VMRawQEMUConfig(true)
+		}
+		return ports.InstanceInfo{Type: domain.YardVM, LocalConfig: configuration}, nil
+	}
+	prepared, err := fixture.prepare(t)
+	if err != nil || prepared.Action != PrepareRollbackAction {
+		t.Fatal(prepared.Action, err)
+	}
+	headless = true
+	err = prepared.Execute(context.Background())
+	if outcome := outcomeOf(t, err); outcome.Code != releasetransition.CodePlanStale || !strings.Contains(err.Error(), "free page reporting") || len(fixture.applies) != 0 {
+		t.Fatalf("changed VM configuration = %#v, %v, applies %v", outcome, err, fixture.applies)
 	}
 	fixture.assertUnchanged(t)
 }
@@ -739,6 +825,10 @@ func TestRollbackPreparationFailuresNameTheirNextStep(t *testing.T) {
 		"changed effect": {func(fixture *preparedRollbackFixture) {
 			fixture.apply = func() { fixture.consequence["default"] = "other" }
 		}, domain.ErrPlanStale, rollbackRetry},
+		// A hook that reports success without converting fails the gate.
+		"unconverted owner": {func(fixture *preparedRollbackFixture) {
+			fixture.runtime.config.ProfileRuntimeRollbackApply = func(context.Context, string, config.Loaded, string, string, string, string, string) error { return nil }
+		}, nil, rollbackRetry},
 		// The gate reads the history afresh.
 		"changed history": {func(fixture *preparedRollbackFixture) {
 			apply := fixture.runtime.config.ProfileRuntimeRollbackApply

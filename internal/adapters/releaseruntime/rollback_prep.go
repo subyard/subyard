@@ -26,8 +26,12 @@ import (
 // does not read, and stops with this release active. The second is the
 // ordinary rollback.
 
-// PrepareRollbackAction is the first command's action.
-const PrepareRollbackAction domain.ActionID = "update.prepare-rollback"
+// PrepareRollbackAction is the first command's action; the second is the
+// ordinary rollback.
+const (
+	PrepareRollbackAction domain.ActionID = "update.prepare-rollback"
+	rollbackAction        domain.ActionID = "update.rollback"
+)
 
 const keepActiveRetry = "keep the current release active"
 
@@ -252,10 +256,6 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 	return observation, nil
 }
 
-// retainedBinding recomputes the retained release's installed-runtime
-// activation binding.
-type retainedBinding func(context.Context) (string, error)
-
 // retainedBindingMessage reports installed runtime state the retained
 // release cannot activate.
 const retainedBindingMessage = "the retained release cannot verify installed runtime activation"
@@ -281,6 +281,9 @@ func joinReleaseRefusals(first publicReleaseInspectionError, message string, det
 
 // outcomeDetails is a refusal's cause without its rendered outcomes.
 func outcomeDetails(cause error) error {
+	if public := (publicReleaseInspectionError{}); errors.As(cause, &public) {
+		cause = public.cause
+	}
 	if _, outcome := cause.(transitionOutcomeFailure); outcome {
 		return nil
 	}
@@ -297,34 +300,36 @@ func outcomeDetails(cause error) error {
 	return domain.CollectOrderedRefusals(details...)
 }
 
-// staleFormatObservation reports what changed in the owners' observations
-// after confirmation, with the first finding's next step.
-func staleFormatObservation(request releasetransition.ProcessRequest, observed formatObservation) error {
-	const changed = "profile runtime state changed after confirmation; nothing was converted"
-	if len(observed.messages) == 0 {
-		return staleReleaseState(request.RuntimeRoot, request.Target, changed, rollbackRetry)
+// staleAfterConfirmation reports a refusal of the admission rerun before
+// the first conversion, with its own next step.
+func staleAfterConfirmation(request releasetransition.ProcessRequest, refusal error) error {
+	const changed = "release state changed after confirmation; nothing was converted"
+	outcome, typed := TransitionOutcome(refusal)
+	if !typed {
+		return refusal
 	}
-	complete := changed + "; " + strings.Join(observed.messages, "; ")
-	message := complete
+	message, retry := changed+"; "+outcome.Message, outcome.Retry
 	if len(message) > 512 {
-		message = fmt.Sprintf("%s; %d findings omitted; full details: stderr of yard update --rollback", changed, len(observed.messages))
+		message = changed + "; full details: stderr of yard update --rollback"
 	}
-	retry := rollbackRetry
-	if _, _, typed := domain.ParseRetry(observed.retry); typed {
-		retry = observed.retry
+	if _, _, ok := domain.ParseRetry(retry); !ok {
+		retry = rollbackRetry
 	}
-	err := staleReleaseState(request.RuntimeRoot, request.Target, message, retry).(publicReleaseInspectionError)
-	err.cause = domain.CollectOrderedRefusals(append([]error{err.cause, errors.New(complete)}, observed.causes...)...)
-	return err
+	stale := observedPublicReleaseOutcome(request.RuntimeRoot, request.Target, nil, releasetransition.CodePlanStale, message, retry)
+	cause := fmt.Errorf("%w: %w", domain.ErrPlanStale, transitionOutcomeError(stale))
+	if message != changed+"; "+outcome.Message {
+		cause = fmt.Errorf("%w; %s", cause, outcome.Message)
+	}
+	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(cause, outcomeDetails(refusal)), outcome: stale}
 }
 
 // prepareRollbackPreparation offers the conversion of the stale owners among
-// the observed items as the whole plan. Its run rechecks the confirmed
-// selection, retained binding and observations, converts, then reruns the
-// rollback admission on a fresh selection as the gate. It keeps no record:
-// a rerun resumes, and yard migrate undoes it.
+// the observed items as the whole plan. Its run reruns the rollback
+// admission, which must offer this same plan; converts; then reruns it as
+// the gate, which must offer the ordinary rollback. It keeps no record: a
+// rerun resumes, and yard migrate undoes it.
 func (runtime *Runtime) prepareRollbackPreparation(parsed options, request releasetransition.ProcessRequest, target *verifiedPublishedCandidate,
-	items []formatItem, approved string, retained retainedBinding,
+	items []formatItem, retained string,
 ) Prepared {
 	selection := parsed.selection
 	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
@@ -341,7 +346,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 		}
 		step := domain.OperationStep{ID: fmt.Sprintf("release.prepare-rollback.%d", len(steps)), Target: "activation." + item.owner + " yard." + item.yard,
 			Observed: "rollback-observe stale", Desired: "format of release " + string(request.Target), Decision: domain.StepApply,
-			Preconditions: []string{"the confirmed selection, retained binding, yard instance, rollback-observe result and effect are unchanged"},
+			Preconditions: []string{"a rerun of the rollback admission offers this same plan"},
 			Verify:        "rollback-observe reports current, then the retained release accepts the owner", Consequence: consequence}
 		if len(steps) != 0 {
 			step.DependsOn = []string{steps[len(steps)-1].ID}
@@ -350,11 +355,11 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 	}
 	steps = append(steps, domain.OperationStep{ID: "release.prepare-rollback.gate", Target: "release." + string(links.Active),
 		Observed: "active", Desired: "active", Decision: domain.StepApply, DependsOn: []string{steps[len(steps)-1].ID},
-		Verify:      "a fresh rollback admission to release " + string(request.Target) + " passes",
+		Verify:      "a rerun of the rollback admission offers the rollback to release " + string(request.Target),
 		Consequence: fmt.Sprintf("keep release %s active; then run yard update --rollback to review and confirm the rollback", links.Active)})
 	consequences := domain.OperationStepConsequences(steps)
 	prepared := false
-	return Prepared{
+	plan := Prepared{
 		Request: request, Action: PrepareRollbackAction, Changed: true, Consequences: consequences,
 		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 		SourceRelease:  string(links.Active), TargetRelease: string(target.candidate.release), TargetVersion: target.version, Steps: steps,
@@ -363,83 +368,81 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 				Links    any
 				Steps    []domain.OperationStep
 				Retained string
-			}{parsed.expectedLinks, steps, approved}),
-		check: func(context.Context) (releasetransition.Inspection, error) {
-			if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
-				return releasetransition.Inspection{}, staleRetainedSelection(request.RuntimeRoot, request.Target)
-			}
-			message := fmt.Sprintf("profile runtimes are not yet prepared for %s; release %s stays active", request.Target, links.Active)
-			if prepared {
-				message = fmt.Sprintf("profile runtimes are prepared for %s; release %s stays active until the rollback is confirmed, and yard migrate undoes the preparation", request.Target, links.Active)
-			}
-			return releasetransition.Inspection{Outcome: &releasetransition.Outcome{
-				Status: releasetransition.StatusMigrationRequired, Active: links.Active, Previous: links.Previous, Target: request.Target,
-				Code: releasetransition.CodeTransitionRequired, Message: message, Retry: rollbackRetry,
-			}}, nil
-		},
-		run: func(ctx context.Context) error {
-			ctx = selectionContext(ctx, selection)
-			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
-				return err
-			}
-			targetNow, err := runtime.verifyPublishedCandidate(ctx, targetVerification.candidate, request.RuntimeRoot, &targetVerification.digest)
-			if err != nil {
-				return staleRetainedSelection(request.RuntimeRoot, request.Target)
-			}
-			defer targetNow.Close()
-			unlock, err := runtime.lockReleaseSelection(ctx, false)
-			if err != nil {
-				return err
-			}
-			err = runtime.revalidateReleaseSelection(selection, targetNow)
-			unlock()
-			if err != nil {
-				return err
-			}
-			if binding, err := retained(ctx); err != nil {
-				return retainedBindingRefusal(links, request.Target, err)
-			} else if binding != approved {
-				return staleReleaseState(request.RuntimeRoot, request.Target, "installed runtime rollback inputs changed after confirmation; nothing was converted", rollbackRetry)
-			}
-			activeNow, err := runtime.verifySelectedActive(selection, &selection.activeArtifact)
-			if err != nil {
-				return staleRetainedSelection(request.RuntimeRoot, request.Target)
-			}
-			defer activeNow.Close()
-			observed, err := runtime.observeFormatOwners(ctx, activeNow, targetNow, request.ConfigHome, selection.formatOwners)
-			if err != nil {
-				return err
-			}
-			if len(observed.messages) != 0 || !slices.Equal(observed.items, items) {
-				return staleFormatObservation(request, observed)
-			}
-			var operation [12]byte
-			if _, err := crand.Read(operation[:]); err != nil {
-				return err
-			}
-			for _, item := range observed.pending() {
-				if err := runtime.config.ProfileRuntimeRollbackApply(ctx, pinnedReleaseRoot(activeNow), observed.loaded[item.yard], item.owner,
-					"rollback-prep-"+hex.EncodeToString(operation[:]), item.actual, item.desired, item.consequence); err != nil {
-					return partialPreparation(links, request.Target, fmt.Errorf("prepare profile runtime %s in yard %s: %w", item.owner, item.yard, err))
-				}
-			}
-			// The gate is the admission a rerun would make, from fresh state.
-			fresh, err := runtime.captureReleaseSelection(ctx, targetNow, request, *parsed.expectedLinks)
-			if err != nil {
-				return partialPreparation(links, request.Target, err)
-			}
-			compatErr := runtime.inspectRollbackCompatibility(selectionContext(ctx, fresh), targetNow, request, fresh)
-			var bindingErr error
-			if _, err := retained(ctx); err != nil {
-				bindingErr = retainedBindingRefusal(links, request.Target, err)
-			}
-			if err := domain.CollectOrderedRefusals(compatErr, bindingErr); err != nil {
-				return partialPreparation(links, request.Target, err)
-			}
-			prepared = true
-			return nil
-		},
+			}{parsed.expectedLinks, steps, retained}),
 	}
+	plan.check = func(context.Context) (releasetransition.Inspection, error) {
+		if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
+			return releasetransition.Inspection{}, staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+		message := fmt.Sprintf("profile runtimes are not yet prepared for %s; release %s stays active", request.Target, links.Active)
+		if prepared {
+			message = fmt.Sprintf("profile runtimes are prepared for %s; release %s stays active until the rollback is confirmed, and yard migrate undoes the preparation", request.Target, links.Active)
+		}
+		return releasetransition.Inspection{Outcome: &releasetransition.Outcome{
+			Status: releasetransition.StatusMigrationRequired, Active: links.Active, Previous: links.Previous, Target: request.Target,
+			Code: releasetransition.CodeTransitionRequired, Message: message, Retry: rollbackRetry,
+		}}, nil
+	}
+	// readmit is the rollback admission a rerun of this command makes.
+	readmit := func(ctx context.Context) (domain.ActionID, string, error) {
+		if parsed.rerun == nil {
+			return "", "", errors.New("the rollback admission cannot be rerun")
+		}
+		fresh, err := parsed.rerun(ctx)
+		if fresh.Close != nil {
+			_ = fresh.Close()
+		}
+		return fresh.Action, fresh.Binding, err
+	}
+	plan.run = func(outer context.Context) error {
+		ctx := outer
+		if action, binding, err := readmit(ctx); err != nil {
+			return staleAfterConfirmation(request, err)
+		} else if action != PrepareRollbackAction || binding != plan.Binding {
+			return staleReleaseState(request.RuntimeRoot, request.Target, "release state changed after confirmation; nothing was converted", rollbackRetry)
+		}
+		ctx = selectionContext(ctx, selection)
+		if err := requirePreparedReleaseRoots(parsed, false); err != nil {
+			return err
+		}
+		// The hooks run from these pinned roots.
+		targetNow, err := runtime.verifyPublishedCandidate(ctx, targetVerification.candidate, request.RuntimeRoot, &targetVerification.digest)
+		if err != nil {
+			return staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+		defer targetNow.Close()
+		activeNow, err := runtime.verifySelectedActive(selection, &selection.activeArtifact)
+		if err != nil {
+			return staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+		defer activeNow.Close()
+		now, err := runtime.observeFormatOwners(ctx, activeNow, targetNow, request.ConfigHome, selection.formatOwners)
+		if err != nil {
+			return err
+		}
+		if len(now.messages) != 0 || !slices.Equal(now.items, items) {
+			return staleReleaseState(request.RuntimeRoot, request.Target, "profile runtime state changed after confirmation; nothing was converted", rollbackRetry)
+		}
+		var operation [12]byte
+		if _, err := crand.Read(operation[:]); err != nil {
+			return err
+		}
+		for _, item := range now.pending() {
+			if err := runtime.config.ProfileRuntimeRollbackApply(ctx, pinnedReleaseRoot(activeNow), now.loaded[item.yard], item.owner,
+				"rollback-prep-"+hex.EncodeToString(operation[:]), item.actual, item.desired, item.consequence); err != nil {
+				return partialPreparation(links, request.Target, fmt.Errorf("prepare profile runtime %s in yard %s: %w", item.owner, item.yard, err))
+			}
+		}
+		// The gate is the second command's own admission.
+		if action, _, err := readmit(outer); err != nil {
+			return partialPreparation(links, request.Target, err)
+		} else if action != rollbackAction {
+			return partialPreparation(links, request.Target, errors.New("the rollback admission still requires preparation"))
+		}
+		prepared = true
+		return nil
+	}
+	return plan
 }
 
 // partialPreparation reports a failure after the first conversion could
@@ -458,11 +461,10 @@ func partialPreparation(links releasetransition.ReleaseLinks, target releasetran
 }
 
 // preparedDriftOnly admits a rollback from an active release whose only
-// unconverged owners are those it prepares for the retained release, each
-// drifting only in yards whose rollback-observe reports it prepared: a
-// complete journal without blockers whose decisions are such drift or the
-// completed history's metadata.
-func (runtime *Runtime) preparedDriftOnly(ctx context.Context, root, configHome string, protected *protectedTransitionInspection) bool {
+// unconverged owners are those it prepares for the retained release: a
+// complete journal without blockers whose other decisions only preserve.
+// Yard attribution is not consulted; rollback-observe routes each yard.
+func (runtime *Runtime) preparedDriftOnly(ctx context.Context, root string, protected *protectedTransitionInspection) bool {
 	// The protected inspection already restored the fresh-plan status the
 	// V1 wire presents as the completed transaction's pending recovery.
 	inspection := protected.inspection
@@ -470,19 +472,13 @@ func (runtime *Runtime) preparedDriftOnly(ctx context.Context, root, configHome 
 		inspection.Outcome == nil || inspection.Outcome.Status != releasetransition.StatusMigrationRequired {
 		return false
 	}
-	type ownerYard struct{ owner, yard string }
-	drifted, attributed := map[string]bool{}, map[ownerYard]bool{}
+	var drifted []string
 	for _, decision := range inspection.Decisions {
-		if decision.Resource == "transition.source-metadata" && decision.Scope == "" && decision.Decision == releasetransition.DecisionPreserve {
-			continue
-		}
 		owner, activation := strings.CutPrefix(decision.Resource, "activation.")
-		yard, drift := strings.CutPrefix(decision.Result, releasetransition.YardFindingDrift+" ")
 		switch {
-		case activation && decision.Scope == "activation":
-			drifted[owner] = true
-		case activation && decision.Scope == releasetransition.YardAttributionScope && drift && yard != "":
-			attributed[ownerYard{owner, yard}] = true
+		case decision.Decision == releasetransition.DecisionPreserve:
+		case activation && decision.Scope == "activation" && decision.Decision == releasetransition.DecisionCanonicalize:
+			drifted = append(drifted, owner)
 		default:
 			return false
 		}
@@ -502,34 +498,12 @@ func (runtime *Runtime) preparedDriftOnly(ctx context.Context, root, configHome 
 		releases = append(releases, verified)
 	}
 	owners, refusal, _, _ := profileFormatAdmission(releases[0], releases[1], true, true)
-	if refusal != "" {
-		return false
-	}
-	observed, err := runtime.observeFormatOwners(ctx, releases[0], releases[1], configHome, owners)
-	if err != nil {
-		return false
-	}
-	prepared := map[ownerYard]bool{}
-	for _, item := range observed.items {
-		if item.state == ports.RuntimeStateCurrent {
-			prepared[ownerYard{item.owner, item.yard}] = true
-		}
-	}
-	for owner := range drifted {
-		found := false
-		for pair := range attributed {
-			found = found || pair.owner == owner
-		}
-		if !found {
+	for _, owner := range drifted {
+		if !slices.Contains(owners, owner) {
 			return false
 		}
 	}
-	for pair := range attributed {
-		if !drifted[pair.owner] || !prepared[pair] {
-			return false
-		}
-	}
-	return true
+	return refusal == ""
 }
 
 func verificationOf(candidate *verifiedPublishedCandidate) candidateVerification {

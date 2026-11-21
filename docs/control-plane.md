@@ -1254,20 +1254,21 @@ release's installed-runtime check.
 Rollback through a profile hook takes two commands. When every other rollback admission passes and
 only owners that need preparation remain, the first `yard update --rollback` plans the
 `update.prepare-rollback` action. That plan shows each conversion and its declared consequence, and
-nothing else. Execution revalidates the release selection and the retained release's installed-runtime binding,
-and requires the same observations, including each yard's native instance. A changed observation
-converts nothing and keeps its own next step, such as `yard -Y NAME start`. It then runs each `rollback-apply` under the yard's
-integration lock. The apply assessment also binds the confirmed consequence. Afterwards, the whole
-rollback admission is rerun as the gate, on a freshly captured release selection. The command keeps no journal or update history and stops
-with the active release active. It reports `migration-required` with the next step
-`yard update --rollback`.
+nothing else. Before the first conversion, execution reruns the same rollback admission, which must
+offer exactly the confirmed plan; a refusal converts nothing and keeps its own next step, such as
+`yard -Y NAME start`. It then runs each `rollback-apply` under the yard's integration lock. The apply
+assessment also binds the confirmed consequence. Afterwards the admission runs once more as the gate,
+and must offer the ordinary rollback that the second command would plan. The command keeps no journal
+or update history and stops with the active release active. It reports `migration-required` with the
+next step `yard update --rollback`.
 
 The conversions can be resumed by rerunning that command, and abandoned with `yard migrate`, which
 repairs the owners forward. The active release now reports the prepared owners as drift. A rollback
 from that state is admitted only when the active release's journal is complete without blockers, its
-only other decision is the completed history's metadata, and every unconverged activation owner is
-one it prepares for the retained release. Each such owner must be attributed drift only in yards
-whose `rollback-observe` reports it `current`. The second
+other decisions only preserve, and every unconverged activation owner is one it prepares for the
+retained release. Yard attribution is not consulted: `rollback-observe` alone routes each yard. `stale`
+continues the preparation of that yard, a stopped yard or a failed observation refuses with that
+yard's next step, and `current` or `absent` everywhere leaves the ordinary rollback. The second
 `yard update --rollback` is then the ordinary rollback with its own confirmation. Its execution
 observes the prepared owners again before the target runs. Data is not converted.
 
@@ -2782,7 +2783,9 @@ including every runtime up to v0.30, has format 1. A release that changes that f
 one, and `prepares_rollback_to` names the one earlier format its handler converts state back to.
 Such a handler also accepts `rollback-observe` and `rollback-apply OPERATION_ID ACTUAL_SHA256
 DESIRED_SHA256`. Both follow the output, assessment and verification contract of `observe` and
-`apply`, reported against the prepared format. [Release migrations](#release-migrations) describe
+`apply`, reported against the prepared format. `rollback-apply` need not be atomic, but it must be
+rerunnable from any state it can leave, and both `rollback-observe` and the active release's `observe`
+report such an intermediate state as `stale`. [Release migrations](#release-migrations) describe
 how update and rollback use the declared formats.
 
 Releases up to v0.30 decode `profile.json` strictly and cannot read a release that declares `format`.

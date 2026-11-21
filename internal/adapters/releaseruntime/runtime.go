@@ -592,6 +592,9 @@ func (runtime *Runtime) PrepareTransition(
 	if err != nil {
 		return Prepared{}, err
 	}
+	parsed.rerun = func(ctx context.Context) (Prepared, error) {
+		return runtime.PrepareTransition(ctx, arguments, configHome, yard)
+	}
 	if help {
 		return runtime.prepareHelp(), nil
 	}
@@ -730,7 +733,7 @@ func (runtime *Runtime) PrepareTransition(
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
 		// Owners prepared for rollback report their converted state as drift;
 		// only that drift leaves the rollback admitted.
-		if (unfinished || exactCompletedTarget) && !(parsed.rollback && runtime.preparedDriftOnly(ctx, parsed.root, configHome, protected)) {
+		if (unfinished || exactCompletedTarget) && !(parsed.rollback && runtime.preparedDriftOnly(ctx, parsed.root, protected)) {
 			if unfinished {
 				newerRelease = newerReleaseReplacement(parsed, configHome)
 			}
@@ -1357,11 +1360,8 @@ func (runtime *Runtime) prepareRetainedTransition(
 	// still requires the independent runtime binding below AND a successful
 	// ordinary V1 inspection before returning a plan. Neither an exit status nor
 	// a version claim proves compatibility; execution rechecks both proofs.
-	retained := func(ctx context.Context) (string, error) {
-		return runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
-	}
 	// Both admissions are independent; a refusal reports both.
-	runtimeBinding, bindingErr := retained(ctx)
+	runtimeBinding, bindingErr := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
 	if compatErr != nil && bindingErr != nil {
 		joined := joinReleaseRefusals(compatRefusal, retainedBindingMessage, bindingErr)
 		return refused(joined, joined.outcome)
@@ -1373,7 +1373,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(retainedBindingRefusal(observed, release, bindingErr))
 	}
 	if len(pending) != 0 {
-		return runtime.prepareRollbackPreparation(parsed, request, verified, pending, runtimeBinding, retained), nil
+		return runtime.prepareRollbackPreparation(parsed, request, verified, pending, runtimeBinding), nil
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {
@@ -1647,7 +1647,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	return Prepared{
 		Request: request,
 		Action: map[bool]domain.ActionID{
-			true: "update.rollback", false: "update.activate",
+			true: rollbackAction, false: "update.activate",
 		}[request.Direction == releasetransition.DirectionActivatePrevious],
 		Changed: changed, Consequences: consequences,
 		RefreshConfigs:   !activationReconciliationOwned,
@@ -1934,6 +1934,8 @@ type options struct {
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool
 	rootExplicit                                            bool
+	// rerun plans this same command again.
+	rerun func(context.Context) (Prepared, error)
 }
 
 func (runtime *Runtime) prepareHelp() Prepared {
