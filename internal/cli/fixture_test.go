@@ -310,7 +310,10 @@ func (fixture *cliFixture) ownedPath(path string) (string, string, error) {
 
 // writeContained writes path below owned without following links: every
 // parent below owned must be a real directory or is created as one, and the
-// file is opened with O_NOFOLLOW.
+// file is opened with O_NOFOLLOW. This refuses links that exist when the call
+// starts. It does not stop a parent being swapped for a link between its Lstat
+// and the open: the fixture tree belongs to the test, which does not race its
+// own writes.
 func writeContained(owned, path string, data []byte, mode os.FileMode) error {
 	relative, err := filepath.Rel(owned, filepath.Dir(path))
 	if err != nil {
@@ -324,10 +327,13 @@ func writeContained(owned, path string, data []byte, mode os.FileMode) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o700); err != nil {
+			// A concurrent write may create the same parent first.
+			if err := os.Mkdir(current, 0o700); err == nil {
+				continue
+			} else if !errors.Is(err, os.ErrExist) {
 				return err
 			}
-			continue
+			info, err = os.Lstat(current)
 		}
 		if err != nil {
 			return err
@@ -345,7 +351,8 @@ func writeContained(owned, path string, data []byte, mode os.FileMode) error {
 }
 
 // Write creates path, relative to Root or below the fixture's own directories,
-// with its missing parents and without following links; the default mode is 0600.
+// with its missing parents and without following links that exist when it is
+// called (see writeContained); the default mode is 0600.
 func (fixture *cliFixture) Write(path, content string, mode ...os.FileMode) string {
 	fixture.t.Helper()
 	owned, path, err := fixture.ownedPath(path)
@@ -589,6 +596,24 @@ func TestCLIFixtureRefusesPathsAndSettingsItDoesNotOwn(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
 		t.Fatalf("write reached outside the fixture: %v %v", entries, err)
+	}
+	// Concurrent writes of distinct files share their missing parents.
+	var writers sync.WaitGroup
+	failures := make(chan error, 24)
+	for writer := range 24 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			path := filepath.Join(fixture.Root, "shared", "missing", "parent", fmt.Sprintf("file-%d", writer))
+			failures <- writeContained(fixture.Root, path, []byte("x"), 0o600)
+		}()
+	}
+	writers.Wait()
+	close(failures)
+	for err := range failures {
+		if err != nil {
+			t.Errorf("concurrent write: %v", err)
+		}
 	}
 	for tool, local := range map[string]bool{
 		"scripts/e2e-lab/invoke.sh": true, "../outside/tool": false, "/usr/bin/tool": false,
