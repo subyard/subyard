@@ -349,8 +349,80 @@ func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 	}
 }
 
-func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
-	for _, value := range []string{"1", "0", "true"} {
+// 0 and 1 are deprecated aliases: the loader reads them as no and yes and reports
+// each assignment with its source line and replacement.
+func TestDevSudoReadsDeprecatedAliases(t *testing.T) {
+	for _, test := range []struct{ value, want, scope string }{
+		{"0", "no", "host"}, {"1", "yes", "host"}, {"0", "no", "yard"}, {"1", "yes", "yard"}, {"0", "no", "command"}, {"1", "yes", "command"},
+	} {
+		home := t.TempDir()
+		configHome := filepath.Join(home, "config")
+		environment := map[string]string{"SUBYARD_CONFIG_HOME": configHome}
+		path := ""
+		switch test.scope {
+		case "host":
+			path = filepath.Join(configHome, "config.env")
+		case "yard":
+			path = filepath.Join(configHome, "yards", "default", "config.env")
+		default:
+			environment["DEV_SUDO"] = test.value
+		}
+		if path != "" {
+			writeFixture(t, path, "# fixture\nDEV_SUDO="+test.value+"\n")
+		}
+		loaded, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, Environment: environment})
+		if err != nil {
+			t.Fatalf("%s DEV_SUDO=%s: %v", test.scope, test.value, err)
+		}
+		if loaded.Environment["DEV_SUDO"] != test.want || loaded.Settings["DEV_SUDO"].EffectiveValue != test.want ||
+			loaded.Context.DevSudo != (test.want == "yes") {
+			t.Fatalf("%s DEV_SUDO=%s: environment %q, effective %q, grant %v", test.scope, test.value,
+				loaded.Environment["DEV_SUDO"], loaded.Settings["DEV_SUDO"].EffectiveValue, loaded.Context.DevSudo)
+		}
+		deprecated := loaded.DeprecatedAssignments()
+		if len(deprecated) != 1 || deprecated[0].Name != "DEV_SUDO" || deprecated[0].Value != test.value ||
+			deprecated[0].Replacement != test.want || deprecated[0].Scope != test.scope {
+			t.Fatalf("%s DEV_SUDO=%s: deprecated %+v", test.scope, test.value, deprecated)
+		}
+		note := deprecated[0].String()
+		switch test.scope {
+		case "command":
+			if note != "DEV_SUDO="+test.value+" in the command environment is deprecated and read as "+test.want+"; use DEV_SUDO="+test.want {
+				t.Fatalf("command note: %s", note)
+			}
+		default:
+			repair := "yard -Y default config set DEV_SUDO " + test.want + " --scope " + test.scope + " --local"
+			if deprecated[0].Path != path || deprecated[0].Line != 2 || deprecated[0].Repair() != repair ||
+				note != "DEV_SUDO="+test.value+" in "+path+":2 is deprecated and read as "+test.want+"; "+repair {
+				t.Fatalf("%s note: %s", test.scope, note)
+			}
+		}
+	}
+}
+
+// A file the config commands do not write gets the line to edit as its repair.
+func TestDeprecatedAliasInUnauthoredFileNamesTheLine(t *testing.T) {
+	home := t.TempDir()
+	configHome := filepath.Join(home, "config")
+	path := filepath.Join(configHome, "yards", "default.env")
+	writeFixture(t, path, "DEV_SUDO=0\n")
+	loaded, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, YardName: "default", Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deprecated := loaded.DeprecatedAssignments()
+	if len(deprecated) != 1 || deprecated[0].Path != path {
+		t.Fatalf("deprecated %+v", deprecated)
+	}
+	deprecated[0].authored = false
+	if deprecated[0].Repair() != "replace line 1 of "+path+" with DEV_SUDO=no" {
+		t.Fatalf("repair %q", deprecated[0].Repair())
+	}
+}
+
+// Only 0 and 1 are aliases; every other value is still one refusal naming the accepted values.
+func TestDevSudoRefusesUnsupportedValues(t *testing.T) {
+	for _, value := range []string{"true", "false", "on", "off", "2", "Yes"} {
 		for _, scope := range []string{"host", "command"} {
 			home := t.TempDir()
 			configHome := filepath.Join(home, "config")
@@ -362,10 +434,52 @@ func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
 			}
 			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, Environment: environment})
 			if err == nil || strings.Count(err.Error(), "DEV_SUDO") != 1 ||
-				!strings.Contains(err.Error(), "must be one of yes, no, prompt; 1 and 0 are no longer accepted") {
-				t.Fatalf("%s DEV_SUDO=%s: want one refusal naming the new and retired values: %v", scope, value, err)
+				!strings.Contains(err.Error(), "invalid value; must be one of yes, no, prompt") {
+				t.Fatalf("%s DEV_SUDO=%s: want one refusal naming the accepted values: %v", scope, value, err)
 			}
 		}
+	}
+}
+
+// A yard that reads 0 has the same init inputs, approval gates and installed
+// view as one that reads no, so replacing the alias awaits no init.
+func TestDevSudoAliasSnapshotsEqualCanonical(t *testing.T) {
+	catalog, err := LoadCatalog(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for alias, canonical := range map[string]string{"0": "no", "1": "yes"} {
+		home := t.TempDir()
+		configHome := filepath.Join(home, "config")
+		load := func(value string) Loaded {
+			writeFixture(t, filepath.Join(configHome, "yards", "default", "config.env"), "DEV_SUDO="+value+"\n")
+			loaded, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return loaded
+		}
+		old, current := load(alias), load(canonical)
+		oldInputs, currentInputs := catalog.IntegrationInitSettings(old.Environment), catalog.IntegrationInitSettings(current.Environment)
+		if !maps.Equal(oldInputs, currentInputs) || oldInputs["DEV_SUDO"] != canonical {
+			t.Fatalf("DEV_SUDO=%s init inputs differ from %s: %v %v", alias, canonical, oldInputs, currentInputs)
+		}
+		if ApprovalGates(old.Environment) != ApprovalGates(current.Environment) {
+			t.Fatalf("DEV_SUDO=%s approval gates differ from %s", alias, canonical)
+		}
+		if err := catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": alias}); err != nil {
+			t.Fatalf("snapshot DEV_SUDO=%s refused: %v", alias, err)
+		}
+		recorded := catalog.WithAppliedIntegrationInitSettings(nil, map[string]string{"DEV_SUDO": alias})
+		if want := catalog.WithAppliedIntegrationInitSettings(nil, map[string]string{"DEV_SUDO": canonical}); !maps.Equal(recorded, want) {
+			t.Fatalf("installed view of snapshot DEV_SUDO=%s differs from %s: %v %v", alias, canonical, recorded, want)
+		}
+	}
+	if got := CanonicalSettingValue("DEV_SUDO", "prompt"); got != "prompt" {
+		t.Fatalf("canonical value changed: %q", got)
+	}
+	if got := CanonicalSettingValue("FORWARD_SSH_AGENT", "0"); got != "0" {
+		t.Fatalf("alias applied to another setting: %q", got)
 	}
 }
 

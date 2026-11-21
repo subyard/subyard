@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -68,15 +69,15 @@ type SettingDefinition struct {
 	Application SettingApplication
 	Owner       string
 	Enum        []string
-	// RetiredValues are earlier accepted values that refusals name as no longer accepted.
-	RetiredValues []string
-	Minimum       int
-	Maximum       int
-	Optional      bool
-	Default       string
-	DefaultFrom   *profile.PortDefault
-	HostListener  bool
-	HasDefault    bool
+	// ValueAliases maps deprecated values to the canonical Enum values they read as.
+	ValueAliases map[string]string
+	Minimum      int
+	Maximum      int
+	Optional     bool
+	Default      string
+	DefaultFrom  *profile.PortDefault
+	HostListener bool
+	HasDefault   bool
 }
 
 var catalog = map[string]SettingDefinition{
@@ -127,7 +128,7 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	// Yes and prompt grant passwordless sudo; prompt, the default, also makes coding agents ask first.
 	"DEV_SUDO": scalar("yard-security", SettingString, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("prompt"), enum("yes", "no", "prompt"), retiredValues("1", "0")),
+		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("prompt"), enum("yes", "no", "prompt"), valueAliases("1", "yes", "0", "no")),
 	"DEV_UID": scalar("yard-runtime", SettingInteger, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(0, 1<<31-1)),
 	"DEV_USER": scalar("yard-runtime", SettingName, SettingYardInit, true,
@@ -299,9 +300,13 @@ func optionalRange(minimum, maximum int) definitionOption {
 	}
 }
 
-func retiredValues(values ...string) definitionOption {
+// valueAliases takes deprecated, canonical pairs.
+func valueAliases(pairs ...string) definitionOption {
 	return func(definition *SettingDefinition) {
-		definition.RetiredValues = append([]string(nil), values...)
+		definition.ValueAliases = make(map[string]string, len(pairs)/2)
+		for index := 0; index+1 < len(pairs); index += 2 {
+			definition.ValueAliases[pairs[index]] = pairs[index+1]
+		}
 	}
 }
 
@@ -496,6 +501,9 @@ func validateSettingValue(definition SettingDefinition, value string) error {
 		if value == allowed {
 			return nil
 		}
+	}
+	if _, ok := definition.ValueAliases[value]; ok {
+		return nil
 	}
 	if len(definition.Enum) != 0 {
 		return fmt.Errorf("must be one of %s", strings.Join(definition.Enum, ", "))
@@ -709,6 +717,23 @@ func ValidateSetting(scope SettingScope, name, value string, syncable bool) erro
 func ValidateSettingName(scope SettingScope, name string, syncable bool) (SettingDefinition, error) {
 	return (Catalog{}).ValidateSettingName(scope, name, syncable)
 }
+func CanonicalSettingValue(name, value string) string {
+	canonical, _ := (Catalog{}).CanonicalSettingValue(name, value)
+	return canonical
+}
+
+// CanonicalSettingValue returns the canonical value a deprecated alias reads as,
+// and whether value was such an alias. Other values are returned unchanged.
+func (settings Catalog) CanonicalSettingValue(name, value string) (string, bool) {
+	definition, ok := settings.LookupSetting(CanonicalSettingName(name))
+	if !ok {
+		return value, false
+	}
+	if canonical, alias := definition.ValueAliases[value]; alias {
+		return canonical, true
+	}
+	return value, false
+}
 func hostListener() definitionOption {
 	return func(definition *SettingDefinition) { definition.HostListener = true }
 }
@@ -718,6 +743,7 @@ func (definition SettingDefinition) Clone() SettingDefinition {
 	definition.Aliases = slices.Clone(definition.Aliases)
 	definition.Scopes = slices.Clone(definition.Scopes)
 	definition.Enum = slices.Clone(definition.Enum)
+	definition.ValueAliases = maps.Clone(definition.ValueAliases)
 	if definition.DefaultFrom != nil {
 		value := *definition.DefaultFrom
 		definition.DefaultFrom = &value

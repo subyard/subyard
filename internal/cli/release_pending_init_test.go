@@ -402,6 +402,8 @@ func TestPendingInitReportsSudoModeChanges(t *testing.T) {
 	}{
 		{"", "prompt", false}, {"", "", false}, {"", "yes", true}, {"", "no", true}, {"prompt", "prompt", false}, {"prompt", "yes", true},
 		{"yes", "yes", false}, {"yes", "prompt", true}, {"yes", "", true}, {"yes", "no", true}, {"no", "no", false}, {"no", "prompt", true}, {"no", "yes", true},
+		// Snapshots from before the canonical values record the deprecated aliases.
+		{"0", "no", false}, {"1", "yes", false}, {"0", "yes", true}, {"1", "prompt", true},
 	} {
 		applied := map[string]string{"DEV_USER": "dev"}
 		if test.applied != "" {

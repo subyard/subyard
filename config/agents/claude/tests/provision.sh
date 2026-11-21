@@ -229,13 +229,14 @@ done
 sudo_policy="$(cat "$policy")"
 (unset DEV_SUDO; CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null)
 [ "$(cat "$policy")" = "$sudo_policy" ] || fail 'unset DEV_SUDO did not install the prompt policy'
-for sudo_mode in no yes; do
+# 0 and 1 are deprecated aliases of no and yes.
+for sudo_mode in no yes 0 1; do
   DEV_SUDO="$sudo_mode" run_hook "$root" >/dev/null
   [ "$(cat "$policy")" = "$prompt_policy" ] || fail "DEV_SUDO=$sudo_mode changed the Git prompt policy"
   if "$check" | grep -F >/dev/null 'sudo ask'; then fail "DEV_SUDO=$sudo_mode readiness named sudo prompts"; fi
 done
-if DEV_SUDO=1 CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>"$tmp/sudo-mode.err"; then
-  fail 'legacy DEV_SUDO value accepted'
+if DEV_SUDO=true CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>"$tmp/sudo-mode.err"; then
+  fail 'unsupported DEV_SUDO value accepted'
 fi
 grep -Fq 'DEV_SUDO must be yes, no or prompt' "$tmp/sudo-mode.err" || fail 'invalid DEV_SUDO was not named'
 grep -Fq 'CODING_TOOL_GIT_APPROVAL must be prompt or off' "$tmp/sudo-mode.err" \

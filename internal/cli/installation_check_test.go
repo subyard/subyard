@@ -271,3 +271,17 @@ func TestInstallationCheckOutputFailureIsExitTwo(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallationCheckNotesDeprecatedValueAlias(t *testing.T) {
+	fixture := installationCheckFixture(t)
+	configHome := filepath.Join(fixture.Root, "state")
+	path := filepath.Join(configHome, "config.env")
+	fixture.Write(path, "DEV_SUDO=1\n")
+	_, report, _ := runInstallationCheck(t, fixture.Root, fixture.Environment)
+	finding, found := reportFindings(report)["config.sources.deprecated.host.config.env.DEV_SUDO"]
+	if !found || finding.Class != application.FindingNotice ||
+		!strings.Contains(finding.Message, "DEV_SUDO=1 in "+path+":1 is deprecated and read as yes") ||
+		finding.Next != "yard -Y default config set DEV_SUDO yes --scope host --local" {
+		t.Fatalf("deprecated alias finding: %+v", finding)
+	}
+}

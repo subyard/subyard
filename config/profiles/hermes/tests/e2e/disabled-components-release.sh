@@ -533,15 +533,8 @@ prepare_acceptance() {
   operator_yard -Y hermes integration disable opencode --yes
   operator_yard -Y default config set CODING_TOOL_INTEGRATIONS '' --scope yard --local --yes
   operator_yard migrate --yes
-  # The published Hermes preset writes DEV_SUDO=0, which the candidate refuses and no
-  # value satisfies both runtimes. Follow the documented update: unset it with the
-  # baseline, update, then restore the preset's intent with the candidate.
-  operator_yard -Y hermes config unset DEV_SUDO --scope yard --local --yes
-  ! operator_env grep -q '^DEV_SUDO=' "$CONFIG_HOME/yards/hermes/config.env" || die 'baseline DEV_SUDO assignment was not removed'
   install_candidate_with_evidence
   assert_one_run_ready
-  operator_yard -Y hermes config set DEV_SUDO no --scope yard --local --yes
-  operator_yard -Y hermes init --yes
   assert_candidate
   assert_disabled default
   assert_disabled hermes

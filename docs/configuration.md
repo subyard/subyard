@@ -213,25 +213,22 @@ same explicit yard-scope repair.
 Set `DEV_SUDO` at shared, host or yard scope, or for one command, and run `yard init` to apply it.
 Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
 
-The earlier values `1` and `0` are not migrated, and no value is accepted by both an older runtime
-and this one: older runtimes refuse `yes`, `no` and `prompt`, and this runtime refuses `1` and `0`
-with a message that names the file, the line and the new values. Absent `DEV_SUDO` means
-passwordless sudo without prompts for an older runtime and `prompt` for this one. To update:
+The earlier values `1` and `0` are deprecated aliases of `yes` and `no`. An existing assignment
+keeps its behaviour across `yard update`, and a yard whose `0` becomes `no` has nothing to
+reapply. `yard check` and `yard config validate` report each such assignment with its file, its
+line and the replacement, and `yard config set DEV_SUDO 0` saves `no`. Any other value is
+refused. Older runtimes refuse `yes`, `no` and `prompt`, so replace `1` and `0` only after every
+owner host that reads the file runs this release, for example
+`yard -Y <yard> config set DEV_SUDO no --scope yard --yes`.
 
-1. With the older runtime, remove every assignment, for example
-   `yard config unset DEV_SUDO --scope host --yes`, at each scope that sets it. Add `--git` for a
-   synced assignment and push it. Note which yards set `0` on purpose.
-2. Run `yard update`. Release activation reprovisions the coding agents of each running yard with
-   the default `prompt`, so they ask before sudo from then on; no other step is needed. Stopped
-   yards stay unchanged until the release reaches them, at the latest on their next `yard init`.
-3. With the new runtime, set `yes` where you want to keep the old behaviour, or `no` where the
-   yard had `0`, for example `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`, and run
-   `yard init`. Release activation does not touch the guest grant: a yard that had `0` keeps no
-   grant until a `yard init` without `no` publishes one after the agents' approval policies.
+Absent `DEV_SUDO` means passwordless sudo without prompts for an older runtime and `prompt` for
+this one. After `yard update`, release activation reprovisions the coding agents of each running
+yard without an assignment with the default `prompt`, so they ask before sudo from then on. Stopped
+yards stay unchanged until the release reaches them, at the latest on their next `yard init`. Set
+`yes` there to keep the old behaviour and run `yard init`.
 
-With shared configuration, remove the shared assignment while every owner host still runs an
-older runtime, and publish `yes` or `no` at shared scope only after all owner hosts are updated.
-Until then, keep those values at host or yard scope on the updated hosts.
+Older runtimes refuse `DEV_SUDO` at shared scope: publish a shared value only after all owner
+hosts are updated, and until then keep it at host or yard scope.
 
 `prompt` is a guardrail against casual escalation, not a security boundary. It covers commands
 an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the

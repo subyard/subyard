@@ -95,6 +95,7 @@ type settingTracker struct {
 	assignments           map[string][]settingAssignment
 	order                 int
 	ignored               []IgnoredAssignment
+	deprecated            []DeprecatedAssignment
 }
 
 func newSettingTracker() *settingTracker {
@@ -127,6 +128,10 @@ func (tracker *settingTracker) record(
 ) {
 	if _, ok := tracker.catalog.LookupSetting(name); !ok {
 		return
+	}
+	if canonical, alias := tracker.catalog.CanonicalSettingValue(name, value); alias {
+		tracker.observeDeprecatedValue(layer, name, value, canonical, path, line)
+		value = canonical
 	}
 	tracker.order++
 	tracker.assignments[name] = append(tracker.assignments[name], settingAssignment{
