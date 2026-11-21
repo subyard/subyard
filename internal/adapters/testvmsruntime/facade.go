@@ -302,6 +302,15 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		}
 		if err := facade.OnRelease(facade.Context, grant); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
+				// A quarantined lease keeps its credentials until recovery: its cleanup is not done.
+				slot, readErr := storeSlot(facade.Store, grant.SlotID)
+				if readErr != nil {
+					return facade.writeError("unavailable", "lease state is unavailable")
+				}
+				if slot.LeaseID == grant.LeaseID && slot.LeaseEpoch == grant.LeaseEpoch &&
+					slot.CapabilityHash != "" && slot.CapabilityHash == capabilityDigest(grant.Capability) {
+					return facade.writeError("quarantined", "slot cleanup is unconfirmed")
+				}
 				return facade.writeError("lease_lost", "lease is no longer current")
 			}
 			return facade.writeError("quarantined", "slot fencing or stop failed")

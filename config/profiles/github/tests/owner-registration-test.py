@@ -94,7 +94,7 @@ elif action!='show-environment': raise AssertionError([action,*args])
             STORAGE_PATH=str(self.root/'storage'), HOST_BASE=str(self.root/'host'),
             RESTRICTED_DISK_PATHS=str(self.root/'host'), ACCESS_KIND='local', YARD_KIND='container',
             YARD_INSTANCE_NAME='fixture', INCUS_PROJECT='fixture', INCUS_BRIDGE='fixture',
-            SSH_HOST='fixture', SSH_PORT='2222', DEV_USER='dev', DEV_UID='1000', DEV_SUDO='0',
+            SSH_HOST='fixture', SSH_PORT='2222', DEV_USER='dev', DEV_UID='1000', DEV_SUDO='no',
             FORWARD_SSH_AGENT='0', NESTED_E2E_VMS='0', SUBYARD_YARD='fixture', SUBYARD_PROFILE_SELECTED='1')
         self.run_owner('--yes')
         self.log.write_text('')

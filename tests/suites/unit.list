@@ -1,5 +1,6 @@
 # Pure or filesystem-local modules with no fake process boundary.
 build-engine.sh
+checkout-guard.sh
 developer-identity.sh
 docker-forwarding-convergence.sh
 lib-power-network.sh
@@ -8,4 +9,5 @@ runtime-privilege-reexec.sh
 ssh-config.sh
 ssh-transport-identity.sh
 teardown-runtime-preservation.sh
+test-lib.sh
 zabbly-download.sh

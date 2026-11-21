@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 
 grep -Fq -- '--env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"' "$ROOT/scripts/04-provision-subyard.sh" \
   || fail "selected agents are not passed to core guest provisioning"

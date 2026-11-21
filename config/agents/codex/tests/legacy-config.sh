@@ -91,13 +91,21 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
     program = (
         "_toml_writer = {}\nexec(" + json.dumps(licensed_writer) + ", _toml_writer)\n"
         + "LEGACY_TEMPLATES = " + json.dumps([historical.decode("utf-8")]) + "\n"
+        # The compare-and-write helpers precede the materializer, as in the release.
+        + (root / "internal/adapters/configmaterial/guest_cas.py").read_text()
         + program
     )
+
+    def consent(mode):
+        """The token a confirmed apply compares with: the bytes it was planned on."""
+        if mode != "apply":
+            return ""
+        return "sha256:" + hashlib.sha256(destination.read_bytes()).hexdigest() if destination.exists() else "absent"
 
     def run(mode, expect_observation=True):
         result = subprocess.run(
             [sys.executable, "-B", "-c", program, mode, developer,
-             destination_text, str(uid), desired_digest, str(home), desired_digest],
+             destination_text, str(uid), desired_digest, str(home), desired_digest, consent(mode)],
             input=desired,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -149,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix="subyard-codex-legacy-", dir="/tmp") as 
         before = (destination.read_bytes(), baseline_path.read_bytes())
         refused = subprocess.run(
             [sys.executable, "-B", "-c", program, "assess-adopt", developer,
-             destination_text, str(uid), desired_digest, str(home), desired_digest],
+             destination_text, str(uid), desired_digest, str(home), desired_digest, ""],
             input=desired, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         if refused.returncode == 0 or before != (destination.read_bytes(), baseline_path.read_bytes()) or receipt_path.exists():

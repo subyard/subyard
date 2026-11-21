@@ -31,6 +31,11 @@ type convergedYardExecutor struct {
 }
 
 func (fixture convergedYardExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return fixture.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	command := request.Command
 	fixture.calls[instance] = append(fixture.calls[instance], strings.Join(command, " "))
 	if fixture.converged[instance] && len(command) == 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") {

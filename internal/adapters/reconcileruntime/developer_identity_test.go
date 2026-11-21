@@ -176,7 +176,7 @@ func TestDeveloperIdentityNativePlanAndBeginTransport(t *testing.T) {
 			write("listener.json", `{"ssh.service":true,"ssh.socket":false}`, 0o600)
 			write("etc/subuid", "dev:100000:65536\n", 0o644)
 			write("etc/subgid", "dev:100000:65536\n", 0o644)
-			write("var/lib/subyard/integrations/inventory.json", fmt.Sprintf(`{"schema":1,"entries":[],"applied_settings":{"DEV_USER":"dev","DEV_UID":"%d","DEV_SUDO":"1","AGENT_claude_COMMAND":"old-command"}}`, uid), 0o600)
+			write("var/lib/subyard/integrations/inventory.json", fmt.Sprintf(`{"schema":1,"entries":[],"applied_settings":{"DEV_USER":"dev","DEV_UID":"%d","DEV_SUDO":"no","AGENT_claude_COMMAND":"old-command"}}`, uid), 0o600)
 			write("home/dev/data", "preserved", 0o600)
 			runtime := Runtime{RepositoryRoot: repository, Executor: &identityNativeExecutor{root: guest}, Profiles: []profile.Definition{}, Environment: []string{"DEV_USER=next", fmt.Sprintf("DEV_UID=%d", uid)}, Yard: domain.Context{YardName: "sample", IncusProject: "sample-project", YardInstanceName: "sample-yard", DevUser: "next", DevUID: uid}}
 			var wantedPackage integrationArtifact
@@ -210,7 +210,7 @@ func TestDeveloperIdentityNativePlanAndBeginTransport(t *testing.T) {
 				entries := []integrationArtifact{before[0], {ID: "sample", Kind: "file", Path: "/home/dev/data", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte("preserved"))), Mode: 0600}}
 				inventory := map[string]any{"schema": 1, "entries": entries}
 				if scenario != "package-legacy-prompt" {
-					inventory["applied_settings"] = map[string]string{"DEV_USER": "dev", "DEV_UID": strconv.Itoa(uid), "DEV_SUDO": "1", "AGENT_claude_COMMAND": "old-command"}
+					inventory["applied_settings"] = map[string]string{"DEV_USER": "dev", "DEV_UID": strconv.Itoa(uid), "DEV_SUDO": "no", "AGENT_claude_COMMAND": "old-command"}
 				}
 				payload, _ := json.Marshal(inventory)
 				write("var/lib/subyard/integrations/inventory.json", string(payload), 0600)
@@ -423,8 +423,8 @@ else: raise ValueError('unexpected owner phase')
 				if err := json.Unmarshal(payload, &inventory); err != nil {
 					t.Fatal(err)
 				}
-				if inventory.Applied["DEV_USER"] != "next" || inventory.Applied["DEV_SUDO"] != "1" || inventory.Applied["AGENT_claude_COMMAND"] != "old-command" {
-					t.Fatal("identity commit published unrelated desired fields")
+				if inventory.Applied["DEV_USER"] != "next" || inventory.Applied["DEV_SUDO"] != "no" || inventory.Applied["AGENT_claude_COMMAND"] != "old-command" {
+					t.Fatalf("identity commit published unrelated desired fields: %#v", inventory.Applied)
 				}
 				if strings.HasPrefix(scenario, "package-") {
 					var receipt struct {

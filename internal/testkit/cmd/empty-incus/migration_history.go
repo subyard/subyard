@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -50,9 +50,6 @@ type historySkills struct {
 }
 
 var historyMu sync.Mutex
-
-//go:embed config-write.sh
-var configWriteScript string
 
 func historyResponder(control historyControl, path string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 	return func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
@@ -99,23 +96,30 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		if len(command) == 6 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && command[3] == `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents` && command[4] == "subyard" && command[5] == "dev" {
 			return testkit.IncusServerExecStep{}
 		}
-		if len(command) == 3 && command[0] == "sha256sum" && command[1] == "--" && command[2] == control.Destination {
-			if control.InitialDrift != "" {
-				historyMu.Lock()
-				if _, err := os.Stat(path + ".drift"); os.IsNotExist(err) && historyApplyBoundary(control) {
-					drift, err := os.ReadFile(control.InitialDrift)
-					if err == nil {
-						err = os.WriteFile(control.Guest, drift, 0o600)
-					}
-					if err == nil {
-						err = os.WriteFile(path+".drift", []byte("armed at verified activation boundary\n"), 0o600)
-					}
-					if err != nil {
-						historyMu.Unlock()
-						return reject()
-					}
+		// The first read at the verified activation boundary arms the drift.
+		armDrift := func() bool {
+			if control.InitialDrift == "" {
+				return true
+			}
+			historyMu.Lock()
+			defer historyMu.Unlock()
+			if _, err := os.Stat(path + ".drift"); os.IsNotExist(err) && historyApplyBoundary(control) {
+				drift, err := os.ReadFile(control.InitialDrift)
+				if err == nil {
+					err = os.WriteFile(control.Guest, drift, 0o600)
 				}
-				historyMu.Unlock()
+				if err == nil {
+					err = os.WriteFile(path+".drift", []byte("armed at verified activation boundary\n"), 0o600)
+				}
+				if err != nil {
+					return false
+				}
+			}
+			return true
+		}
+		if len(command) == 3 && command[0] == "sha256sum" && command[1] == "--" && command[2] == control.Destination {
+			if !armDrift() {
+				return reject()
 			}
 			payload, err := os.ReadFile(control.Guest)
 			if err != nil {
@@ -195,15 +199,40 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 				return 0
 			}}
 		}
-		if len(command) == 8 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && command[3] == configWriteScript && command[4] == "subyard" && command[5] == control.Destination && command[6] == "1000" {
+		guestToken := func() string {
+			if payload, err := os.ReadFile(control.Guest); err == nil {
+				return configmaterial.PayloadToken(payload)
+			}
+			return configmaterial.TokenAbsent
+		}
+		casCall := len(command) > 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && command[3] == configmaterial.CompareWriteProgram() && command[5] == "/home/dev"
+		if casCall && command[4] == "observe" && slices.Contains(command[6:], control.Destination) {
+			if !armDrift() {
+				return reject()
+			}
+			files := []map[string]string{}
+			for _, destination := range command[6:] {
+				token := configmaterial.TokenAbsent
+				if destination == control.Destination {
+					token = guestToken()
+				}
+				files = append(files, map[string]string{"destination": destination, "token": token})
+			}
+			payload, _ := json.Marshal(map[string]any{"files": files})
+			return testkit.IncusServerExecStep{Stdout: payload}
+		}
+		if casCall && command[4] == "write" && len(command) == 10 && command[6] == control.Destination && command[7] == "1000" {
 			expected, err := os.ReadFile(control.Source)
 			if err != nil {
 				return reject()
 			}
+			if guestToken() != command[8] && guestToken() != configmaterial.PayloadToken(expected) {
+				return testkit.IncusServerExecStep{ExitCode: 4, Stderr: []byte("config write: changed\n")}
+			}
 			return testkit.IncusServerExecStep{Stderr: []byte("controlled materialized config apply fixture\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
 				historyMu.Lock()
 				defer historyMu.Unlock()
-				if !bytes.Equal(actual.Stdin, expected) || command[7] != fmt.Sprintf("%x", sha256.Sum256(actual.Stdin)) {
+				if !bytes.Equal(actual.Stdin, expected) || command[9] != fmt.Sprintf("%x", sha256.Sum256(actual.Stdin)) {
 					reject()
 					return 99
 				}

@@ -564,7 +564,7 @@ func extractLedgerArchive(payload []byte, destination string) error {
 			return err
 		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
-		if name == "." || filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		if name == "." || !filepath.IsLocal(name) {
 			return errors.New("ledger archive contains an unsafe path")
 		}
 		path := filepath.Join(destination, name)

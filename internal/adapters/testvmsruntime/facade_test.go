@@ -18,7 +18,7 @@ import (
 )
 
 func TestFacadeContractAndRedaction(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	var output bytes.Buffer
 	facade := Facade{Store: store, Output: &output}
 	key := strings.Fields(fixturePublicKey(t))
@@ -97,7 +97,7 @@ func TestFacadeAcquireRequiresExactSlotWithoutMutatingAnyConfiguredPool(t *testi
 			} {
 				name := strings.Fields(command)[0]
 				t.Run(name+"/absent", func(t *testing.T) {
-					path := filepath.Join(t.TempDir(), "missing", "leases.json")
+					path := filepath.Join(testkit.TempDir(t), "missing", "leases.json")
 					var output bytes.Buffer
 					facade := Facade{
 						Store: LeaseStore{Path: path, SlotCount: slotCount}, Output: &output,
@@ -114,7 +114,7 @@ func TestFacadeAcquireRequiresExactSlotWithoutMutatingAnyConfiguredPool(t *testi
 				})
 
 				t.Run(name+"/existing", func(t *testing.T) {
-					path := filepath.Join(t.TempDir(), "leases.json")
+					path := filepath.Join(testkit.TempDir(t), "leases.json")
 					store := LeaseStore{Path: path, SlotCount: slotCount}
 					slots := make([]LeaseSlot, slotCount)
 					for index := range slots {
@@ -133,9 +133,7 @@ func TestFacadeAcquireRequiresExactSlotWithoutMutatingAnyConfiguredPool(t *testi
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := os.WriteFile(path, fixture, 0o600); err != nil {
-						t.Fatal(err)
-					}
+					testkit.WriteFile(t, path, fixture, 0o600)
 					before, err := os.ReadFile(path)
 					if err != nil {
 						t.Fatal(err)
@@ -163,7 +161,7 @@ func TestFacadeAcquireRequiresExactSlotWithoutMutatingAnyConfiguredPool(t *testi
 }
 
 func TestFacadeRejectsLegacyAcquireWithoutTouchingLeaseState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing", "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "missing", "leases.json")
 	key := strings.Fields(fixturePublicKey(t))
 	var output bytes.Buffer
 	facade := Facade{
@@ -186,7 +184,7 @@ func TestFacadeRejectsLegacyAcquireWithoutTouchingLeaseState(t *testing.T) {
 }
 
 func TestFacadeRejectsAndroidOnArmBeforeLeaseMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 1}
 	initial, err := json.Marshal(LeasePool{
 		SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
@@ -195,9 +193,7 @@ func TestFacadeRejectsAndroidOnArmBeforeLeaseMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, initial, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, initial, 0o600)
 	cfg := fixtureConfig(t)
 	var output bytes.Buffer
 	provisioned, quarantined := false, false
@@ -255,7 +251,7 @@ func assertMissingSlotResponse(t *testing.T, payload []byte) {
 }
 
 func TestFacadeExactSlotAcquireDoesNotFallback(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	var output bytes.Buffer
 	var provisioned []string
 	facade := Facade{
@@ -361,7 +357,7 @@ func TestFacadeExactUnavailableResponseIsTypedAndRedacted(t *testing.T) {
 		t.Run(string(test.state), func(t *testing.T) {
 			heldAt := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 			store := LeaseStore{
-				Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2,
+				Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2,
 				Now: func() time.Time { return heldAt.Add(time.Minute) },
 			}
 			target := LeaseSlot{
@@ -392,9 +388,7 @@ func TestFacadeExactUnavailableResponseIsTypedAndRedacted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(store.Path, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, store.Path, payload, 0o600)
 			before, err := store.Status()
 			if err != nil {
 				t.Fatal(err)
@@ -476,7 +470,7 @@ func TestFacadeExactUnavailableResponseIsTypedAndRedacted(t *testing.T) {
 }
 
 func TestFacadeAdvertisesAndAcceptsAttributionV2(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	var output bytes.Buffer
 	facade := Facade{Store: store, Output: &output}
 	if err := facade.Run("status"); err != nil {
@@ -621,7 +615,7 @@ func TestFacadeRequestedDisk(t *testing.T) {
 }
 
 func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	var output bytes.Buffer
 	facade := Facade{
 		Store: store, Output: &output,
@@ -676,9 +670,69 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 	}
 }
 
+func TestFacadeReleaseOfQuarantinedLeaseIsNotAnEndedLease(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
+	store := LeaseStore{Path: path, SlotCount: 1}
+	var output bytes.Buffer
+	facade := Facade{
+		Store: store, Output: &output,
+		OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
+			expires, err := store.MarkHeld(grant)
+			grant.ExpiresAt = expires
+			return grant, err
+		},
+		OnRelease: func(ctx context.Context, grant LeaseGrant) error {
+			return store.BeginDrain(grant)
+		},
+	}
+	key := strings.Fields(fixturePublicKey(t))
+	if err := facade.Run("acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
+		key[0] + " " + key[1] + " slot-001"); err != nil {
+		t.Fatal(err)
+	}
+	var acquired facadeResponse
+	if err := json.Unmarshal(output.Bytes(), &acquired); err != nil || acquired.Grant == nil {
+		t.Fatalf("acquire response = %s (%v)", output.String(), err)
+	}
+	grant := *acquired.Grant
+	if err := store.Quarantine(grant, errors.New("fixture stop failed")); err != nil {
+		t.Fatal(err)
+	}
+	release := func(capability string) facadeResponse {
+		t.Helper()
+		output.Reset()
+		if err := facade.Run(strings.Join([]string{"release", grant.SlotID, grant.LeaseID,
+			strconv.FormatUint(grant.LeaseEpoch, 10), capability}, " ")); err != nil {
+			t.Fatal(err)
+		}
+		var response facadeResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatalf("release response = %s (%v)", output.String(), err)
+		}
+		return response
+	}
+	// The quarantined lease still holds its credentials: cleanup is unconfirmed, not ended.
+	for range 2 {
+		if response := release(grant.Capability); response.Code != "quarantined" || response.Message != "slot cleanup is unconfirmed" {
+			t.Fatalf("quarantined release = %+v", response)
+		}
+	}
+	if response := release("wrong"); response.Code != "lease_lost" {
+		t.Fatalf("wrong credential release = %+v", response)
+	}
+	// A lease state that cannot be reread after the refusal is unavailable, never an ended lease.
+	facade.OnRelease = func(context.Context, LeaseGrant) error {
+		testkit.WriteFile(t, path, []byte("{"), 0o600)
+		return ErrLeaseLost
+	}
+	if response := release(grant.Capability); response.Code != "unavailable" {
+		t.Fatalf("unreadable state release = %+v", response)
+	}
+}
+
 func TestFacadeRejectsUnboundedInput(t *testing.T) {
 	var output bytes.Buffer
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	facade := Facade{
 		Store:  LeaseStore{Path: path, SlotCount: 1},
 		Output: &output,

@@ -110,7 +110,7 @@ chmod 0600 "$root/.fixture-run"
 EOS
 } | remote /usr/sbin/runuser -u dev -- bash -s -- "$REMOTE_DATA" "$REMOTE" "$RUN_ID"
 
-VERSION=hostid-e2e
+VERSION=1.0.0-hostid.e2e
 phase package-runtime
 RELEASE="$LOCAL/release"
 "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE" --version "$VERSION" >/dev/null
@@ -264,7 +264,7 @@ export SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1
 export SUBYARD_CONFIG_DIR="$runtime/config" STORAGE_PATH="$SUBYARD_HOME/incus/storage"
 export HOST_BASE="$SUBYARD_HOME/host" RESTRICTED_DISK_PATHS="$SUBYARD_HOME/host"
 export ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard INCUS_PROJECT=subyard INCUS_BRIDGE=incusbr0
-export SSH_HOST=yard DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
+export SSH_HOST=yard DEV_USER=dev DEV_UID=1000 DEV_SUDO=no FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
 "$runtime/scripts/install-keys-auto-sync.sh" --yes
 "$runtime/scripts/install-keys-auto-sync.sh" --check
 [ "$(stat -c %a "$root/home/.config/systemd/user/subyard-keys-sync.service")" = 644 ]
@@ -457,6 +457,8 @@ printf 'evidence: one scoped source rename commit preserved exact owner tree and
 EOS
 owner_yard config sync --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
+# Rename commits without pushing; publish it before later Git setting edits.
+owner_yard config sync push --yes >/dev/null
 # Simulate the historical defective identity-only rename with deleted cache.
 phase source-mismatch-recovery
 remote_dev bash -s -- "$REMOTE" <<'EOS'
@@ -476,6 +478,7 @@ owner_yard host rename owner-mismatch --source-host-id owner-b --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
 owner_yard host rename owner-b --yes >/dev/null
 owner_yard config sync --yes >/dev/null
+owner_yard config sync push --yes >/dev/null
 owner_yard config set YARD_IMAGE images:debian/13 --scope shared --git --yes >/dev/null
 owner_yard config validate --all-local >/dev/null
 [ "$(runtime_identity)" = "$live_before" ] || fail 'rename/recovery changed live UUID, process, root volume, project registry, guest rule hash or credential actor'

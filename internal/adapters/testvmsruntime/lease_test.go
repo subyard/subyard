@@ -10,13 +10,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestLeaseStoreConfiguredCapacityMatrix(t *testing.T) {
 	for _, count := range []int{1, 2, 3} {
 		t.Run(fmt.Sprintf("N=%d", count), func(t *testing.T) {
 			store := LeaseStore{
-				Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: count,
+				Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: count,
 			}
 			var grants []LeaseGrant
 			for index := 0; index < count; index++ {
@@ -46,7 +48,7 @@ func TestLeaseStoreConfiguredCapacityMatrix(t *testing.T) {
 }
 
 func TestLeaseStoreAcquireSlotDoesNotFallback(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	grant, err := store.AcquireSlot(
 		"exact", "SHA256:key", "checkout", "tests", "slot-002",
 	)
@@ -111,7 +113,7 @@ func TestLeaseStoreAcquireSlotDoesNotFallback(t *testing.T) {
 func TestLeaseStoreExactBusyOwnerTracksHeldLeaseLifecycle(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1,
+		Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1,
 		Now: func() time.Time { return now },
 	}
 	grant, err := store.AcquireV2Slot(
@@ -182,7 +184,7 @@ func TestLeaseStoreExactBusyOwnerTracksHeldLeaseLifecycle(t *testing.T) {
 }
 
 func TestLeaseStoreInspectIsReadOnlyAndExpiresOnlyInMemory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	now := time.Unix(1_000, 0).UTC()
 	pool := LeasePool{
 		SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
@@ -195,9 +197,7 @@ func TestLeaseStoreInspectIsReadOnlyAndExpiresOnlyInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, payload, 0o600)
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +246,7 @@ func TestLeaseStoreInspectRejectsNoncanonicalSlotInventory(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "leases.json")
+			path := filepath.Join(testkit.TempDir(t), "leases.json")
 			payload, err := json.Marshal(LeasePool{
 				SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e",
 				ResourceID: "test-vms", Slots: test.slots,
@@ -254,9 +254,7 @@ func TestLeaseStoreInspectRejectsNoncanonicalSlotInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, path, payload, 0o600)
 			if _, err := (LeaseStore{Path: path, SlotCount: test.count}).Inspect(); err == nil {
 				t.Fatalf("Inspect accepted slots=%#v", test.slots)
 			}
@@ -267,7 +265,7 @@ func TestLeaseStoreInspectRejectsNoncanonicalSlotInventory(t *testing.T) {
 func TestLeaseStoreConcurrentCapacityAndFencing(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2,
+		Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2,
 		Now: func() time.Time { return now },
 	}
 	var wait sync.WaitGroup
@@ -334,7 +332,7 @@ func TestLeaseStoreConcurrentCapacityAndFencing(t *testing.T) {
 
 func TestLeaseStoreExpiryShrinkAndQuarantine(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 3, Now: func() time.Time { return now }}
 	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
@@ -382,7 +380,7 @@ func TestLeaseStoreExpiryShrinkAndQuarantine(t *testing.T) {
 func TestLeaseStoreHeldDeadlineStartsAfterProvisioning(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path:      filepath.Join(t.TempDir(), "leases.json"),
+		Path:      filepath.Join(testkit.TempDir(t), "leases.json"),
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
@@ -419,7 +417,7 @@ func TestLeaseStoreFiveMinuteRenewExtendsTwentyMinuteDeadline(t *testing.T) {
 		t.Fatalf("lease TTL=%s, want 20m", LeaseTTL)
 	}
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1, Now: func() time.Time { return now }}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1, Now: func() time.Time { return now }}
 	grant, err := store.AcquireSlot("client", "SHA256:key", "", "", "slot-001")
 	if err != nil {
 		t.Fatal(err)
@@ -460,7 +458,7 @@ func TestProvisioningDeadlineContainsColdToolchainBudget(t *testing.T) {
 }
 
 func TestLeaseStoreBlockedShrinkDoesNotMutateState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 3}
 	for index := 0; index < 3; index++ {
 		if _, err := store.AcquireSlot(
@@ -489,7 +487,7 @@ func TestLeaseStoreBlockedShrinkDoesNotMutateState(t *testing.T) {
 }
 
 func TestLeaseStoreRedactsCapability(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "label", "purpose", "slot-001",
 	)
@@ -507,10 +505,8 @@ func TestLeaseStoreRedactsCapability(t *testing.T) {
 }
 
 func TestLeaseStoreCorruptStateRecoveryKeepsOtherSlotsQuarantined(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
-	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
+	testkit.WriteFile(t, path, []byte("{broken"), 0o600)
 	store := LeaseStore{Path: path, SlotCount: 2}
 	if _, err := store.Status(); !errors.Is(err, ErrCorruptLeaseState) {
 		t.Fatalf("status error = %v", err)
@@ -533,7 +529,7 @@ func TestLeaseStoreCorruptStateRecoveryKeepsOtherSlotsQuarantined(t *testing.T) 
 }
 
 func TestLeaseStoreCombinedLabelPublishesOnlyCurrentAttribution(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "Subyard/Subyard@checkout-a#run-a", "unit-tests",
 		"slot-001",
@@ -577,7 +573,7 @@ func TestLeaseStoreCombinedLabelPublishesOnlyCurrentAttribution(t *testing.T) {
 }
 
 func TestLeaseStoreV2PublishesCanonicalProjectWithoutCheckout(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireV2Slot(
 		"client", "SHA256:key", "default", "Subyard-2", "run-a", "unit-tests",
 		"slot-001",
@@ -608,7 +604,7 @@ func TestLeaseStoreV2PublishesCanonicalProjectWithoutCheckout(t *testing.T) {
 }
 
 func TestLeaseStoreRejectsUnsafeAttributionBeforeMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	store := LeaseStore{Path: path, SlotCount: 1}
 	if _, err := store.AcquireSlot(
 		"client", "SHA256:key", "/home/dev/private@checkout#run", "tests", "slot-001",
@@ -621,7 +617,7 @@ func TestLeaseStoreRejectsUnsafeAttributionBeforeMutation(t *testing.T) {
 }
 
 func TestLeaseStoreMigratesV1AndPreservesRetainedDataAndAttribution(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	payload := `{
 	  "schema_version": 1,
 	  "resource_type": "agent-e2e",
@@ -637,9 +633,7 @@ func TestLeaseStoreMigratesV1AndPreservesRetainedDataAndAttribution(t *testing.T
 	    "purpose": "migration"
 	  }]
 	}`
-	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(payload), 0o600)
 	store := LeaseStore{Path: path, SlotCount: 1}
 	pool, err := store.Status()
 	if err != nil {
@@ -659,7 +653,7 @@ func TestLeaseStoreMigratesV1AndPreservesRetainedDataAndAttribution(t *testing.T
 
 func TestLeaseRecoveryJournalSurvivesPreviousProducerRewrite(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	store := LeaseStore{
 		Path:      path,
 		SlotCount: 1,
@@ -718,9 +712,7 @@ func TestLeaseRecoveryJournalSurvivesPreviousProducerRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, append(previousPayload, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, append(previousPayload, '\n'), 0o600)
 
 	pool, err := store.Status()
 	if err != nil {
@@ -739,7 +731,7 @@ func TestLeaseRecoveryJournalSurvivesPreviousProducerRewrite(t *testing.T) {
 func TestLeaseStoreRecoveryScheduleGenerationAndFencing(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path:      filepath.Join(t.TempDir(), "leases.json"),
+		Path:      filepath.Join(testkit.TempDir(t), "leases.json"),
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
@@ -815,7 +807,7 @@ func TestLeaseStoreRecoveryScheduleGenerationAndFencing(t *testing.T) {
 func TestInterruptedRecoveryReturnsToImmediateQuarantine(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path:      filepath.Join(t.TempDir(), "leases.json"),
+		Path:      filepath.Join(testkit.TempDir(t), "leases.json"),
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
@@ -855,7 +847,7 @@ func TestInterruptedRecoveryReturnsToImmediateQuarantine(t *testing.T) {
 func TestLeaseStoreRecoveryBackoffNeverBecomesTerminal(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	store := LeaseStore{
-		Path:      filepath.Join(t.TempDir(), "leases.json"),
+		Path:      filepath.Join(testkit.TempDir(t), "leases.json"),
 		SlotCount: 1,
 		Now:       func() time.Time { return now },
 	}
@@ -909,7 +901,7 @@ func TestLeaseStoreRecoveryBackoffNeverBecomesTerminal(t *testing.T) {
 }
 
 func TestLeaseStoreExpectedDrainFencesOnlyTheSnapshottedLease(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	original, err := store.AcquireSlot(
 		"original", "SHA256:key", "", "stale-drain", "slot-001",
 	)
@@ -946,7 +938,7 @@ func TestLeaseStoreExpectedDrainFencesOnlyTheSnapshottedLease(t *testing.T) {
 }
 
 func TestLeaseStoreExpectedDrainStartsMatchingTargetAndSkipsCompletedTarget(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "", "exact-drain", "slot-001",
 	)
@@ -971,7 +963,7 @@ func TestLeaseStoreExpectedDrainStartsMatchingTargetAndSkipsCompletedTarget(t *t
 }
 
 func TestLeaseStoreExpectedRecoveryRejectsReplacementPair(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "", "stale-recovery", "slot-001",
 	)
@@ -1005,7 +997,7 @@ func TestLeaseStoreExpectedRecoveryRejectsReplacementPair(t *testing.T) {
 }
 
 func TestLeaseStoreExpectedRecoveryStartsMatchingTargetAndDoesNotRestartIt(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	grant, err := store.AcquireSlot(
 		"client", "SHA256:key", "", "exact-recovery", "slot-001",
 	)

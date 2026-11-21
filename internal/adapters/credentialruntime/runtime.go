@@ -15,11 +15,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -383,15 +383,11 @@ func (runtime *Runtime) withLock(ctx context.Context, run func() error) error {
 	if err := os.MkdirAll(runtime.config.Root, 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(runtime.lockFile, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.Lock(ctx, runtime.lockFile, false, 0)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release()
 	return run()
 }
 
@@ -575,31 +571,9 @@ func readProtectedJSON(path string, target any) error {
 }
 
 func atomicWrite(path string, payload []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".subyard-write-*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err := file.Chmod(mode); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err := file.Write(payload); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary, path)
+	return safefs.WriteFile(path, payload, safefs.Options{
+		Mode: mode, ParentMode: 0o700, TempPattern: ".subyard-write-*",
+	})
 }
 
 func randomHex(bytesCount int) (string, error) {

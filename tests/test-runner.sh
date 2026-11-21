@@ -3,6 +3,8 @@
 set -euo pipefail
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/helpers/test-lib.sh
+. "$ROOT/tests/helpers/test-lib.sh"
 tmp="$(mktemp -d)"
 cleanup() {
   local rc=$?
@@ -102,7 +104,6 @@ run_fixture() {
     bash "$fixture/tests/run.sh" > "$tmp/$1.out" 2>&1
 }
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 (umask 0077; run_fixture success)
 awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }

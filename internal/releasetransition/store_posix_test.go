@@ -135,121 +135,6 @@ func TestPOSIXV2StoreCheckpointEvidenceIsWriteOnceAndIdempotentForExactBytes(t *
 	))
 }
 
-func TestPOSIXV2StoreSupersededJournalIsWriteOnceAndIdempotentForExactBytes(t *testing.T) {
-	store, err := NewPOSIXV2Store(protectedConfigHome(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := []byte(`{"schemaVersion":1,"authorizationPlan":"plan-v1-source"}`)
-	if err := store.CreateSupersededJournal("tx-new", payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateSupersededJournal("tx-new", payload); err != nil {
-		t.Fatalf("exact archive retry: %v", err)
-	}
-	if err := store.CreateSupersededJournal("tx-new", []byte(`{"different":true}`)); !errors.Is(err, ErrProtectedStoreExists) {
-		t.Fatalf("foreign archive error = %v", err)
-	}
-	stored, err := store.ReadSupersededJournal("tx-new")
-	if err != nil || !bytes.Equal(stored.Payload, payload) {
-		t.Fatalf("stored archive=%#v err=%v", stored, err)
-	}
-	assertProtectedFile(t, filepath.Join(
-		store.configHome, "release-transition", "v2", "transactions", "tx-new",
-		"superseded-journal.json",
-	))
-}
-
-func TestPOSIXV2StoreReplacementGraphAdmissionRejectsUnsafeProposedEdgeWithoutMutation(t *testing.T) {
-	authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
-	tests := []struct {
-		name     string
-		proposed TransactionID
-		setup    func(*testing.T, *POSIXV2Store)
-	}{
-		{name: "source already has predecessor", proposed: "tx-proposed", setup: func(t *testing.T, store *POSIXV2Store) {
-			createStoreTransaction(t, store, "tx-older")
-			createStoreSupersession(t, store, "tx-source", "tx-older", authorization)
-		}},
-		{name: "foreign successor already points to source", proposed: "tx-proposed", setup: func(t *testing.T, store *POSIXV2Store) {
-			foreignAuthorization := PlanToken("plan-v1-" + strings.Repeat("d", 64))
-			createStoreSupersession(t, store, "tx-foreign", "tx-source", foreignAuthorization)
-		}},
-		{name: "allocation exceeds graph bound", proposed: "tx-proposed", setup: func(t *testing.T, store *POSIXV2Store) {
-			for index := 0; index < maxTransactionGraphEntries-1; index++ {
-				createStoreTransaction(t, store, TransactionID(fmt.Sprintf("tx-bound-%03d", index)))
-			}
-		}},
-		{name: "proposed transaction collides", proposed: "tx-proposed", setup: func(t *testing.T, store *POSIXV2Store) {
-			createStoreTransaction(t, store, "tx-proposed")
-		}},
-		{name: "proposed transaction is source", proposed: "tx-source"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			configHome := protectedConfigHome(t)
-			store, err := NewPOSIXV2Store(configHome)
-			if err != nil {
-				t.Fatal(err)
-			}
-			createStoreTransaction(t, store, "tx-source")
-			if test.setup != nil {
-				test.setup(t, store)
-			}
-			replacement := storeSupersessionRecord(t, "tx-source", authorization).Replacement
-			before := snapshotStoreV2Tree(t, configHome)
-			if _, err := store.ResolveSupersededJournalTransaction(
-				test.proposed, replacement, authorization,
-			); err == nil {
-				t.Fatal("unsafe proposed predecessor edge was accepted")
-			}
-			after := snapshotStoreV2Tree(t, configHome)
-			if !bytes.Equal(after, before) {
-				t.Fatalf("failed admission changed the protected tree\nbefore:\n%s\nafter:\n%s", before, after)
-			}
-		})
-	}
-}
-
-func TestPOSIXV2StoreReplacementGraphAdmissionRejectsPreActivationReplacement(t *testing.T) {
-	store, err := NewPOSIXV2Store(protectedConfigHome(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
-	createStoreTransaction(t, store, "tx-source")
-	replacement := storeSupersessionRecord(t, "tx-source", authorization).Replacement
-	replacement.Reason = JournalReplacementPreActivationPlanStale
-	replacement.SourceVersion = ""
-	before := snapshotStoreV2Tree(t, store.configHome)
-	if _, err := store.ResolveSupersededJournalTransaction(
-		"tx-proposed", replacement, authorization,
-	); err == nil {
-		t.Fatal("pre-activation replacement was admitted to the archive graph")
-	}
-	after := snapshotStoreV2Tree(t, store.configHome)
-	if !bytes.Equal(after, before) {
-		t.Fatalf("rejected pre-activation replacement changed the protected tree\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-func TestPOSIXV2StoreReplacementGraphAdmissionReusesExactArchive(t *testing.T) {
-	store, err := NewPOSIXV2Store(protectedConfigHome(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authorization := PlanToken("plan-v1-" + strings.Repeat("c", 64))
-	createStoreTransaction(t, store, "tx-source")
-	createStoreSupersession(t, store, "tx-existing", "tx-source", authorization)
-	replacement := storeSupersessionRecord(t, "tx-source", authorization).Replacement
-	resolved, err := store.ResolveSupersededJournalTransaction(
-		"tx-proposed", replacement, authorization,
-	)
-	if err != nil || resolved != "tx-existing" {
-		t.Fatalf("exact archive resolution = %q, err=%v", resolved, err)
-	}
-}
-
 func TestPOSIXV2StoreKeepsCheckpointEvidenceAndRecoverySeparate(t *testing.T) {
 	store, err := NewPOSIXV2Store(protectedConfigHome(t))
 	if err != nil {
@@ -343,7 +228,7 @@ func TestPOSIXV2StoreCleanupRejectsInvalidPredecessorGraphBeforeDeletion(t *test
 		setup func(*testing.T, *POSIXV2Store, PlanToken)
 	}{
 		{name: "malformed archive", setup: func(t *testing.T, store *POSIXV2Store, _ PlanToken) {
-			if err := store.CreateSupersededJournal("tx-current", []byte("{\n")); err != nil {
+			if err := store.seedSupersededJournal("tx-current", []byte("{\n")); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -494,10 +379,9 @@ func TestPOSIXV2StoreCleanupPreservesPreparedRoots(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(configHome, "release-transition", "v2", "transactions", "tx-unrelated")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unrelated evidence was retained: %v", err)
 			}
-			archive := storeSupersessionRecord(t, "tx-prepared-source", authorization)
-			resolved, err := store.ResolveSupersededJournalTransaction("tx-another", archive.Replacement, authorization)
-			if err != nil || resolved != "tx-prepared" {
-				t.Fatalf("prepared intent no longer resumes exactly: %s, %v", resolved, err)
+			graph, err := store.readTransactionGraph()
+			if err != nil || graph.successors["tx-prepared-source"] != "tx-prepared" {
+				t.Fatalf("prepared intent binding lost: %#v %v", graph, err)
 			}
 		})
 	}
@@ -578,11 +462,6 @@ func TestPOSIXV2StoreIndependentSupersessionHistoryBeyondGraphCeiling(t *testing
 		source := TransactionID(fmt.Sprintf("tx-source-%03d", index))
 		successor := TransactionID(fmt.Sprintf("tx-successor-%03d", index))
 		createStoreTransaction(t, store, source)
-		archive := storeSupersessionRecord(t, source, authorization)
-		resolved, err := store.ResolveSupersededJournalTransaction(successor, archive.Replacement, authorization)
-		if err != nil || resolved != successor {
-			t.Fatalf("admission %d failed: %s, %v", index, resolved, err)
-		}
 		createStoreSupersession(t, store, successor, source, authorization)
 		writeStoreCurrentJournal(t, store, successor, authorization)
 		if err := store.CleanupTransactions(successor); err != nil {
@@ -639,7 +518,7 @@ func createStoreSupersession(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateSupersededJournal(successor, payload); err != nil {
+	if err := store.seedSupersededJournal(successor, payload); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -953,4 +832,9 @@ func assertProtectedDirectory(t *testing.T, path string) {
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0o700 || stat.Uid != uint32(os.Getuid()) {
 		t.Fatalf("unsafe protected directory %s: mode=%v stat=%#v", path, info.Mode(), stat)
 	}
+}
+
+// Seed retained archive bytes independently of the retired engine writer.
+func (store *POSIXV2Store) seedSupersededJournal(transaction TransactionID, payload []byte) error {
+	return store.createImmutable([]string{"release-transition", "v2", "transactions", string(transaction)}, "superseded-journal.json", payload)
 }

@@ -19,23 +19,29 @@ fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+DEV_SUDO="${DEV_SUDO:-prompt}"
 
 # BEGIN generated Git approval hook
 git_approval_hook() {
   cat <<'GIT_APPROVAL_HOOK'
 #!/usr/bin/python3 -I
 # Managed by Subyard Git approval provision.
-"""Recognize literal Git command words without executing or expanding shell input."""
+"""Refuse a literal mention of a gated command unless the client's own prompt covers it.
 
+Arguments name the gates: git (commit and push) and sudo (privilege escalation).
+--plain selects the Codex rules, which require the whole command to be plain; without
+it, the Claude rules check the plain prefix up to the first direct gated command.
+"""
+
+import collections
 import json
 import posixpath
 import re
 import shlex
 import sys
 
-# Keep shell separators distinct from quoted words. Comments are recognized only
-# at token boundaries. A full shell evaluator is outside this hook's scope.
-TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|\n]+|[()]|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'";&|()<>\\])+""", re.S)
+# A flat lexer: shell separators, comments and quoted words, without evaluating anything.
+TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|\n]+|[()`]|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'"`;&|()<>\\])+""", re.S)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*\+?=")
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree",
                      "--namespace", "--config-env", "--super-prefix"}
@@ -43,126 +49,245 @@ GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
              "--no-optional-locks", "--no-lazy-fetch", "--literal-pathspecs",
              "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
              "--bare", "--no-advice"}
+ESCALATION = ("sudo", "su", "doas", "pkexec", "sudoedit", "run0")
+GIT_ACTIONS = ("git commit", "git push")
+RESERVED = {"!", "{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac",
+            "fi", "for", "function", "if", "in", "select", "then", "time", "until", "while"}
+# Commands that only print, search or list their arguments, so a mention there is text.
+INERT = {"echo", "printf", "grep", "rg", "which", "type", "ls", "cat", "head", "tail", "wc",
+         "cut", "uniq", "cd", "true"}
+PLAIN_SEPARATORS = {";", "|", "&&", "||"}
+# Codex runs a command with a glob, tilde, brace or escape without asking, so its plain words
+# use only these characters outside quotes, and quotes without expansions or escapes.
+CODEX_WORD = re.compile(r"""(?:[A-Za-z0-9_@%+=:,./-]|'[^'\n]*'|"[^"\\$`\n]*")+""")
+RESCAN = re.compile(r"""[\s;&|()<>`$#'"\\]""")
+# Larger commands are refused: scanning them could outlast the client's hook timeout.
+MAX_COMMAND_BYTES = 256 * 1024
+ANSI_C = re.compile(r"""(?<!\\)\$'((?:\\.|[^'\\])*)'""", re.S)
+ANSI_C_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)", re.S)
+ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+                "r": "\r", "t": "\t", "v": "\v"}
+# Brace expansion, option values and history expansion glue names to other text.
+NAME_PARTS = re.compile(r"[{},=!]")
 
 
-def git_action(words):
-    args = iter(words)
-    for arg in args:
+def git_action(words, start=0):
+    """Return the subcommand git runs from words[start:]; ... marks one hidden by an expansion."""
+    index = start
+    while index < len(words):
+        arg = words[index]
+        index += 1
+        if arg is None or "$" in arg or "`" in arg:
+            return "..."
         if arg in GIT_VALUE_OPTIONS:
-            next(args, None)
-        elif arg in GIT_FLAGS or (
+            index += 1
+        elif not (arg in GIT_FLAGS or (
             "=" in arg and arg.partition("=")[0] in GIT_VALUE_OPTIONS | {"--exec-path"}
-        ):
-            continue
+        )):
+            return arg
+    return None
+
+
+def ansi_c(match):
+    """Return a $'…' body with its escapes decoded, quoted again for shlex."""
+    def decode(escape):
+        code = escape[1]
+        if code[0] in "xuU":
+            value = chr(min(int(code[1:], 16), 0x10FFFF))
+        elif code[0] in "01234567":
+            value = chr(int(code, 8) & 0xFF)
+        elif code[0] == "c" and len(code) == 2:
+            value = chr(ord(code[1]) & 0x1F)
         else:
-            return arg if arg in {"commit", "push"} else None
+            value = ANSI_C_NAMED.get(code, code)
+        return value
+    # Bash ends the string at the first NUL, from \0, \x0, \u0000 or \c@ alike.
+    return shlex.quote(ANSI_C_ESCAPE.sub(decode, match[1]).partition("\0")[0])
+
+
+def unquote(raw):
+    """Return the value of one shell word; $'…' is decoded and $"…" loses its prefix."""
+    raw = ANSI_C.sub(ansi_c, raw)
+    raw = re.sub(r"""(?<!\\)\$(?=["])""", "", raw)
+    try:
+        return "".join(shlex.split(raw, comments=False))
+    except ValueError:
+        return re.sub(r"""[\\'"]""", "", raw)
+
+
+def names(value):
+    """Return the command names a word spells, also inside braces, after = or !, or after -S."""
+    parts = [value, *NAME_PARTS.split(value)]
+    if value.startswith("-S"):
+        # env -S takes its command in the same word.
+        parts.append(value[2:])
+    return {posixpath.basename(part) for part in parts}
+
+
+def git_mention(run):
+    """Return the git action that a git word in one command's words runs."""
+    later, action = [None] * (len(run) + 1), None
+    for index in range(len(run) - 1, -1, -1):
+        action = f"git {run[index]}" if run[index] in ("commit", "push") else action
+        later[index] = action
+    for index, word in enumerate(run):
+        if word is not None and "git" in names(word):
+            action = git_action(run, index + 1)
+            if action in ("commit", "push"):
+                return f"git {action}"
+            if action == "...":
+                # An expansion hides the subcommand; a later literal commit or push counts.
+                return later[index + 1]
     return None
 
 
-def simple_commands(command):
-    words = []
-    offset = 0
-    array_depth = 0
-    while offset < len(command):
-        token = TOKEN.match(command, offset)
-        if token is None:
-            return
-        offset = token.end()
-        raw = token[0]
-        if array_depth:
-            array_depth += (raw == "(") - (raw == ")")
-            continue
-        if (raw == "(" and words and words[-1][2] == token.start()
-                and ASSIGNMENT.fullmatch(words[-1][0])):
-            array_depth = 1
-            continue
-        if raw == "<<":
-            # A heredoc body contains data, not a list of shell commands.
-            if words:
-                yield words
-            return
-        if raw.startswith("#"):
-            continue
-        if raw.startswith("\n") or raw[0] in ";&|()":
-            if words:
-                yield words
-                words = []
-        elif not raw.isspace():
-            words.append((raw, token.start(), token.end()))
-    if words:
-        yield words
-
-
-def shell_command(executable, args):
-    options = iter(args)
-    command_mode = noexec = False
-    # sh can be Bash under its POSIX invocation name. POSIX sh and dash
-    # use -o; Bash also takes operands for -O, --init-file and --rcfile.
-    bash_options = executable in {"bash", "sh"}
-    for arg in options:
-        if arg == "--":
-            arg = next(options, None)
-            break
-        if bash_options and arg in {"--init-file", "--rcfile"}:
-            next(options, None)
-            continue
-        if re.fullmatch(r"[-+][a-zA-Z]+", arg):
-            enabled = arg[0] == "-"
-            for flag in arg[1:]:
-                if flag == "c" and enabled:
-                    command_mode = True
-                elif flag == "n":
-                    noexec = enabled
-                elif flag == "o" or (flag == "O" and bash_options):
-                    option = next(options, None)
-                    if flag == "o" and option == "noexec":
-                        noexec = enabled
-        elif not arg.startswith("--"):
-            break
-    else:
-        return None
-    return arg if command_mode and not noexec else None
-
-
-def denied_action(command, nested=False, depth=0):
-    if depth == 8:
-        return None
-    command = command.replace("\\\n", "")
-    for tokens in simple_commands(command):
-        try:
-            words = [shlex.split(raw, comments=False)[0] for raw, _, _ in tokens]
-        except (IndexError, ValueError):
-            continue
-        start = 0
-        while start < len(words) and ASSIGNMENT.match(tokens[start][0]):
-            start += 1
-        if start == len(words):
-            continue
-        executable = posixpath.basename(words[start])
-        args = words[start + 1:]
-        if executable == "git":
-            action = git_action(args)
-            if action and (nested or start or
-                           command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
-                return action
-        elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
-            script = shell_command(executable, args)
-            if script is not None:
-                action = denied_action(script, nested=True, depth=depth + 1)
-                if action:
-                    return action
+def mention(text, gates):
+    """Return the first gated command the text names anywhere, in any position."""
+    pending = collections.deque([text])
+    while pending:
+        current = pending.popleft()
+        run = []
+        offset = 0
+        while offset <= len(current):
+            token = TOKEN.match(current, offset) if offset < len(current) else None
+            raw = token[0] if token else ""
+            if token is None or raw.isspace() and "\n" in raw or raw[0] in ";&|\n#":
+                # The end of a command's words: name a git subcommand in them.
+                found = "git" in gates and git_mention(run)
+                if found:
+                    return found
+                run = []
+                if token is None:
+                    offset += 1
+                    continue
+                if raw[0] == "#":
+                    pending.append(raw[1:])
+            elif raw.isspace():
+                pass
+            elif raw[0] in "()`<>":
+                run.append(None)
+            else:
+                value = unquote(raw)
+                spelled = names(value)
+                found = "sudo" in gates and next((n for n in ESCALATION if n in spelled), None)
+                if found:
+                    return found
+                # Git runs git-commit and git-push from its exec path.
+                found = "git" in gates and next((f"git {n[4:]}" for n in ("git-commit", "git-push")
+                                                 if n in spelled), None)
+                if found:
+                    return found
+                if len(value) < len(raw) and RESCAN.search(value):
+                    pending.append(value)
+                run.append(value)
+            offset = token.end()
     return None
+
+
+def native(text, gates, start=0):
+    """Return the gated command text[start:] starts with literally, as the client's rules match it."""
+    for name in (ESCALATION if "sudo" in gates else ()) + (GIT_ACTIONS if "git" in gates else ()):
+        end = start + len(name)
+        if text.startswith(name, start) and (end == len(text) or text[end] in " ;&|\n"):
+            return name
+    return None
+
+
+def inert(segment):
+    return segment.split(None, 1)[0] in INERT or segment == "git commit" or segment.startswith("git commit ")
+
+
+def pipelines(command, gates, claude):
+    """Split a plain command into pipelines of (text, direct) segments, or return None.
+
+    Plain means simple commands of words joined by &&, ||, ; or |, with no expansion,
+    redirect, grouping, newline or comment, and no reserved word or assignment first.
+    Claude prompts once for a whole call, so its check ends at the first direct segment.
+    """
+    result, pipeline, offset = [], [], 0
+    while True:
+        while command.startswith((" ", "\t"), offset):
+            offset += 1
+        start = offset
+        if claude and native(command, gates, start):
+            return result + [pipeline + [(command[start:], True)]]
+        words, separator = [], None
+        while offset < len(command):
+            token = TOKEN.match(command, offset)
+            if token is None:
+                return None
+            raw = token[0]
+            if raw in PLAIN_SEPARATORS:
+                separator = raw
+                break
+            if raw.isspace():
+                if raw.strip(" \t"):
+                    return None
+                offset = token.end()
+                continue
+            if raw[0] in "#;&|\n()`<>" or any(char in raw for char in "$`\n"):
+                return None
+            if not claude and not CODEX_WORD.fullmatch(raw):
+                return None
+            words.append(raw)
+            offset = token.end()
+        if not words or words[0] in RESERVED or ASSIGNMENT.match(words[0]):
+            return None
+        segment = command[start:offset].rstrip(" \t")
+        pipeline.append((segment, bool(native(segment, gates))))
+        if separator is None:
+            return result + [pipeline]
+        offset += len(separator)
+        if separator != "|":
+            result.append(pipeline)
+            pipeline = []
+
+
+def refused(command, gates, claude):
+    """Return the mention that the client's own prompt does not cover, if any."""
+    first = mention(command, gates)
+    if not first:
+        return None, True
+    split = pipelines(command, gates, claude)
+    if split is None:
+        return first, False
+    for pipeline in split:
+        # A mention is text only when no command of its pipeline can run it.
+        inert_pipeline = all(d or inert(s) for s, d in pipeline)
+        for segment, direct in pipeline:
+            found = not direct and mention(segment, gates)
+            if found and not (inert_pipeline and inert(segment)):
+                return found, True
+    return None, True
 
 
 def main():
-    payload = json.load(sys.stdin)
-    action = denied_action(payload["tool_input"]["command"])
-    if action:
-        print(f"Git approval requires a direct `git {action}` command. "
-              f"For another directory, use `cd <directory> && git {action}`.",
-              file=sys.stderr)
+    gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
+    codex = "--plain" in sys.argv[1:]
+    command = json.load(sys.stdin)["tool_input"]["command"]
+    if len(command.encode(errors="surrogatepass")) > MAX_COMMAND_BYTES:
+        print(f"Approval refuses a command longer than {MAX_COMMAND_BYTES // 1024} KiB; "
+              f"write long scripts to a file first.", file=sys.stderr)
         return 2
-    return 0
+    action, plain = refused(command, gates, claude=not codex)
+    if not action:
+        return 0
+    if codex and not plain:
+        print(f"Approval requires `{action}` in a plain command: words joined only by "
+              f"&&, ||, ; or |, without redirects, variables, substitutions or grouping.",
+              file=sys.stderr)
+    elif action.startswith("git "):
+        print(f"Git approval requires a direct `{action}` command. "
+              f"For another directory, use `cd <directory> && {action}`.",
+              file=sys.stderr)
+    else:
+        print(f"Sudo approval requires a direct `{action}` command at the start of a command, "
+              f"without a path, wrapper, keyword, substitution or nested shell.",
+              file=sys.stderr)
+    if not codex or plain:
+        print("Another command may name it only in a plain command that starts with "
+              + ", ".join(sorted(INERT)) + ".", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
@@ -172,7 +297,7 @@ GIT_APPROVAL_HOOK
 # Publish the helper before the policy that references it.
 install_git_approval_hook() {
   local hook_stage
-  [ "$GIT_APPROVAL" = prompt ] || return 0
+  [ -n "$APPROVAL_GATES" ] || return 0
   hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
   git_approval_hook > "$hook_stage"
   chmod 0755 "$hook_stage"
@@ -181,23 +306,26 @@ install_git_approval_hook() {
 
 check_git_approval_hook() {
   local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
-  [ -x /usr/bin/python3 ] || refuse 'managed Git approval hook interpreter is missing; run yard init'
+  [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
   if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
     [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed Git approval hook permissions drifted; run yard init'
+      || refuse 'managed approval hook permissions drifted; run yard init'
     [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed Git approval hook content drifted; run yard init'
+      || refuse 'managed approval hook content drifted; run yard init'
   else
-    refuse 'managed Git approval hook is missing; run yard init'
+    refuse 'managed approval hook is missing; run yard init'
   fi
 }
 # END generated Git approval hook
 
-case "$GIT_APPROVAL" in
-  prompt) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' ;;
-  off) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"}}' ;;
-  *) die 'CODING_TOOL_GIT_APPROVAL must be prompt or off' ;;
-esac
+modes_valid=1
+case "$GIT_APPROVAL" in prompt|off) ;; *) printf 'Claude policy: CODING_TOOL_GIT_APPROVAL must be prompt or off\n' >&2; modes_valid=0 ;; esac
+case "$DEV_SUDO" in yes|no|prompt) ;; *) printf 'Claude policy: DEV_SUDO must be yes, no or prompt\n' >&2; modes_valid=0 ;; esac
+[ "$modes_valid" = 1 ] || exit 1
+# The hook receives the gates whose direct commands the ask rules prompt for.
+APPROVAL_GATES=''
+[ "$GIT_APPROVAL" != prompt ] || APPROVAL_GATES=git
+[ "$DEV_SUDO" != prompt ] || APPROVAL_GATES="${APPROVAL_GATES:+$APPROVAL_GATES }sudo"
 [ "$(id -u)" = 0 ] || [ "${CLAUDE_POLICY_TEST_ALLOW_NON_ROOT:-0}" = 1 ] || die 'must run as root'
 ETC_DIR="${CLAUDE_ETC_DIR:-/etc}"
 case "$ETC_DIR" in /*) ;; *) die 'environment directory must be absolute' ;; esac
@@ -228,13 +356,13 @@ for path in "$INSTALL_ROOT" "$(dirname "$BIN_LINK")" "$(dirname "$CHECK_PATH")" 
 done
 policy="$POLICY_DIR/50-subyard-git-approval.json"
 git_hook="$(dirname "$POLICY_DIR")/subyard-git-approval-hook"
-if [ "$GIT_APPROVAL" = prompt ]; then
-  [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for Git approval'
+if [ -n "$APPROVAL_GATES" ]; then
+  [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for managed approval'
   if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
-    die 'managed Git approval hook is not a regular file'
+    die 'managed approval hook is not a regular file'
   fi
   if [ -f "$git_hook" ] && ! grep -Fxq '# Managed by Subyard Git approval provision.' "$git_hook"; then
-    die 'existing Git approval hook belongs to another policy'
+    die 'existing approval hook belongs to another policy'
   fi
 fi
 for path in "$policy" "$CHECK_PATH"; do
@@ -256,6 +384,12 @@ fi
 for tool in curl jq sha256sum sort od timeout; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
+POLICY_JSON="$(jq -cn --arg git "$GIT_APPROVAL" --arg sudo "$DEV_SUDO" '
+  [if $git == "prompt" then "git commit", "git push" else empty end,
+   if $sudo == "prompt" then "sudo", "su", "doas", "pkexec", "sudoedit", "run0" else empty end]
+  | map("Bash(\(.))", "Bash(\(.):*)") as $ask
+  | {"$comment": "Subyard Claude permission policy", env: {DISABLE_UPDATES: "1"}}
+  + if $ask == [] then {} else {permissions: {ask: $ask}} end')"
 if [ -z "$ARCH" ]; then ARCH="$(dpkg --print-architecture)"; fi
 case "$ARCH" in
   amd64) platform=linux-x64 ;;
@@ -344,10 +478,12 @@ download_artifact() {
 install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
 stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
 install_git_approval_hook
-if [ "$GIT_APPROVAL" = prompt ]; then
-  POLICY_JSON="$(jq -c --arg path "$git_hook" '
+if [ -n "$APPROVAL_GATES" ]; then
+  # Keep the historical Git-only command for unchanged installed policies.
+  POLICY_JSON="$(jq -c --arg path "$git_hook" --arg gates "$APPROVAL_GATES" '
     .hooks.PreToolUse = [{matcher:"Bash", hooks:[{
-      type:"command", command:($path | @sh), timeout:3, onFailure:"block"
+      type:"command", command:(if $gates == "git" then $path | @sh else ($path | @sh) + " " + $gates end),
+      timeout:3, onFailure:"block"
     }]}]' <<<"$POLICY_JSON")"
 fi
 jq . <<<"$POLICY_JSON" > "$stage"
@@ -418,7 +554,7 @@ stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
   printf 'policy=%q\npolicy_dir=%q\nexpected_owner=%q\n' "$policy" "$POLICY_DIR" "$(id -u):$(id -g)"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
-  printf 'git_approval=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$POLICY_JSON"
+  printf 'git_approval=%q\ndev_sudo=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$DEV_SUDO" "$POLICY_JSON"
   printf 'git_hook=%q\ngit_hook_sha=%q\n' "$git_hook" "$(git_approval_hook | sha256sum | cut -d' ' -f1)"
   declare -f check_git_approval_hook is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
@@ -435,10 +571,10 @@ if [ -f "$policy" ] && [ ! -L "$policy" ]; then
 else
   refuse 'managed policy is missing; run yard init'
 fi
-if [ "$git_approval" = prompt ]; then
+if [ "$git_approval" = prompt ] || [ "$dev_sudo" = prompt ]; then
   hook_dir="$(dirname "$git_hook")"
   [ ! -L "$hook_dir" ] && [ "$(stat -c '%a:%u:%g' "$hook_dir" 2>/dev/null)" = "755:$expected_owner" ] \
-    || refuse 'managed Git approval hook directory drifted; run yard init'
+    || refuse 'managed approval hook directory drifted; run yard init'
   check_git_approval_hook "$git_hook" "$git_hook_sha" "$expected_owner"
 fi
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
@@ -449,10 +585,12 @@ shadow="$(native_shadow_state)" || shadow=foreign
 if [ "$refusals" = 0 ]; then
   printf 'Claude %s ready. ' "$BINARY_VERSION"
   if [ "$git_approval" = off ]; then
-    printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).\n'
+    printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).'
   else
-    printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.\n'
+    printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.'
   fi
+  [ "$dev_sudo" != prompt ] || printf ' Managed sudo ask rules installed (DEV_SUDO=prompt).'
+  printf '\n'
 fi
 if [ "$shadow" = foreign ]; then
   printf 'Conflict: %s/.local/bin/claude is not Subyard-owned and was left unchanged; login shells can run it instead of %s.\n' "$DEV_HOME" "$link"

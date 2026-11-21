@@ -2,34 +2,41 @@ package profile
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 )
 
+// ApprovalGateSets are the approval_sources keys: the prompt gates a variant carries.
+var ApprovalGateSets = []string{"git", "sudo", "git sudo"}
+
 // IntegrationArtifact is semantic data; native sources are bound by the package loader.
 // Modes and ownership retain the existing raw and structured writer policies.
+// ApprovalSources replace Source for the named set of active prompt gates.
 type IntegrationArtifact struct {
-	ID                   string `json:"id"`
-	Label                string `json:"label,omitempty"`
-	Kind                 string `json:"kind"`
-	Source               string `json:"source,omitempty"`
-	GitApprovalOffSource string `json:"git_approval_off_source,omitempty"`
-	SourceSetting        string `json:"source_setting,omitempty"`
-	Destination          string `json:"destination"`
-	Format               string `json:"format"`
+	ID              string            `json:"id"`
+	Label           string            `json:"label,omitempty"`
+	Kind            string            `json:"kind"`
+	Source          string            `json:"source,omitempty"`
+	ApprovalSources map[string]string `json:"approval_sources,omitempty"`
+	SourceSetting   string            `json:"source_setting,omitempty"`
+	Destination     string            `json:"destination"`
+	Format          string            `json:"format"`
 }
 
 // PackageSources lists the shipped variants that must be validated and bound.
 func (artifact IntegrationArtifact) PackageSources() []string {
-	if artifact.GitApprovalOffSource != "" {
-		return []string{artifact.Source, artifact.GitApprovalOffSource}
+	if artifact.Source == "" {
+		return nil
 	}
-	if artifact.Source != "" {
-		return []string{artifact.Source}
+	sources := []string{artifact.Source}
+	for _, gates := range slices.Sorted(maps.Keys(artifact.ApprovalSources)) {
+		sources = append(sources, artifact.ApprovalSources[gates])
 	}
-	return nil
+	return sources
 }
 
 func (definition IntegrationDefinition) validateArtifacts() error {
@@ -53,8 +60,10 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 		if artifact.Format != "raw" && artifact.Format != "json" && artifact.Format != "toml" && artifact.Format != "destination" {
 			return errors.New("invalid integration artifact format")
 		}
-		if path := artifact.GitApprovalOffSource; path != "" && (artifact.Kind != "config" || !textSafe(path) || !relative(path)) {
-			return errors.New("invalid Git approval off artifact source")
+		for gates, path := range artifact.ApprovalSources {
+			if artifact.Kind != "config" || !slices.Contains(ApprovalGateSets, gates) || !textSafe(path) || !relative(path) {
+				return errors.New("invalid approval artifact source")
+			}
 		}
 		switch artifact.Kind {
 		case "config":

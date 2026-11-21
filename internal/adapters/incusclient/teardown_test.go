@@ -1,6 +1,7 @@
 package incusclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestTeardownRejectsSharedDefaultProject(t *testing.T) {
@@ -49,14 +52,20 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	testkit.WriteFile(t, snapshots, []byte(`["/1.0/instances/yard/snapshots/approved?project=fixture"]`), 0o600)
 	fake := filepath.Join(root, "incus")
 	testkit.WriteFile(t, fake, []byte("#!/bin/sh\ncase \"$2\" in */snapshots\\?*) cat \"$SNAPSHOT_DATA\";; *) cat \"$INSTANCE_DATA\";; esac\n"), 0o700)
-	guard := filepath.Join("..", "..", "..", "scripts", "lib", "teardown-plan.py")
+	// The native guard checks the bindings this adapter produced.
+	t.Setenv("PATH", root+":"+os.Getenv("PATH"))
+	t.Setenv("INSTANCE_DATA", data)
+	t.Setenv("SNAPSHOT_DATA", snapshots)
 	var output []byte
 	run := func(args ...string) error {
-		command := exec.Command("python3", append([]string{guard}, args...)...)
-		command.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "INSTANCE_DATA="+data, "SNAPSHOT_DATA="+snapshots, "SUBYARD_TEARDOWN_INVENTORY="+string(inventory))
-		var err error
-		output, err = command.CombinedOutput()
-		return err
+		t.Setenv("SUBYARD_TEARDOWN_INVENTORY", string(inventory))
+		var combined bytes.Buffer
+		code := uninstall.RunGuard(args, nil, &combined, &combined)
+		output = combined.Bytes()
+		if code != 0 {
+			return guardExit(code)
+		}
+		return nil
 	}
 	if err := run("guard", "instance", "yard", "fixture"); err != nil {
 		t.Fatalf("captured physical metadata was rejected: %v", err)
@@ -74,8 +83,7 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	assertRefusal := func(wanted string) {
 		t.Helper()
 		err := run("guard-all", "fixture")
-		exit, ok := err.(*exec.ExitError)
-		if !ok || exit.ExitCode() != 1 || !strings.Contains(string(output), `"action":"guard-all"`) || !strings.Contains(string(output), wanted) || strings.Contains(string(output), "synthetic-private") {
+		if err != guardExit(1) || !strings.Contains(string(output), `"action":"guard-all"`) || !strings.Contains(string(output), wanted) || strings.Contains(string(output), "synthetic-private") {
 			t.Fatal("aggregate guard lost its refusal or safe diagnostic")
 		}
 	}
@@ -90,6 +98,10 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	inventory = []byte(`[{"kind":"synthetic-private-kind"}]`)
 	assertRefusal(`"stage":"inventory"`)
 }
+
+type guardExit int
+
+func (code guardExit) Error() string { return "teardown guard exit " + strconv.Itoa(int(code)) }
 
 func TestTeardownResourceContainment(t *testing.T) {
 	approved := []ports.TeardownResource{{Kind: "volume", Pool: "pool", Name: "owned", Binding: strings.Repeat("a", 64)}}

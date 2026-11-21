@@ -200,22 +200,94 @@ same explicit yard-scope repair.
 
 ### Passwordless sudo inside the yard
 
-`DEV_SUDO` defaults to `1`. The yard's developer account can run commands as guest root without
-a password. Set `DEV_SUDO=0` at shared, host or yard scope, or for one command, and run `yard init`
-to remove the managed grant. Hermes and Amnezia yard presets explicitly set `DEV_SUDO=0`.
-Removing the grant leaves the developer's Docker group access, which can still provide
-root-equivalent access inside the guest.
+`DEV_SUDO` takes one of three values:
+
+| Value | Effect after `yard init` |
+| --- | --- |
+| `prompt` (default) | The yard's developer account runs commands as guest root without a password. Claude, Codex and OpenCode ask for approval before `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. |
+| `yes` | The grant stays as with `prompt`, and the agents run sudo without asking. |
+| `no` | Subyard removes its managed sudoers grant and installs no sudo approval rules. Docker group access remains; see below. |
+
+Set `DEV_SUDO` at shared, host or yard scope, or for one command, and run `yard init` to apply it.
+Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
+
+The earlier values `1` and `0` are not migrated, and no value is accepted by both an older runtime
+and this one: older runtimes refuse `yes`, `no` and `prompt`, and this runtime refuses `1` and `0`
+with a message that names the file, the line and the new values. Absent `DEV_SUDO` means
+passwordless sudo without prompts for an older runtime and `prompt` for this one. To update:
+
+1. With the older runtime, remove every assignment, for example
+   `yard config unset DEV_SUDO --scope host --yes`, at each scope that sets it. Add `--git` for a
+   synced assignment and push it. Note which yards set `0` on purpose.
+2. Run `yard update`. Release activation reprovisions the coding agents of each running yard with
+   the default `prompt`, so they ask before sudo from then on; no other step is needed. Stopped
+   yards stay unchanged until the release reaches them, at the latest on their next `yard init`.
+3. With the new runtime, set `yes` where you want to keep the old behaviour, or `no` where the
+   yard had `0`, for example `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`, and run
+   `yard init`. Release activation does not touch the guest grant: a yard that had `0` keeps no
+   grant until a `yard init` without `no` publishes one after the agents' approval policies.
+
+With shared configuration, remove the shared assignment while every owner host still runs an
+older runtime, and publish `yes` or `no` at shared scope only after all owner hosts are updated.
+Until then, keep those values at host or yard scope on the updated hosts.
+
+`prompt` is a guardrail against casual escalation, not a security boundary. It covers commands
+an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the
+Docker or Incus socket bypass it. `no` removes only Subyard's managed sudoers grant: the developer
+account stays in the guest's `docker` group, which is root-equivalent inside the guest, so remove
+that access as well when the agent must not become root. Provisioning writes the prompt rules to
+the same policies as [Git approval](#commit-and-push-approval-prompts):
+
+- Claude: `permissions.ask` entries in the root-owned managed drop-in, plus the managed hook's
+  `sudo` gate.
+- Codex: `prompt` prefix rules in the root-owned `/etc/codex/requirements.toml`, plus the
+  managed hook's `sudo` gate.
+- OpenCode: `ask` entries for `permission.bash` in the shipped home template
+  `~/.config/opencode/opencode.jsonc`. This policy lives in the developer's home, not a root-owned
+  file. A custom `AGENT_opencode_CONFIG` source gets no sudo ask entries, and OpenCode's project,
+  agent and UI permissions, including an `always` answer, can allow sudo again.
+- pi: unsupported; it has no per-command approval gate.
+
+On a yard that had no grant, `yard init` publishes the `prompt` grant only after the selected
+agents' approval policies are installed and verified, so an interrupted init leaves the yard
+without sudo rather than with sudo and no prompts.
+
+For Claude and Codex, the hook applies the [Git approval rule](#commit-and-push-approval-prompts)
+to `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. A word that names one of them, also as
+a path such as `/usr/bin/sudo` or after `=`, is a mention. Use the bare command, such as
+`sudo apt-get install …`, at the start or after a plain prefix, to reach the prompt. Commands such
+as `rg sudo src | head`, `which sudo`, `du -su` and `cat /etc/sudoers` run as usual, and
+`git commit` counts as a listed command here, so `git commit -m 'Fix sudo'` does too. Expected
+false positives include `man sudo`, `grep sudo . 2>/dev/null`, a heredoc file that mentions sudo,
+`gh pr create --title 'Fix sudo'`, `ssh host 'sudo …'`, and a word that glues a name after `=`
+or `,`, such as `--user=su` or `a,su`. For Codex the whole command must be
+plain, because Codex would otherwise run it without asking. The Git approval limits apply here
+too. In addition:
+
+- Claude blocks a Bash call if the hook fails or times out. Codex continues its normal
+  permission flow on hook failures and timeouts, so only its direct sudo prompt rules remain.
+- OpenCode has no hook; its ask patterns match only the bare command.
+
+`yard status` names the configured mode, and its Codex rules line reports the installed sudo
+prompts; `claude-policy-check` reports the installed Claude rules. Existing sessions keep their
+loaded policy until restarted.
 
 After an upgrade, an existing yard that inherits the shipped default gets the grant on its next
 `yard init`. Release activation leaves the guest sudoers file alone. `yard config show DEV_SUDO`
-shows the desired value. `yard config status` does not inspect guest sudoers, so it can report a
-clean yard while the grant still awaits `yard init`.
+shows the desired value and `yard status` names it. `yard config status` does not inspect guest
+sudoers, so it can report a clean yard while the grant still awaits `yard init`. The installed
+record keeps `yes` and `no`; an installation without one, also from an older runtime, counts as
+`prompt`. A change of mode is listed as a pending init-owned setting, but release activation and
+`yard integration` also reprovision the agents and record the new mode without reconciling sudoers.
+After `yard config set DEV_SUDO no` and then `yard update`, for example, pending init and
+`yard status` look clean while the old grant remains; a change from `no` to `prompt` likewise
+leaves the yard without a grant. Run `yard init` after every `DEV_SUDO` change.
 
 To disable the grant across owner hosts, publish a shared override in the connected private
 configuration repository:
 
 ```sh
-yard config set DEV_SUDO 0 --scope shared --git
+yard config set DEV_SUDO no --scope shared --git
 ```
 
 Run `yard config sync pull` on the other owner hosts, then run `yard init` for each yard where
@@ -223,8 +295,13 @@ you want to apply the change. Host, yard and command values follow the scalar pr
 Restrict write access to the configuration repository to trusted operators.
 
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
-the shared scope for this field. Before downgrading, remove any shared assignment and, if it was
-Git-backed, sync the removal while the runtime still supports it.
+the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
+`DEV_SUDO` assignment and, if one was Git-backed, sync the removal while the runtime still
+supports it. A yard that runs the default needs nothing more: an older runtime reads its
+installed record, its own default keeps the grant, and its hooks remove the sudo prompts. A yard
+that applied `yes` or `no` must also run `yard init` without the assignment before downgrading,
+because older runtimes refuse an installed record of either value. For a `no` yard that init
+publishes the grant; after the downgrade, set `DEV_SUDO=0` and run `yard init` to remove it.
 
 ### Git identity
 
@@ -321,13 +398,19 @@ JSON predecessors use `legacy-config/*.json` in the owning integration. A raw co
 historical digest in `legacy-config/<destination-basename>.sha256`; it is accepted only during
 confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
-Subyard serializes its own writes per asset and atomically replaces the destination before updating
-the baseline. Replacements preserve the existing file mode. New documents use mode
-`0644`. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
-fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
-Subyard's lock: application reads the current file and verifies its result, but cannot serialize
-arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
-the current document or printing its contents.
+Subyard serializes its own writes per asset and replaces a destination only when the guest still
+holds the bytes that the refresh was planned on, before updating the baseline. Replacements preserve
+the existing file mode. New documents use mode `0644`. An already converged file keeps its bytes and
+gets its owner and mode back, unless another name links the same file. Retrying an interrupted
+application converges. Invalid JSON or an invalid baseline fails without overwriting it; diagnostics omit
+configuration contents. Running tools do not share Subyard's lock: a file that a tool changed after
+the plan is kept and reported as changed, the other files of the refresh are still written, and
+`yard -Y NAME config apply` plans again on the new bytes. A destination that is not a readable
+regular file, such as a symlink, is kept; `yard -Y NAME config status` and the refused apply name it
+with the step to replace or remove it. Such a yard, or one whose files cannot be assessed, is refused
+alone: `config apply --all-local`, `config sync --apply` and a release activation repair still refresh
+the other yards and report the refused yard with its files and next step. Invalid TOML, like invalid JSON, fails
+without overwriting the current document or printing its contents.
 
 ## Per-yard coding tool selection
 
@@ -796,12 +879,37 @@ approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-poli
 mode and accept either correctly installed policy. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
-In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
-`git commit` and `git push`, including Git global options such as `-C` and `-c`, quoted command
-words, executable paths, and literal shell `-c` commands. Use a direct `git commit` or `git push`
-to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
-or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
-and `git rebase` continue through the normal permission flow.
+In `prompt` mode, Claude and Codex also use a managed Bash `PreToolUse` hook. It refuses a
+literal mention of `git commit` or `git push` unless the client's own prompt covers it. A mention
+is a `git` word, also as a path such as `/usr/bin/git`, followed by words that resolve to `commit`
+or `push` after Git global options such as `-C` and `-c`, or a `git-commit` or `git-push` word
+such as `/usr/lib/git-core/git-push`. Quotes, escapes and `$'…'` escapes are decoded first, and
+a name inside braces or after `=` or `!` counts, as in `{git,} push`. The hook finds it anywhere
+in the command text, including quoted strings, heredoc bodies and comments, without running or
+expanding anything:
+
+- A command without a mention runs as usual.
+- A direct command reaches the client's prompt: it starts literally with `git commit` or
+  `git push`, either at the start or after a plain prefix, as in `cd <directory> && git push`.
+  Plain means simple commands of words joined by `&&`, `||`, `;` or `|`, without `$`, backticks,
+  redirects, parentheses, newlines, comments or `&`, and not starting with a reserved word such
+  as `if` or with an assignment.
+- A mention in a plain command that starts with `echo`, `printf`, `grep`, `rg`, `which`, `type`,
+  `ls`, `cat`, `head`, `tail`, `wc`, `cut`, `uniq`, `cd` or `true` is text, as long as every
+  command of its pipeline is one of these or a direct command: `rg 'git push' docs | head`.
+- Anything else is refused with a message that names the direct form.
+
+Claude prompts once for a whole call, so the check ends at its first direct command. Codex
+matches its prompt rules only against a whole plain command, so for Codex the whole command must
+be plain: `git push 2>&1`, a variable or a `$(…)` substitution in the same command is refused.
+Codex also runs a command with a glob such as `*` without asking, so for Codex unquoted words use
+only letters, digits and `_@%+=:,./-`, and quoted words contain no `$`, backtick or backslash.
+Commands such as `git stash push`, `git log --grep commit` and `git rebase` mention neither
+action and continue through the normal permission flow. Expected false positives are commands
+that only name an action outside that list, such as `gh pr create --title 'git push fix'`,
+`grep 'git push' docs 2>/dev/null`, `ssh host 'git push'`, `git-push` in a URL or a man page
+name such as `man git-push`, or a heredoc or comment that contains `git push`; use a plain form
+or write the text with a separate command.
 
 OpenCode's `prompt` template asks for direct `git commit` and `git push` commands. The `off`
 template removes those ask patterns. Config refreshes also apply the template for the selected
@@ -810,10 +918,14 @@ usual precedence. Use `opencode-permission-check` in the project to inspect the 
 
 Limits:
 
-- The hook is a client guardrail. It inspects literal shell command words without running or
-  expanding them. Aliases, computed commands, complex shell syntax such as heredocs, scripts,
-  Make targets, subprocesses and direct writes to `.git` are outside its coverage. Other Git
-  subcommands such as `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
+- The hook is a client guardrail. It sees only names spelled literally: variables such as
+  `$cmd push`, globs, aliases, scripts, Make targets and combined options such as `env -iSsudo`
+  are outside its coverage, as are options that make a listed command run another one, such as
+  `rg --pre`.
+  Subprocesses and direct writes to `.git` are outside it too. Other Git subcommands such as
+  `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
+- The hook refuses a command longer than 256 KiB, whatever it contains, so that its scan always
+  finishes within the client's hook timeout. Write longer scripts to a file and run the file.
 - Claude is configured to block a Bash call if the hook fails or times out. Codex continues
   its normal permission flow on hook failures and timeouts, including its direct Git prompt rules.
 - When Claude runs under an organization's server-managed settings, the yard's drop-in is not the

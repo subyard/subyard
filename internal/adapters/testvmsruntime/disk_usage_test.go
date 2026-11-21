@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func diskUsageRuntime(t *testing.T, driver string) *Runtime {
@@ -28,7 +30,7 @@ func diskUsageRuntime(t *testing.T, driver string) *Runtime {
 
 func diskUsageRoot(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	for _, path := range []string{
 		filepath.Join(root, "images"),
 		filepath.Join(root, "storage-pools", "default"),
@@ -50,15 +52,9 @@ func TestDiskBudgetUsageDirCountsOnlyCacheAndRetainedVMRoots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(cache, make([]byte, 8192), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(vm, make([]byte, 8192), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(snapshot, make([]byte, 8192), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, cache, make([]byte, 8192), 0600)
+	testkit.WriteFile(t, vm, make([]byte, 8192), 0600)
+	testkit.WriteFile(t, snapshot, make([]byte, 8192), 0600)
 	rt := diskUsageRuntime(t, "dir")
 	got, err := rt.measureDiskBudgetUsage(context.Background(), 999<<30, root)
 	if err != nil {
@@ -79,9 +75,7 @@ func TestDiskBudgetUsageDirCountsOnlyCacheAndRetainedVMRoots(t *testing.T) {
 	if got != want || vmUsage == 0 {
 		t.Fatalf("disk budget usage=%d want=%d vm=%d", got, want, vmUsage)
 	}
-	if err := os.WriteFile(filepath.Join(root, "unrelated-host-file"), make([]byte, 1<<20), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "unrelated-host-file"), make([]byte, 1<<20), 0600)
 	again, err := rt.measureDiskBudgetUsage(context.Background(), 999<<30, root)
 	if err != nil || again != got {
 		t.Fatalf("unrelated file changed scoped usage: %d %v", again, err)
@@ -124,13 +118,9 @@ func TestMeasureDirVMUsageCountsVMMetadataWithoutFollowingLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars := filepath.Join(vm, "OVMF_VARS.fd")
-	if err := os.WriteFile(vars, make([]byte, 8192), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, vars, make([]byte, 8192), 0600)
 	outside := filepath.Join(root, "outside")
-	if err := os.WriteFile(outside, make([]byte, 16384), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, outside, make([]byte, 16384), 0600)
 	base, err := measureDirVMUsage(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)

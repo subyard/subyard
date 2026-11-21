@@ -302,6 +302,89 @@ def restricted_tool_check(app, provider, workspace):
     print('ok: native Codex read-only tool read succeeded and write was denied for ' + workspace.name, flush=True)
 
 
+def observe_turn(app, provider, thread, workspace, command, decision):
+    """Run one command, answer every approval request with decision, and report the outcome."""
+    provider.workspace, provider.command = workspace, command
+    app.request('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': 'Run the fixture command.'}]})
+    approvals, result = 0, None
+    while True:
+        frame = app.read()
+        method = frame.get('method', '')
+        if method == 'item/commandExecution/requestApproval':
+            approvals += 1
+            app.send({'id': frame['id'], 'result': {'decision': decision}})
+        elif method == 'item/completed' and frame['params']['item']['type'] == 'commandExecution':
+            result = frame['params']['item']
+        elif method == 'turn/completed':
+            assert not provider.failure, provider.failure
+            return approvals, result
+
+
+def sudo_checks(app, provider, workspace):
+    """DEV_SUDO=prompt: direct escalation asks; compound forms ask or are blocked, never run."""
+    thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
+    cases = [
+        ('direct', 'sudo -n touch {m}', True),
+        # Codex rules match only plain command sequences, so the managed hook refuses redirects.
+        ('redirect', 'sudo -n touch {m} > /dev/null', False),
+        ('pipe', 'sudo -n touch {m} | cat', True),
+        ('and-list', 'true && sudo -n touch {m}', True),
+        ('if', 'if sudo -n touch {m}; then true; fi', False),
+        ('reserved', '{{ true; sudo -n touch {m}; }}', False),
+        ('assignment', 'x=1; sudo -n touch {m}', False),
+        ('substitution', 'echo "$(sudo -n touch {m})"', False),
+        ('path', '/usr/bin/sudo -n touch {m}', False),
+        ('leading-redirect', '</dev/null sudo -n touch {m}', False),
+        ('stdin-shell', "echo 'sudo -n touch {m}' | bash", False),
+        # Codex runs a command with a glob without asking, so the hook refuses it.
+        ('glob', 'ls -d /t* && sudo -n touch {m}', False),
+        ('quoted', "sudo -n touch {m} 'quoted text'", True),
+        # Every unquoted character and concatenation the hook accepts as a plain Codex word.
+        ('word-grammar', 'sudo -n touch {m} a"b" --k=\'v\' user@h 50% a:b,c+d', True),
+    ]
+    for name, template, direct in cases:
+        marker = workspace / ('sudo-' + name)
+        approvals, result = observe_turn(app, provider, thread, workspace, template.format(m=marker), 'decline')
+        outcome = {'case': name, 'approvals': approvals, 'ran': marker.exists(),
+                   'status': result and result.get('status'), 'exitCode': result and result.get('exitCode')}
+        print('codex-sudo: ' + json.dumps(outcome), flush=True)
+        assert not marker.exists(), 'declined or blocked sudo ran: ' + name
+        if direct:
+            assert approvals == 1, 'direct sudo did not ask for approval: ' + name
+    marker = workspace / 'sudo-accepted'
+    approvals, result = observe_turn(app, provider, thread, workspace, f'sudo -n touch {marker}', 'accept')
+    assert approvals == 1 and marker.exists(), 'approved sudo did not run: ' + repr(result)
+    print('ok: native Codex sudo prompts asked, declined compound forms did not run, approval ran', flush=True)
+
+
+def sudo_probe(app, provider, workspace):
+    """Record what Codex does natively, without the managed hook, on forms the hook refuses."""
+    thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
+    cases = [
+        ('direct', 'sudo -n touch {m}'),
+        ('reserved-if', 'if true; then sudo -n touch {m}; fi'),
+        ('reserved-brace', '{{ true; sudo -n touch {m}; }}'),
+        ('assignment-list', 'x=1; sudo -n touch {m}'),
+        ('assignment-prefix', 'x=1 sudo -n touch {m}'),
+        ('glob', 'ls -d /t* && sudo -n touch {m}'),
+        ('tilde', 'cd ~ && sudo -n touch {m}'),
+        ('quoted', "sudo -n touch {m} 'quoted text'"),
+        ('concat-double', 'sudo -n touch {m} a"b"'),
+        ('concat-single', "sudo -n touch {m} --k='v'"),
+        ('punctuation', 'sudo -n touch {m} --k=v user@h 50% a:b,c+d'),
+    ]
+    outcomes = {}
+    for name, template in cases:
+        marker = workspace / ('probe-' + name)
+        approvals, result = observe_turn(app, provider, thread, workspace, template.format(m=marker), 'decline')
+        outcomes[name] = {'approvals': approvals, 'ran': marker.exists(),
+                          'status': result and result.get('status')}
+        print('codex-sudo-probe: ' + json.dumps(dict(case=name, **outcomes[name])), flush=True)
+    # The control shows that the native prompt rules were active for this probe.
+    assert outcomes['direct'] == {'approvals': 1, 'ran': False, 'status': 'declined'}, outcomes['direct']
+    print('ok: native Codex sudo probe recorded without the managed hook', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workspace', nargs=2, type=Path)
@@ -311,6 +394,9 @@ def main():
     parser.add_argument('--codex', default='codex')
     parser.add_argument('--template', type=Path, default=Path('/home/dev/.codex/config.toml'))
     parser.add_argument('--home-rules', type=Path)
+    parser.add_argument('--sudo', action='store_true', help='check DEV_SUDO=prompt only')
+    parser.add_argument('--sudo-probe', action='store_true',
+                        help='record native Codex sudo prompts while the managed hook is stubbed')
     args = parser.parse_args()
     executable = shutil.which(args.codex)
     assert executable, 'native Codex unavailable'
@@ -348,6 +434,13 @@ def main():
                 if args.terminal or args.orca:
                     terminal_checks(executable, env, provider, workspace, args.orca)
                     continue
+                if args.sudo or args.sudo_probe:
+                    app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
+                    try:
+                        (sudo_probe if args.sudo_probe else sudo_checks)(app, provider, workspace)
+                    finally:
+                        app.close()
+                    break
                 app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
                 try:
                     started = app.request('thread/start', {'cwd': str(workspace)})
@@ -398,6 +491,8 @@ def main():
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)
                 finally:
                     app.close()
+            if args.sudo or args.sudo_probe:
+                return
             # Keep the managed-only Git checks above independent of home rules.
             # A fresh process then checks the delivered local-cleanup allow rule.
             (codex_home / 'rules').mkdir(exist_ok=True)

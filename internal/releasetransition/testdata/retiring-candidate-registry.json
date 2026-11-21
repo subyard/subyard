@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "minimumEpochs": {
+    "owner-registration": 3,
+    "power-metadata": 3,
+    "project-state": 1,
+    "settings": 3
+  },
+  "currentEpochs": {
+    "owner-registration": 3,
+    "power-metadata": 4,
+    "project-state": 1,
+    "settings": 3
+  },
+  "migrations": [
+    {
+      "id": "introduce-nm-device-guard-v4",
+      "domain": "power-metadata",
+      "fromEpoch": 3,
+      "toEpoch": 4,
+      "kind": "nm-device-guard-v1",
+      "dependsOn": [
+        "complete-registered-guest-disk-tmp-v3"
+      ]
+    }
+  ],
+  "retiredPrefixes": {
+    "owner-registration": {
+      "throughEpoch": 3,
+      "digest": "f612c2a88cfb6a2f1f3194acf13b933d3009d8853c9f093e07e5cad491c1aab6"
+    },
+    "power-metadata": {
+      "throughEpoch": 3,
+      "digest": "7692dc70c24e437966ba441be41204ec2642f3ceda004ef3492dd10c6826467d"
+    },
+    "settings": {
+      "throughEpoch": 3,
+      "digest": "559acd8e21b67b9f4516f44ec2c67f655898a9094147d5686c3816990c47855e"
+    }
+  }
+}

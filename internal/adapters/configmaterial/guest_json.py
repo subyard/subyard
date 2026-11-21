@@ -1,3 +1,4 @@
+# guest_cas.py precedes this program and defines the cas_ names.
 import copy
 import fcntl
 import hashlib
@@ -499,15 +500,10 @@ def atomic_write(path, payload, uid, mode):
         os.close(directory_descriptor)
 
 
-def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=0o644):
-    validate_destination_parent(destination, allowed_home, uid, create)
-    _, latest = read_current(destination, allow_invalid=True)
-    if latest != original:
-        raise MaterializationError("concurrent destination change")
-    atomic_write(destination, payload, uid, file_mode)
-    _, latest = read_current(destination)
-    if latest != payload:
-        raise MaterializationError("destination verification failed")
+def replace_destination(destination, allowed_home, uid, original, payload, file_mode=0o644):
+    # The bytes read under the lock are the token; the compare-and-write repeats
+    # the comparison in the exec that replaces the document.
+    cas_replace(allowed_home, destination, cas_token(original), payload, uid, file_mode)  # noqa: F821
 
 
 def document_payload(current, original):
@@ -628,7 +624,7 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             # Convert an earlier candidate's schema2 before any document edit.
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
             replace_destination(destination, allowed_home, uid, original,
-                                document_payload(current, original), False,
+                                document_payload(current, original),
                                 stat.S_IMODE(os.lstat(destination).st_mode))
         atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline, True)) + b"\n", STATE_UID, 0o600)
         baseline["phase"] = "retired"
@@ -646,11 +642,24 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
 
 
+OBSERVED_RAW = None
+
+
+def emit(report):
+    if OBSERVED_RAW is not None:
+        report["raw"] = OBSERVED_RAW
+    print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+
+
 def main():
-    if len(sys.argv) != 8:
+    if len(sys.argv) != 9:
         fail("invalid request")
-    mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
+    mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest, expect = sys.argv[1:]
     if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
+        fail("invalid request")
+    # Apply writes only over the consented token; retirement compares with the
+    # document it reads in this exec.
+    if (expect != "") != (mode in ("apply", "apply-installed")):
         fail("invalid request")
     # An installed-view repair applies like apply, but never takes back ownership
     # that a retirement released; only a deliberate enable does.
@@ -671,6 +680,21 @@ def main():
         fail("invalid desired " + FORMAT.upper())
     if not isinstance(desired, dict):
         fail("desired configuration root must be an object")
+    # One exec observes the destination's exact bytes with its document: an
+    # observation reports their token. Where the document would be read, a
+    # path that is no readable regular file is reported, or refused by apply.
+    global OBSERVED_RAW
+    raw = cas_observe(allowed_home, destination) if mode in ("observe", "apply") else None  # noqa: F821
+    if mode == "observe":
+        OBSERVED_RAW = raw
+
+    def unreadable():
+        if raw != "unreadable":
+            return False
+        if mode == "apply":
+            raise CasRefusal("unreadable")  # noqa: F821
+        emit({"converged": False, "fingerprint": fingerprint({}, desired, "unreadable", "unreadable", [])})
+        return True
     wanted_owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
     identity = hashlib.sha256((developer + "\0" + destination).encode()).hexdigest()
     baseline_path = os.path.join(STATE_ROOT, identity + ".json")
@@ -680,13 +704,15 @@ def main():
     state_exists = validate_state_root()
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
+        if unreadable():
+            return
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=True) if parent_exists else ({}, None)
         if current is None:
             if mode == "assess-adopt":
                 raise unowned_invalid_destination(destination)
-            print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
-                  hashlib.sha256(original).hexdigest(), "invalid-destination", [])}))
+            emit({"converged": False, "fingerprint": fingerprint({}, desired,
+                  hashlib.sha256(original).hexdigest(), "invalid-destination", [])})
             return
         if mode == "assess-adopt" and original is not None:
             # Recognize exact pre-baseline templates, or JSON documents whose
@@ -707,13 +733,23 @@ def main():
         else:
             report = {"converged": False,
                       "fingerprint": fingerprint(current, desired, "missing", "baseline-missing", [])}
-        print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+        emit(report)
         return
 
     if mode in ("assess-retire", "retire") and not os.path.lexists(baseline_path):
         raise MaterializationError("retirement ownership evidence unavailable")
 
     if mode == "apply":
+        if not (state_exists and os.path.lexists(lock_path)):
+            # A refused write creates no state: the destination is compared
+            # before the state root and lock exist, and again under the lock.
+            unreadable()
+            if raw != expect:
+                raise CasRefusal("changed")  # noqa: F821
+            if (not os.path.lexists(baseline_path) and not os.path.lexists(receipt_path) and
+                    validate_destination_parent(destination, allowed_home, uid, False) and
+                    read_current(destination, allow_invalid=True)[0] is None):
+                raise unowned_invalid_destination(destination)
         if not state_exists:
             os.makedirs(STATE_ROOT, mode=0o700)
             os.chmod(STATE_ROOT, 0o700)
@@ -748,21 +784,22 @@ def main():
         released = (evidence is not None and evidence.get("phase") == "retired" and
                     read_release_marker(release_path, evidence))
         if released and mode == "observe":
-            print(json.dumps({"converged": False, "release": released,
-                              "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])},
-                             separators=(",", ":"), sort_keys=True))
+            emit({"converged": False, "release": released,
+                  "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])})
             return
         if released and installed_apply:
             raise MaterializationError("released ownership refused for the installed view")
         compatible = baseline is not None and baseline["schema"] == 1
+        if unreadable():
+            return
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=mode in ("observe", "apply")) if parent_exists else ({}, None)
         if current is None:
             if evidence is None:
                 raise unowned_invalid_destination(destination)
             if mode == "observe":
-                print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
-                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"])}))
+                emit({"converged": False, "fingerprint": fingerprint({}, desired,
+                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"])})
                 return
             current = {}
 
@@ -812,11 +849,13 @@ def main():
                                                  baseline["owned"])}
             if mode == "assess-adopt":
                 report["adoptable"] = adoptable
-            print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+            emit(report)
             return
 
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
+        if cas_token(original) != expect:  # noqa: F821
+            raise CasRefusal("changed")  # noqa: F821
         # Fresh ownership supersedes the reason of an earlier release.
         remove_release_marker(release_path)
         if baseline is not None and baseline.get("phase") != "retired":
@@ -830,7 +869,7 @@ def main():
         overlay(current, desired)
         file_mode = stat.S_IMODE(os.lstat(destination).st_mode) if original is not None else 0o644
         replace_destination(destination, allowed_home, uid, original,
-                            document_payload(current, original), True, file_mode)
+                            document_payload(current, original), file_mode)
         evidence = {"schema": 2, "developer": developer,
                     "destination": destination, "desired_digest": desired_digest,
                     "format": FORMAT, "phase": "applied",
@@ -842,6 +881,8 @@ def main():
 
 try:
     main()
+except CasRefusal as refusal:  # noqa: F821
+    cas_refuse(refusal)  # noqa: F821
 except MaterializationError as error:
     fail(str(error))
 except Exception:

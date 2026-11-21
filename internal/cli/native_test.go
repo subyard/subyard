@@ -619,65 +619,6 @@ func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 	}
 }
 
-func TestV0111RecoveryPreparedActionUsesOneDefaultYesPrompt(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	countRecoveryConsequence := func(consequences []string) int {
-		count := 0
-		for _, consequence := range consequences {
-			if consequence == recoveryConsequence {
-				count++
-			}
-		}
-		return count
-	}
-	for _, assumeYes := range []bool{false, true} {
-		t.Run(fmt.Sprintf("assume yes=%v", assumeYes), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			prompt := &testkit.Prompt{Answers: []bool{true}}
-			program, err := New(Options{
-				RepositoryRoot: root, Environment: environment, Prompt: prompt,
-				Clock: testkit.NewManualClock(time.Unix(100, 0)),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := program.loadContext("default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			prepared := releaseruntime.Prepared{
-				Action: "update.activate", Changed: true,
-				Consequences: []string{
-					recoveryConsequence,
-					"apply the exact typed migration and release activation plan",
-				},
-			}
-			plan, err := program.operationOrchestrator(
-				"operation-v0111-recovery", loaded, nil, nil,
-			).PlanAction(
-				context.Background(), loaded.Context, "update", domain.RemoteOnController,
-				prepared.Action, domain.ActionDelta{
-					Changed: prepared.Changed, Consequences: prepared.Consequences,
-				}, assumeYes,
-			)
-			if err != nil || !plan.Confirmed || countRecoveryConsequence(plan.Consequences) != 1 {
-				t.Fatalf("recovery plan=%#v err=%v", plan, err)
-			}
-			if assumeYes {
-				if len(prompt.Requests) != 0 {
-					t.Fatalf("--yes prompted: %#v", prompt.Requests)
-				}
-				return
-			}
-			if len(prompt.Requests) != 1 ||
-				prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
-				countRecoveryConsequence(prompt.Requests[0].Consequences) != 1 {
-				t.Fatalf("interactive recovery prompt=%#v", prompt.Requests)
-			}
-		})
-	}
-}
-
 func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *testing.T) {
 	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
@@ -1414,7 +1355,7 @@ type validatingConfigApplier struct {
 	yards      []string
 }
 
-func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard string) error {
+func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard string, _ *ports.ConfigConsent) error {
 	if err := validateManagedConfigTree(applier.configHome); err != nil {
 		return err
 	}
@@ -1424,7 +1365,9 @@ func (applier *validatingConfigApplier) ApplyConfig(_ context.Context, yard stri
 
 type failingConfigApplier struct{ err error }
 
-func (applier failingConfigApplier) ApplyConfig(context.Context, string) error { return applier.err }
+func (applier failingConfigApplier) ApplyConfig(context.Context, string, *ports.ConfigConsent) error {
+	return applier.err
+}
 
 type finishedOperationAudit struct {
 	err    error
@@ -3817,7 +3760,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -3869,7 +3812,7 @@ func TestReleaseTransitionChildUsesSanitizedCandidateContext(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -4492,12 +4435,13 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 			if test.summary {
 				if !strings.Contains(stdout.String(), "owner-a/default") ||
 					!strings.Contains(stdout.String(), "owner-a/demo") ||
+					strings.Count(stdout.String(), "\n  sudo     ") != 2 ||
 					len(incus.ExecCalls) != 0 {
 					t.Fatalf("status did not use inventory summary:\n%s\nexec=%#v", stdout.String(), incus.ExecCalls)
 				}
 				return
 			}
-			if strings.Contains(stdout.String(), "owner-a/") || len(incus.ExecCalls) == 0 {
+			if strings.Contains(stdout.String(), "owner-a/") || strings.Count(stdout.String(), "\n  sudo     ") != 1 || len(incus.ExecCalls) == 0 {
 				t.Fatalf("status did not use detailed path:\n%s\nexec=%#v", stdout.String(), incus.ExecCalls)
 			}
 			for _, call := range incus.ExecCalls {
@@ -5760,7 +5704,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		// Required context has persistent shipped defaults; command values may
 		// override these for ordinary requests but cannot mask authored drafts.
 		if name == "subyard.env" {
-			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
+			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
 		}
 		if name == "agents.env" {
 			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
@@ -5776,7 +5720,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"SUBYARD_HOME=" + filepath.Join(root, "data"),
 		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + hostBase, "RESTRICTED_DISK_PATHS=" + hostBase,
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222", "SUBYARD_NO_AUDIT=1",
 	}
 	return root, environment, stateDirectory

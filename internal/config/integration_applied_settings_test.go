@@ -77,3 +77,41 @@ func TestAppliedIntegrationSettingsPreserveGitApprovalEncoding(t *testing.T) {
 		t.Fatal("closed applied-settings domain accepted an unknown field")
 	}
 }
+
+// The default prompt stays out of the snapshot, so older runtimes can read it;
+// yes and no are recorded. A snapshot without the setting, also one from before
+// it, reads as prompt whatever the desired mode.
+func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
+	catalog := Catalog{}
+	for _, value := range []string{"prompt", ""} {
+		if settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": value}); len(settings) != 0 {
+			t.Fatalf("default sudo mode %q entered the snapshot: %#v", value, settings)
+		}
+	}
+	recorded := map[string]map[string]string{}
+	for _, value := range []string{"yes", "no"} {
+		settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": value})
+		if len(settings) != 1 || settings["DEV_SUDO"] != value || catalog.ValidateIntegrationInitSettings(settings) != nil {
+			t.Fatalf("sudo mode %q was not recorded: %#v", value, settings)
+		}
+		recorded[value] = settings
+	}
+	for _, test := range []struct {
+		desired string
+		applied map[string]string
+		want    string
+	}{
+		{"yes", map[string]string{}, "prompt"}, {"no", map[string]string{}, "prompt"}, {"prompt", map[string]string{}, "prompt"},
+		{"", map[string]string{}, "prompt"}, {"yes", nil, "prompt"}, {"no", nil, "prompt"},
+		{"prompt", recorded["yes"], "yes"}, {"no", recorded["yes"], "yes"}, {"prompt", recorded["no"], "no"}, {"yes", recorded["no"], "no"},
+	} {
+		if got := catalog.WithAppliedIntegrationInitSettings(map[string]string{"DEV_SUDO": test.desired}, test.applied)["DEV_SUDO"]; got != test.want {
+			t.Fatalf("desired %q with snapshot %#v projected as %q, want %q", test.desired, test.applied, got, test.want)
+		}
+	}
+	for _, value := range []string{"1", "0"} {
+		if catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": value}) == nil {
+			t.Fatalf("installed snapshot accepted legacy DEV_SUDO=%s", value)
+		}
+	}
+}

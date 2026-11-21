@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestBuilderProjectOwnershipCannotBeAdopted(t *testing.T) {
@@ -69,13 +71,11 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 				registry.Build.Failure = &readinessFailure{Project: project, VM: "e2e-base-1", Phase: "incus-agent", Budget: time.Second, StartedAt: time.Now(), ObservedAt: time.Now(), LastProbe: "error_kind=probe_error"}
 				registry.Build.IncidentSlot = LeaseSlot{SlotID: "slot-000"}
 			}
-			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 			recorder := EventRecorder{StateDir: cfg.StateDir, Source: "yard-source"}
 			if failure == "evidence_write" {
 				recorder.StateDir = filepath.Join(cfg.StateDir, "blocked")
-				if err := os.WriteFile(recorder.StateDir, nil, 0600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, recorder.StateDir, nil, 0600)
 			}
 			vmDeleted, imageDeleted := false, false
 			consoleCalls := 0
@@ -164,9 +164,7 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 				case "image delete " + fingerprint + " --project default":
 					if failure == "evidence_receipt" {
 						recorder.StateDir = filepath.Join(cfg.StateDir, "blocked_receipt")
-						if err := os.WriteFile(recorder.StateDir, nil, 0600); err != nil {
-							t.Fatal(err)
-						}
+						testkit.WriteFile(t, recorder.StateDir, nil, 0600)
 					}
 					imageDeleted = true
 					return nil, nil, nil
@@ -226,7 +224,7 @@ func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
 			current.Fingerprint = strings.Repeat("f", 64)
 			current.CreatedAt = now.Add(-10 * 24 * time.Hour)
 			registry := ImageRegistry{SchemaVersion: 1, Owner: owner, Bases: []BaseImage{old, current}}
-			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 			if reference == "quarantined" {
 				spec, err := cfg.EnvironmentSpec(EnvironmentPair)
 				if err != nil {
@@ -305,7 +303,7 @@ func TestImagePruneRetainsCurrentExpiredAndUnknownReferences(t *testing.T) {
 }
 
 func TestImageBuildWaitCancellationPreservesActiveBuilder(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "images.lock")
+	path := filepath.Join(testkit.TempDir(t), "images.lock")
 	active, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
@@ -373,19 +371,15 @@ func TestImageReaperDoesNotWaitForActiveBuilder(t *testing.T) {
 }
 
 func TestRecipeRequestKeepsItsResolvedGeneration(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	first, second := filepath.Join(root, "first"), filepath.Join(root, "second")
 	for _, directory := range []string{first, second} {
 		if err := os.Mkdir(directory, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(first, "manifest.sha256"), []byte("first recipe"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(second, "manifest.sha256"), []byte("second recipe"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(first, "manifest.sha256"), []byte("first recipe"), 0600)
+	testkit.WriteFile(t, filepath.Join(second, "manifest.sha256"), []byte("second recipe"), 0600)
 	current := filepath.Join(root, "current")
 	if err := os.Symlink(first, current); err != nil {
 		t.Fatal(err)
@@ -425,7 +419,7 @@ func TestBuilderAdmissionUsesSequentialPeakAndKeepsOtherReservations(t *testing.
 	cfg := fixtureConfig(t)
 	cfg.DiskBudget = "160GiB"
 	cfg.Memory, cfg.Disk = "4GiB", "20GiB"
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 2}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 2}
 	spec, err := cfg.environmentSpecForArch(EnvironmentAndroid, "amd64")
 	if err != nil {
 		t.Fatal(err)
@@ -511,10 +505,8 @@ func testWarmAcquireImage(t *testing.T, image string) {
 		t.Run(mode, func(t *testing.T) {
 			changed := mode == "changed"
 			cfg := fixtureConfig(t)
-			cfg.RecipeRoot = t.TempDir()
-			if err := os.WriteFile(filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("pinned recipe"), 0600); err != nil {
-				t.Fatal(err)
-			}
+			cfg.RecipeRoot = testkit.TempDir(t)
+			testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("pinned recipe"), 0600)
 			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 				t.Fatal(err)
 			}

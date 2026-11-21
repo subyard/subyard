@@ -18,6 +18,17 @@ desired = (package / "settings.json").read_bytes()
 digest = hashlib.sha256(desired).hexdigest()
 uid, developer = os.getuid(), "dev"
 template = (root / "internal/adapters/configmaterial/guest_json.py").read_text()
+# The compare-and-write helpers precede the materializer, as in the release.
+cas = (root / "internal/adapters/configmaterial/guest_cas.py").read_text()
+
+
+def consent(mode, destination):
+    """The token a confirmed apply compares with: the bytes it was planned on."""
+    if mode != "apply":
+        return ""
+    return "sha256:" + hashlib.sha256(destination.read_bytes()).hexdigest() if destination.exists() else "absent"
+
+
 for historical_path in sorted((package / "legacy-config").glob("*.json")):
     historical = historical_path.read_bytes()
     with tempfile.TemporaryDirectory(prefix="subyard-claude-legacy-", dir="/tmp") as temporary:
@@ -37,11 +48,11 @@ for historical_path in sorted((package / "legacy-config").glob("*.json")):
             if program.count(old) != 1:
                 raise SystemExit("FAIL: guest materializer test hook changed")
             program = program.replace(old, new)
-        program = "LEGACY_TEMPLATES = " + json.dumps([historical.decode()]) + "\n" + program
+        program = "LEGACY_TEMPLATES = " + json.dumps([historical.decode()]) + "\n" + cas + program
 
         def run(mode):
             result = subprocess.run([sys.executable, "-B", "-c", program, mode, developer, str(destination),
-                                     str(uid), digest, str(home), digest],
+                                     str(uid), digest, str(home), digest, consent(mode, destination)],
                                     input=desired, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result.returncode != 0:
                 raise SystemExit(f"FAIL: {historical_path.name} {mode}: {result.stderr.decode().strip()}")

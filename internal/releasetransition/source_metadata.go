@@ -18,6 +18,11 @@ import (
 // It does not authorize source repair or identify other unfinished history.
 var ErrSourceRecoveryHistory = errors.New("source repair requires completed history or an original activation-only reconciling journal")
 
+var (
+	ErrSourcePendingPublication = errors.New("protected release publication is pending")
+	ErrSourcePendingArchive     = errors.New("protected archive publication is pending")
+)
+
 // SourceMetadata is read-only admission evidence, never a release authorization
 // or a claim that the original owner's operational resources remain ready.
 type SourceMetadata struct {
@@ -128,7 +133,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 	}
 	if graph != nil {
 		if len(graph.pending) != 0 {
-			return proof, errors.New("finish the pending protected archive publication before source repair")
+			return proof, ErrSourcePendingArchive
 		}
 		terminals, err := store.readLifecycleArchive()
 		if err != nil {
@@ -350,32 +355,43 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 }
 
 func sourceHistoricalLedgerEdges(journal JournalRecord, registry RegistryV2, state MigrationLedgerSnapshot) (map[string]sourceLedgerEdge, error) {
-	last := Fingerprint("")
+	var last JournalStep
 	for _, step := range journal.Steps {
 		if step.ID == step.Migration+".ledger" {
-			last = step.Desired
+			last = step
 		}
 	}
-	if last == "" {
+	if last.ID == "" {
 		return ledgerTrace(registry, state.Ledger, journal.Steps)
 	}
-	ledger := state.Ledger
-	_, terminal, err := MarshalLedgerV2(ledger, registry)
+	_, terminal, err := MarshalLedgerV2(state.Ledger, registry)
 	if err != nil {
 		return nil, err
 	}
-	if terminal != last {
-		// ReadMigrationLedger already verified the checkpoint's binding to these
-		// exact projection bytes. A journal's claimed terminal is not an anchor.
-		if !state.Checkpointed || !state.ProjectionSnapshot.Exists || state.ProjectionSnapshot.Fingerprint != last {
-			return nil, errors.New("terminal ledger evidence has no authenticated historical anchor")
-		}
-		ledger, err = historicalProjectionLedger(registry, compatibilityProjectionRevision{state.ProjectionSnapshot})
-		if err != nil {
-			return nil, err
+	if terminal == last.Desired {
+		return ledgerTrace(registry, state.Ledger, journal.Steps)
+	}
+	// ReadMigrationLedger verified the checkpoint's binding to the projection.
+	// That projection can be any cut of the retained trace.
+	if !state.Checkpointed || !state.ProjectionSnapshot.Exists {
+		return nil, errors.New("terminal ledger evidence has no authenticated historical anchor")
+	}
+	ledger, err := historicalProjectionLedger(registry, compatibilityProjectionRevision{state.ProjectionSnapshot})
+	if err != nil {
+		return nil, err
+	}
+	edges, err := ledgerTrace(registry, ledger, journal.Steps)
+	if err != nil {
+		return nil, err
+	}
+	// Both views have exact per-domain prefixes in the same registry. The
+	// replay may end earlier than the authoritative checkpoint in any domain.
+	for name, endpoint := range ledgerFromAuthority(edges[last.Migration].witness.After()).Domains {
+		if endpoint.Epoch > state.Ledger.Domains[name].Epoch {
+			return nil, errors.New("terminal ledger evidence extends beyond validated migration history")
 		}
 	}
-	return ledgerTrace(registry, ledger, journal.Steps)
+	return edges, nil
 }
 
 // Older ordinary publication can replace a completed journal without archiving
@@ -585,19 +601,6 @@ type sourceMetadataInput struct {
 // This is a bounded inventory of the existing typed store, including absence,
 // pending records, directory identities, and unrelated recovery namespaces.
 func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
-	return store.sourceMetadataInventoryWithMigrationOwner(false)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithoutMigrationOwner() (Fingerprint, error) {
-	// Publication changes this namespace, so its bytes cannot join the predecessor
-	// binding. Validate its complete typed grammar before excluding it instead.
-	if _, err := store.migrationOwnerReceipts(); err != nil {
-		return "", err
-	}
-	return store.sourceMetadataInventoryWithMigrationOwner(true)
-}
-
-func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude bool) (Fingerprint, error) {
 	inputs := map[string]sourceMetadataInput{}
 	remaining := 8192
 	remainingBytes := int64(32 << 20)
@@ -618,11 +621,6 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 			return err
 		}
 		inputs[key] = metadataInput(stat, "")
-		if exclude && len(parts) == 1 {
-			input := inputs[key]
-			input.Links = 0
-			inputs[key] = input
-		}
 		entries, _, err := store.readDirectoryEntries(parts, remaining)
 		if err != nil {
 			return err
@@ -634,17 +632,8 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 		for _, entry := range entries {
 			name := entry.Name()
 			child := append(slices.Clone(parts), name)
-			if exclude && len(child) == 2 && child[1] == "migration-owner" {
-				continue
-			}
 			if strings.HasSuffix(name, ".pending") {
-				if exclude && len(child) == 3 && child[1] == "v2" && name == ".journal.json.pending" {
-					if err := store.validateMigrationOwnerPreparedJournal(); err != nil {
-						return err
-					}
-					continue
-				}
-				return errors.New("finish the pending protected publication with its sealed owner before source repair")
+				return ErrSourcePendingPublication
 			}
 			if entry.IsDir() {
 				if !sourceMetadataDirectory(child) {

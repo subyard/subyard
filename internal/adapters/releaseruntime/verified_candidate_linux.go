@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -35,6 +36,9 @@ type verifiedPublishedCandidate struct {
 	registryDigest        releasetransition.Fingerprint
 	checkpointRaw         []byte
 	checkpointDigest      [sha256.Size]byte
+	rollbackRaw           []byte
+	rollbackDigest        [sha256.Size]byte
+	rollbackBound         bool
 	version               string
 	inventory             map[string]bool // true for directories
 	published             bool
@@ -184,6 +188,15 @@ func verifyOpenCandidateFiles(verified *verifiedPublishedCandidate, expectedDige
 					err = errors.New("published runtime checkpoint capability changed")
 				}
 				verified.checkpointDigest = entry.digest
+			}
+			if err == nil && entry.path == "config/release-rollback.json" {
+				verified.rollbackRaw, err = io.ReadAll(io.NewSectionReader(file, 0, releasetransition.MaxRollbackDeclarationBytes+1))
+				if err == nil && len(verified.rollbackRaw) > releasetransition.MaxRollbackDeclarationBytes {
+					err = errors.New("published runtime rollback declaration exceeds its size bound")
+				} else if err == nil && sha256.Sum256(verified.rollbackRaw) != entry.digest {
+					err = errors.New("published runtime rollback declaration changed")
+				}
+				verified.rollbackDigest, verified.rollbackBound = entry.digest, true
 			}
 		}
 		file.Close()
@@ -412,6 +425,12 @@ func verifyCandidateFile(file *os.File, expected [sha256.Size]byte) error {
 }
 
 func sealVerifiedEngine(file *os.File, expected [sha256.Size]byte) (*os.File, error) {
+	return sealVerifiedEngineWith(file, expected, unix.FcntlInt)
+}
+
+func sealVerifiedEngineWith(
+	file *os.File, expected [sha256.Size]byte, fcntl func(uintptr, int, int) (int, error),
+) (*os.File, error) {
 	fd, err := createExecutableMemfd(unix.MemfdCreate)
 	if err != nil {
 		return nil, errors.New("create verified runtime execution image")
@@ -431,10 +450,17 @@ func sealVerifiedEngine(file *os.File, expected [sha256.Size]byte) (*os.File, er
 	if err := sealed.Chmod(0o500); err != nil {
 		return fail(errors.New("make verified runtime execution image executable"))
 	}
-	if _, err := unix.FcntlInt(sealed.Fd(), unix.F_ADD_SEALS,
-		unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL,
-	); err != nil {
-		return fail(errors.New("seal verified runtime execution image"))
+	const seals = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
+	const sealAttempts = 5
+	for attempt := 1; attempt <= sealAttempts; attempt++ {
+		_, err := fcntl(sealed.Fd(), unix.F_ADD_SEALS, seals)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EBUSY) || attempt == sealAttempts {
+			return fail(fmt.Errorf("seal verified runtime execution image: %w", err))
+		}
+		time.Sleep(75 * time.Millisecond)
 	}
 	if _, err := sealed.Seek(0, io.SeekStart); err != nil {
 		return fail(errors.New("rewind verified runtime execution image"))
@@ -483,14 +509,12 @@ func (runtime *Runtime) runVerifiedCandidate(
 	stdout io.Writer,
 	grant releasetransition.Authorization,
 ) error {
-	return runtime.runVerifiedRuntimeEngine(
-		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant, nil,
-	)
+	return runtime.runVerifiedCandidateRequest(ctx, candidate, runtimeRoot, arguments, stdin, stdout, grant, nil)
 }
 
-func (runtime *Runtime) runVerifiedRuntimeEngine(
+func (runtime *Runtime) runVerifiedCandidateRequest(
 	ctx context.Context,
-	assets, engine *verifiedPublishedCandidate,
+	candidate *verifiedPublishedCandidate,
 	runtimeRoot string,
 	arguments []string,
 	stdin io.Reader,
@@ -498,13 +522,13 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	grant releasetransition.Authorization,
 	request *releasetransition.ProcessRequest,
 ) error {
-	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
+	if candidate == nil || candidate.root == nil || candidate.engine == nil {
 		return errors.New("verified published runtime is unavailable")
 	}
 	transition := len(arguments) != 0 && arguments[0] == "_release-transition"
 	if transition {
 		if request == nil || request.RuntimeRoot != runtimeRoot {
-			return staleRetainedSelection(runtimeRoot, engine.candidate.release)
+			return staleRetainedSelection(runtimeRoot, candidate.candidate.release)
 		}
 		unlock, err := runtime.lockReleaseTransition(ctx, grant, request)
 		if err != nil {
@@ -543,16 +567,16 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		extra = append(extra, placeholder)
 	}
 	rootChildFD := 3 + len(extra)
-	extra = append(extra, assets.root)
+	extra = append(extra, candidate.root)
 	engineChildFD := 3 + len(extra)
-	extra = append(extra, engine.engine)
+	extra = append(extra, candidate.engine)
 	enginePath := fmt.Sprintf("/proc/self/fd/%d", engineChildFD)
 	command := exec.CommandContext(ctx, enginePath, arguments...)
 	command.Args[0] = "yard-engine"
 	command.ExtraFiles = extra
 	repositoryRoot := fmt.Sprintf("/proc/self/fd/%d", rootChildFD)
 	if runtime.pinnedCandidateRoot != nil &&
-		runtime.pinnedCandidateRelease == assets.candidate.release {
+		runtime.pinnedCandidateRelease == candidate.candidate.release {
 		repositoryRoot = fmt.Sprintf(
 			"/proc/%d/fd/%d", os.Getpid(), runtime.pinnedCandidateRoot.Fd(),
 		)
@@ -579,7 +603,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
 	if transition {
-		if err := runtime.admitTransitionLaunch(ctx, engine, *request); err != nil {
+		if err := runtime.admitTransitionLaunch(ctx, candidate, *request); err != nil {
 			return err
 		}
 	}
@@ -596,42 +620,28 @@ func (runtime *Runtime) invokeVerifiedCandidateTransition(
 	request releasetransition.ProcessRequest,
 	grant releasetransition.Authorization,
 ) (releasetransition.ProcessResponse, error) {
-	return runtime.invokeVerifiedRuntimeTransition(ctx, candidate, candidate, request, grant)
-}
-
-func (runtime *Runtime) invokeVerifiedRuntimeTransition(
-	ctx context.Context,
-	assets, engine *verifiedPublishedCandidate,
-	request releasetransition.ProcessRequest,
-	grant releasetransition.Authorization,
-) (releasetransition.ProcessResponse, error) {
-	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
-		return releasetransition.ProcessResponse{},
-			errors.New("verified published runtime is unavailable")
+	if candidate == nil || candidate.root == nil || candidate.engine == nil {
+		return releasetransition.ProcessResponse{}, errors.New("verified published runtime is unavailable")
 	}
-	if assets.registryDigest == "" {
+	if candidate.registryDigest == "" {
 		return releasetransition.ProcessResponse{},
 			errors.New("published runtime manifest does not bind release transition registry")
 	}
-	if engine.registryDigest != assets.registryDigest {
-		return releasetransition.ProcessResponse{},
-			errors.New("verified runtime engine and assets have incompatible release transition registries")
-	}
-	if err := runtime.pinCandidateRoot(assets); err != nil {
+	if err := runtime.pinCandidateRoot(candidate); err != nil {
 		return releasetransition.ProcessResponse{}, err
 	}
-	if request.RegistryDigest != "" && request.RegistryDigest != assets.registryDigest {
+	if request.RegistryDigest != "" && request.RegistryDigest != candidate.registryDigest {
 		return releasetransition.ProcessResponse{},
 			errors.New("published runtime registry changed after inspection")
 	}
-	request.RegistryDigest = assets.registryDigest
+	request.RegistryDigest = candidate.registryDigest
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return releasetransition.ProcessResponse{}, err
 	}
 	var stdout boundedResponseBuffer
-	if err := runtime.runVerifiedRuntimeEngine(
-		ctx, assets, engine, request.RuntimeRoot, []string{"_release-transition"},
+	if err := runtime.runVerifiedCandidateRequest(
+		ctx, candidate, request.RuntimeRoot, []string{"_release-transition"},
 		bytes.NewReader(append(payload, '\n')), &stdout, grant, &request,
 	); err != nil {
 		return releasetransition.ProcessResponse{},

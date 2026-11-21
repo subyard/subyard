@@ -14,8 +14,17 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Disposable fixtures must not become workspace repositories in Orca.
 export TMPDIR=/tmp
+# Python helpers imported by tests must not leave bytecode in the checkout.
+export PYTHONDONTWRITEBYTECODE=1
+
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
+# Tests keep disposable state outside the checkout; see tests/helpers/checkout-guard.sh.
+CHECKOUT_TRACKED=0
+if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
+  CHECKOUT_TRACKED=1
+  bash "$ROOT/tests/helpers/checkout-guard.sh" start "$ROOT" "$RUN_DIR"
+fi
 SUMMARY="$RUN_DIR/summary.tsv"
 printf 'kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog\n' > "$SUMMARY"
 printf 'RESULTS %s\n' "$SUMMARY"
@@ -47,8 +56,13 @@ finish() {
   local rc="$1" status=passed
   trap - EXIT
   set +e
+  local failed_check="$CHECK_NAME"
   [ -z "$CHECK_NAME" ] || record_check "$rc"
   [ "$rc" -eq 0 ] || status=failed
+  # A failed run still reports its leaks, which the next run's snapshot would accept.
+  if [ "$rc" -ne 0 ] && [ "$CHECKOUT_TRACKED" = 1 ] && [ "$failed_check" != checkout-unchanged ]; then
+    bash "$ROOT/tests/helpers/checkout-guard.sh" check "$ROOT" "$RUN_DIR"
+  fi
   printf 'run\t%s\tall\t%s\t%s\t%s\t-\n' \
     "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
   printf 'SUMMARY status=%s checks=%s duration_seconds=%s exit_code=%s results=%s\n' \
@@ -120,7 +134,7 @@ check_go_race() {
     './internal/config:TestWritePersistentAssignmentPreservesUnrelatedRecords|TestCreatePersistentFileRefusesExistingTarget|TestCreatePersistentFileCreatesMissingConfigurationRoot|TestYardRegistrationRepairMovesFlatRegistrationToRecovery|TestYardResetMarkerModeDoesNotDependOnUmask|TestLocalSettingsCASCreatesExactPrivateModesAndResumesUnpublishedCreation|TestLocalSettingsCASPreservesModeAndRefusesConcurrentFileOrSymlink' \
     './internal/configsync:TestConfigurationSourceRecordIsProtectedAndIdempotent|TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings|TestVersionedConfigSyncDefaultYardAssets' \
     './internal/testyardmigration:TestCommitAcceptsCompatiblePublishedRegistrationModes' \
-    './internal/releasetransition:TestPOSIXV2StoreCASPersistsProtectedLedgerAndRejectsStaleSnapshot|TestPOSIXV2StoreCheckpointEvidenceIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreSupersededJournalIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreRecoversDeterministicPendingCreate|TestPOSIXV2StorePinsParentDirectoryAcrossSymlinkSwap|TestPOSIXV2StoreUsesSharedMigrationUpdateLock' \
+    './internal/releasetransition:TestPOSIXV2StoreCASPersistsProtectedLedgerAndRejectsStaleSnapshot|TestPOSIXV2StoreCheckpointEvidenceIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreRecoversDeterministicPendingCreate|TestPOSIXV2StorePinsParentDirectoryAcrossSymlinkSwap|TestPOSIXV2StoreUsesSharedMigrationUpdateLock' \
     './internal/adapters/credentialruntime:TestProtectedJSONAtomicWriteAndCounter|TestSetupCredentialImportMaterializeAndResume' \
     './internal/adapters/codexdesktop:TestProtectedCreationModes' \
     './internal/adapters/projectruntime:TestPatchStorePublishesProtectedArtifact' \
@@ -133,6 +147,11 @@ check_go_race() {
     './internal/ownerservice:TestRegistryInterruptedPublicationAndGenerationCAS' \
     './internal/sshtrust:TestFirstTrustConsentAndVerification' \
     './internal/audit:TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes'
+}
+
+check_checkout_unchanged() {
+  [ "$CHECKOUT_TRACKED" = 1 ] || { printf 'checkout is not a Git work tree root; skipped\n'; return 0; }
+  bash "$ROOT/tests/helpers/checkout-guard.sh" check "$ROOT" "$RUN_DIR"
 }
 
 if [ "$selection" != go ]; then
@@ -158,7 +177,7 @@ if [ "$selection" != shell ]; then
   run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
   run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
 fi
-[ "$selection" != go ] || exit 0
+[ "$selection" != go ] || { run_check checkout-unchanged check_checkout_unchanged; exit 0; }
 run_check manifests check_manifests
 
 for suite in unit contract integration; do
@@ -173,3 +192,4 @@ for suite in unit contract integration; do
     run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
   done < "$ROOT/tests/suites/$suite.list"
 done
+run_check checkout-unchanged check_checkout_unchanged

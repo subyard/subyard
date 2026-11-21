@@ -89,11 +89,11 @@ legacy lease retains its old disks. Preserve needed data before proposing retire
 
 Ordinary P0 uses the standard resources above: smoke, full and peer scenarios use two guests;
 independent single-host lanes use one. `SUBYARD_P0_NESTED_VM=2` retains a pair for that selector.
-Android acceptance uses one Android VM. Physical candidate-broker cross-slot isolation and
-quarantine/rebuild use the separate `SUBYARD_P0_BROKER_RECOVERY_ONLY=1` diagnostic, which creates
-nested pairs and checks capacity first. Select it for affected broker behavior; it is not an
-automatic full P0 requirement or a reason to enlarge the ordinary pool. A successful outer-broker
-lease does not prove the candidate broker code.
+Android acceptance uses one Android VM. A successful outer-broker lease does not prove the
+candidate broker code. The host-free broker tests cover multi-slot quarantine, recovery and lease
+scoping. `vm:staging-reliability` covers installed single-slot quarantine and recovery. The
+test-vms `memory-boundary` lane checks the installed forwarding rule with two network namespaces
+before acquiring its nested lease.
 
 ## Running tests
 
@@ -471,10 +471,8 @@ It initializes a disposable yard, uses an isolated owner SSH server and controll
 removes only its test yard's key, and checks confirmation and continuation of `sync`. It never
 edits the operator's SSH trust. This focused check does not replace the full P0 gate.
 
-The default pool has slots 1 and 2, but callers must use the configured capacity reported by status.
-The live lease acceptance always exercises one exact slot and, when a second exists, adds concurrent
-cross-slot isolation. Additional slots remain unselected and must retain the same state, lease epoch
-and resource generation throughout the run.
+The default pool has slots 1 and 2. Use status to find the configured capacity. Host-free broker
+tests check that exact-slot operations leave unselected slots and their allocation identities intact.
 
 ### Test lanes and gates
 
@@ -860,7 +858,9 @@ The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `dire
 fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0
 with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1 hop has no release
 check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
-previous release distinct from both remains a direct baseline.
+previous release distinct from both remains a direct baseline. When the baseline ships the
+candidate's exact registry bytes, the lane also rolls back to it, checks Ready and unchanged
+migration history, and updates to the candidate again.
 Host-free `dev/verify-release-upgrades.py --only-source-anchor` checks refusal at
 v0.11.0, v0.17.3 and v0.27.0, including update and `--check`, the exact hop command,
 unchanged protected state and rejection of Incus mutations; these have no VM catalog entries.
@@ -897,7 +897,7 @@ This uses one lease with two 4 GiB / 20 GiB guests. It fills VM1's root filesyst
 `ENOSPC`, verifies that VM2 remains writable, reclaims the fill file, then releases the
 allocation and checks that its working reservation is gone. The output directory must be
 new. The check uses the runner's ordinary admission and never changes resource limits.
-It does not establish another agent's workload health or exercise nested broker recovery.
+`vm:staging-reliability` owns installed broker recovery coverage.
 
 For the broker's physical storage adapter contract, use VM1 of one standard pair:
 
@@ -939,7 +939,8 @@ reservations. The output directory must be new; it contains bounded runner logs,
 samples and `summary.json`. Add `--require-cold` after installing a changed recipe to require new
 base fingerprints for both types. Equal fingerprints and sampled builder state do not establish
 an exact build count. Only VM1 is directly measured; VM2 composition/readiness comes from the
-broker. This check does not replace broker recovery or Android application acceptance.
+broker. See `vm:staging-reliability` for broker recovery and the Android profile lanes for
+application acceptance.
 Use `--disk-isolation` to fill peer VM1's root filesystem to `ENOSPC` while checking that the
 other held allocation remains responsive and writable. The writer is bounded by the guest disk
 capacity and a five-minute deadline; its unlinked temporary file is reclaimed when closed or when
@@ -1287,7 +1288,12 @@ guard lanes recognize these refusal paths. Release smoke compares runtime link m
 V2 state tree's metadata and file hashes across the refusal. The same-epoch cycle uses a compatible
 release built from the candidate source. A public `update --check --json` names its exact target
 with a plan and no blockers. The lane updates to it, returns to the candidate, performs a real
-rollback to it and rolls forward again.
+rollback to it and rolls forward again. A last cycle updates to a release built from the candidate
+source whose registry retires the definition-free `project-state` prefix and whose declaration
+names the candidate's registry; `tests/helpers/registry-fixture` derives both with the engine's
+registry code. The release's `_history-compatibility` verdict for the candidate must be an admitted
+`equivalent`, a real rollback returns to the candidate, the candidate's verdict must admit the
+retired release as its declared `successor`, and the lane rolls forward and back once more.
 Both passages preserve native policy and the registered ownership. Fresh sources below v0.11.0
 remain refused; accepted completed V2 history and recovery retain their separate supported
 contracts. The guest verifies checksum-pinned official anchor assets before creating the cold

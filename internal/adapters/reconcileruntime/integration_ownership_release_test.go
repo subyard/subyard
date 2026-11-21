@@ -244,7 +244,7 @@ func TestInstalledViewAppliesWithRefusingMode(t *testing.T) {
 		mode    string
 	}{{runtime, configmaterial.ModeApply}, {runtime.WithInstalledConfiguration(), configmaterial.ModeApplyInstalled}} {
 		executor.requests = nil
-		if err := scenario.runtime.applyGuestConfig(context.Background(), file, []byte(`{"managed":1}`)); err != nil {
+		if err := scenario.runtime.applyGuestConfig(context.Background(), file, []byte(`{"managed":1}`), configmaterial.TokenAbsent); err != nil {
 			t.Fatal(err)
 		}
 		if len(executor.requests) != 1 || executor.requests[0].Command[4] != scenario.mode {

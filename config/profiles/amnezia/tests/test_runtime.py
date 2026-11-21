@@ -329,6 +329,8 @@ GUEST_DIRS[1]=/var/tmp/subyard-worktree.synthetic
 LEASE_KEEPER_PID=''
 CLIENT_CONFIG=synthetic-config
 quote_ssh_command() { printf '%q ' "$@"; }
+LEASE_SLOT=slot-001
+lane_record() { :; }
 release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 100; return "$CLEANUP_FAILURE"; }
 ''' + functions + f'\ntrap cleanup_acceptance EXIT\nexit {original}\n'
                 started = time.monotonic()
@@ -368,6 +370,63 @@ release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 10
                         self.assertEqual(result['probes']['observe']['exit_code'], 255)
                         self.assertEqual(result['probes']['state']['stdout_bytes'], 22)
                         self.assertTrue(all(item.isfile() and item.mode == 0o600 for item in archive.getmembers()))
+
+    def test_acceptance_records_cleanup_of_every_staged_vm_for_release_acceptance(self):
+        # The real staging, custom cleanup loop and release record, read by the core lane rule.
+        acceptance = load_module('release_acceptance_rule', PROFILE.parents[2] / 'dev/release-acceptance.py')
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        functions = 'diagnose_failure() {' + source.split('diagnose_failure() {', 1)[1].split('trap cleanup_acceptance EXIT', 1)[0]
+        lane = '0123456789abcdef' * 2
+        for failed in ('', '2'):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                directory = Path(temporary)
+                binary = directory / 'bin'
+                binary.mkdir()
+                (binary / 'ssh').write_text('#!/bin/sh\ncase "$*" in *"e2e-vm-$FAILED_VM "*) exit 5 ;; esac\n')
+                (binary / 'ssh').chmod(0o700)
+                script = '''set -euo pipefail
+exec 2>&1
+. "$REPOSITORY/dev/agent-e2e.sh"
+ROOT="$REPOSITORY"
+OUTPUT="$TEMP_ROOT/output"
+LOCAL_TEMP="$TEMP_ROOT/local"
+mkdir -m 0700 "$OUTPUT" "$LOCAL_TEMP"
+CLIENT_CONFIG=synthetic-config LEASE_ID=lease LEASE_SLOT=slot-001 LEASE_RUN=0123abcd LEASE_EPOCH=1 LEASE_CAPABILITY=c
+facade_request() { printf '{"status":"ok"}\\n'; }
+guest() {
+  local vm="$1"; shift
+  case "$1" in
+    findmnt) printf 'ext4\\n' ;;
+    mktemp) printf '/var/tmp/subyard-worktree.vm%s\\n' "$vm" ;;
+    dd) cat >/dev/null ;;
+    sha256sum) printf '%s  worktree.tar.gz\\n' "$HASH" ;;
+    mkdir|tar) ;;
+    *) return 97 ;;
+  esac
+}
+lane_record slot-001 request
+lane_record slot-001 grant type=subyard-pair vms=2 base=$(printf %064d 0)
+bundle="$LOCAL_TEMP/worktree.tar.gz"
+: >"$bundle"
+HASH="$(sha256sum "$bundle" | cut -d' ' -f1)"
+prepare_guest 1 "$bundle" "$HASH"
+prepare_guest 2 "$bundle" "$HASH"
+''' + functions + '\ntrap cleanup_acceptance EXIT\nexit 0\n'
+                environment = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'], REPOSITORY=str(PROFILE.parents[2]),
+                                   TEMP_ROOT=str(directory), FAILED_VM=failed, SUBYARD_E2E_LANE=lane)
+                observed = subprocess.run(['bash', '-c', script], stdout=subprocess.PIPE, env=environment, timeout=30)
+                self.assertEqual(observed.returncode, 3 if failed else 0, observed.stdout.decode())
+                log = directory / 'lane.log'
+                header = f'E2E_LANE id={lane}\n'.encode()
+                log.write_bytes(header + observed.stdout)
+                evidence = acceptance.lane_evidence(log, 1)
+                if failed:
+                    self.assertEqual(evidence.issue, 'guest cleanup of VM2 exited 5')
+                else:
+                    self.assertEqual((evidence.issue, evidence.cleaned, evidence.completed), (None, [1, 2], 1))
+                # Without the cleanup records, the staged VMs keep the lease from counting.
+                log.write_bytes(header + b''.join(line for line in observed.stdout.splitlines(keepends=True) if b'event=cleaned' not in line))
+                self.assertIn('has no confirmed guest cleanup', acceptance.lane_evidence(log, 1).issue)
 
     def test_native_failure_capture_is_bounded_and_never_changes_the_capture_result(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()

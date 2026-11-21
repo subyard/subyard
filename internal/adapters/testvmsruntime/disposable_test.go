@@ -18,7 +18,7 @@ import (
 )
 
 func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	cfg := fixtureConfig(t)
 	var output bytes.Buffer
 	facade := Facade{
@@ -82,7 +82,7 @@ func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
 }
 
 func TestDisposableGenerationAndReservationRemainUntilVerifiedDrain(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	cfg := fixtureConfig(t)
 	spec, err := cfg.environmentSpecForArch(EnvironmentAndroid, "amd64")
 	if err != nil {
@@ -194,11 +194,9 @@ func TestDisposableDeletionRequiresEveryExactMarkerAndVerifiedStop(t *testing.T)
 }
 
 func TestFutureLeaseSchemaCannotBeOverwrittenByRecovery(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "leases.json")
+	path := filepath.Join(testkit.TempDir(t), "leases.json")
 	original := []byte(`{"schema_version":` + strconv.Itoa(LeaseFencedSchemaVersion+1) + `,"resource_type":"agent-e2e","resource_id":"test-vms"}`)
-	if err := os.WriteFile(path, original, 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, original, 0600)
 	store := LeaseStore{Path: path, SlotCount: 1}
 	if err := store.BeginRecovery("slot-001"); !errors.Is(err, ErrUnsupportedLeaseState) {
 		t.Fatalf("future schema recovery = %v", err)
@@ -222,10 +220,8 @@ func TestRecoveryPreservesLegacyDataUntilExplicitRetirement(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("automatic recovery touched retained data: %#v", runner.calls)
 	}
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
-	if err := os.WriteFile(store.Path, []byte(`{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}`), 0600); err != nil {
-		t.Fatal(err)
-	}
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+	testkit.WriteFile(t, store.Path, []byte(`{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}`), 0600)
 	stale := LeaseIdentity{SlotID: "slot-001", ResourceGeneration: 6, LeaseEpoch: 0}
 	if err := runtime.RetireLegacySlot(context.Background(), store, stale); !errors.Is(err, ErrLeaseTargetStale) {
 		t.Fatalf("stale retirement error = %v", err)

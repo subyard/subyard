@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -154,6 +155,38 @@ func TestStructuredWriterRefusesChangedTransportBeforeMutation(t *testing.T) {
 			}
 			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
 				t.Fatal("changed transport modified managed state")
+			}
+		})
+	}
+}
+
+// A structured apply planned on other bytes refuses as changed with the guest's
+// file and every managed record exactly as they were.
+func TestStructuredWriterRefusesStaleConsentToken(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			payload := []byte(`{"managed":true}`)
+			if format == "toml" {
+				payload = []byte("sandbox_mode = 'danger-full-access'\n")
+			}
+			h.apply(t, payload)
+			h.writeDestination(t, string(payload)+"\n")
+			before := snapshotMaterialization(t, h.root)
+			request, err := materializationRequest(format, ModeApply, "dev", h.destination, os.Getuid(), payload,
+				h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"), PayloadToken(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(request.Command[0], request.Command[1:]...)
+			command.Stdin = bytes.NewReader(request.Stdin)
+			err = command.Run()
+			if refused, ok := Refused(File{}, ports.InstanceExecResult{ExitCode: command.ProcessState.ExitCode()}, nil); !ok || refused.State() != "changed" {
+				t.Fatalf("stale token: %v", err)
+			}
+			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
+				t.Fatal("stale token modified managed state")
 			}
 		})
 	}
@@ -371,7 +404,7 @@ func TestJSONMaterializationRejectsDestinationSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	stderr, err := harness.run([]byte(`{"managed":1}`), ModeApply)
-	if err == nil || !strings.Contains(stderr, "invalid destination path") {
+	if exit := new(exec.ExitError); !errors.As(err, &exit) || exit.ExitCode() != 3 || !strings.Contains(stderr, "config write: unreadable") {
 		t.Fatalf("symlink apply error=%v stderr=%q", err, stderr)
 	}
 	got, readErr := os.ReadFile(target)
@@ -469,7 +502,7 @@ func TestJSONRequestAndObservationParserRejectUnsafeInputs(t *testing.T) {
 			t.Fatalf("accepted unsafe request: %#v", test)
 		}
 	}
-	request, err := JSONRequest(ModeApply, "1dev", "/home/1dev/settings.json", 0, []byte(`{}`))
+	request, err := JSONRequest(ModeObserve, "1dev", "/home/1dev/settings.json", 0, []byte(`{}`))
 	if err != nil || request.Command[7] != "1000" {
 		t.Fatalf("legacy uid fallback request=%#v err=%v", request, err)
 	}
@@ -745,8 +778,15 @@ func (h guestHarness) request(payload []byte, mode string) (ports.InstanceExecRe
 	if format == "" {
 		format = "json"
 	}
+	expect := ""
+	if mode == ModeApply || mode == ModeApplyInstalled {
+		expect = TokenAbsent
+		if current, err := os.ReadFile(h.destination); err == nil {
+			expect = PayloadToken(current)
+		}
+	}
 	return materializationRequest(format, mode, "dev", h.destination, os.Getuid(), payload,
-		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"), h.legacyTemplates...)
+		h.state, os.Getuid(), filepath.Join(h.root, "home", "dev"), expect, h.legacyTemplates...)
 }
 
 func (h guestHarness) run(payload []byte, mode string) (string, error) {
@@ -1576,7 +1616,7 @@ func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode)"
+	needle := "    cas_replace(allowed_home, destination, cas_token(original), payload, uid, file_mode)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1602,7 +1642,7 @@ func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode)"
+	needle := "    cas_replace(allowed_home, destination, cas_token(original), payload, uid, file_mode)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1643,7 +1683,7 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "    atomic_write(destination, payload, uid, file_mode)"
+			needle := "    cas_replace(allowed_home, destination, cas_token(original), payload, uid, file_mode)"
 			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
 			if stage == "after" {
 				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"
@@ -1857,7 +1897,7 @@ func snapshotMaterialization(t *testing.T, root string) map[string]string {
 // The guest writer's report keeps no guest string: each is validated, and
 // only the count of released pointers is returned.
 func TestWireObservationStringsAreValidatedOnly(t *testing.T) {
-	allowed := map[string]bool{"Fingerprint": true, "Release": true, "Released": true}
+	allowed := map[string]bool{"Fingerprint": true, "Release": true, "Released": true, "Raw": true}
 	kind := reflect.TypeOf(wireObservation{})
 	for index := range kind.NumField() {
 		field := kind.Field(index)

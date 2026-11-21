@@ -11,6 +11,7 @@ RUNTIME_DIR=""
 PREBUILT_ENGINE=""
 MIGRATION_REGISTRY="$REPO/config/migrations.json"
 RELEASE_TRANSITION_REGISTRY="$REPO/config/release-transition.json"
+RELEASE_ROLLBACK_DECLARATION="$REPO/config/release-rollback.json"
 RUNTIME_INSTALLER="$REPO/scripts/install-runtime-release.sh"
 
 while [ $# -gt 0 ]; do
@@ -21,6 +22,8 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || { printf 'package-engine: --version needs a value\n' >&2; exit 2; }; VERSION="$2"; shift 2 ;;
     --arch) [ $# -ge 2 ] || { printf 'package-engine: --arch needs amd64 or arm64\n' >&2; exit 2; }; TARGET_ARCH="$2"; shift 2 ;;
     --migration-registry) [ $# -ge 2 ] || { printf 'package-engine: --migration-registry needs a path\n' >&2; exit 2; }; MIGRATION_REGISTRY="$2"; shift 2 ;;
+    --release-transition-registry) [ $# -ge 2 ] || { printf 'package-engine: --release-transition-registry needs a path\n' >&2; exit 2; }; RELEASE_TRANSITION_REGISTRY="$2"; shift 2 ;;
+    --release-rollback-declaration) [ $# -ge 2 ] || { printf 'package-engine: --release-rollback-declaration needs a path\n' >&2; exit 2; }; RELEASE_ROLLBACK_DECLARATION="$2"; shift 2 ;;
     --runtime-installer) [ $# -ge 2 ] || { printf 'package-engine: --runtime-installer needs a path\n' >&2; exit 2; }; RUNTIME_INSTALLER="$2"; shift 2 ;;
     *) printf 'package-engine: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -38,7 +41,7 @@ fi
 case "$TARGET_ARCH" in amd64 | arm64) ;; *) printf 'package-engine: unsupported architecture: %s\n' "$TARGET_ARCH" >&2; exit 2 ;; esac
 jq -e '. == {schemaVersion:1,contract:"installation-inventory-v1"}' "$REPO/config/installation-capabilities.json" >/dev/null \
   || { printf 'package-engine: unsupported installation capability\n' >&2; exit 2; }
-for package_input in "$MIGRATION_REGISTRY" "$RELEASE_TRANSITION_REGISTRY" "$RUNTIME_INSTALLER"; do
+for package_input in "$MIGRATION_REGISTRY" "$RELEASE_TRANSITION_REGISTRY" "$RELEASE_ROLLBACK_DECLARATION" "$RUNTIME_INSTALLER"; do
   [ -f "$package_input" ] && [ ! -L "$package_input" ] \
     || { printf 'package-engine: package override must be a regular non-symlink file: %s\n' "$package_input" >&2; exit 2; }
 done
@@ -168,6 +171,7 @@ GOOS="$goos" GOARCH="$goarch" "$SCRIPT_DIR/build-profiles.sh" \
 install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-release.sh"
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
+install -m 0644 "$RELEASE_ROLLBACK_DECLARATION" "$bundle_stage/config/release-rollback.json"
 for required in config/installation-capabilities.json \
   config/retired-components.json \
   internal/adapters/configmaterial/tomli_w.py \
@@ -186,6 +190,7 @@ for required in config/installation-capabilities.json \
   config/commands.registry \
   config/migrations.json \
   config/release-transition.json \
+  config/release-rollback.json \
   config/preview/subyard-preview \
   config/preview/instructions.md \
   completions/yard.bash; do

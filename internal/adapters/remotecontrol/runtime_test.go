@@ -40,6 +40,37 @@ func TestCapturedRemotePlanRejectsControllerIdentityReplacementBeforeAuthorizati
 	}
 }
 
+func TestCapturedRemotePlanSurvivesCreatingSSHDirectoryThroughHomeAlias(t *testing.T) {
+	runtime := remoteFixture(t)
+	realHome := runtime.Home + "-real"
+	if err := os.Mkdir(realHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realHome, runtime.Home); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	prepared, err := runtime.CapturePrepared(ctx, domain.RemotePrepared{
+		Action:  domain.RemoteAdd,
+		Spec:    domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"},
+		Owner:   domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"},
+		Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.processCall = func(_ context.Context, _ string, arguments []string, _ []byte) ([]byte, error) {
+		if strings.Contains(strings.Join(arguments, " "), "yard-demo") {
+			testkit.WriteFile(t, runtime.knownHostsPath(), []byte("subyard-remote-demo "+fixturePublicKey+"\n"), 0o600)
+		}
+		return nil, nil
+	}
+	if _, err := runtime.Apply(ctx, prepared); err != nil {
+		t.Fatalf("creating .ssh invalidated the prepared plan: %v", err)
+	}
+	assertRemoteFileContains(t, filepath.Join(realHome, ".ssh", "config"), "Include subyard-demo.config")
+}
+
 func TestRemoteSSHOptionsPreserveTransportWithoutPreview(t *testing.T) {
 	runtime := remoteFixture(t)
 	prepared := domain.RemotePrepared{Spec: domain.RemoteSpec{
@@ -117,7 +148,7 @@ func TestLookupAndListRejectUnsafeRegisteredDataPlane(t *testing.T) {
 
 func TestLookupFallsBackFromSymlinkedHigherPrecedenceEntry(t *testing.T) {
 	runtime := remoteFixture(t)
-	target := filepath.Join(t.TempDir(), "target.env")
+	target := filepath.Join(testkit.TempDir(t), "target.env")
 	writeRemoteFile(t, target, "ACCESS_KIND=remote\nOWNER_ENDPOINT=unsafe.example\n", 0o600)
 	nested := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	if err := os.MkdirAll(filepath.Dir(nested), 0o700); err != nil {
@@ -157,7 +188,7 @@ func TestScanYardKeysRejectsUnsafeOwnerEndpointBeforeProcessCall(t *testing.T) {
 
 func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 	runtime := remoteFixture(t)
-	writeRemoteFile(t, runtime.sshConfigPath(), "Host local\n", 0o600)
+	target := linkSSHConfig(t, runtime, "Host local\n")
 	writeRemoteFile(t, runtime.knownHostsPath(), "local.example "+fixturePublicKey+"\n", 0o600)
 	key := remoteFixtureKey(t, "subyard-remote-demo")
 	var calls [][]string
@@ -175,9 +206,7 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload = append(payload, []byte("subyard-remote-demo "+fixturePublicKey+"\n")...)
-			if err := os.WriteFile(runtime.knownHostsPath(), payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, runtime.knownHostsPath(), payload, 0o600)
 		}
 		return nil, nil
 	}
@@ -191,6 +220,10 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 			State: "RUNNING", SSHPort: 2233, DevUser: "dev", Projects: &projects,
 		},
 		Scanned: []domain.RemoteKey{key},
+	}
+	prepared, err := runtime.CapturePrepared(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
 	}
 	result, err := runtime.Apply(context.Background(), prepared)
 	if err != nil || !strings.Contains(result.Message, "yard -Y demo sync") {
@@ -210,7 +243,8 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 	assertRemoteFileContains(t, filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"),
 		"OWNER_YARD_NAME=inner")
 	assertRemoteFileContains(t, runtime.snippetPath("demo"), "HostKeyAlias subyard-remote-demo")
-	assertRemoteFileContains(t, runtime.sshConfigPath(), "Include subyard-demo.config")
+	assertSSHConfigLink(t, runtime, target)
+	assertRemoteFileContains(t, target, "Include subyard-demo.config")
 	assertRemoteFileContains(t, runtime.knownHostsPath(), "local.example ")
 	assertRemoteFileContains(t, runtime.knownHostsPath(), "subyard-remote-demo ")
 	if _, _, err := runtime.readCache("demo"); err != nil {
@@ -240,6 +274,7 @@ func testApplyAddRollback(t *testing.T, admitted bool) {
 		runtime.cachePath("demo"),
 	}
 	original := make(map[string][]byte, len(paths))
+	var configTarget string
 	for index, path := range paths {
 		payload := []byte("original-" + string(rune('a'+index)) + "\n")
 		if path == envPath {
@@ -247,7 +282,11 @@ func testApplyAddRollback(t *testing.T, admitted bool) {
 				Spec: spec, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"},
 			}, nil)
 		}
-		writeRemoteFile(t, path, string(payload), 0o600)
+		if path == runtime.sshConfigPath() {
+			configTarget = linkSSHConfig(t, runtime, string(payload))
+		} else {
+			writeRemoteFile(t, path, string(payload), 0o600)
+		}
 		original[path] = append([]byte(nil), payload...)
 	}
 	runtime.processCall = func(_ context.Context, _ string, arguments []string, _ []byte) ([]byte, error) {
@@ -273,6 +312,7 @@ func testApplyAddRollback(t *testing.T, admitted bool) {
 	if err == nil || !strings.Contains(err.Error(), "rejected the controller key") {
 		t.Fatalf("probe failure was not classified: %v", err)
 	}
+	assertSSHConfigLink(t, runtime, configTarget)
 	for _, path := range paths {
 		payload, readErr := os.ReadFile(path)
 		if readErr != nil || string(payload) != string(original[path]) {
@@ -411,15 +451,18 @@ func TestApplyRemoveDeletesOnlyTheSelectedRemote(t *testing.T) {
 		Spec: spec, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"},
 	}, nil)), 0o600)
 	writeRemoteFile(t, runtime.snippetPath("demo"), "demo\n", 0o600)
-	writeRemoteFile(t, runtime.sshConfigPath(),
-		"Include subyard-demo.config\nInclude subyard-other.config\n", 0o600)
+	target := linkSSHConfig(t, runtime, "Include subyard-demo.config\nInclude subyard-other.config\n")
 	writeRemoteFile(t, runtime.knownHostsPath(),
 		"subyard-remote-demo "+fixturePublicKey+"\nsubyard-remote-other "+fixturePublicKey+"\n", 0o600)
 	writeRemoteFile(t, runtime.cachePath("demo"), "cache\n", 0o600)
 
-	if _, err := runtime.Apply(context.Background(), domain.RemotePrepared{
+	prepared, err := runtime.CapturePrepared(context.Background(), domain.RemotePrepared{
 		Action: domain.RemoteRemove, Spec: spec, Existing: &existing,
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Apply(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{envPath, runtime.snippetPath("demo"), runtime.cachePath("demo")} {
@@ -427,14 +470,40 @@ func TestApplyRemoveDeletesOnlyTheSelectedRemote(t *testing.T) {
 			t.Fatalf("selected remote file survived: %s err=%v", path, err)
 		}
 	}
-	assertRemoteFileContains(t, runtime.sshConfigPath(), "Include subyard-other.config")
-	assertRemoteFileNotContains(t, runtime.sshConfigPath(), "Include subyard-demo.config")
+	assertSSHConfigLink(t, runtime, target)
+	assertRemoteFileContains(t, target, "Include subyard-other.config")
+	assertRemoteFileNotContains(t, target, "Include subyard-demo.config")
 	assertRemoteFileContains(t, runtime.knownHostsPath(), "subyard-remote-other ")
 	assertRemoteFileNotContains(t, runtime.knownHostsPath(), "subyard-remote-demo ")
 }
 
+func linkSSHConfig(t *testing.T, runtime Runtime, content string) string {
+	t.Helper()
+	target := filepath.Join(runtime.Home, "dotfiles", "ssh-config")
+	writeRemoteFile(t, target, content, 0o600)
+	if err := os.MkdirAll(filepath.Dir(runtime.sshConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link, err := filepath.Rel(filepath.Dir(runtime.sshConfigPath()), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(link, runtime.sshConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func assertSSHConfigLink(t *testing.T, runtime Runtime, target string) {
+	t.Helper()
+	link, err := os.Readlink(runtime.sshConfigPath())
+	if err != nil || filepath.Join(filepath.Dir(runtime.sshConfigPath()), link) != target {
+		t.Fatalf("configuration symlink = %q, %v, want target %q", link, err, target)
+	}
+}
+
 func TestTransactionalRestoresExistingFilesAndRemovesNewFiles(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	existing := filepath.Join(root, "existing")
 	created := filepath.Join(root, "created")
 	writeRemoteFile(t, existing, "before", 0o640)
@@ -539,7 +608,7 @@ func TestProbeDiagnosticsAndShellQuoting(t *testing.T) {
 
 func remoteFixture(t *testing.T) Runtime {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	public := filepath.Join(root, "controller.pub")
 	writeRemoteFile(t, public, fixturePublicKey+"\n", 0o600)
 	return Runtime{
@@ -723,9 +792,15 @@ func TestOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T) {
 }
 
 func TestAdmittedAddRevalidatesGapAndKeepsStrictTrust(t *testing.T) {
-	for _, scenario := range []string{"ready", "generated-identity", "trust-publication-drift", "mapping-drift", "identity-drift", "other-identity-drift", "known-host-drift", "cache-drift", "authorization-refused", "cancelled", "second-admission-refused", "detached-binding"} {
+	for _, scenario := range []string{"ready", "generated-identity", "trust-publication-drift", "mapping-drift", "config-retarget", "identity-drift", "other-identity-drift", "known-host-drift", "cache-drift", "authorization-refused", "cancelled", "second-admission-refused", "detached-binding"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime := remoteFixture(t)
+			var replacementConfig string
+			if scenario == "config-retarget" {
+				target := linkSSHConfig(t, runtime, "Host local\n")
+				replacementConfig = target + ".alternate"
+				writeRemoteFile(t, replacementConfig, "Host local\n", 0o600)
+			}
 			if scenario == "generated-identity" {
 				runtime.PublicKey = ""
 			}
@@ -798,6 +873,13 @@ func TestAdmittedAddRevalidatesGapAndKeepsStrictTrust(t *testing.T) {
 					switch scenario {
 					case "mapping-drift":
 						writeRemoteFile(t, filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"), "ACCESS_KIND=remote\nOWNER_ENDPOINT=changed.example\n", 0600)
+					case "config-retarget":
+						if err := os.Remove(runtime.sshConfigPath()); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(replacementConfig, runtime.sshConfigPath()); err != nil {
+							t.Fatal(err)
+						}
 					case "identity-drift":
 						writeRemoteFile(t, runtime.PublicKey, fixturePublicKey+" changed\n", 0600)
 					case "other-identity-drift":

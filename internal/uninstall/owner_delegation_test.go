@@ -26,13 +26,6 @@ func TestInheritedOwnerDescriptorHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if role == "native-parent" {
-		UseArtifactGuard(root)
-		if err := nativeArtifact("barrier-fixture", nil, nil); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
 	if role == "parent" {
 		borrowed, err := BorrowOwnerLock(filepath.Join(root, "data"))
 		if err != nil || borrowed == nil {
@@ -64,23 +57,9 @@ func TestInheritedOwnerDescriptorHelper(t *testing.T) {
 }
 
 func TestInheritedOwnerBarrierSurvivesParentInterruption(t *testing.T) {
-	for _, role := range []string{"parent", "native-parent"} {
+	for _, role := range []string{"parent"} {
 		t.Run(role, func(t *testing.T) {
 			root := testkit.TempDir(t)
-			if role == "native-parent" {
-				directory := filepath.Join(root, "scripts", "lib")
-				if err := os.MkdirAll(directory, 0700); err != nil {
-					t.Fatal(err)
-				}
-				testkit.WriteFile(t, filepath.Join(directory, "teardown-plan.py"), []byte(`import os,pathlib,time
-root=pathlib.Path(__file__).resolve().parents[2]
-(root/"ready").write_text(str(os.getpid()))
-deadline=time.monotonic()+10
-while not (root/"finish").exists():
- if time.monotonic()>deadline:raise SystemExit(1)
- time.sleep(0.01)
-`), 0700)
-			}
 			parent := exec.Command(os.Args[0], "-test.run=^TestInheritedOwnerDescriptorHelper$")
 			parent.Env = append(os.Environ(), "SUBYARD_TEST_OWNER_ROLE="+role, "SUBYARD_TEST_OWNER_ROOT="+root)
 			if err := parent.Start(); err != nil {

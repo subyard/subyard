@@ -391,49 +391,31 @@ Three independent policies determine support:
   until it reaches a terminal state, regardless of age or intervening releases. Raising the ordinary
   upgrade floor cannot revoke that recovery contract or permit deletion of its inputs.
 
-A proved defective migration-ledger owner has one typed exception to exact-owner continuation:
-`migration-ledger-owner-replacement-v1`. This separately negotiated process-schema-2 contract
-initially recognizes only the exact supported official Linux amd64 v0.21.0 manifest and registry.
-Version comparison alone never establishes eligibility. An explicitly selected newer standalone
-candidate with checkpoint support independently proves the canonical reconciling predecessor,
-sealed owner/source/candidate assets, actual links, projection/checkpoint prefixes and dependencies,
-and the captured/applied/verified evidence for the two completed ledger-only power and SSH steps.
-Retained terminal migration artifacts may belong only to the exact source or previous release
-named by that predecessor journal. Admission independently seals the previous release and requires
-its registry to equal the verified source registry, then validates every retained evidence triple
-against the frozen projection. The receipt records these asset identities and transaction references;
-cleanup preserves the referenced artifacts. An ordinary zero-step source update needs no fabricated
-transaction directory. Other earlier releases and arbitrary same-registry targets remain unsupported.
-The candidate registry must equal the predecessor's, so supersession runs through v0.25.1, the last
-release with that registry, and an ordinary update continues from there.
-Unrecognized state, conflicting publication, ingress and recovery chains refuse supersession.
-The newer-release recovery above is a separate forward-update contract; it does not expand
-source repair or the migration-owner exception.
+Historical `migration-ledger-owner-replacement-v1` is a retained evidence contract. Its frozen
+process-schema-2 capability probe remains available, while the current engine no longer selects
+or writes replacements. Historical writers through v0.25.1 could supersede the exact supported
+Linux amd64 v0.21.0 manifest and registry after independent proof and fresh authorization;
+version comparison alone never established eligibility. The current registry differs, and
+below-anchor source admission also prevents a new replacement by the current candidate.
 
-A fresh candidate assessment and grant bind these facts and current activation consequences.
-Under the update lock, the candidate revalidates the proof, publishes an immutable receipt in
-`release-transition/migration-owner/v1/transactions`, then CASes the protected journal to an ordinary
-V2 successor. Receipt-only crashes reuse the exact reserved successor after fresh consent; selected
-successors resume normally. The receipt preserves the unfinished predecessor as superseded evidence,
-without declaring its activation ready or replaying completed migrations. Cleanup retains its
-predecessor artifacts and captures successor completion before later journals replace it. This
-exception changes no frozen process/journal/activation-recovery/v0.11.1 archive meaning and confers
-no rollback promise to the defective owner; existing rollback eligibility checks still apply.
+Readers continue to validate immutable receipts in
+`release-transition/migration-owner/v1/transactions`, their canonical predecessor and initial
+successor, frozen projection/checkpoint, completed evidence triples, exact source/previous-release
+bindings and retained transactions. Cleanup keeps those artifacts and captures successor completion
+before a later journal replaces it. An unfinished predecessor is superseded evidence, never
+activation readiness. Canonical owner-completion records retain private immutable publication;
+partial legacy receipt staging, unsafe files and conflicting records remain untouched and refuse.
+Source admission refuses pending journal publications; the retired receipt-bound prepared-journal
+continuation is no longer implemented.
 
-The shared history trace validates the completed ledger edges; exact artifact eligibility and
-canonical evidence policy remain in the replacement adapter. A canonical immutable receipt can
-also prove the exact intended successor bytes when its journal staging file is empty or truncated,
-provided the selected predecessor is unchanged. Staging supplies no authority. New owner receipts
-and owner-completion records are written into an unnamed inode on the target Linux filesystem.
-The writer sets and checks exact private permissions, ownership and link count, verifies the complete
-canonical bytes, and fsyncs the file before a no-replace link through its held procfd makes it visible.
-The parent directory is then fsynced. A process killed during any private prefix write leaves no
-named partial receipt; a process killed after publication leaves the complete canonical record.
-Filesystems or procfd environments without this mechanism refuse the owner-replacement feature
-before publishing a receipt or successor journal; ordinary migration publication is unchanged.
-Full canonical pending records from the previous writer remain resumable. Partial legacy receipt
-staging, unsafe files and conflicting records remain untouched and refuse admission; the writer
-never appends a fresh grant to visible legacy staging or treats staging as authority.
+The current engine also no longer writes v0.11.1 post-activation superseded archives or delegates
+v0.17.3 activation repair. Archive codecs and transaction graph readers remain necessary for
+completed installations. These retirements change no frozen process/journal/activation-recovery
+meaning, domain epoch floor, retained rollback checks or generic activation-only recovery.
+Explicit `--version` selection with an unfinished journal and an installed release from v0.11.0
+to below v0.28.0 returns the existing `source-anchor-required` guidance. Sources before v0.11.0
+retain the full-uninstall and separate clean-install policy. Ordinary installed-owner resume and historical retry hints
+remain available without `--version`; historical recovery still belongs to its compatible release.
 
 Released-binary acceptance retains a supported baseline for each distinct caller, producer or
 compatibility-bridge contract. Checks use the actual published binaries; rebuilding current source

@@ -343,7 +343,7 @@ type configApplyRepairFixture struct {
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)
-	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py", "scripts/lib/teardown-plan.py"} {
+	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -360,7 +360,7 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 	}
 	writeCLIFile(t, sampleHandler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222",
 		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + filepath.Join(root, "host"),

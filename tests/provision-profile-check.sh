@@ -51,7 +51,7 @@ engine_env=(
   SSH_HOST=yard-check
   DEV_USER=dev
   DEV_UID=1000
-  DEV_SUDO=1
+  DEV_SUDO=yes
   FORWARD_SSH_AGENT=0
   NESTED_E2E_VMS=0
 )
