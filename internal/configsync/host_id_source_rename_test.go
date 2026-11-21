@@ -234,6 +234,9 @@ func TestRegisteredHostRenameRefusesDirtyCollisionAndStaleLocal(t *testing.T) {
 	}
 }
 
+// Crash-fidelity gap: ApplyHostIDRename rolls back through a deferred
+// recoverHostIDRenameLocked on any error, so an injected error there tests failure and
+// rollback, not a crash and resume. The interrupted states are therefore built by hand.
 func TestRegisteredHostRenameResumesAfterEachPublicationBoundary(t *testing.T) {
 	for _, boundary := range []string{"journal", "move", "head", "index", "manifest", "identity", "local-edit"} {
 		t.Run(boundary, func(t *testing.T) {
