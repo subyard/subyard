@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/crypto/ssh"
 )
 
 const brokerFixtureBase = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -39,12 +40,11 @@ func newBrokerPoolFixture(t *testing.T, count int) *brokerPoolFixture {
 	}
 	cfg := fixtureConfig(t)
 	cfg.SlotCount = count
-	accounts := make(map[string]string)
 	f.rt = &Runtime{
 		Config: cfg, Runner: f.incus, Now: func() time.Time { return f.now },
 		slotAccountRoot: testkit.TempDir(t),
 		lookupUser: func(name string) (*user.User, error) {
-			home, exists := accounts[name]
+			home, exists := f.incus.accounts[name]
 			if !exists {
 				return nil, user.UnknownUserError(name)
 			}
@@ -67,7 +67,7 @@ func newBrokerPoolFixture(t *testing.T, count int) *brokerPoolFixture {
 				return grant, err
 			}
 			child := f.prepareSlot(index, key)
-			accounts[child.Config.AgentUser] = child.Config.AgentHome
+			f.incus.accounts[child.Config.AgentUser] = child.Config.AgentHome
 			// The fixture supplies a validated, already imported base. Exercise
 			// the allocation markers without building an image or booting a VM.
 			grant.BaseFingerprint = brokerFixtureBase
@@ -88,6 +88,9 @@ func newBrokerPoolFixture(t *testing.T, count int) *brokerPoolFixture {
 				vm := f.incus.projects[child.Config.Project].instances[name]
 				vm.status = "RUNNING"
 				vm.ip = fmt.Sprintf("192.0.2.%d", 10*index+indexVM)
+				if err := child.installManagedGuestKeys(ctx, name); err != nil {
+					return grant, err
+				}
 			}
 			if err := child.enableAgentAccess(ctx); err != nil {
 				return grant, err
@@ -131,13 +134,24 @@ func (f *brokerPoolFixture) request(command string, result any) []byte {
 
 func (f *brokerPoolFixture) acquire(index int, purpose string) LeaseGrant {
 	f.t.Helper()
-	var result facadeResponse
-	f.request(fmt.Sprintf("acquire-v3 subyard-pair client-%d SHA256:controller test-yard Broker-Tests %08x %s %s slot-%03d",
-		index, index, purpose, f.rt.Config.AgentPublicKey, index), &result)
+	return f.acquireWithKey(index, purpose, fixturePublicKey(f.t))
+}
+
+func (f *brokerPoolFixture) acquireWithKey(index int, purpose, key string) LeaseGrant {
+	f.t.Helper()
+	result := f.requestAcquire(index, purpose, key)
 	if result.Status != "ok" || result.Grant == nil || result.Grant.SlotID != fmt.Sprintf("slot-%03d", index) {
 		f.t.Fatalf("acquire slot %d: status=%s code=%s message=%s", index, result.Status, result.Code, result.Message)
 	}
 	return *result.Grant
+}
+
+func (f *brokerPoolFixture) requestAcquire(index int, purpose, key string) facadeResponse {
+	f.t.Helper()
+	var result facadeResponse
+	f.request(fmt.Sprintf("acquire-v3 subyard-pair client-%d SHA256:controller test-yard Broker-Tests %08x %s %s slot-%03d",
+		index, index, purpose, key, index), &result)
+	return result
 }
 
 func (f *brokerPoolFixture) leaseAction(action string, grant LeaseGrant) facadeResponse {
@@ -158,6 +172,32 @@ func (f *brokerPoolFixture) slot(index int) LeaseSlot {
 func (f *brokerPoolFixture) keys(index int) []byte {
 	f.t.Helper()
 	return brokerRead(f.t, f.rt.slotRuntime(index, "").Config.AgentAuthorizedKeys)
+}
+
+func (f *brokerPoolFixture) assertSlotAccess(index int, key string, destinations ...string) {
+	f.t.Helper()
+	publicKey, _, options, rest, err := ssh.ParseAuthorizedKey(f.keys(index))
+	brokerMust(f.t, err)
+	if len(rest) != 0 || strings.TrimSpace(string(ssh.MarshalAuthorizedKey(publicKey))) != key {
+		f.t.Errorf("slot %d did not publish exactly its lease key", index)
+	}
+	var allowed []string
+	for _, option := range options {
+		if destination, ok := strings.CutPrefix(option, `permitopen="`); ok {
+			allowed = append(allowed, strings.TrimSuffix(destination, `"`))
+		}
+	}
+	if !slices.Equal(allowed, destinations) {
+		f.t.Errorf("slot %d permitopen = %v, want %v", index, allowed, destinations)
+	}
+	cfg := f.rt.slotRuntime(index, "").Config
+	for selector := 1; selector <= len(destinations); selector++ {
+		name := cfg.vm(selector)
+		vm := f.incus.projects[cfg.Project].instances[name]
+		if vm == nil || !slices.Equal(vm.agentKeys, []string{key, key}) {
+			f.t.Errorf("slot %d %s did not receive its lease key for both guest accounts", index, name)
+		}
+	}
 }
 
 func (f *brokerPoolFixture) failRelease(victim LeaseGrant) LeaseSlot {
@@ -340,6 +380,34 @@ func TestBrokerHeldNeighborRenewsThroughPeerQuarantineAndRecovery(t *testing.T) 
 	renew(SlotAvailable)
 }
 
+func TestBrokerProvisioningFailureRecoversAndAllowsReacquire(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	cfg := f.rt.slotRuntime(1, "").Config
+	f.incus.fault = []string{"exec", cfg.vm(1), "--project", cfg.Project, "--", "ip", "-4", "route", "show", "default"}
+	result := f.requestAcquire(1, "failed-provisioning", fixturePublicKey(t))
+	if result.Status != "error" || result.Code != "quarantined" || result.Message != "slot provisioning failed" ||
+		result.Grant != nil || f.incus.fault != nil {
+		t.Fatalf("provisioning fault: status=%s code=%s message=%s", result.Status, result.Code, result.Message)
+	}
+	failed := f.slot(1)
+	if failed.State != SlotQuarantined || failed.IncidentID == "" || failed.NextRecoveryAt.IsZero() ||
+		len(f.keys(1)) != 0 || len(f.incus.projects[cfg.Project].instances) != 2 {
+		t.Fatal("failed provisioning did not fence and schedule recovery of the partial allocation")
+	}
+	f.now = failed.NextRecoveryAt.Add(time.Second)
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	f.assertEmptyProject(1)
+	if available := f.slot(1); available.State != SlotAvailable || available.ResourceGeneration != failed.ResourceGeneration+1 {
+		t.Fatal("reaper did not return a new generation to the available pool")
+	}
+	freshKey := fixturePublicKey(t)
+	fresh := f.acquireWithKey(1, "after-recovery", freshKey)
+	if fresh.LeaseEpoch != failed.LeaseEpoch+1 || f.slot(1).State != SlotHeld {
+		t.Fatal("reacquire did not hold a new lease after recovery")
+	}
+	f.assertSlotAccess(1, freshKey, "192.0.2.11:22", "192.0.2.12:22")
+}
+
 func TestBrokerReleaseDeletesDisposablePairAndNextGrantIsFresh(t *testing.T) {
 	f := newBrokerPoolFixture(t, 2)
 	f.acquire(1, "held-neighbor")
@@ -362,10 +430,15 @@ func TestBrokerReleaseDeletesDisposablePairAndNextGrantIsFresh(t *testing.T) {
 	if state := f.slot(2); state.State != SlotAvailable || state.ResourceGeneration != old.ResourceGeneration {
 		t.Error("release did not return the same generation to available")
 	}
+	if len(f.keys(2)) != 0 {
+		t.Error("release kept forwarding access before reacquisition")
+	}
 	if result := f.leaseAction("renew", old); result.Code != "lease_lost" {
 		t.Errorf("stale renew = %s, want lease_lost", result.Code)
 	}
-	fresh := f.acquire(2, "fresh")
+	freshKey := fixturePublicKey(t)
+	fresh := f.acquireWithKey(2, "fresh", freshKey)
+	f.assertSlotAccess(2, freshKey, "192.0.2.21:22", "192.0.2.22:22")
 	if fresh.ResourceGeneration != old.ResourceGeneration+1 || fresh.LeaseEpoch != old.LeaseEpoch+1 ||
 		fresh.BaseFingerprint == "" || fresh.BaseFingerprint != old.BaseFingerprint || fresh.LeaseID == old.LeaseID ||
 		len(project.instances) != len(uuids) {
@@ -432,9 +505,10 @@ func (f *brokerPoolFixture) assertDeletedPair(index int, grant LeaseGrant) {
 
 func TestSlotRuntimesUseDisjointProjectNetworkAccountAndKeys(t *testing.T) {
 	f := newBrokerPoolFixture(t, 2)
-	f.acquire(1, "held-neighbor")
+	firstKey, secondKey := fixturePublicKey(t), fixturePublicKey(t)
+	f.acquireWithKey(1, "held-neighbor", firstKey)
 	oneKeys := f.keys(1)
-	f.acquire(2, "own-network")
+	f.acquireWithKey(2, "own-network", secondKey)
 	one, two := f.rt.slotRuntime(1, "").Config, f.rt.slotRuntime(2, "").Config
 	if one.Project == two.Project || one.Network == two.Network || one.StateDir == two.StateDir ||
 		one.AgentUser == two.AgentUser || one.AgentHome == two.AgentHome || one.AgentAuthorizedKeys == two.AgentAuthorizedKeys {
@@ -445,10 +519,10 @@ func TestSlotRuntimesUseDisjointProjectNetworkAccountAndKeys(t *testing.T) {
 			t.Errorf("project %s can access %q, want %q", cfg.Project, allowed, cfg.Network)
 		}
 	}
-	twoKeys := string(f.keys(2))
-	want := `permitopen="192.0.2.21:22",permitopen="192.0.2.22:22"`
-	if !strings.Contains(twoKeys, want) || strings.Count(twoKeys, "permitopen=") != 2 || !bytes.Equal(oneKeys, f.keys(1)) {
-		t.Error("slot-2 key did not stay confined to its two guest addresses")
+	f.assertSlotAccess(1, firstKey, "192.0.2.11:22", "192.0.2.12:22")
+	f.assertSlotAccess(2, secondKey, "192.0.2.21:22", "192.0.2.22:22")
+	if !bytes.Equal(oneKeys, f.keys(1)) {
+		t.Error("acquiring slot 2 changed slot 1's key file")
 	}
 }
 
@@ -496,9 +570,21 @@ func TestReconcilePoolGrowAndShrinkPreservesHeldLowerSlot(t *testing.T) {
 		f.assertEmptyProject(1)
 		f.assertEmptyProject(3)
 
+		f.incus.calls = nil
 		brokerMust(t, f.resize(2))
 		f.assertRetired(3)
 		one := f.rt.slotRuntime(1, "").Config
+		three := f.rt.slotRuntime(3, "").Config
+		var deletions [][]string
+		for _, call := range f.incus.calls {
+			if call[0] == "userdel" {
+				deletions = append(deletions, call[1:])
+			}
+		}
+		if len(deletions) != 1 || !slices.Equal(deletions[0], []string{three.AgentUser}) ||
+			len(f.incus.accounts) != 1 || f.incus.accounts[one.AgentUser] != one.AgentHome {
+			t.Errorf("retirement must delete only account %q, got userdel arguments %q", three.AgentUser, deletions)
+		}
 		if len(f.incus.projects) != 1 || len(f.incus.networks) != 1 ||
 			f.incus.projects[one.Project] == nil || f.incus.networks[one.Network] != managedMarker {
 			t.Error("broker recreation left projects or networks outside the configured allocation")

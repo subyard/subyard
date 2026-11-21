@@ -18,6 +18,7 @@ type fakeIncus struct {
 	t        *testing.T
 	projects map[string]*fakeIncusProject
 	networks map[string]string
+	accounts map[string]string
 	fault    []string
 	hostKey  string
 }
@@ -29,15 +30,16 @@ type fakeIncusProject struct {
 }
 
 type fakeIncusVM struct {
-	status string
-	config map[string]string
-	ip     string
+	status    string
+	config    map[string]string
+	ip        string
+	agentKeys []string
 }
 
 func newFakeIncus(t *testing.T) *fakeIncus {
 	fake := &fakeIncus{
 		t: t, projects: make(map[string]*fakeIncusProject),
-		networks: make(map[string]string), hostKey: fixturePublicKey(t),
+		networks: make(map[string]string), accounts: make(map[string]string), hostKey: fixturePublicKey(t),
 	}
 	fake.fakeRunner = &fakeRunner{handler: fake.run}
 	return fake
@@ -45,8 +47,13 @@ func newFakeIncus(t *testing.T) *fakeIncus {
 
 func (fake *fakeIncus) run(name string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 	switch name {
-	case "systemctl", "pkill", "journalctl", "userdel":
+	case "systemctl", "pkill", "journalctl":
 		return nil, nil, nil
+	case "userdel":
+		if len(args) == 1 && fake.accounts[args[0]] != "" {
+			delete(fake.accounts, args[0])
+			return nil, nil, nil
+		}
 	case "incus":
 		if slices.Equal(args, fake.fault) {
 			fake.fault = nil
@@ -56,9 +63,8 @@ func (fake *fakeIncus) run(name string, args, _ []string, _ io.Reader) ([]byte, 
 		}
 		out, err := fake.incus(args)
 		return []byte(out), nil, err
-	default:
-		return nil, nil, fake.unexpected(append([]string{name}, args...))
 	}
+	return nil, nil, fake.unexpected(append([]string{name}, args...))
 }
 
 func (fake *fakeIncus) incus(args []string) (string, error) {
@@ -206,14 +212,17 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 		if vm.status != "RUNNING" {
 			return "", fmt.Errorf("instance %s is stopped", name)
 		}
-		command := args[slices.Index(args, "--")+1:]
+		separator := slices.Index(args, "--")
+		command := args[separator+1:]
 		switch {
 		case slices.Equal(command, []string{"ip", "-4", "route", "show", "default"}):
 			return "default via 192.0.2.1 dev eth0", nil
 		case command[0] == "awk" && slices.Contains(command, "/etc/ssh/ssh_host_ed25519_key.pub"):
 			return fake.hostKey, nil
-		case command[0] == "sh" && (strings.Contains(command[len(command)-1], "authorized_keys") ||
-			strings.Contains(command[len(command)-1], "subyard-e2e-lease.json")):
+		case command[0] == "sh" && strings.Contains(command[len(command)-1], "authorized_keys"):
+			vm.agentKeys = append(vm.agentKeys, incusSetting(args[:separator], "AGENT_KEY"))
+			return "", nil
+		case command[0] == "sh" && strings.Contains(command[len(command)-1], "subyard-e2e-lease.json"):
 			return "", nil
 		case command[0] == "fstrim" || slices.Contains(command, "/run/subyard-e2e-lease.json"):
 			return "", nil

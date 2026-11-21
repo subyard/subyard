@@ -92,7 +92,7 @@ stop_holder_child() {
     sleep 1
   done
   if kill -0 -- "-$root" >/dev/null 2>&1; then
-    printf 'p0-broker-recovery: holder process group %s survived bounded shutdown\n' \
+    printf 'lease-holder: holder process group %s survived bounded shutdown\n' \
       "$root" >&2
     return 1
   fi
