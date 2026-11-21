@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -30,10 +31,15 @@ type fakeIncusProject struct {
 }
 
 type fakeIncusVM struct {
-	status    string
-	config    map[string]string
-	ip        string
-	agentKeys []string
+	status         string
+	config         map[string]string
+	ip             string
+	agentKeyWrites []guestKeyWrite
+}
+
+type guestKeyWrite struct {
+	account string
+	key     string
 }
 
 func newFakeIncus(t *testing.T) *fakeIncus {
@@ -220,7 +226,13 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 		case command[0] == "awk" && slices.Contains(command, "/etc/ssh/ssh_host_ed25519_key.pub"):
 			return fake.hostKey, nil
 		case command[0] == "sh" && strings.Contains(command[len(command)-1], "authorized_keys"):
-			vm.agentKeys = append(vm.agentKeys, incusSetting(args[:separator], "AGENT_KEY"))
+			account := managedGuestKeyAccount(command[len(command)-1])
+			if account == "" {
+				return "", fake.unexpected(args)
+			}
+			vm.agentKeyWrites = append(vm.agentKeyWrites, guestKeyWrite{
+				account: account, key: incusSetting(args[:separator], "AGENT_KEY"),
+			})
 			return "", nil
 		case command[0] == "sh" && strings.Contains(command[len(command)-1], "subyard-e2e-lease.json"):
 			return "", nil
@@ -229,6 +241,30 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 		}
 	}
 	return "", fake.unexpected(args)
+}
+
+// Resolve the managed key script's move target from its path assignments.
+func managedGuestKeyAccount(script string) string {
+	paths := make(map[string]string, 3)
+	expand := func(value string) string {
+		return os.Expand(strings.Trim(value, `"`), func(name string) string { return paths[name] })
+	}
+	for line := range strings.SplitSeq(script, "\n") {
+		if target, ok := strings.CutPrefix(line, `mv -f "$temp" `); ok {
+			switch expand(target) {
+			case "/home/dev/.ssh/authorized_keys":
+				return "dev"
+			case "/root/.ssh/authorized_keys":
+				return "root"
+			}
+		}
+		name, value, _ := strings.Cut(line, "=")
+		switch name {
+		case "home", "ssh_dir", "authorized":
+			paths[name] = expand(value)
+		}
+	}
+	return ""
 }
 
 func (fake *fakeIncus) query(path string) (string, error) {

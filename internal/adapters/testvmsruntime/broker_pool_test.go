@@ -194,8 +194,10 @@ func (f *brokerPoolFixture) assertSlotAccess(index int, key string, destinations
 	for selector := 1; selector <= len(destinations); selector++ {
 		name := cfg.vm(selector)
 		vm := f.incus.projects[cfg.Project].instances[name]
-		if vm == nil || !slices.Equal(vm.agentKeys, []string{key, key}) {
-			f.t.Errorf("slot %d %s did not receive its lease key for both guest accounts", index, name)
+		if vm == nil || len(vm.agentKeyWrites) != 2 ||
+			!slices.Contains(vm.agentKeyWrites, guestKeyWrite{account: "dev", key: key}) ||
+			!slices.Contains(vm.agentKeyWrites, guestKeyWrite{account: "root", key: key}) {
+			f.t.Errorf("slot %d %s must receive exactly one write of its lease key for dev and one for root", index, name)
 		}
 	}
 }
