@@ -37,8 +37,12 @@ def passed_names(*paths):
 
 def split_run_pattern(pattern):
     """Split a -run pattern on the slashes go test splits on: outside brackets,
-    parentheses and escapes."""
-    elements, current, depth, in_class, escaped = [], "", 0, False, False
+    parentheses and escapes.
+
+    A top-level | together with a top-level / would make go test alternate whole
+    per-level elements, which this matcher does not model; such a pattern is refused.
+    """
+    elements, current, depth, in_class, escaped, alternation = [], "", 0, False, False, False
     for char in pattern:
         if escaped:
             escaped = False
@@ -52,11 +56,16 @@ def split_run_pattern(pattern):
             depth += 1
         elif char == ")":
             depth -= 1
+        elif char == "|" and depth == 0:
+            alternation = True
         elif char == "/" and depth == 0:
             elements.append(current)
             current = ""
             continue
         current += char
+    if alternation and elements:
+        raise ValueError(f"-run pattern {pattern!r} has a top-level | across subtest levels; "
+                         "group the alternatives inside one level")
     return [re.compile(element) for element in elements + [current]]
 
 
@@ -171,6 +180,12 @@ def mutants(path, candidate, changed, select_all):
         if missing:
             ok = False
             print(f"  FAIL mutant line {number} names missing files {missing}", file=sys.stderr)
+            continue
+        try:
+            split_run_pattern(row[1])
+        except (ValueError, re.error) as error:
+            ok = False
+            print(f"  FAIL mutant line {number} is invalid: {error}", file=sys.stderr)
             continue
         if not select_all and test_file not in changed:
             print(f"  skipped  mutant line {number}: {test_file} is unchanged", file=sys.stderr)

@@ -219,7 +219,8 @@ func checkoutSource() string {
 // reports is not in a repository and has no .git of its own, falls back to
 // every file below the trees; any other Git failure is an error.
 func trackedCheckoutFiles(source string) ([]string, error) {
-	environment := append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	// The export decision reads Git's message, so it runs in the C locale.
+	environment := append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C", "LANGUAGE=")
 	var stderr bytes.Buffer
 	top := exec.Command("git", "-C", source, "rev-parse", "--show-toplevel")
 	top.Env, top.Stderr = environment, &stderr
@@ -647,7 +648,11 @@ func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
 		t.Fatalf("export listing: %q %v", files, err)
 	}
 	// A source below a Git top level lists only its tracked files.
-	repository := testkit.TempDir(t)
+	repository, err := os.MkdirTemp("/tmp", "subyard-fixture-listing-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(repository) })
 	nested := filepath.Join(repository, "nested")
 	for _, tree := range checkoutTrees {
 		if err := os.MkdirAll(filepath.Join(nested, tree), 0o700); err != nil {

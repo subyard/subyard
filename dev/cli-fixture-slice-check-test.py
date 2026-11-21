@@ -103,6 +103,18 @@ class SliceCheckTest(unittest.TestCase):
         self.assertEqual(tool.failed_selected(run, "^TestA$/^[/]$"), {"TestA"})
         self.assertEqual(tool.failed_selected(run, "^TestC$/^sub$"), set())
 
+    def test_alternation_across_subtest_levels_is_refused(self):
+        with self.assertRaises(ValueError):
+            tool.split_run_pattern("^TestOther$/^foo$|^TestA$/^sub$")
+        self.assertEqual(len(tool.split_run_pattern("^TestA$/^(foo|sub)$")), 2)
+        self.assertEqual(len(tool.split_run_pattern("^TestA$|^TestB$")), 1)
+        self.write("candidate/internal/cli/a_test.go", "")
+        listing = self.write("mutants.tsv", LIST_HEADER + "internal/cli/a_test.go\t^TestOther$/^foo$|^TestA$/^sub$"
+                             "\tinternal/cli/a_test.go\told\tnew\n")
+        ok, output = self.run_tool(tool.mutants, listing, self.work / "candidate", {"internal/cli/a_test.go"}, False)
+        self.assertFalse(ok)
+        self.assertIn("FAIL mutant line 2 is invalid: -run pattern", output)
+
     def test_mutant_text_must_occur_once_and_honours_escapes(self):
         target = self.write("a.go", "first\nsecond\nsecond\n")
         tool.apply(target, "first\\n", "changed\\t")
