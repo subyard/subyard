@@ -387,7 +387,7 @@ def refusal_messages(reasons):
                 messages.append('developer cannot read telemetry policy /etc/'+AGENTS[agent][0])
             case ('rollback-enabled',):
                 messages.append('telemetry is enabled, and releases up to v0.30 cannot open the telemetry store '
-                                'of this release; run yard profile disable telemetry before the rollback')
+                                'of this release; disable telemetry before the rollback')
             case ('rollback-unconverged',):
                 messages.append('telemetry is not converged with this release; run yard migrate before the rollback')
             case ('invalid-template', agent) if agent in AGENTS:
