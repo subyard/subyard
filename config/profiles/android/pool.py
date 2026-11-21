@@ -1124,11 +1124,11 @@ class Runtime:
             # Probe the existing ADB server directly. An adb CLI here could auto-start an
             # unowned root daemon outside the runtime cgroup when the server is not ready yet.
             process = None
-            sample = None
+            framework = None
             try:
                 process = self.connect(slot)
-                sample, _ = self.adb_ready(process, timeout=min(5, deadline - time.monotonic()),
-                                           wifi_state=wifi_state, settle=settle)
+                framework, _ = self.adb_ready(process, timeout=min(5, deadline - time.monotonic()),
+                                              wifi_state=wifi_state, settle=settle)
             except (subprocess.SubprocessError, OSError, PoolError):
                 pass
             finally:
@@ -1143,18 +1143,20 @@ class Runtime:
                     with contextlib.suppress(OSError):
                         process.stdout.close()
             now = time.monotonic()
-            if sample is not None and not settle:
+            if framework is not None and not settle:
                 return
-            if sample is not None:
-                framework, pressure = sample
+            if framework is not None:
                 if first_package is None:
                     first_package = round(now - started, 1)
-                peak_pressure = pressure if peak_pressure is None else max(pressure, peak_pressure)
-                memory_pressure = self.boot_memory_pressure(slot)
+                # Android's shell domain cannot read guest /proc/pressure/cpu on all images.
+                pressure = self.boot_pressure(slot, 'cpu')
+                memory_pressure = self.boot_pressure(slot, 'memory')
+                if pressure is not None:
+                    peak_pressure = pressure if peak_pressure is None else max(pressure, peak_pressure)
                 if memory_pressure is not None:
                     peak_memory_pressure = (memory_pressure if peak_memory_pressure is None
                                             else max(peak_memory_pressure, memory_pressure))
-                if (pressure <= BOOT_CPU_PRESSURE_LIMIT and memory_pressure is not None
+                if (pressure is not None and pressure <= BOOT_CPU_PRESSURE_LIMIT and memory_pressure is not None
                         and memory_pressure <= BOOT_MEMORY_PRESSURE_LIMIT):
                     if stable_since is None or stable_framework != framework:
                         stable_since, stable_framework = now, framework
@@ -1175,9 +1177,9 @@ class Runtime:
         else:
             raise PoolError('boot_timeout', f'Android boot did not complete within {BOOT_TIMEOUT} seconds')
 
-    def boot_memory_pressure(self, slot):
+    def boot_pressure(self, slot, resource):
         try:
-            path = self.CGROUP_ROOT / 'system.slice' / self.unit(slot) / 'memory.pressure'
+            path = self.CGROUP_ROOT / 'system.slice' / self.unit(slot) / f'{resource}.pressure'
             match = re.search(r'^some avg10=([0-9]{1,3}\.[0-9]{2}) ', path.read_text(), re.M)
         except OSError:
             return None
@@ -1187,7 +1189,7 @@ class Runtime:
 
     @staticmethod
     def adb_ready(process, timeout=5, wifi_state=None, *, settle=False):
-        """Return ((framework PID, CPU pressure) or None, Wi-Fi submission)."""
+        """Return (ready framework PID or None, Wi-Fi submission)."""
         if wifi_state is None:
             wifi_state = {}
         deadline = time.monotonic() + timeout
@@ -1225,9 +1227,8 @@ class Runtime:
             submitted_for = ''
         ready_probe = 'printf "%s:ready\\n" "$framework"; '
         if settle:
-            ready_probe = ('case "$(cmd package path android 2>/dev/null)" in package:/*) '
-                           'cat /proc/pressure/cpu | { read -r kind avg10 rest; '
-                           '[ "$kind" = some ] && printf "%s:ready:%s\\n" "$framework" "$avg10"; };; esac; ')
+            ready_probe = ('if package=$(cmd package path android 2>/dev/null); then '
+                           'case "$package" in package:/*) printf "%s:ready\\n" "$framework";; esac; fi; ')
         request('shell:if [ "$(getprop sys.boot_completed)" = 1 ]; then '
                 'framework=$(pidof system_server); '
                 'case "$framework" in ""|*[!0-9]*|0*) exit 1;; esac; '
@@ -1252,20 +1253,15 @@ class Runtime:
                 return None, False
             line.extend(byte)
             if byte == b'\n':
-                match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready(?::avg10=([0-9]{1,3}\.[0-9]{2}))?|submitted|pending|missing)',
-                                     line.strip())
+                match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready|submitted|pending|missing)', line.strip())
                 if not match:
                     return None, False
-                framework, state, avg10 = match.groups()
+                framework, state = match.groups()
                 if state == b'missing':
                     wifi_state.pop('submitted_for', None)
                 elif state == b'submitted':
                     wifi_state['submitted_for'] = framework.decode('ascii')
-                if settle and avg10 is not None and float(avg10) <= 100:
-                    return (framework, float(avg10)), False
-                if not settle and state == b'ready':
-                    return (framework, None), False
-                return None, state == b'submitted'
+                return (framework if state == b'ready' else None), state == b'submitted'
         return None, False
 
     def start_network(self, slot, directory, cancel, namespace):
