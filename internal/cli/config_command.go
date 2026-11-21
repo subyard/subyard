@@ -921,16 +921,15 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	return targets, err
 }
 
+func (cli *CLI) releaseConfigTargets(ctx context.Context, loaded config.Loaded, allLocal bool) ([]configTarget, error) {
+	targets, _, err := cli.configTargets(ctx, loaded, allLocal, true)
+	return targets, err
+}
+
 func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLocal, release bool) ([]configTarget, []config.Loaded, error) {
 	if !allLocal {
-		if release && (loaded.Context.YardName == "test-yard" || loaded.Context.YardName == "e2e-yard") {
-			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
-			if err != nil {
-				return nil, nil, err
-			}
-			if warning != "" {
-				return nil, nil, nil
-			}
+		if release && loaded.Context.YardName == legacyTestYardName {
+			return nil, nil, nil
 		}
 		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil, nil
 	}
@@ -954,14 +953,8 @@ func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLoca
 	var findings []error
 	var addressOnly []config.Loaded
 	for _, name := range names {
-		if release && (name == "test-yard" || name == "e2e-yard") {
-			warning, err := cli.releaseTestYardRecreation(ctx, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
-			if err != nil {
-				return nil, nil, err
-			}
-			if warning != "" {
-				continue
-			}
+		if release && name == legacyTestYardName {
+			continue
 		}
 		var targetLoaded config.Loaded
 		var err error

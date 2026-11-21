@@ -112,37 +112,7 @@ reconcile_e2e_route_mount() {
   ok "shared E2E routes → $target (read-only)"
 }
 
-# Only the native owner bridge uses these fixed portions. Ordinary calls run
-# the complete original body in its existing order.
-owner_phase=whole
 created=0 created_uuid=''
-case "${1:-}" in
-  --owner-before-instance) owner_phase='before-instance' ;;
-  --owner-before-srv) owner_phase='before-srv' ;;
-  --owner-after-srv) owner_phase='after-srv' ;;
-esac
-if [ "$owner_phase" != whole ]; then
-  [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'
-  case "$desired_power" in running | stopped) ;; *) die 'original prepared power is required' ;; esac
-  if [ "$owner_phase" != before-instance ]; then
-    [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_UUID:-}" ] \
-      && [ "$(instance_get volatile.uuid)" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
-      || die 'original owner instance identity differs'
-    if [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN:-}" ]; then
-      [ "$(instance_get user.subyard.owner_create)" = "$SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN" ] \
-        || die 'original owner instance token differs'
-    fi
-  fi
-fi
-if [ "$owner_phase" = after-srv ] && [ -n "${SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID:-}" ]; then
-  [ "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
-    && [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN:-}" ] \
-    || die 'fresh owner instance identity differs'
-  created=1
-  created_uuid="$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"
-fi
-docker_apparmor_required=0
-if [ "$owner_phase" = whole ] || [ "$owner_phase" = before-instance ]; then
 # --- preconditions -----------------------------------------------------------
 incus_preflight
 incus project show "$INCUS_PROJECT" >/dev/null 2>&1 \
@@ -172,12 +142,6 @@ if [ "${1:-}" = --check-vm-storage ]; then
   exit 0
 fi
 case "$desired_power" in running | stopped) ;; *) die "prepared desired power is required" ;; esac
-# Native owner creation has already completed its one correlated SDK POST.
-# A missing/replaced result may never fall back to a second CLI create.
-if [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_UUID:-}" ]; then
-  [ "$(instance_get volatile.uuid)" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
-    || die "original owner-created instance identity differs"
-fi
 vm_raw_preflight
 
 # The Go Apply path supplies its fresh observation before writing power metadata.
@@ -215,12 +179,6 @@ if [ "$YARD_KIND" = vm ]; then
   fi
 fi
 
-fi # original pre-instance portion
-[ "$owner_phase" != before-instance ] || exit 0
-if [ "$owner_phase" = before-srv ] && [ "${SUBYARD_PREPARED_INCUS_APPARMOR:-}" = disabled ]; then
-  docker_apparmor_required=1
-fi
-if [ "$owner_phase" != after-srv ]; then
 if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
   ok "instance '$YARD_INSTANCE_NAME' exists"
   if [ "$YARD_KIND" = container ] \
@@ -229,8 +187,6 @@ if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
     ok "reconciled security.nesting=true"
   fi
 else
-  [ -z "${SUBYARD_PREPARED_OWNER_INSTANCE_UUID:-}" ] \
-    || die "original owner-created instance is missing"
   subyard_instance_identity_flags
   if yard_instance_create; then
     created=1
@@ -455,12 +411,6 @@ else
   warn "/dev/kvm absent on host — emulator won't be hardware-accelerated; skipping passthrough"
 fi
 
-fi # original metadata/devices portion
-[ "$owner_phase" != before-srv ] || exit 0
-if [ "$owner_phase" = after-srv ] && [ -n "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ]; then
-  [ "$(incus storage volume get "$SRV_POOL" "$SRV_VOLUME" user.subyard.owner_create "${PROJ[@]}")" = "$SUBYARD_PREPARED_OWNER_VOLUME_TOKEN" ] \
-    || die 'original owner SRV volume identity differs'
-fi
 # --- 4. persistent /srv volume (idempotent) ----------------------------------
 echo "Storage (/srv):"
 if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
@@ -470,7 +420,6 @@ subyard_srv_create_config || die 'invalid original SRV settings'
 if incus storage volume show "$SRV_POOL" "$SRV_VOLUME" "${PROJ[@]}" >/dev/null 2>&1; then
   ok "volume '$SRV_VOLUME' exists"
 else
-  [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" != 1 ] && [ -z "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ] || die 'original owner-created SRV volume is missing'
   subyard_srv_create_config || die 'invalid original SRV create settings'
   incus storage volume create "$SRV_POOL" "$SRV_VOLUME" "${PROJ[@]}" "${SUBYARD_SRV_CREATE_CONFIG[@]}" >/dev/null
   ok "created volume '$SRV_VOLUME' on pool '$SRV_POOL'"

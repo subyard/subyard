@@ -90,6 +90,14 @@ func InstanceIntentionallyStopped(instance ports.InstanceInfo) bool {
 		metadata.Desired.State == fieldValid && metadata.Desired.Value == domain.PowerStopped
 }
 
+// InstanceStoppedForRunningIntent reports a stopped instance whose recorded
+// intent is running, so boot reconciliation starts it again.
+func InstanceStoppedForRunningIntent(instance ports.InstanceInfo) bool {
+	metadata := parsePowerMetadata(instance)
+	return strings.EqualFold(instance.Status, "stopped") &&
+		metadata.Desired.State == fieldValid && metadata.Desired.Value == domain.PowerRunning
+}
+
 // InstanceNeverInitialized reports a managed instance whose init has never
 // finished: initialized=false without the completion mark. A yard from a release
 // before the mark counts as initialized when its initialized value is true; an

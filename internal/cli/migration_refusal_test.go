@@ -16,7 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
-	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 func TestReleaseTransitionIngressFactoryRefusesSourceByClass(t *testing.T) {
@@ -76,135 +75,71 @@ func TestReleaseTransitionIngressFactoryRefusesRuntimeDirectoryWithoutUninstallA
 	}
 }
 
-func TestReleaseTransitionWritesFilteredMigrationDiagnostics(t *testing.T) {
-	root := testkit.TempDir(t)
-	home, runtimeRoot := filepath.Join(root, "config"), filepath.Join(root, "runtime")
-	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const target = "0.29.0-test-aaaaaaaaaaaa"
-	digest := writeSealedRollbackTarget(t, runtimeRoot, target, "0.29.0-test", registry)
-	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(home, "yards", "e2e-yard", "config.env")
-	writeReleaseTransitionTestFile(t, path, []byte("SSH_PORT=2240\n"), 0600)
-	request, err := json.Marshal(releasetransition.ProcessRequest{
-		SchemaVersion: 1, Mode: releasetransition.ProcessInspect,
-		RuntimeRoot: runtimeRoot, ConfigHome: home, Yard: "default",
-		Target: target, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: digest,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t), Incus: &testkit.Incus{},
-		Environment: []string{"HOME=" + root, "SUBYARD_HOME=" + filepath.Join(root, "data"), "SUBYARD_CONFIG_HOME=" + home},
-		Stdin:       bytes.NewReader(request), Stdout: &stdout, Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	code := program.runReleaseTransition(context.Background(), nil)
-	if code != 0 || !strings.Contains(stderr.String(), "release transition refusal: reserved yard name e2e-yard:") || !strings.Contains(stderr.String(), "yards/e2e-yard/config.env") || !strings.Contains(stderr.String(), "YARD_TEMPLATE=test-vms") || strings.Contains(stderr.String(), "SSH_PORT=2240") {
-		t.Fatalf("filtered migration diagnostic did not reach command stderr (exit %d): %s", code, stderr.String())
-	}
-	var response releasetransition.ProcessResponse
-	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || response.Inspection == nil || response.Inspection.Outcome == nil {
-		t.Fatalf("missing structured inspection: %s %v", stdout.String(), err)
-	}
-	plan := response.Inspection
-	if plan.Outcome.Status != releasetransition.StatusOperatorActionRequired || plan.Outcome.Code != releasetransition.CodePreconditionBlocked || len(plan.Blockers) == 0 || !strings.Contains(plan.Outcome.Message, "yards/e2e-yard/config.env") || !strings.Contains(plan.Outcome.Retry, "YARD_TEMPLATE=test-vms") || strings.Contains(stdout.String(), "SSH_PORT=2240") {
-		t.Fatalf("owner verdict lost its structured public repair: %#v", plan)
-	}
-}
-
-// The error comes from the real registration adapter; the synthetic port only
-// seeds an authorized historical row without running a host mutation.
-type diagnosticRegistrationOwner struct {
-	before  releasetransition.OwnerRegistrationObservation
-	failure error
-}
-
-func (owner *diagnosticRegistrationOwner) Prepare(context.Context, releasetransition.V2SettingsSnapshotView) (releasetransition.OwnerRegistrationObservation, error) {
-	return owner.before, owner.failure
-}
-func (owner *diagnosticRegistrationOwner) Observe(context.Context, releasetransition.OwnerRegistrationObservation) (releasetransition.OwnerRegistrationProgress, error) {
-	return releasetransition.OwnerRegistrationExpected, owner.failure
-}
-func (*diagnosticRegistrationOwner) Commit(context.Context, releasetransition.OwnerRegistrationObservation) error {
-	return errors.New("interrupt before native owner effects")
-}
-
-func TestReservedOwnerMigrationPublicInspectionAndUpdate(t *testing.T) {
-	for _, yard := range []string{"e2e-yard", "test-yard"} {
-		for _, resume := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/resume=%t", yard, resume), func(t *testing.T) {
-				root := testkit.TempDir(t)
-				home := filepath.Join(root, "config")
+// The compiled pre-v0.11 owner migration is inert: a legacy test yard refuses
+// with its recreation commands and no effect, and any other ledger advances.
+func TestLegacyOwnerRegistrationRecreatesInsteadOfMigrating(t *testing.T) {
+	for _, yard := range []string{"e2e-yard", "test-yard", ""} {
+		t.Run("yard="+yard, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			home := filepath.Join(root, "config")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if yard != "" {
 				path := filepath.Join(home, "yards", yard, "config.env")
-				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=private-unrelated-value\n"), 0600)
-				realOwner := &ownerRegistrationTransition{options: func() (testyardmigration.Options, error) {
-					return testyardmigration.Options{Executable: filepath.Join(root, "yard"), ConfigHome: home, DataHome: filepath.Join(root, "data")}, nil
-				}}
-				_, failure := realOwner.Prepare(context.Background(), nil)
-				if failure == nil {
-					t.Fatal("reserved registration was accepted")
+				testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=private-unrelated-value\n"), 0o600)
+			}
+			owner := &legacyOwnerRegistration{configHome: home}
+			observation, err := owner.Prepare(context.Background(), nil)
+			if legacy := yard == "e2e-yard"; legacy != (err != nil) || !legacy && observation.State != releasetransition.OwnerRegistrationAbsent {
+				t.Fatalf("prepare: %+v %v", observation, err)
+			}
+			if _, err := owner.Observe(context.Background(), observation); err == nil {
+				t.Fatal("an inert owner observed migration progress")
+			}
+			if err := owner.Commit(context.Background(), observation); err == nil {
+				t.Fatal("an inert owner committed a migration")
+			}
+			digest := releasetransition.Fingerprint(strings.Repeat("a", 64))
+			payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":1},"currentEpochs":{"owner-registration":2},"migrations":[{"id":"owner-v2","domain":"owner-registration","fromEpoch":1,"toEpoch":2,"kind":"test-yard-owner-v1-to-v2"}]}`)
+			transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home, RegistryPayload: payload, ArtifactDigest: digest, Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+				return releasetransition.ReleaseLinks{Active: "release-a"}, nil
+			}, OwnerRegistration: owner, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
+			plan, err := transition.Inspect(context.Background(), goal)
+			if err != nil || plan.Outcome == nil {
+				t.Fatalf("inspection: %#v %v", plan, err)
+			}
+			if err := releasetransition.ValidateProcessInspection(goal, plan); err != nil {
+				t.Fatal(err)
+			}
+			result, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: plan.Plan, Authorization: "confirmed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if yard != "e2e-yard" {
+				if len(plan.Blockers) != 0 || result.Status != releasetransition.StatusReady {
+					t.Fatalf("absent legacy owner did not advance: %#v %#v", plan, result)
 				}
-				digest := releasetransition.Fingerprint(strings.Repeat("a", 64))
-				owner := &diagnosticRegistrationOwner{before: releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationLegacyDirectory, Registration: digest, Overrides: digest, Controller: digest}}
-				if !resume {
-					owner.failure = failure
-				}
-				payload := []byte(`{"schemaVersion":2,"minimumEpochs":{"owner-registration":1},"currentEpochs":{"owner-registration":2},"migrations":[{"id":"owner-v2","domain":"owner-registration","fromEpoch":1,"toEpoch":2,"kind":"test-yard-owner-v1-to-v2"}]}`)
-				transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{ConfigHome: home, RegistryPayload: payload, ArtifactDigest: digest, Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-					return releasetransition.ReleaseLinks{Active: "release-a"}, nil
-				}, OwnerRegistration: owner, VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }})
-				if err != nil {
-					t.Fatal(err)
-				}
-				goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
-				if resume {
-					plan, err := transition.Inspect(context.Background(), goal)
-					if err != nil || len(plan.Blockers) != 0 {
-						t.Fatalf("seed inspection: %#v %v", plan, err)
-					}
-					result, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: plan.Plan, Authorization: "confirmed"})
-					if err != nil || result.Status != releasetransition.StatusRecovering {
-						t.Fatalf("seed interruption: %#v %v", result, err)
-					}
-					owner.failure = failure
-				}
-				plan, err := transition.Inspect(context.Background(), goal)
-				if err != nil || plan.Outcome == nil || len(plan.Blockers) == 0 {
-					t.Fatalf("operator inspection: %#v %v", plan, err)
-				}
-				if err := releasetransition.ValidateProcessInspection(goal, plan); err != nil {
-					t.Fatal(err)
-				}
-				if !resume && plan.Outcome.Code != releasetransition.CodePreconditionBlocked {
-					t.Fatalf("reserved name is not a precondition: %#v", plan.Outcome)
-				}
-				encoded, err := json.Marshal(plan)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, text := range []string{string(encoded), plan.Outcome.Message + " " + plan.Outcome.Retry} {
-					if !strings.Contains(text, "yards/"+yard+"/config.env") || !strings.Contains(text, "YARD_TEMPLATE=test-vms") || strings.Contains(text, "private-unrelated-value") || strings.Contains(text, "install a compatible release") {
-						t.Fatalf("operator lost public repair: %s", text)
-					}
-				}
-				result, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: plan.Plan, Authorization: "confirmed"})
-				if err != nil || result.Status != releasetransition.StatusOperatorActionRequired || !strings.Contains(result.Message, "yards/"+yard+"/config.env") || !strings.Contains(result.Retry, "YARD_TEMPLATE=test-vms") {
-					t.Fatalf("update lost public repair: %#v %v", result, err)
-				}
-			})
-		}
+				return
+			}
+			encoded, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Outcome.Code != releasetransition.CodePreconditionBlocked || len(plan.Blockers) == 0 || plan.Outcome.Retry != legacyTestYardRecreation || strings.Contains(string(encoded), "private-unrelated-value") {
+				t.Fatalf("legacy owner lost its recreation commands: %s", encoded)
+			}
+			if result.Status != releasetransition.StatusOperatorActionRequired || result.Retry != legacyTestYardRecreation {
+				t.Fatalf("update lost the recreation commands: %#v", result)
+			}
+		})
 	}
 }
 

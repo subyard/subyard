@@ -140,6 +140,36 @@ func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (
 	return err == nil, nil
 }
 
+// EngineChanged reports whether the installed broker runs another engine
+// revision than this release ships. The revision covers the engine binary,
+// its provision and download helpers and its recipe bundle; yard settings,
+// power, routes and host units are separate drift that apply repairs in place.
+func (backend *Backend) EngineChanged(ctx context.Context) (bool, error) {
+	state, err := backend.state()
+	if err != nil {
+		return false, err
+	}
+	if backend.Runner == nil {
+		backend.Runner = ProcessRunner{}
+	}
+	marker, err := backend.incus(ctx, "config", "get", backend.Instance,
+		"user.subyard.test_vms_revision", "--project", backend.Project)
+	if err != nil {
+		return false, fmt.Errorf("inspect backend revision: %w", err)
+	}
+	return engineRevision(strings.TrimSpace(marker)) != engineRevision(state.marker), nil
+}
+
+// engineRevision is the engine component of a revision marker; a marker
+// without one never matches a release.
+func engineRevision(marker string) string {
+	fields := strings.Split(marker, ":")
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
 func (backend *Backend) Apply(ctx context.Context) (err error) {
 	state, err := backend.state()
 	if err != nil {

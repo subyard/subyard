@@ -16,8 +16,14 @@ without image metadata retain their Debian behavior. Explicit selection requires
 `image-v1` capability; clients refuse it on older brokers before acquiring a lease.
 
 
-The yard names `test-yard` and `e2e-yard` are reserved for registrations selecting `YARD_TEMPLATE=test-vms`; use another name for unrelated yards.
-An unrelated registration using either name refuses update and init with a diagnostic naming its configuration file and how to choose another name or select the test-owner template.
+A Subyard update recreates a registered broker whose engine changed: open SSH sessions through it
+end, its VMs, leases and base images are removed, its yard settings are kept, the registration is
+recreated with the new runtime UUID, and the next acquire builds a fresh base. Agents holding a
+lease acquire a new one. The engine is the broker's sealed engine, provisioning and recipe files;
+`E2E_*` settings, a stopped broker, host units, routes and other drift are repaired in place. A
+broker stopped by the operator is not changed. Rollback updates the broker in place.
+The pre-v0.11 name `e2e-yard` is not updated; recreate it with
+`yard -Y e2e-yard teardown --reset-config`, then `yard service install test-vms`.
 
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.

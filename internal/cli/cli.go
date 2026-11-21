@@ -195,9 +195,6 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	stderr io.Writer,
 	arguments ...string,
 ) error {
-	if err := validateMigrationChildInvocation(ctx, yard, arguments); err != nil {
-		return err
-	}
 	operationID := cli.ensureOperationID()
 	operation := cli.rpcOperation(operationID)
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
@@ -428,7 +425,7 @@ func New(options Options) (*CLI, error) {
 			continue
 		}
 		switch definition.Runtime.ActivationID {
-		case "materialized-config", "test-vm-broker", "test-yard-route-consumers", "host-power":
+		case "materialized-config", "test-vm-broker", "host-power":
 			return nil, fmt.Errorf("profile runtime activation ID conflicts with core: %s", definition.Runtime.ActivationID)
 		}
 	}
@@ -2650,9 +2647,7 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 	if len(arguments) != 1 ||
 		(arguments[0] != "paths" && arguments[0] != "check" &&
 			arguments[0] != "apply" && arguments[0] != "finalize" &&
-			arguments[0] != "rollback" && arguments[0] != "cleanup" &&
-			arguments[0] != "reconcile-test-vm-broker" &&
-			arguments[0] != "reconcile-power-reconciler") {
+			arguments[0] != "rollback" && arguments[0] != "cleanup") {
 		cli.errorf("internal: invalid _migrate action")
 		return 2
 	}
@@ -2661,24 +2656,7 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		cli.errorf("state migration %s: %s", arguments[0], releaseruntime.LegacyReinstallGuidance)
 		return 2
 	}
-	if migrationHelperAction(arguments[0]) {
-		if err := requireMigrationChildAuthority(ctx, yard, arguments[0]); err != nil {
-			cli.errorf("state migration %s: %v", arguments[0], err)
-			return 1
-		}
-	}
 	repositoryRoot := cli.options.RepositoryRoot
-	if arguments[0] == "reconcile-power-reconciler" {
-		payloadRepositoryRoot, payloadErr := powerMigrationRepositoryRoot(
-			repositoryRoot,
-			cli.baseEnv,
-		)
-		if payloadErr != nil {
-			cli.errorf("state migration power reconciler payload: %v", payloadErr)
-			return 1
-		}
-		repositoryRoot = payloadRepositoryRoot
-	}
 	migrationEnvironment := cli.freshMigrationEnvironment(
 		cli.baseEnv,
 		repositoryRoot,
@@ -2740,60 +2718,6 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		}
 		return 0
 	}
-	if arguments[0] == "reconcile-test-vm-broker" {
-		if !loaded.Context.NestedE2EVMs ||
-			loaded.Context.YardKind != domain.YardContainer {
-			cli.errorf("state migration test VM broker context is not active")
-			return 1
-		}
-		platform := cli.options.InitPlatform
-		if platform == nil {
-			if err := cli.prepareSudoPrivileges(
-				ctx, cli.options.Stderr, cli.effectiveUID(), "update",
-			); err != nil {
-				cli.errorf("state migration test VM broker privileges: %v", err)
-				return 1
-			}
-			platform = cli.initPlatform(loaded, []domain.Context{loaded.Context})
-		}
-		if err := reconcileMigrationTestVMs(ctx, platform); err != nil {
-			cli.errorf("state migration test VM broker reconcile: %v", err)
-			return 1
-		}
-		return 0
-	}
-	if arguments[0] == "reconcile-power-reconciler" {
-		platform := cli.options.InitPlatform
-		if platform == nil {
-			if err := cli.prepareSudoPrivileges(
-				ctx, cli.options.Stderr, cli.effectiveUID(), "update",
-			); err != nil {
-				cli.errorf("state migration power reconciler privileges: %v", err)
-				return 1
-			}
-			// Rollback is dispatched by the active runtime, but the root-owned
-			// helper must come from the selected retained release.
-			platform = func() ports.InitPlatform {
-				activeRepositoryRoot := cli.options.RepositoryRoot
-				activeDispatcherPath := cli.options.DispatcherPath
-				activeCompatibility := cli.retainedAdapterCompatibility
-				defer func() {
-					cli.options.RepositoryRoot = activeRepositoryRoot
-					cli.options.DispatcherPath = activeDispatcherPath
-					cli.retainedAdapterCompatibility = activeCompatibility
-				}()
-				cli.options.RepositoryRoot = repositoryRoot
-				cli.options.DispatcherPath = filepath.Join(repositoryRoot, "bin", "yard-engine")
-				cli.retainedAdapterCompatibility = repositoryRoot != activeRepositoryRoot
-				return cli.initPlatform(loaded, []domain.Context{loaded.Context})
-			}()
-		}
-		if err := platform.ApplyStage(ctx, ports.ReconcileStagePower); err != nil {
-			cli.errorf("state migration power reconciler: %v", err)
-			return 1
-		}
-		return 0
-	}
 	if !filepath.IsAbs(configHome) || filepath.Clean(configHome) == string(filepath.Separator) {
 		cli.errorf("state migration %s: mutation gate config home must be an absolute non-root path", arguments[0])
 		return 1
@@ -2844,48 +2768,6 @@ func (cli *CLI) freshMigrationEnvironment(
 	}
 	environment["SUBYARD_REPOSITORY_ROOT"] = repositoryRoot
 	return environment
-}
-
-func powerMigrationRepositoryRoot(
-	activeRepositoryRoot string,
-	environment map[string]string,
-) (string, error) {
-	payloadRoot := environment["SUBYARD_POWER_MIGRATION_PAYLOAD_ROOT"]
-	if payloadRoot == "" {
-		return activeRepositoryRoot, nil
-	}
-	return retainedMigrationPayloadRoot(payloadRoot, environment)
-}
-
-func retainedMigrationPayloadRoot(
-	payloadRoot string,
-	environment map[string]string,
-) (string, error) {
-	runtimeRoot := environment["YARD_RUNTIME_ROOT"]
-	if runtimeRoot == "" || !filepath.IsAbs(runtimeRoot) {
-		return "", errors.New("absolute runtime root is required")
-	}
-	resolvedRuntimeRoot, err := filepath.EvalSymlinks(runtimeRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve runtime root: %w", err)
-	}
-	resolvedPrevious, err := filepath.EvalSymlinks(filepath.Join(resolvedRuntimeRoot, "previous"))
-	if err != nil {
-		return "", fmt.Errorf("resolve retained previous release: %w", err)
-	}
-	resolvedPayload, err := filepath.EvalSymlinks(payloadRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve migration payload: %w", err)
-	}
-	if resolvedPayload != resolvedPrevious {
-		return "", errors.New("migration payload is not the retained previous release")
-	}
-	relative, err := filepath.Rel(filepath.Join(resolvedRuntimeRoot, "releases"), resolvedPrevious)
-	if err != nil || relative == "." || relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", errors.New("retained previous release escapes the runtime release store")
-	}
-	return resolvedPrevious, nil
 }
 
 func runtimeRootForRepository(repositoryRoot, fallback string) string {

@@ -57,19 +57,8 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 				}
 				files = &config.ProspectiveFiles{Root: request.ConfigHome, Yards: names, ReadSnapshot: view.ReadSnapshot}
 			}
-			if yard == "test-yard" || yard == "e2e-yard" {
-				// Recreation inspection runs the native CLI, whose socket denial
-				// would surface as an untyped exit status.
-				if err := cli.releaseActivationOperation().nativeAccessRefusal(ctx, yard); err != nil {
-					return nil, err
-				}
-				warning, err := cli.releaseTestYardRecreation(ctx, request.ConfigHome, files)
-				if err != nil {
-					return nil, err
-				}
-				if warning != "" {
-					return nil, nil
-				}
+			if yard == legacyTestYardName {
+				return nil, nil
 			}
 			// An older parent passes its own resolved settings; they are not overrides.
 			operation := cli.releaseActivationOperation()
@@ -163,19 +152,6 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	defer func() { cli.gateAdmitted = previousAdmission }()
 	return cli.runCurrentMigration(ctx, definition, nil, false, yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")), nil
-}
-
-// nativeAccessRefusal types a socket this account cannot open for one yard.
-// An absent server or any other failure is left to the caller's own read.
-func (cli *CLI) nativeAccessRefusal(ctx context.Context, yard string) error {
-	native, _ := cli.statusPorts()
-	if ports.LocalInstallationAbsent(native) {
-		return nil
-	}
-	if _, err := native.Server(ctx); errors.Is(err, domain.ErrIncusAccessDenied) {
-		return domain.IncusAccessRefusal(yard, err)
-	}
-	return nil
 }
 
 // localYardAccessRefusals reports every local yard whose native state this

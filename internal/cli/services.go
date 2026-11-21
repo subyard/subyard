@@ -155,6 +155,12 @@ func (cli *CLI) serviceRuntimeRole(yard domain.Context, uuid string) (string, st
 	return "", "", "", nil
 }
 
+// serviceRuntimeUnproven is a runtime read that succeeded but does not prove
+// the declared owner; a failed read is returned as it is.
+type serviceRuntimeUnproven string
+
+func (finding serviceRuntimeUnproven) Error() string { return string(finding) }
+
 // Yard teardown retires the same captured service metadata after native cleanup.
 // This also covers ordinary teardown and prevents orphan routes during fixtures
 // or when the operator deliberately removes the runtime through its yard name.
@@ -448,7 +454,7 @@ func (cli *CLI) reportServiceError(arguments []string, err error) int {
 // enabled setting, profile or reachable broker cannot authorize registration.
 func (cli *CLI) serviceRuntime(ctx context.Context, loaded config.Loaded, definition profile.Definition) (string, string, error) {
 	if loaded.Context.AccessKind != domain.AccessLocal || !definition.InfrastructureService.Matches(loaded.Environment) {
-		return "", "", errors.New("runtime does not match its declared infrastructure service")
+		return "", "", serviceRuntimeUnproven("runtime does not match its declared infrastructure service")
 	}
 	incus, _ := cli.statusPorts()
 	state, err := incus.ReconcileState(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName, loaded.Context.IncusBridge, loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"])
@@ -457,11 +463,11 @@ func (cli *CLI) serviceRuntime(ctx context.Context, loaded config.Loaded, defini
 	}
 	project := state.ProjectConfig
 	if !state.ProjectFound || !state.InstanceFound || project["user.subyard.installation"] != "1" && project["user.subyard.installation"] != domain.AdoptedInstallation || project["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) || project["user.subyard.data_home"] != loaded.Context.Paths.DataHome || project["user.subyard.config_home"] != loaded.Context.Paths.ConfigHome || project["user.subyard.yard_name"] != loaded.Context.YardName || project["user.subyard.instance_name"] != loaded.Context.YardInstanceName || state.Instance.Config["user.subyard.managed"] != "true" || state.Instance.Config["user.subyard.name"] != loaded.Context.YardName {
-		return "", "", errors.New("service runtime ownership is unproven")
+		return "", "", serviceRuntimeUnproven("service runtime ownership is unproven")
 	}
 	uuid := state.Instance.Config["volatile.uuid"]
 	if uuid == "" || project["user.subyard.installation"] == domain.AdoptedInstallation && project["user.subyard.adopted_uuid"] != uuid {
-		return "", "", errors.New("service runtime UUID is unproven")
+		return "", "", serviceRuntimeUnproven("service runtime UUID is unproven")
 	}
 	ownership := map[string]string{}
 	for _, key := range []string{"user.subyard.installation", "user.subyard.adopted_uuid", "user.subyard.operator_uid", "user.subyard.data_home", "user.subyard.config_home", "user.subyard.yard_name", "user.subyard.instance_name", "user.subyard.bridge"} {

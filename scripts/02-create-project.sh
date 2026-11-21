@@ -23,16 +23,6 @@ RESTRICTED_DISK_PATHS="${RESTRICTED_DISK_PATHS:-}"
 ROOT_POOL="${ROOT_POOL:-${SRV_POOL:-default}}"
 INCUS_NETWORK="${INCUS_NETWORK:-${INCUS_BRIDGE:-incusbr0}}"
 
-owner_phase=whole
-case "${1:-}" in
-  --owner-before-project) owner_phase='before-project' ;;
-  --owner-after-project) owner_phase='after-project' ;;
-esac
-if [ "$owner_phase" != whole ]; then
-  [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'
-fi
-
-if [ "$owner_phase" != after-project ]; then
 # --- preconditions -----------------------------------------------------------
 incus_preflight
 if vm_page_reporting_required; then
@@ -53,23 +43,15 @@ announce_confirm "Subyard Phase 1 — create restricted Incus project" \
   "$project_policy_summary" \
   "Reversible: 'incus project delete $INCUS_PROJECT' removes it."
 
-fi
-[ "$owner_phase" != before-project ] || exit 0
-
 # --- 1. create project (idempotent) ------------------------------------------
 echo "Project:"
 created_project=0
 if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
   ok "project '$INCUS_PROJECT' exists"
 else
-  [ "$owner_phase" = whole ] || die 'original owner project is missing'
   env INCUS_PROJECT=default incus project create "$INCUS_PROJECT" </dev/null >/dev/null
   created_project=1
   ok "created project '$INCUS_PROJECT'"
-fi
-
-if [ "$owner_phase" = after-project ] && [ -n "${SUBYARD_PREPARED_OWNER_PROJECT_TOKEN:-}" ]; then
-  [ "$(incus project get "$INCUS_PROJECT" user.subyard.owner_create)" = "$SUBYARD_PREPARED_OWNER_PROJECT_TOKEN" ] || die 'original owner project token differs'
 fi
 
 # Persist the exact installation boundary while the project may still be

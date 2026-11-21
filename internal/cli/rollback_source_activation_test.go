@@ -12,14 +12,12 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
-	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
-	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 func TestRollbackSourceActivationPreservesNativeScopeBeforeEffects(t *testing.T) {
-	for _, rename := range []bool{false, true} {
-		t.Run(map[bool]string{false: "settings-only", true: "legacy-owner-preserved"}[rename], func(t *testing.T) {
+	{
+		t.Run("settings-only", func(t *testing.T) {
 			fixture := newSourceScopeFixture(t)
 			writeConfigCommandFile(t, filepath.Join(fixture.configHome, "yards/named/config.env"), "AGENT_claude_CONFIG='"+fixture.namedAsset+"'\n")
 			writeConfigCommandFile(t, filepath.Join(fixture.configHome, ".sync/settings/config.env"), "SSH_PORT=2240\n")
@@ -53,51 +51,10 @@ func TestRollbackSourceActivationPreservesNativeScopeBeforeEffects(t *testing.T)
 				t.Fatal(err)
 			}
 			incus := "#!/bin/sh\ncase \"$*\" in 'project list --format=json') printf '[]\\n';; *) exit 2;; esac\n"
-			if rename {
-				request.Yard = testyardmigration.LegacyYard
-				manifestPath := filepath.Join(fixture.root, "config", "commands.registry")
-				manifest, err := os.ReadFile(manifestPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, manifestPath, string(manifest)+"check||@check||forward|read|never|public|lifecycle|simple|check|read-only native check|--help|\n", 0600)
-				if err := os.MkdirAll(filepath.Join(fixture.configHome, "yards", testyardmigration.LegacyYard), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.MkdirAll(filepath.Join(fixture.root, "config", "yards", "profiles"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, filepath.Join(fixture.configHome, "yards", testyardmigration.LegacyYard, "config.env"), "YARD_TEMPLATE=test-vms\nSSH_PORT=2244\n", 0600)
-				writeCLIFile(t, filepath.Join(fixture.root, "config", "yards", "profiles", "test-vms.env"), "NESTED_E2E_VMS=0\nSSH_PORT=2244\n", 0600)
-				incus = `#!/bin/sh
-case "$*" in
-  'project list --format=json') printf '[{"name":"subyard-test-yard"}]\n' ;;
-  'project get subyard-test-yard features.images') printf 'true\n' ;;
-  'list --all-projects --format=json'|'list yard-test-yard --project subyard-test-yard --format=json')
-    printf '[{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.name":"test-yard","user.subyard.managed":"true"}}]\n' ;;
-  *) printf 'unexpected native query: %s\n' "$*" >&2; exit 2 ;;
-esac
-`
-				platform := fixture.program.options.InitPlatform.(*initPlatformFixture)
-				platform.converged[ports.ReconcileStageProject] = true
-				platform.configsConverged = true
-				fixture.boundary.converged["subyard-test-yard/yard-test-yard"] = true
-			}
 			writeCLIFile(t, filepath.Join(bin, "incus"), incus, 0700)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if rename {
-				program, err := New(fixture.program.options)
-				if err != nil {
-					t.Fatal(err)
-				}
-				fixture.program = program
-			}
-			beforeOwner, err := fixture.program.ownerRegistrationTransition(request).Prepare(context.Background(), nil)
-			wantOwner := releasetransition.OwnerRegistrationAbsent
-			if rename {
-				wantOwner = releasetransition.OwnerRegistrationLegacyDirectoryAdoptCurrent
-			}
-			if err != nil || beforeOwner.State != wantOwner {
+			beforeOwner, err := fixture.program.legacyOwnerRegistration(request).Prepare(context.Background(), nil)
+			if err != nil || beforeOwner.State != releasetransition.OwnerRegistrationAbsent {
 				t.Fatalf("native owner fixture has wrong initial state: %+v err=%v", beforeOwner, err)
 			}
 			rollback, _, err := releaseruntime.VerifyRollbackTarget(context.Background(), request.RuntimeRoot, request.Target, request.ArtifactDigest)
@@ -118,9 +75,9 @@ esac
 			var freshTransition func() *releasetransition.V2Transition
 			freshTransition = func() *releasetransition.V2Transition {
 				actors := slices.DeleteFunc(fixture.program.activationReconcilers(request), func(actor releasetransition.V2ActivationReconciler) bool {
-					return !slices.Contains([]string{"materialized-config", "test-vm-broker", "test-yard-route-consumers"}, actor.ID())
+					return !slices.Contains([]string{"materialized-config", "test-vm-broker"}, actor.ID())
 				})
-				if len(actors) != 3 {
+				if len(actors) != 2 {
 					t.Fatal("missing production rollback activation owners", len(actors))
 				}
 				options := candidateTransitionOptions(request, releasetransition.V2Options{
@@ -129,7 +86,7 @@ esac
 					OperatorHome:       environmentValue(fixture.program.options.Environment, "SUBYARD_OPERATOR_HOME"),
 					RollbackTarget:     rollback, RegistryPayload: registry, ArtifactDigest: request.ArtifactDigest,
 					InheritedSettingIDs: request.InheritedSettingIDs, Reconcilers: actors,
-					OwnerRegistration: fixture.program.ownerRegistrationTransition(request),
+					OwnerRegistration: fixture.program.legacyOwnerRegistration(request),
 					ObserveLinks:      func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
 					VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool {
 						grants++
@@ -156,14 +113,6 @@ esac
 						}
 						if !settingsChanged {
 							t.Fatal("rollback fixture did not perform pending native settings work")
-						}
-						if rename {
-							if _, err := os.Stat(filepath.Join(fixture.configHome, "yards", testyardmigration.LegacyYard, "config.env")); err != nil {
-								t.Fatal("legacy registration was not preserved", err)
-							}
-							if _, err := os.Stat(filepath.Join(fixture.configHome, "yards", testyardmigration.CurrentYard, "config.env")); !os.IsNotExist(err) {
-								t.Fatal("release mutated the preserved legacy owner", err)
-							}
 						}
 						if attempts == 1 {
 							transaction, scope = journal.Transaction, journal.ObservationScope
