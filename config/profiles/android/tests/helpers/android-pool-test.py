@@ -946,6 +946,7 @@ class Leases(unittest.TestCase):
         identity.chmod(0o755)
         environment = dict(os.environ, HOME=str(root), PATH=str(commands) + ':' + os.environ['PATH'],
                            EMULATOR_GPU='software')
+        environment.pop('SUBYARD_ANDROID_E2E_SHOW_KERNEL', None)
         check = subprocess.run(['bash', str(ROOT / 'config/profiles/android/runtime.sh'), '--check-graphics'],
                                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(check.returncode, 0, check.stderr.decode())
@@ -977,6 +978,13 @@ class Leases(unittest.TestCase):
                 self.assertEqual(arguments[arguments.index('-feature') + 1], '-Vulkan')
             else:
                 self.assertNotIn('-feature', arguments)
+            self.assertNotIn('-show-kernel', arguments)
+            for enabled, expected in (('0', arguments), ('1', arguments + ['-show-kernel'])):
+                launch = subprocess.run(['bash', str(ROOT / 'config/profiles/android/runtime.sh')],
+                                        env=dict(environment, SUBYARD_ANDROID_E2E_SHOW_KERNEL=enabled),
+                                        capture_output=True, text=True)
+                self.assertEqual(launch.returncode, 42, launch.stderr)
+                self.assertEqual(launch.stdout.splitlines(), expected)
 
     def test_start_passes_software_mode_and_ram_floor_to_avd_and_runtime(self):
         sdk, image = self.root / 'sdk', self.root / 'image'

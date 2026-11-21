@@ -376,7 +376,7 @@ assert result.returncode == 2 and result.stderr == 'android-gradle: missing watc
 # After the Gradle exec fails, root cleanup captures the retained journal without
 # changing the original failure. Unrelated phases and successful runs skip it.
 runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
-journal_branch = runtime_source[runtime_source.index('  # The emulator journal survives'):
+journal_branch = runtime_source[runtime_source.index('  # The emulator journal includes the guest console'):
                                 runtime_source.index('  if [ -n "$monitor_pid" ] &&')]
 for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'images', 0, False),
                                            (23, 'gradle', 0, True), (23, 'gradle', 7, True)):
@@ -389,7 +389,7 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
     result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit)],
                             capture_output=True, text=True)
     assert result.returncode == status, result.stderr
-    assert ('android-gradle evidence: emulator' in result.stderr) == called
+    assert ('android-gradle evidence: emulator journal with guest kernel console' in result.stderr) == called
     if called:
         assert 'exec fixture -- journalctl' in result.stderr and '--user' not in result.stderr
         assert '-n 512 -o cat -u subyard-android-slot-*' in result.stderr
