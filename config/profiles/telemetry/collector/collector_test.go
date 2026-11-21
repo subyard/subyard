@@ -301,8 +301,10 @@ func TestNonoverlappingAttribution(t *testing.T) {
 func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	s := fixtureStore(t)
 	token := strings.Repeat("a", 32)
-	authFile := filepath.Join(s.dir, "auth")
-	testkit.WriteFile(t, authFile, []byte(token), 0600)
+	policy := DefaultPolicy()
+	if err := s.publishCapturePolicy(context.Background(), policy); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +313,11 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	listener.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, s, Options{Listen: address, AuthFile: authFile}) }()
+	// Start the real receiver without the periodic spool drainer.
+	go func() {
+		done <- serveOTLP(ctx, s, Options{Listen: address, Policy: policy},
+			&localAuth{store: s, token: token, slots: make(chan struct{}, 16), policy: policy})
+	}()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -433,6 +439,96 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	var exported Envelope
 	if err = json.NewDecoder(&output).Decode(&exported); err != nil {
 		t.Fatal(err)
+	}
+
+	spool := filepath.Join(s.dir, "spool")
+	for _, tc := range []struct {
+		name     string
+		resource bool
+		sealed   bool
+	}{
+		{name: "spooled-header"},
+		{name: "spooled-resource", resource: true},
+		{name: "spooled-sealed", resource: true, sealed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := record("run", map[string]any{"agent_run_id": tc.name, "state": "starting", "agent": "codex"})
+			appendPython(t, s, []Record{start})
+			if tc.sealed {
+				if err := sealSegment(spool, streamForRun(tc.name)+".open"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if s.RegisteredRun(ctx, tc.name) {
+				t.Fatal("run was already visible before the first export")
+			}
+			req := ptraceotlp.NewExportRequest()
+			resource := req.Traces().ResourceSpans().AppendEmpty()
+			headerRun := tc.name
+			evidence := "authenticated-header"
+			if tc.resource {
+				resource.Resource().Attributes().PutStr("subyard.agent_run.id", tc.name)
+				headerRun = ""
+				evidence = "registered-resource-attribute"
+			}
+			spans := resource.ScopeSpans().AppendEmpty().Spans()
+			for _, id := range []byte{1, 2} {
+				span := spans.AppendEmpty()
+				span.SetTraceID(pcommon.TraceID{1})
+				span.SetSpanID(pcommon.SpanID{id})
+			}
+			raw, err := req.MarshalProto()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := post("traces", raw, token, headerRun); code != 200 {
+				t.Fatalf("first trace export HTTP %d", code)
+			}
+			var stored []byte
+			if err := s.db.QueryRow("SELECT protobuf FROM records WHERE kind='otlp/traces' ORDER BY sequence DESC LIMIT 1").Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			stored, err = decompressOTLP(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := ptraceotlp.NewExportRequest()
+			if err := accepted.UnmarshalProto(stored); err != nil {
+				t.Fatal(err)
+			}
+			got := accepted.Traces().ResourceSpans().At(0)
+			for key, want := range map[string]string{"subyard.agent_run.id": tc.name, "subyard.agent_run.evidence": evidence} {
+				if value, ok := got.Resource().Attributes().Get(key); !ok || value.Str() != want {
+					t.Fatalf("attribute %s = %q, want %q", key, value.Str(), want)
+				}
+			}
+			gotSpans := got.ScopeSpans().At(0).Spans()
+			if gotSpans.Len() != 2 || gotSpans.At(0).SpanID() != (pcommon.SpanID{1}) || gotSpans.At(1).SpanID() != (pcommon.SpanID{2}) {
+				t.Fatal("first export did not preserve both spans")
+			}
+			var count int
+			if err := s.db.QueryRow("SELECT count(*) FROM spool_offsets").Scan(&count); err != nil || count != 0 {
+				t.Fatalf("receiver advanced a spool offset: %d (%v)", count, err)
+			}
+			if err := s.drainSpool(ctx, policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow("SELECT count(*) FROM records WHERE kind='run' AND origin_id=? AND json_extract(body,'$.agent_run_id')=? AND json_extract(body,'$.state')='starting'", s.origin, tc.name).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("normal drain left %d starting events for the run (%v)", count, err)
+			}
+			var event string
+			if err := s.db.QueryRow("SELECT event_id FROM records WHERE origin_id=? AND event_id=?", s.origin, start.EventID).Scan(&event); err != nil {
+				t.Fatal("producer event identity missing after drain", err)
+			}
+			if entries, err := os.ReadDir(spool); err != nil || len(entries) != 0 {
+				t.Fatalf("normal drain did not retire the spool: %v (%v)", entries, err)
+			}
+		})
+	}
+	const forged = "forged-run"
+	appendPython(t, s, []Record{record("run", map[string]any{"agent_run_id": forged, "state": "running"})})
+	if code = post("traces", traceBytes, token, forged); code != 503 || s.RegisteredRun(ctx, forged) {
+		t.Fatalf("spool without a starting record authorized a forged run: HTTP %d", code)
 	}
 }
 
