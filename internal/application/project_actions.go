@@ -16,6 +16,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
 )
@@ -195,24 +196,10 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if err := os.MkdirAll(workspaceNamespace, 0o700); err != nil {
 		return "", err
 	}
-	temporary, err := os.CreateTemp(workspaceNamespace, ".workspace-*")
-	if err != nil {
-		return "", err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if _, err := temporary.Write(append(payload, '\n')); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(temporaryPath, workspace); err != nil {
+	// The descriptor is Subyard-private state: a final symlink is refused.
+	if err := safefs.WriteFile(workspace, append(payload, '\n'), safefs.Options{
+		TempPattern: ".workspace-*",
+	}); err != nil {
 		return "", err
 	}
 	message := ""

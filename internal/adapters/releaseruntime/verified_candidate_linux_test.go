@@ -176,8 +176,8 @@ func TestCandidateResponseBufferIsBoundedWhileWriting(t *testing.T) {
 }
 
 func TestVerifiedCandidateTransitionKeepsRepositoryRootAcrossProcesses(t *testing.T) {
-	root := t.TempDir()
-	capture := filepath.Join(t.TempDir(), "repository-root")
+	root := testkit.TempDir(t)
+	capture := filepath.Join(testkit.TempDir(t), "repository-root")
 	payload := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;
@@ -233,7 +233,7 @@ esac
 }
 
 func TestRuntimeCloseReleasesPinnedCandidateRoot(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	candidate := writeRuntimeCandidatePayload(t, root, `#!/bin/sh
 case "${1:-}" in
   --version) printf 'yard-engine 1.2.3\n' ;;

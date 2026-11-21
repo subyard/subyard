@@ -67,6 +67,26 @@ def wait_for_short_run_samples(data_dir, run):
     raise AssertionError('short-run baseline and final samples were not committed')
 
 
+def wait_for_detached_final(data_dir, run):
+    deadline = time.monotonic()+40
+    finals = []
+    with closing(sqlite3.connect('file:'+str(data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
+        while time.monotonic() < deadline:
+            samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run+':scope',))]
+            finals = [sample for sample in samples if sample.get('final')]
+            if finals:
+                assert finals[-1]['cpu_ns'] > 0
+                assert finals[-1]['populated'] is False
+                assert finals[-1]['memory_peak_bytes'] >= 8*1024*1024
+                # The observer removes the manifest only after the final sample
+                # and the run's completion are durable; a busy spool defers it a tick.
+                if not (data_dir/'runs-v5'/(run+'.json')).exists():
+                    return
+            time.sleep(0.2)
+    raise AssertionError('run manifest remained after final descendant counters' if finals
+                         else 'final descendant counters were not committed')
+
+
 def short_run(args):
     context = args.state/'short-context.json'
     code = r'''import json,os,subprocess,sys,time
@@ -150,20 +170,8 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':run,'child_pid':child.pi
                     '--', sys.executable, '-c', code, str(context)], check=True, timeout=15)
     run = json.loads(context.read_text())
     assert Path('/proc/'+str(run['child_pid'])).exists(), 'background child did not outlive main'
-    deadline = time.monotonic()+40
-    with closing(sqlite3.connect('file:'+str(args.data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
-        while time.monotonic() < deadline:
-            samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run['agent_run_id']+':scope',))]
-            finals = [sample for sample in samples if sample.get('final')]
-            if finals:
-                assert finals[-1]['cpu_ns'] > 0
-                assert finals[-1]['populated'] is False
-                assert finals[-1]['memory_peak_bytes'] >= 8*1024*1024
-                assert not list((args.data_dir/'runs-v5').glob(run['agent_run_id']+'.json'))
-                print('ok: pre-exec managed placement; child survived main; final cumulative counters durable')
-                return
-            time.sleep(0.2)
-    raise AssertionError('final descendant counters were not committed')
+    wait_for_detached_final(args.data_dir, run['agent_run_id'])
+    print('ok: pre-exec managed placement; child survived main; final cumulative counters durable')
 
 
 if __name__ == '__main__':

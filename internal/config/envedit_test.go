@@ -15,15 +15,13 @@ import (
 )
 
 func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(configHome, "config.env")
 	initial := "# keep this comment\nSSH_PORT=2200\nDEV_USER='dev'\n"
-	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte(initial), 0o600)
 	value := "2299"
 	if err := WritePersistentAssignment(
 		configHome, path, "SSH_PORT", &value,
@@ -185,7 +183,7 @@ func TestPersistentAssignmentValueRoundTrip(t *testing.T) {
 }
 
 func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +214,7 @@ func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 }
 
 func TestCreatePersistentFileCreatesMissingConfigurationRoot(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "missing")
+	configHome := filepath.Join(testkit.TempDir(t), "missing")
 	path := filepath.Join(configHome, "yards", "sample-service", "config.env")
 	content := []byte("ENVIRONMENT_PROFILES=sample-service\n")
 	if err := CreatePersistentFile(configHome, path, content); err != nil {
@@ -259,7 +257,7 @@ func TestCreatePersistentFileGuardHoldsExclusiveRootWithoutPublishing(t *testing
 }
 
 func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) {
-	configHome := t.TempDir()
+	configHome := testkit.TempDir(t)
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -267,9 +265,7 @@ func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("YARD_TEMPLATE=test-vms\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=test-vms\n"), 0o640)
 	before, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +304,7 @@ func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) 
 }
 
 func TestCompareAndSwapPersistentFileUsesProtectedIdentity(t *testing.T) {
-	configHome := t.TempDir()
+	configHome := testkit.TempDir(t)
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -318,18 +314,14 @@ func TestCompareAndSwapPersistentFileUsesProtectedIdentity(t *testing.T) {
 	}
 	path := filepath.Join(directory, "config.env")
 	before := []byte("YARD_TEMPLATE=e2e-vms\n")
-	if err := os.WriteFile(path, before, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, before, 0o600)
 	expected, err := ReadPersistentFileSnapshot(configHome, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	replacement := filepath.Join(directory, "replacement")
-	if err := os.WriteFile(replacement, before, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, replacement, before, 0o600)
 	if err := os.Rename(replacement, path); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +352,7 @@ func TestCompareAndSwapPersistentFileUsesProtectedIdentity(t *testing.T) {
 func TestCompareAndSwapPersistentFileConvergesAcrossPublicationFaults(t *testing.T) {
 	for _, point := range []string{"after-pending-fsync", "after-publish-before-dir-fsync"} {
 		t.Run(point, func(t *testing.T) {
-			configHome := t.TempDir()
+			configHome := testkit.TempDir(t)
 			if err := os.Chmod(configHome, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -369,9 +361,7 @@ func TestCompareAndSwapPersistentFileConvergesAcrossPublicationFaults(t *testing
 				t.Fatal(err)
 			}
 			path := filepath.Join(directory, "config.env")
-			if err := os.WriteFile(path, []byte("YARD_TEMPLATE=e2e-vms\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, path, []byte("YARD_TEMPLATE=e2e-vms\n"), 0o600)
 			expected, err := ReadPersistentFileSnapshot(configHome, path)
 			if err != nil {
 				t.Fatal(err)
@@ -415,7 +405,7 @@ func TestCompareAndSwapPersistentFileConvergesAcrossPublicationFaults(t *testing
 }
 
 func TestReadPersistentFileSnapshotRejectsUnsafePaths(t *testing.T) {
-	configHome := t.TempDir()
+	configHome := testkit.TempDir(t)
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -424,9 +414,7 @@ func TestReadPersistentFileSnapshotRejectsUnsafePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	safe := filepath.Join(safeDirectory, "config.env")
-	if err := os.WriteFile(safe, []byte("SSH_PORT=2222\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, safe, []byte("SSH_PORT=2222\n"), 0o600)
 
 	t.Run("escape", func(t *testing.T) {
 		if _, err := ReadPersistentFileSnapshot(configHome, filepath.Join(configHome, "..", "foreign")); err == nil {
@@ -492,14 +480,12 @@ func TestReadPersistentFileSnapshotRejectsForeignOwnershipWhenSupported(t *testi
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to construct a foreign-owned fixture")
 	}
-	configHome := t.TempDir()
+	configHome := testkit.TempDir(t)
 	if err := os.Chmod(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(configHome, "config.env")
-	if err := os.WriteFile(path, []byte("NESTED_E2E_VMS=0\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("NESTED_E2E_VMS=0\n"), 0o600)
 	if err := os.Chown(path, 1, -1); err != nil {
 		if errors.Is(err, syscall.EPERM) {
 			t.Skip("filesystem does not permit ownership fixture")

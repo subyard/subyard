@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPreviewIsReadOnlyAndSelectsAutomaticEndpoint(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -34,7 +36,7 @@ func TestPreviewIsReadOnlyAndSelectsAutomaticEndpoint(t *testing.T) {
 func TestCommitCreatesMissingPrivateParentAfterReadOnlyPreview(t *testing.T) {
 	for _, unsafe := range []bool{false, true} {
 		t.Run(map[bool]string{false: "private", true: "unsafe ancestor"}[unsafe], func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			mode := os.FileMode(0700)
 			if unsafe {
 				mode = 0777
@@ -70,7 +72,7 @@ func TestCommitCreatesMissingPrivateParentAfterReadOnlyPreview(t *testing.T) {
 }
 
 func TestCommitPersistsEndpointAndPreviewReusesItWithoutLiveProbe(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -101,7 +103,7 @@ func TestCommitPersistsEndpointAndPreviewReusesItWithoutLiveProbe(t *testing.T) 
 }
 
 func TestExplicitValuesWinAndAreReserved(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "", errors.New("must not discover") },
@@ -128,7 +130,7 @@ func TestExplicitValuesWinAndAreReserved(t *testing.T) {
 }
 
 func TestExplicitPortCannotUseCallerReservation(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{Discover: func(context.Context) (string, error) { return "127.0.0.1", nil }}
 	_, err := manager.Preview(context.Background(), Request{
@@ -141,7 +143,7 @@ func TestExplicitPortCannotUseCallerReservation(t *testing.T) {
 }
 
 func TestCommitRejectsStaleAutomaticSelection(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -166,7 +168,7 @@ func TestCommitRejectsStaleAutomaticSelection(t *testing.T) {
 }
 
 func TestConcurrentCommitsSerializeInitialAllocation(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -265,7 +267,7 @@ func TestConcurrentCommitsSerializeInitialAllocation(t *testing.T) {
 }
 
 func TestCommitWithDoesNotInvokeCallbackForStaleEndpointPlan(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -298,7 +300,7 @@ func TestCommitWithDoesNotInvokeCallbackForStaleEndpointPlan(t *testing.T) {
 }
 
 func TestCommitWithCallbackFailureDoesNotPublishEndpoint(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -340,7 +342,7 @@ func TestCommitWithCallbackFailureDoesNotPublishEndpoint(t *testing.T) {
 }
 
 func TestCommitWithInvokesCallbackForExistingExactAllocation(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	manager := Manager{
 		Discover: func(context.Context) (string, error) { return "owner.example.ts.net", nil },
@@ -371,15 +373,13 @@ func TestCommitWithInvokesCallbackForExistingExactAllocation(t *testing.T) {
 }
 
 func TestReadSavedRejectsSymlinkState(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "resource-endpoints")
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
 	protectParent(t, directory)
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(target, []byte(`{"schema":1,"allocations":[]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	target := filepath.Join(testkit.TempDir(t), "state.json")
+	testkit.WriteFile(t, target, []byte(`{"schema":1,"allocations":[]}`), 0o600)
 	if err := os.Symlink(target, filepath.Join(directory, "state.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -392,5 +392,30 @@ func protectParent(t *testing.T, directory string) {
 	t.Helper()
 	if err := os.Chmod(filepath.Dir(directory), 0o700); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEndpointStateDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
+	directory := filepath.Join(testkit.TempDir(t), "resource-endpoints")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStateDirectory(directory); err != nil {
+		t.Fatalf("narrow owned endpoint directory: %v", err)
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow endpoint directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStateDirectory(directory); err == nil || err.Error() != "endpoint state directory has unsafe type or permissions" {
+		t.Fatalf("broad endpoint directory: %v", err)
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("broad endpoint directory changed: %v %v", info, err)
 	}
 }

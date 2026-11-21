@@ -1280,7 +1280,7 @@ func (cli *CLI) reportConfigRefusals(err error) {
 // unlinkedPrivateFile is a file only its descriptor names, holding payload,
 // so no pipe buffer bounds what passes through it.
 func unlinkedPrivateFile(pattern string, payload []byte) (*os.File, error) {
-	file, err := os.CreateTemp("", pattern)
+	file, err := os.CreateTemp("", pattern) //nolint:forbidigo // unlinked descriptor handoff, never published
 	if err != nil {
 		return nil, err
 	}

@@ -44,7 +44,7 @@ case "${1:-apply}" in
     nm_unmanaged_guard_reconcile
     exit 0 ;;
   remove-files)
-    if teardown_guard files-need-root "$SUBYARD_TEARDOWN_PLAN"; then
+    if teardown_guard files-need-root; then
       require_root "removing approved private installation roots requires root"
     fi
     exec "${SUBYARD_DISPATCHER_PATH:?}" _teardown-guard remove-files ;;
@@ -78,9 +78,9 @@ subyard_home_validate_root "$SUBYARD_HOME" \
   || die "refusing unsafe Subyard data root: $SUBYARD_HOME"
 SUBYARD_HOME="$SUBYARD_VALIDATED_HOME"
 [ "$INCUS_PROJECT" != default ] || die "teardown requires a dedicated project"
-teardown_guard validate || die "prepared exact teardown inventory is required"
+teardown_guard validate || exit 1
 approved_names() { teardown_guard list "$1"; }
-guard_resource() { teardown_guard guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || die "plan_stale: teardown resource changed after confirmation"; }
+guard_resource() { teardown_guard guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || exit 1; }
 require_root "removing the NetworkManager guard, ufw rules, and the Incus storage data needs root"
 
 if command -v incus >/dev/null 2>&1 && ! incus info >/dev/null 2>&1; then
@@ -93,7 +93,7 @@ PROJ=(--project "$INCUS_PROJECT")
 bridge_gone=0; pool_gone=0
 [ "$have_incus" = 1 ] || { bridge_gone=1; pool_gone=1; }
 
-teardown_guard guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
+teardown_guard guard-all "$INCUS_PROJECT" || exit 1
 teardown_guard guard-artifacts || exit 75
 # shellcheck source=scripts/lib/teardown-session.sh
 . "$SCRIPT_DIR/lib/teardown-session.sh"

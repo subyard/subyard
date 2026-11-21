@@ -999,3 +999,44 @@ func TestAdmittedOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T
 		})
 	}
 }
+
+func TestApplyAddCreatesParentOfLinkedSSHConfigTarget(t *testing.T) {
+	runtime := remoteFixture(t)
+	target := filepath.Join(runtime.Home, "new-dotfiles", "config")
+	if err := os.MkdirAll(filepath.Dir(runtime.sshConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, runtime.sshConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	writeRemoteFile(t, runtime.knownHostsPath(), "local.example "+fixturePublicKey+"\n", 0o600)
+	runtime.processCall = func(_ context.Context, _ string, arguments []string, _ []byte) ([]byte, error) {
+		joined := strings.Join(arguments, " ")
+		if strings.Contains(joined, "yard-demo") && strings.HasSuffix(joined, " -- true") {
+			payload, err := os.ReadFile(runtime.knownHostsPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = append(payload, []byte("subyard-remote-demo "+fixturePublicKey+"\n")...)
+			testkit.WriteFile(t, runtime.knownHostsPath(), payload, 0o600)
+		}
+		return nil, nil
+	}
+	projects := 1
+	prepared, err := runtime.CapturePrepared(context.Background(), domain.RemotePrepared{
+		Action:  domain.RemoteAdd,
+		Spec:    domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example", OwnerYardName: "inner"},
+		Owner:   domain.RemoteInfo{State: "RUNNING", SSHPort: 2233, DevUser: "dev", Projects: &projects},
+		Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")},
+	})
+	if err != nil {
+		t.Fatalf("capture with an absent link target directory: %v", err)
+	}
+	if _, err := runtime.Apply(context.Background(), prepared); err != nil {
+		t.Fatalf("apply with an absent link target directory: %v", err)
+	}
+	if link, err := os.Readlink(runtime.sshConfigPath()); err != nil || link != target {
+		t.Fatalf("configuration symlink = %q, %v, want %q", link, err, target)
+	}
+	assertRemoteFileContains(t, target, "Include subyard-demo.config")
+}

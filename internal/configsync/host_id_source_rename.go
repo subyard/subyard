@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // A source rename never changes setting content or an operator's local overrides.
@@ -562,7 +563,7 @@ func verifyRenameSubtree(root, commit, oldID, currentID string) error {
 func finalizeSourceRename(plan *HostIDRenamePlan) error {
 	transaction := plan.source
 	// Isolated index: planning never stages or rewrites the operator's index.
-	index, err := os.CreateTemp("/tmp", "subyard-rename-index-")
+	index, err := os.CreateTemp("/tmp", "subyard-rename-index-") //nolint:forbidigo // scratch name for an isolated Git index
 	if err != nil {
 		return err
 	}
@@ -629,29 +630,14 @@ func lockRenameIndex(source *hostSourceRename) (func(), error) {
 	}
 	imagePath := renameIndexImage(source)
 	if _, err := os.Lstat(imagePath); errors.Is(err, os.ErrNotExist) {
-		file, err := os.CreateTemp(source.GitDir, "subyard-rename-index-")
-		if err != nil {
-			return nil, err
-		}
-		temporary := file.Name()
-		defer os.Remove(temporary)
-		if err = file.Chmod(0o600); err == nil {
-			_, err = file.Write(source.AfterIndex)
-		}
-		if err == nil {
-			err = file.Sync()
-		}
-		closeErr := file.Close()
-		if err == nil {
-			err = closeErr
+		err := safefs.WriteFile(imagePath, source.AfterIndex, safefs.Options{
+			TempPattern: "subyard-rename-index-*", NoReplace: true,
+		})
+		if errors.Is(err, os.ErrExist) {
+			// Another attempt published the image first; it is verified below.
+			err = syncDirectory(source.GitDir)
 		}
 		if err != nil {
-			return nil, err
-		}
-		if err := os.Link(temporary, imagePath); err != nil && !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-		if err := syncDirectory(source.GitDir); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
@@ -721,7 +707,7 @@ func inspectRenameIndexTree(source *hostSourceRename) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	file, err := os.CreateTemp("/tmp", "subyard-rename-index-inspect-")
+	file, err := os.CreateTemp("/tmp", "subyard-rename-index-inspect-") //nolint:forbidigo // scratch copy for git write-tree
 	if err != nil {
 		return "", err
 	}
@@ -864,15 +850,15 @@ func publishRenameIndex(source *hostSourceRename, image os.FileInfo, expectedTre
 	if err := check(); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(source.GitDir, "subyard-rename-index-publish-")
+	pending, err := safefs.Create(filepath.Join(source.GitDir, "index"), safefs.Options{
+		TempPattern: "subyard-rename-index-publish-*",
+	})
 	if err != nil {
 		return err
 	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err = file.Chmod(0o600); err == nil {
-		_, err = file.Write(source.AfterIndex)
-	}
+	defer pending.Abort()
+	file := pending.File()
+	_, err = file.Write(source.AfterIndex)
 	if err == nil {
 		err = file.Sync()
 	}
@@ -886,8 +872,5 @@ func publishRenameIndex(source *hostSourceRename, image os.FileInfo, expectedTre
 	if err := check(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, filepath.Join(source.GitDir, "index")); err != nil {
-		return err
-	}
-	return syncDirectory(source.GitDir)
+	return pending.Commit()
 }

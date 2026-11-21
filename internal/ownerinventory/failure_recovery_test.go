@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 var errInjectedOwnerIO = errors.New("injected owner inventory I/O failure")
@@ -31,7 +33,7 @@ func TestRegistrationRecoversFromEveryDurableIOBoundary(t *testing.T) {
 		ownerIOJournalCleanup,
 	} {
 		t.Run(boundary, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			trust := testSSHHostTrust(t, "owner.example")
 			connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
 			snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-a", time.Now())}
@@ -57,7 +59,7 @@ func TestRegistrationRecoversFromEveryDurableIOBoundary(t *testing.T) {
 }
 
 func TestHostIDAdoptionRecoversAcrossRoutingRename(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	trust := testSSHHostTrust(t, "owner.example")
 	oldConnection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
 	store := Connections{Root: root}
@@ -71,9 +73,7 @@ func TestHostIDAdoptionRecoversAcrossRoutingRename(t *testing.T) {
 	if err := os.MkdirAll(oldRouting, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(oldRouting, "state"), []byte("kept\n"), 0o600)
 	store.failIO = failOwnerBoundaryOnce(ownerIORoutingRename)
 	snapshot := Snapshot{FetchedAt: time.Now(), Inventory: fixtureInventory("owner-b", time.Now())}
 	err := store.AdoptHostID(IdentityProof{
@@ -130,7 +130,7 @@ func TestHostIDAdoptionRecoversFromEveryDurableIOBoundary(t *testing.T) {
 
 func adoptionFailureFixture(t *testing.T) (Connections, SSHHostTrust) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	trust := testSSHHostTrust(t, "owner.example")
 	store := Connections{Root: root}
 	connection := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &trust}
@@ -144,9 +144,7 @@ func adoptionFailureFixture(t *testing.T) (Connections, SSHHostTrust) {
 	if err := os.MkdirAll(routing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(routing, "state"), []byte("kept\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(routing, "state"), []byte("kept\n"), 0o600)
 	return store, trust
 }
 
@@ -156,7 +154,7 @@ func TestRepairRecoversFromEveryDurableIOBoundary(t *testing.T) {
 		ownerIODirectorySync, ownerIOJournalCleanup,
 	} {
 		t.Run(boundary, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			oldTrust, newTrust := testSSHHostTrust(t, "owner.example"), testSSHHostTrust(t, "owner.example")
 			store := Connections{Root: root}
 			old := Connection{HostID: "owner-a", Destination: "owner-alias", Trust: &oldTrust}
@@ -246,7 +244,7 @@ func TestRemovalRecoversFromEveryDurableIOBoundary(t *testing.T) {
 		ownerIOJournalWrite, ownerIOStateDelete, ownerIODirectorySync, ownerIOJournalCleanup,
 	} {
 		t.Run(boundary, func(t *testing.T) {
-			root := t.TempDir()
+			root := testkit.TempDir(t)
 			store := Connections{Root: root}
 			connection := Connection{HostID: "owner-a", Destination: "owner-alias"}
 			if err := store.Write(connection); err != nil {

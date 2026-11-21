@@ -10,6 +10,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
@@ -43,7 +44,7 @@ func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
 }
 
 func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {
-	configHome := t.TempDir()
+	configHome := testkit.TempDir(t)
 	root := filepath.Join(configHome, "yards")
 	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o700); err != nil {
 		t.Fatal(err)
@@ -52,9 +53,7 @@ func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {
 		filepath.Join(root, "nested", "config.env"),
 		filepath.Join(root, "legacy.env"),
 	} {
-		if err := os.WriteFile(path, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte("SSH_PORT=1\n"), 0o600)
 	}
 	got, err := YardNames(configHome)
 	if err != nil {
@@ -67,8 +66,8 @@ func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {
 }
 
 func TestYardRegistryIgnoresCheckoutOverlay(t *testing.T) {
-	repositoryRoot := t.TempDir()
-	configHome := filepath.Join(t.TempDir(), "config")
+	repositoryRoot := testkit.TempDir(t)
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	for _, path := range []string{
 		filepath.Join(repositoryRoot, "private", "yards", "private-flat.env"),
 		filepath.Join(repositoryRoot, "private", "yards", "private-nested", "config.env"),
@@ -81,9 +80,7 @@ func TestYardRegistryIgnoresCheckoutOverlay(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte("SSH_PORT=1\n"), 0o600)
 	}
 
 	got, err := YardNames(configHome)
@@ -106,21 +103,17 @@ func TestYardRegistryIgnoresCheckoutOverlay(t *testing.T) {
 }
 
 func TestYardRegistryIgnoresUnsafeAndSymlinkEntries(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	yards := filepath.Join(configHome, "yards")
 	if err := os.MkdirAll(yards, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), "target.env")
-	if err := os.WriteFile(target, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	target := filepath.Join(testkit.TempDir(t), "target.env")
+	testkit.WriteFile(t, target, []byte("SSH_PORT=1\n"), 0o600)
 	if err := os.Symlink(target, filepath.Join(yards, "linked.env")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(yards, "bad name.env"), []byte("SSH_PORT=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(yards, "bad name.env"), []byte("SSH_PORT=1\n"), 0o600)
 
 	got, err := YardNames(configHome)
 	if err != nil {
@@ -132,15 +125,13 @@ func TestYardRegistryIgnoresUnsafeAndSymlinkEntries(t *testing.T) {
 }
 
 func TestFindYardRegistrationFileRejectsSymlink(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	yardDir := filepath.Join(configHome, "yards", "demo")
 	if err := os.MkdirAll(yardDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), "target.env")
-	if err := os.WriteFile(target, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	target := filepath.Join(testkit.TempDir(t), "target.env")
+	testkit.WriteFile(t, target, []byte("SSH_PORT=1\n"), 0o600)
 	if err := os.Symlink(target, filepath.Join(yardDir, "config.env")); err != nil {
 		t.Fatal(err)
 	}
@@ -154,14 +145,12 @@ func TestFindYardRegistrationFileRejectsSymlink(t *testing.T) {
 }
 
 func TestFindYardRegistrationFileRejectsUnsafeName(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	escaped := filepath.Join(configHome, "outside", "config.env")
 	if err := os.MkdirAll(filepath.Dir(escaped), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(escaped, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, escaped, []byte("SSH_PORT=1\n"), 0o600)
 
 	if got, err := FindYardRegistrationFile(configHome, "../outside"); !errors.Is(err, ErrUnknownYard) {
 		t.Fatalf("FindYardRegistrationFile() = %q, %v; want unknown yard", got, err)
@@ -169,14 +158,12 @@ func TestFindYardRegistrationFileRejectsUnsafeName(t *testing.T) {
 }
 
 func TestFindYardRegistrationFileRejectsSyntheticDefault(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	registration := filepath.Join(configHome, "yards", "default", "config.env")
 	if err := os.MkdirAll(filepath.Dir(registration), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(registration, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, registration, []byte("SSH_PORT=1\n"), 0o600)
 
 	if got, err := FindYardRegistrationFile(configHome, "default"); !errors.Is(err, ErrUnknownYard) {
 		t.Fatalf("FindYardRegistrationFile() = %q, %v; want synthetic default", got, err)
@@ -184,17 +171,15 @@ func TestFindYardRegistrationFileRejectsSyntheticDefault(t *testing.T) {
 }
 
 func TestYardRegistryFallsBackFromUnsafeHigherPrecedenceEntry(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	installedNested := filepath.Join(configHome, "yards", "demo", "config.env")
 	git := filepath.Join(configHome, GitSettingsRelativePath, "yards", "demo", "config.env")
-	target := filepath.Join(t.TempDir(), "target.env")
+	target := filepath.Join(testkit.TempDir(t), "target.env")
 	for _, path := range []string{git, target} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("SSH_PORT=1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte("SSH_PORT=1\n"), 0o600)
 	}
 	if err := os.MkdirAll(filepath.Dir(installedNested), 0o700); err != nil {
 		t.Fatal(err)

@@ -63,6 +63,34 @@ func EnsureDir(path string, o DirOptions) error {
 
 func EnsurePrivateDir(path string) error { return EnsureDir(path, DirOptions{}) }
 
+// AdmitDir runs before a caller's own directory policy and never replaces it.
+// It finishes a directory the caller owns whose permission bits are a strict
+// subset of mode and that has no setuid or setgid bit, keeping the sticky bit.
+// Every other state, including absence, a symlink, another owner, set-ID bits,
+// broader bits, lookup errors and a failed chmod, is left unchanged for the
+// caller's policy to handle.
+func AdmitDir(path string, mode fs.FileMode) error {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	dir := &directory{fd: fd, path: path}
+	defer dir.close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil
+	}
+	want, have := uint32(mode.Perm()), stat.Mode&0o777
+	if stat.Uid == uint32(os.Geteuid()) && stat.Mode&0o6000 == 0 && have != want && have&^want == 0 {
+		// A failed finish leaves the directory for the caller's policy.
+		_ = dir.chmod(want | stat.Mode&0o1000)
+	}
+	return nil
+}
+
 func SyncDir(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {

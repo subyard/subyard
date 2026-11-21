@@ -80,6 +80,8 @@ func OpenLock(path string, mode fs.FileMode) (*LockFile, error) {
 	return &LockFile{file: os.NewFile(uintptr(fd), path)}, nil
 }
 
+func (l *LockFile) Stat() (fs.FileInfo, error) { return l.file.Stat() }
+
 func (l *LockFile) Chmod(mode fs.FileMode) error { return l.file.Chmod(mode) }
 
 // Identity identifies the actual lock inode, including through filesystem aliases.

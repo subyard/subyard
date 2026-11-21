@@ -423,35 +423,7 @@ func (store *FileStore) writeProjectNameMigration(journal projectNameMigration) 
 		return err
 	}
 	payload = append(payload, '\n')
-	temporary, err := os.CreateTemp(store.directory, ".name-migration.tmp.*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	published := false
-	defer func() {
-		_ = temporary.Close()
-		if !published {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(payload); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, store.projectNameMigrationPath()); err != nil {
-		return err
-	}
-	published = true
-	return syncDirectory(store.directory)
+	return writeStateFile(store.projectNameMigrationPath(), payload, ".name-migration.tmp.*", false)
 }
 
 func (store *FileStore) removeProjectNameMigration() error {

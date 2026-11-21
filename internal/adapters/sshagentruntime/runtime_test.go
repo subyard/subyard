@@ -59,7 +59,7 @@ func TestManagerRejectsUnsafeDirectoryAndInvalidTTL(t *testing.T) {
 func TestStopAcceptsControlDisconnect(t *testing.T) {
 	for name, response := range map[string]string{"empty": "", "partial": "{"} {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testkit.TempDir(t)
 			lock, err := acquireLock(context.Background(), filepath.Join(dir, "worker.lock"))
 			if err != nil {
 				t.Fatal(err)
@@ -98,15 +98,13 @@ func TestStopAcceptsControlDisconnect(t *testing.T) {
 }
 
 func TestDaemonPendingGrantCanBeLockedAndCannotRestartGrant(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	os.Chmod(root, 0700)
 	dir := filepath.Join(root, "run")
 	os.Mkdir(dir, 0700)
 	cfg := daemonConfig{Config: Config{Directory: dir, SSHPort: 1, Developer: "dev", IdentityFile: "unused", KnownHostsFile: "unused"}, TTL: time.Minute}
 	data, _ := json.Marshal(cfg)
-	if err := os.WriteFile(filepath.Join(dir, "worker.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(dir, "worker.json"), data, 0600)
 	done := make(chan error, 1)
 	go func() { done <- RunDaemon(context.Background(), dir) }()
 	m := Manager{Config: cfg.Config}
@@ -176,7 +174,7 @@ func TestEmptyAgentCannotActivateGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
-	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	testkit.WriteFile(t, filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -208,7 +206,7 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 	cfg, _ := syntheticYard(t)
 	validateDirectory(cfg.Directory, true)
 	raw, _ := json.Marshal(daemonConfig{Config: cfg, TTL: time.Minute})
-	os.WriteFile(filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
+	testkit.WriteFile(t, filepath.Join(cfg.Directory, "worker.json"), raw, 0600)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -257,7 +255,7 @@ func TestActiveWorkerStopsAfterLock(t *testing.T) {
 }
 
 func TestPrivateFilesRejectFIFOWithoutBlocking(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fifo := filepath.Join(root, "fifo")
 	if err := unix.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
@@ -290,14 +288,12 @@ func TestValidateKeyRejectsUnencryptedOrPublicFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "key")
+	path := filepath.Join(testkit.TempDir(t), "key")
 	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "synthetic", []byte("synthetic-passphrase"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, pem.EncodeToMemory(block), 0600)
 	if err := ValidateKey(path); err != nil {
 		t.Fatalf("encrypted key rejected: %v", err)
 	}
@@ -314,16 +310,126 @@ func TestValidateKeyRejectsUnencryptedOrPublicFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, pem.EncodeToMemory(block), 0600)
 	if err := ValidateKey(path); err == nil {
 		t.Fatal("unencrypted key accepted")
 	}
-	if err := os.WriteFile(path, []byte("invalid private key"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("invalid private key"), 0600)
 	if err := ValidateKey(path); err == nil {
 		t.Fatal("malformed key accepted")
+	}
+}
+
+func shortRuntimeRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "sya-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestWorkerConfigKeepsControlFileChecksBeforeReplacement(t *testing.T) {
+	dir := shortRuntimeRoot(t)
+	path := filepath.Join(dir, "worker.json")
+	assertPreserved := func(name string) {
+		t.Helper()
+		if content, err := os.ReadFile(path); err != nil || string(content) != "preserve" {
+			t.Fatalf("%s: control file changed: %q %v", name, content, err)
+		}
+	}
+	testkit.WriteFile(t, path, []byte("preserve"), 0o644)
+	if err := writeWorkerConfig(path, []byte("{}")); err == nil || err.Error() != "unsafe SSH agent control file" {
+		t.Fatalf("broad control file: %v", err)
+	}
+	assertPreserved("broad mode")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "linked")
+	if err := os.Link(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkerConfig(path, []byte("{}")); err == nil || err.Error() != "unsafe SSH agent control file" {
+		t.Fatalf("hard-linked control file: %v", err)
+	}
+	assertPreserved("hard link")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(dir, "symlinked")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkerConfig(symlink, []byte("{}")); err == nil {
+		t.Fatal("followed a symlinked control file")
+	}
+	assertPreserved("symlink")
+	if info, err := os.Lstat(symlink); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced: %v", err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		if err := writeWorkerConfig(path, []byte("{}")); !errors.Is(err, unix.EACCES) || err.Error() != "permission denied" {
+			t.Fatalf("read-only control file: %v", err)
+		}
+		assertPreserved("read-only")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(dir, "directory.json")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkerConfig(directory, []byte("{}")); !errors.Is(err, unix.EISDIR) || err.Error() != "is a directory" {
+		t.Fatalf("directory control file: %v", err)
+	}
+	for _, name := range []string{"replace", "create"} {
+		if err := writeWorkerConfig(path, []byte("{}")); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: control file metadata: %v %v", name, info, err)
+		}
+		if content, _ := os.ReadFile(path); string(content) != "{}" {
+			t.Fatalf("%s: control file content %q", name, content)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestValidateDirectoryFinishesNarrowAndRefusesBroadDirectory(t *testing.T) {
+	dir := filepath.Join(shortRuntimeRoot(t), "run")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDirectory(dir, true); err != nil {
+		t.Fatalf("narrow owned directory: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	want := "SSH agent runtime directory and parent must be owned by the operator with mode 0700"
+	if err := validateDirectory(dir, true); err == nil || err.Error() != want {
+		t.Fatalf("broad directory: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("broad directory changed: %v %v", info, err)
 	}
 }

@@ -274,19 +274,125 @@ func TestTeardownFullOriginalFactsUseBoundedWireAfterPartialRemoval(t *testing.T
 }
 
 func TestGuardAllReportsOnlyStructuralDetails(t *testing.T) {
-	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"instance","name":"yard","binding":"`+strings.Repeat("a", 64)+`"}]`)
+	binding := strings.Repeat("a", 64)
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"instance","name":"yard","binding":"`+binding+`"},{"kind":"profile","name":"private-name","binding":"`+binding+`"}]`)
 	t.Cleanup(func() { incusQuery = queryIncus })
 	incusQuery = func(path, _ string, target any) error {
+		if strings.HasPrefix(path, "/1.0/profiles/") {
+			return json.Unmarshal([]byte(`{"name":"private-name"}`), target)
+		}
 		return json.Unmarshal([]byte(`{"name":"yard","type":"container","config":{"secret":"value"},"devices":{},"profiles":[]}`), target)
 	}
 	var stderr bytes.Buffer
 	if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	expected := `plan_stale: {"action":"guard-all","stage":"resource","kind":"instance","ordinal":1,"category":"KeyError","field":"created_at"}` + "\n" +
-		"plan_stale: teardown inventory, artifact or resource binding is invalid\n"
-	if stderr.String() != expected {
+	if diagnostic := stderr.String(); !strings.HasPrefix(diagnostic, "plan_stale: ") ||
+		!strings.Contains(diagnostic, "instance resource 1: missing teardown resource field created_at") ||
+		!strings.Contains(diagnostic, "profile resource 2: missing teardown resource field config") ||
+		strings.Contains(diagnostic, "private-name") || strings.Contains(diagnostic, "secret") {
 		t.Fatalf("diagnostic %q", stderr.String())
+	}
+}
+
+func TestGuardAllReportsPreflightRefusalsBeforeQuery(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	resources := []ports.TeardownResource{
+		{Kind: "instance", Name: "yard", Binding: binding},
+		{Kind: "volume", Name: "data", Binding: binding},
+		{Kind: "host-profile", Name: "default", Binding: binding, Bindings: []string{"bad-digest"}},
+		{Kind: "unknown", Name: "invalid", Binding: binding},
+	}
+	payload, err := json.Marshal(resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", string(payload))
+	t.Cleanup(func() { incusQuery = queryIncus })
+	incusQuery = func(_, _ string, _ any) error {
+		t.Fatal("queried Incus with an invalid project")
+		return nil
+	}
+	var stderr bytes.Buffer
+	if code := RunGuard([]string{"guard-all", "default"}, nil, io.Discard, &stderr); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	expected := "plan_stale: host-profile resource 3: invalid full default-profile retry bindings; " +
+		"inventory: invalid teardown resource kind; teardown requires a dedicated project; " +
+		"volume resource 2: missing teardown resource field pool\n"
+	if stderr.String() != expected {
+		t.Fatalf("diagnostic %q, want %q", stderr.String(), expected)
+	}
+}
+
+func TestGuardAllReportsLocalAndIndependentBindingRefusals(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", `[{"kind":"volume","name":"data","binding":"`+binding+`"},{"kind":"profile","name":"fixture","binding":"`+binding+`"}]`)
+	t.Setenv("PATH", testkit.TempDir(t))
+	var stderr bytes.Buffer
+	if code := RunGuard([]string{"guard-all", "subyard"}, nil, io.Discard, &stderr); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	expected := "plan_stale: profile resource 2: required executable was not found; " +
+		"volume resource 1: missing teardown resource field pool\n"
+	if stderr.String() != expected {
+		t.Fatalf("diagnostic %q, want %q", stderr.String(), expected)
+	}
+}
+
+func TestProducerArtifactEnvelopeFitsGuardTransport(t *testing.T) {
+	directory := testkit.TempDir(t)
+	for range 18 {
+		directory = filepath.Join(directory, strings.Repeat("&", 210))
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var artifacts []ports.TeardownArtifact
+	for _, name := range []string{"first", "second", "third"} {
+		path := filepath.Join(directory, name)
+		testkit.WriteFile(t, path, []byte("producer artifact"), 0600)
+		artifact, err := CaptureArtifact(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	services, err := json.Marshal([]RecoveryService{{Scope: "user", Units: []string{"fixture.service"}, Artifacts: artifacts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUBYARD_TEARDOWN_PLAN", "")
+	t.Setenv("SUBYARD_TEARDOWN_SERVICES", string(services))
+	payload, code := runGuard(t, "producer-artifacts-json")
+	if code != 0 || len(payload) >= 65536 {
+		t.Fatalf("producer envelope exit %d, length %d", code, len(payload))
+	}
+	t.Setenv("SUBYARD_TEARDOWN_ARTIFACTS", strings.TrimSuffix(payload, "\n"))
+	if _, code := runGuard(t, "guard-artifacts"); code != 0 {
+		t.Fatalf("producer envelope refused by guard: exit %d", code)
+	}
+}
+
+func TestCaptureArtifactDisappearanceDiscardsPartialFacts(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "artifact")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(path, "child"), nil, 0600)
+	statAt = func(fd int, name, relative string) (Entry, error) {
+		if relative == "child" {
+			if err := os.Rename(path, path+"-moved"); err != nil {
+				t.Fatal(err)
+			}
+			return Entry{}, os.ErrNotExist
+		}
+		return factAt(fd, name, relative)
+	}
+	t.Cleanup(func() { statAt = factAt })
+	artifact, err := CaptureArtifact(path)
+	if err != nil || artifact.Path != path || artifact.Binding != "" || artifact.Entries == nil || len(artifact.Entries) != 0 {
+		t.Fatalf("vanished path must yield empty facts and binding: %+v, %v", artifact, err)
 	}
 }
 
@@ -344,18 +450,8 @@ func TestFullFileRemoverRequiresAnActualPoolCollection(t *testing.T) {
 	}
 }
 
-// decodeFixture decodes like queryIncus, so shape errors keep their category.
 func decodeFixture(body string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(target); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
-			return typeMismatch("unexpected Incus response shape")
-		}
-		return err
-	}
-	return nil
+	return decodeIncusJSON(strings.NewReader(body), target)
 }
 
 func TestArtifactRemovalStopsAtCancellationBeforeNextUnlink(t *testing.T) {
