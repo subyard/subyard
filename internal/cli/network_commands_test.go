@@ -20,7 +20,7 @@ import (
 
 func TestNetworkHelpDoesNotRequireAnInitializedYard(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
-	home := fixture.Home
+	home := testkit.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	engine := fixture.New(Options{
 		Arguments: []string{"network", "--help"},

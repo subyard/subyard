@@ -310,7 +310,7 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 		{name: "live forces refresh", arguments: []string{"list", "--live"}, wantSSH: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=owner-a"), withCommands("ssh"))
+			fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=owner-a"), withCommands("ssh", "ssh-keygen"))
 			now := time.Unix(1_000, 0).UTC()
 			ownerRoot := filepath.Join(fixture.DataHome, "owner-inventory")
 			connections := ownerinventory.Connections{Root: ownerRoot}
@@ -347,8 +347,13 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 				t.Fatal(err)
 			}
 			reply := fixture.Write("inventory.reply", response.String())
+			const knownKey = "remote.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture\n"
+			knownHosts := fixture.Write("known_hosts", knownKey)
+			lookup := []string{"-F", "remote.example", "-f", knownHosts}
 			fixture.Exec().
-				On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+				On(testkit.Match{Tool: "ssh", Args: []string{"-G", "dev@remote.example"}},
+					testkit.Reply{Stdout: "hostname remote.example\nport 22\nuserknownhostsfile " + knownHosts + "\n"}).
+				On(testkit.Match{Tool: "ssh-keygen", Args: lookup}, testkit.Reply{Stdout: knownKey}).
 				On(testkit.Match{Tool: "ssh", Contains: []string{"dev@remote.example", "--", "bash", "-lc"}},
 					testkit.Reply{Script: "exec /bin/cat " + shellquote.Word(reply)})
 
@@ -375,6 +380,7 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 			if test.wantSSH {
 				fixture.Exec().AssertCalls(
 					testkit.Call{Tool: "ssh", Args: []string{"-G", "dev@remote.example"}},
+					testkit.Call{Tool: "ssh-keygen", Args: lookup},
 					testkit.Call{Tool: "ssh", Args: []string{
 						"-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
 						"-o", "ControlMaster=no", "-o", "ControlPath=none",
