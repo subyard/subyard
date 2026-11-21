@@ -312,27 +312,42 @@ func (cli *CLI) checkConfigGitPushTarget(ctx context.Context, checkout, remote, 
 
 // writeExportedConfigFile replaces a user file in the export checkout. A final
 // symlink is kept and its target is written; the target's directory must exist.
-// A target the caller may not write is refused with the open error, as before.
+// A regular target the caller may not write and a directory fail with the open
+// error, as before. A special file is never opened; the publisher refuses it.
 func writeExportedConfigFile(path string, content []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	resolved, err := safefs.ResolveFile(path)
-	if err != nil {
-		return err
-	}
-	probe, err := os.OpenFile(resolved, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err == nil {
-		err = probe.Close()
-	} else if errors.Is(err, os.ErrNotExist) {
-		err = nil
-	} else if pathErr, ok := err.(*os.PathError); ok {
-		pathErr.Path = path
+		err = probeExportTarget(resolved)
+	}
+	if pathErr, ok := err.(*os.PathError); ok {
+		err = &os.PathError{Op: "open", Path: path, Err: pathErr.Err}
 	}
 	if err != nil {
 		return err
 	}
 	return safefs.WriteFile(resolved, content, safefs.Options{Mode: mode, ExactMode: true})
+}
+
+func probeExportTarget(path string) error {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case info.IsDir():
+		return &os.PathError{Op: "open", Path: path, Err: syscall.EISDIR}
+	case !info.Mode().IsRegular():
+		return nil
+	}
+	probe, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	return probe.Close()
 }
 
 func (prepared *preparedConfigSyncPush) cleanup(cli *CLI, ctx context.Context) {
