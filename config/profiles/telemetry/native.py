@@ -47,10 +47,11 @@ def safe(path):
         raise ValueError('native configuration is not regular')
 
 
-def snapshot(path, max_bytes=CONFIG_LIMIT):
-    safe(path)
+def snapshot(path, max_bytes=CONFIG_LIMIT, *, dir_fd=None):
+    if dir_fd is None:
+        safe(path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
     with os.fdopen(fd, 'rb') as stream:
@@ -63,7 +64,8 @@ def snapshot(path, max_bytes=CONFIG_LIMIT):
     return content
 
 
-def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600, policy_gid=None):
+def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600, policy_gid=None,
+            *, no_replace=False):
     from records import safefs
 
     safe(path)
@@ -74,7 +76,7 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
         pending.file.seek(0)
         if pending.file.read() != content:
             raise ValueError('native payload verification failed')
-        if snapshot(path, max_bytes=max_bytes) != expected:
+        if snapshot(pending.target, max_bytes=max_bytes, dir_fd=pending.parent_fd) != expected:
             raise ValueError('native configuration changed')
 
     owner = (uid, gid) if uid is not None else None
@@ -86,7 +88,7 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
         staging = tempfile.TemporaryDirectory(prefix='.telemetry-', dir=path.parent)
     with staging as directory:
         safefs.write_file(path, content, owner=owner, mode=mode, prefix='.telemetry-',
-                          parent_mode=0o700, stage_dir=directory, check=check)
+                          parent_mode=0o700, stage_dir=directory, check=check, no_replace=no_replace)
 
 
 def desired(agent, endpoint, helper=HELPER):

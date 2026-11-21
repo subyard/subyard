@@ -124,6 +124,32 @@ class NativeTest(unittest.TestCase):
         self.reconcile(['codex'])
         self.assertTrue(self.reconcile(['codex'], check=True))
 
+    def test_publish_compares_against_pinned_destination_with_separate_staging(self):
+        for can_replace in (False, True):
+            with self.subTest(can_replace=can_replace):
+                parent = self.root/f'policy-{can_replace}'
+                parent.mkdir()
+                moved = parent.with_suffix('.moved')
+                path = parent/'settings'
+                original = b'expected' if can_replace else b'other'
+                replacement = b'other' if can_replace else b'expected'
+                path.write_bytes(original)
+
+                def move_parent(point):
+                    if point == safefs.AFTER_STAGE:
+                        parent.rename(moved)
+                        parent.mkdir()
+                        path.write_bytes(replacement)
+
+                with patch.object(safefs, 'FAULT', move_parent):
+                    if can_replace:
+                        native.publish(path, b'new', b'expected', policy_gid=self.gid)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'native configuration changed'):
+                            native.publish(path, b'new', b'expected', policy_gid=self.gid)
+                self.assertEqual((moved/path.name).read_bytes(), b'new' if can_replace else original)
+                self.assertEqual(path.read_bytes(), replacement)
+
     @unittest.skipIf(os.geteuid() == 0, 'user-file symlink case runs as the developer')
     def test_legacy_cleanup_keeps_user_symlink(self):
         legacy = self.legacy()
