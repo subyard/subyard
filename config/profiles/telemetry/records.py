@@ -80,6 +80,8 @@ def sanitize_state(family, value, binary=None):
 
 def operational_directory(data_dir):
     path = Path(data_dir)
+    if path.name in ('', '..'):
+        path = Path(os.path.abspath(path))
     return private_directory(path.with_name(path.name+'-private'))
 
 
@@ -90,7 +92,7 @@ def private_directory(path):
         if parent.is_symlink():
             raise ValueError('unsafe directory')
     try:
-        fd, _ = safefs.open_dir(path, owner=(os.getuid(), -1), parent_mode=0o700,
+        fd, _ = safefs.open_dir(Path(os.path.abspath(path)), owner=(os.getuid(), -1), parent_mode=0o700,
                                 durability=safefs.BEST_EFFORT)
     except safefs.Unsafe as error:
         if error.reason == safefs.SYMLINK:

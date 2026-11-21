@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import json
 import hashlib
 import importlib.util
@@ -614,6 +615,19 @@ assert launcher.launch(args) == 0
                 runtime.private_directory(runtime.data, 'foreign data directory')
             self.assertEqual(runtime.data.stat().st_uid, os.geteuid())
 
+    def test_private_directory_preserves_storage_error(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = os.geteuid(), os.getegid()
+            with patch.object(guest.safefs.os, 'mkdir', side_effect=OSError(errno.ENOSPC, 'no space')):
+                try:
+                    runtime.private_directory(Path(name)/'data', 'foreign data directory')
+                except OSError as error:
+                    self.assertEqual(error.errno, errno.ENOSPC)
+                    self.assertIn('(OSError at guest.py:', guest.failure_diagnostic(error))
+                else:
+                    self.fail('directory creation ignored ENOSPC')
+
     @unittest.skipUnless(os.geteuid() == 0, 'creating a directory as another UID needs root')
     def test_staged_developer_directory_recovers_without_changing_a_directory_uid(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -649,6 +663,7 @@ assert launcher.launch(args) == 0
             runtime.uid, runtime.gid, runtime.selected = os.getuid(), os.getgid(), True
             runtime.control, runtime.library, data = root/'control', root/'library', root/'state/data'
             runtime.data = data
+            runtime.safefs_path, runtime.safefs_content = root/'support/safefs.py', b'support'
             runtime.reconcile_native = lambda check: True
             runtime.manager = lambda unit: {}
 
@@ -909,7 +924,8 @@ for path, value in (
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.safefs_path = Path(name)/'support/safefs.py'
             runtime.safefs_content = b'expected support'
-            runtime.safefs_state = lambda: (runtime.safefs_content, 0o644)
+            runtime.safefs_state = lambda: types.SimpleNamespace(before=runtime.safefs_content, mode=0o644,
+                                                                 receipt=b'', current=True, digest=b'd', wanted=b'd')
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
@@ -920,6 +936,35 @@ for path, value in (
             observation = runtime.observe()
             self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
             self.assertNotIn('private observed content', str(observation))
+
+    def test_shared_module_refuses_unmanaged_bytes_and_adopts_exact_bytes(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.control = root/'control'
+            runtime.safefs_path, runtime.safefs_content = root/'support/safefs.py', b'support'
+            runtime.assets = runtime.retained = {}
+            runtime.selected = True
+            runtime.owned = lambda: False
+            runtime.safefs_path.parent.mkdir()
+            runtime.safefs_path.parent.chmod(0o2755)
+            runtime.safefs_path.write_bytes(b'unmanaged')
+            runtime.safefs_path.chmod(0o644)
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(ValueError, 'managed asset changed'):
+                    operation()
+            self.assertEqual(runtime.safefs_path.read_bytes(), b'unmanaged')
+            self.assertFalse(runtime.control.exists())
+
+            runtime.control.mkdir(mode=0o700)
+            runtime.safefs_path.write_bytes(runtime.safefs_content)
+            state = runtime.safefs_state()
+            self.assertEqual(state.mode, 0o644)
+            self.assertFalse(state.publish)
+            pending = runtime.publish_safefs(state)
+            guest.native.publish(state.receipt_path, state.wanted, pending)
+            self.assertTrue(runtime.safefs_state().current)
+            self.assertEqual(stat.S_IMODE(runtime.safefs_path.parent.stat().st_mode), 0o2755)
 
     def test_running_child_no_new_privs_uses_actual_kernel_status_and_uid(self):
         process=subprocess.Popen(['/usr/bin/setpriv','--no-new-privs',sys.executable,'-c',
@@ -1152,6 +1197,36 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 subprocess.run([sys.executable, '-IBc', "import sys; sys.path.insert(0, sys.argv[1]); "
                                 "import records; assert records.safefs.__file__ == sys.argv[2]",
                                 str(runtime.library), str(runtime.safefs_path)], check=True, timeout=5)
+                # Stop after publishing only the module. Both the receipt and
+                # restart decision must survive a retry of the same update.
+                original_support = runtime.safefs_content
+                runtime.safefs_content += b'\n# replacement module\n'
+                publish = guest.native.publish
+
+                def interrupt_support(path, *args, **kwargs):
+                    publish(path, *args, **kwargs)
+                    if path == runtime.safefs_path:
+                        raise InterruptedError('module published')
+
+                inventory = runtime.saved_inventory()
+                start = len(calls)
+                with patch.object(guest.native, 'publish', side_effect=interrupt_support):
+                    with self.assertRaisesRegex(InterruptedError, 'module published'):
+                        runtime.apply()
+                self.assertIn(('stop', guest.MANAGER), calls[start:])
+                self.assertFalse(any(call[0] == 'stop' and guest.COLLECTOR in call for call in calls[start:]))
+                support = runtime.safefs_state()
+                self.assertFalse(support.current)
+                self.assertFalse(support.publish)
+                self.assertEqual(len(support.receipt.splitlines()), 2)
+                start = len(calls)
+                runtime.apply()
+                self.assertIn(('enable', '--now', guest.COLLECTOR, guest.MANAGER), calls[start:])
+                self.assertTrue(runtime.safefs_state().current)
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertEqual(runtime.saved_inventory(), inventory)
+                runtime.safefs_content = original_support
+                runtime.apply()
                 installed_native = root/'library/native.py'
                 receipt_path = root/'control/assets.json'
                 legacy_fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'

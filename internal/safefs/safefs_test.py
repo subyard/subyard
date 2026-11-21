@@ -2,7 +2,6 @@
 
 import concurrent.futures
 import errno
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -122,10 +121,6 @@ safefs.write_file(sys.argv[3], b'new')
 
         self.assertTrue(safefs.ensure_dir(self.path/'child', parent_mode=0o700))
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o700)
-        for before, after in ((0o1500, 0o1700), (0o2500, 0o2500), (0o4500, 0o4500)):
-            self.path.chmod(before)
-            safefs.ensure_dir(self.path)
-            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), after)
         self.path.chmod(0o750)
         with self.assertRaisesRegex(safefs.DirState, safefs.MODE):
             safefs.ensure_dir(self.path)
@@ -141,6 +136,28 @@ safefs.write_file(sys.argv[3], b'new')
         with self.assertRaisesRegex(safefs.Unsafe, safefs.OWNER):
             safefs.ensure_dir(self.path/'foreign', owner=(foreign, -1))
         self.assertFalse((self.path/'foreign').exists())
+
+    def test_parity_finish_keeps_sticky_and_leaves_set_id_directories_untouched(self):
+        self.path.mkdir()
+        for before, after in ((0o1500, 0o1700), (0o2500, 0o2500), (0o4500, 0o4500), (0o7500, 0o7500)):
+            with self.subTest(mode=oct(before)):
+                self.path.chmod(before)
+                identity = self.path.stat().st_uid, self.path.stat().st_gid
+                self.assertFalse(safefs.ensure_dir(self.path))
+                info = self.path.stat()
+                self.assertEqual(stat.S_IMODE(info.st_mode), after)
+                self.assertEqual((info.st_uid, info.st_gid), identity)
+
+    def test_parity_dangling_user_link_is_refused(self):
+        self.path.symlink_to('missing')
+        # Exercise the user-file policy even in the root permission run.
+        with patch.object(safefs.os, 'geteuid', return_value=1):
+            with self.assertRaises(FileNotFoundError):
+                safefs.resolve_file(self.path)
+            with self.assertRaises(FileNotFoundError):
+                safefs.write_file(self.path, b'new', follow_symlink=True)
+        self.assertEqual(os.readlink(self.path), 'missing')
+        self.assertFalse((self.root/'missing').exists())
 
     def test_anchored_publication_and_root_checks(self):
         before = self.root/'before'
@@ -227,6 +244,37 @@ safefs.write_file(sys.argv[3], b'new')
         self.assertEqual(self.path.read_bytes(), b'new')
         self.assertEqual(list(stage.iterdir()), [])
 
+    def test_no_replace_directory_without_renameat2_refuses_without_linking(self):
+        self.path.mkdir()
+        target = self.root/'destination'
+        with patch.object(safefs.ctypes, 'CDLL', return_value=object()), patch.object(safefs.os, 'link') as link:
+            with self.assertRaisesRegex(OSError, 'atomic no-replace directory rename requires renameat2') as error:
+                safefs.rename_noreplace(self.path, target)
+        self.assertEqual(error.exception.errno, errno.EOPNOTSUPP)
+        link.assert_not_called()
+        self.assertTrue(self.path.is_dir())
+        self.assertFalse(target.exists())
+
+    def test_rename_noreplace_rejects_nul_before_calling_libc(self):
+        self.path.write_bytes(b'original')
+        target = self.root/'destination'
+        for src, dst in ((str(self.path)+'\0suffix', target), (self.path, os.fsencode(target)+b'\0suffix')):
+            with self.subTest(src=src, dst=dst), patch.object(safefs.ctypes, 'CDLL') as libc:
+                with self.assertRaisesRegex(ValueError, 'embedded null byte'):
+                    safefs.rename_noreplace(src, dst)
+                libc.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), b'original')
+        self.assertFalse(target.exists())
+
+    def test_lock_releases_flock_while_duplicate_remains_open(self):
+        with safefs.lock(self.path) as fd:
+            duplicate = os.dup(fd)
+            self.addCleanup(os.close, duplicate)
+            with self.assertRaises(BlockingIOError), safefs.lock(self.path, deadline=time.monotonic()):
+                self.fail('locked an already locked file')
+        with safefs.lock(self.path, deadline=time.monotonic()):
+            self.assertTrue(stat.S_ISREG(os.fstat(duplicate).st_mode))
+
     def test_read_and_lock_refuse_unsafe_entries(self):
         self.assertIsNone(safefs.read_regular(self.path))
         os.mkfifo(self.path)
@@ -244,7 +292,6 @@ safefs.write_file(sys.argv[3], b'new')
             self.assertTrue(stat.S_ISREG(os.fstat(fd).st_mode))
             with self.assertRaises(BlockingIOError), safefs.lock(self.path, deadline=time.monotonic()):
                 self.fail('locked an already locked file')
-            fcntl.flock(fd, fcntl.LOCK_UN)
         safefs.write_file(self.path, b'hello')
         self.assertEqual(safefs.read_regular(self.path, max_bytes=5, single_link=True), b'hello')
         with self.assertRaisesRegex(safefs.Unsafe, safefs.TOO_LARGE):

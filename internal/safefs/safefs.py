@@ -287,14 +287,20 @@ def resolve_file(path):
 
 
 def _rename_noreplace(src, dst, src_fd, dst_fd):
+    src_bytes, dst_bytes = os.fsencode(src), os.fsencode(dst)
+    if b'\0' in src_bytes or b'\0' in dst_bytes:
+        raise ValueError('embedded null byte')
     rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
     if rename is not None:
-        if rename(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), 1) == 0:
+        if rename(src_fd, src_bytes, dst_fd, dst_bytes, 1) == 0:
             return True
         error = ctypes.get_errno()
         if error not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
             raise OSError(error, os.strerror(error), src, None, dst)
-    os.link(src, dst, src_dir_fd=None if src_fd == -100 else src_fd,
+    source_parent = None if src_fd == -100 else src_fd
+    if stat.S_ISDIR(os.stat(src, dir_fd=source_parent, follow_symlinks=False).st_mode):
+        raise OSError(errno.EOPNOTSUPP, 'atomic no-replace directory rename requires renameat2', src, None, dst)
+    os.link(src, dst, src_dir_fd=source_parent,
             dst_dir_fd=None if dst_fd == -100 else dst_fd, follow_symlinks=False)
     return False
 
@@ -317,6 +323,16 @@ class Pending:
 
     def __enter__(self):
         return self
+
+    @property
+    def target(self):
+        """Destination basename for descriptor-relative checks."""
+        return self._target
+
+    @property
+    def parent_fd(self):
+        """Borrow the pinned destination parent while the pending file is open."""
+        return self._parent
 
     def __exit__(self, kind, _value, _trace):
         if kind is not None and issubclass(kind, SimulatedCrash):
@@ -515,6 +531,9 @@ def lock(path, *, shared=False, deadline=None, mode=0o600):
                     if remaining <= 0:
                         raise
                     time.sleep(min(0.005, remaining))
-        yield fd
+        try:
+            yield fd
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
