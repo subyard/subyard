@@ -17,19 +17,17 @@ import (
 )
 
 func TestResourceCommandPreparesConfirmsRevalidatesThenApplies(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	prepareLog := filepath.Join(root, "resource-prepare.log")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"},
-		Environment: append(environment, "API_TOKEN=must-not-reach-prepare"), WorkingDir: root,
-		Stdin: strings.NewReader("must-not-reach-prepare\n"), Stdout: &stdout, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments:   []string{"demo", "run"},
+		Environment: append(environment, "API_TOKEN=must-not-reach-prepare"),
+		Stdin:       strings.NewReader("must-not-reach-prepare\n"), Stdout: &stdout, Stderr: &stderr,
 		Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -59,7 +57,8 @@ func TestResourceCommandRejectsStaleAssessmentAfterConsent(t *testing.T) {
 		{name: "automation consent", argument: "--stale-on-second", assumeYes: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
+			root := fixture.Root
 			arguments := []string{"demo", "run", test.argument}
 			var prompt ports.Prompter = &callbackPrompt{callback: func() {
 				writeCLIFile(t, filepath.Join(root, "resource-drift"), "changed\n", 0o600)
@@ -69,13 +68,10 @@ func TestResourceCommandRejectsStaleAssessmentAfterConsent(t *testing.T) {
 				prompt = &testkit.Prompt{}
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: arguments,
-				Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+			program := fixture.New(Options{
+				Arguments: arguments,
+				Stderr:    &stderr, Prompt: prompt,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), "operation plan is stale") {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -88,19 +84,16 @@ func TestResourceCommandRejectsStaleAssessmentAfterConsent(t *testing.T) {
 }
 
 func TestResourceCommandSkipsMutationThatBecameNoOpAfterConsent(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
+	root := fixture.Root
 	prompt := &callbackPrompt{callback: func() {
 		writeCLIFile(t, filepath.Join(root, "resource-drift"), "changed\n", 0o600)
 	}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"demo", "run", "--become-no-op"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--become-no-op"},
+		Stderr:    &stderr, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -110,16 +103,12 @@ func TestResourceCommandSkipsMutationThatBecameNoOpAfterConsent(t *testing.T) {
 }
 
 func TestResourceCommandRejectsMalformedSecondPrepare(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"demo", "run", "--malformed-on-second", "--yes"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--malformed-on-second", "--yes"},
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "resource_plan_invalid") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -130,16 +119,13 @@ func TestResourceCommandRejectsMalformedSecondPrepare(t *testing.T) {
 }
 
 func TestResourceCommandDeclineDoesNotApplyDefaultNoAction(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "purge"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "purge"},
+		Stderr:    &stderr, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -152,16 +138,13 @@ func TestResourceCommandDeclineDoesNotApplyDefaultNoAction(t *testing.T) {
 }
 
 func TestResourceCommandSessionDoesNotPrompt(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "view"},
+		Stderr:    &stderr, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -174,30 +157,23 @@ func TestResourceCommandSessionDoesNotPrompt(t *testing.T) {
 }
 
 func TestResourceCommandSessionPreservesChildExitCode(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view", "--exit=23"},
-		Environment: environment, WorkingDir: root,
+	fixture, _ := newResourceCommandFixture(t)
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "view", "--exit=23"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 23 {
 		t.Fatalf("code=%d, want 23", code)
 	}
 }
 
 func TestResourceCommandNoOpMutationDoesNotPromptOrApply(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--no-op"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--no-op"},
+		Stderr:    &stderr, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -210,7 +186,8 @@ func TestResourceCommandNoOpMutationDoesNotPromptOrApply(t *testing.T) {
 }
 
 func TestResourceApplyInheritsDeclaredContext(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	descriptor := filepath.Join(root, "config/profiles/fixture/resources/demo.res")
 	data, err := os.ReadFile(descriptor)
 	if err != nil {
@@ -227,11 +204,8 @@ func TestResourceApplyInheritsDeclaredContext(t *testing.T) {
 	writeCLIFile(t, handlerPath, handlerText, 0o700)
 	environment = append(environment, "FIXTURE_RUN_CONTEXT=managed-run", "FIXTURE_DATA_CONTEXT=/tmp/context with $literal")
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "view"},
+		Environment: environment, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -271,7 +245,8 @@ func TestResourceContextEnvironmentCannotOverrideAuthorityOrCarryInvalidValues(t
 }
 
 func TestResourceSessionApplyPreservesOnlyInteractiveEnvironment(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	environment = append(environment,
 		"HOME=/home/session-user",
 		"USER=session-user",
@@ -287,13 +262,10 @@ func TestResourceSessionApplyPreservesOnlyInteractiveEnvironment(t *testing.T) {
 		"API_TOKEN=must-not-reach-resource",
 	)
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments:   []string{"demo", "view"},
+		Environment: environment, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -308,16 +280,13 @@ func TestResourceSessionApplyPreservesOnlyInteractiveEnvironment(t *testing.T) {
 }
 
 func TestResourceCommandYesIsConsentOnly(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--yes"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--yes"},
+		Stderr:    &stderr, Prompt: prompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -341,15 +310,12 @@ func TestResourceCommandRejectsUnknownAndMismatchedActionsBeforeApply(t *testing
 		{name: "oversize result", arguments: []string{"demo", "status", "--oversize"}, want: "resource_plan_invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
-				Environment: environment, WorkingDir: root, Stderr: &stderr,
+			program := fixture.New(Options{
+				Arguments: test.arguments,
+				Stderr:    &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
 			}
@@ -361,15 +327,12 @@ func TestResourceCommandRejectsUnknownAndMismatchedActionsBeforeApply(t *testing
 }
 
 func TestResourceCommandPrepareHonorsParentDeadline(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status", "--timeout"},
-		Environment: environment, WorkingDir: root, Stderr: &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "status", "--timeout"},
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if code := program.Run(ctx); code == 0 || !strings.Contains(stderr.String(), "resource_plan_invalid") {
@@ -395,15 +358,12 @@ func TestResourceCommandExitCodesDistinguishUsageFromRuntime(t *testing.T) {
 		{"malformed plan", []string{"demo", "status", "--malformed"}, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
 			prompt := &testkit.Prompt{}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard",
-				Arguments: test.arguments, Environment: environment, WorkingDir: root,
-				Stderr: &stderr, Prompt: prompt})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{
+				Arguments: test.arguments,
+				Stderr:    &stderr, Prompt: prompt})
 			if code := program.Run(context.Background()); code != test.code {
 				t.Fatalf("exit=%d want=%d stderr=%q", code, test.code, stderr.String())
 			}
@@ -419,16 +379,14 @@ func TestResourceCommandExitCodesDistinguishUsageFromRuntime(t *testing.T) {
 
 func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 	t.Run("help", func(t *testing.T) {
-		root, environment, applyLog := resourceCommandFixture(t)
+		fixture, applyLog := newResourceCommandFixture(t)
+		environment := fixture.Environment
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "--help"},
-			Environment: append(environment, "API_TOKEN=must-not-reach-help"), WorkingDir: root,
-			Stdin: strings.NewReader("must-not-reach-help\n"), Stdout: &stdout, Stderr: &stderr,
+		program := fixture.New(Options{
+			Arguments:   []string{"demo", "--help"},
+			Environment: append(environment, "API_TOKEN=must-not-reach-help"),
+			Stdin:       strings.NewReader("must-not-reach-help\n"), Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "Usage:") {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
@@ -438,15 +396,12 @@ func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 	})
 
 	t.Run("svc", func(t *testing.T) {
-		root, environment, applyLog := resourceCommandFixture(t)
+		fixture, applyLog := newResourceCommandFixture(t)
 		var stderr bytes.Buffer
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Arguments: []string{"svc", "demo", "status"},
-			Environment: environment, WorkingDir: root, Stderr: &stderr,
+		program := fixture.New(Options{
+			Arguments: []string{"svc", "demo", "status"},
+			Stderr:    &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -456,15 +411,12 @@ func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 	})
 
 	t.Run("positional help is a handler argument", func(t *testing.T) {
-		root, environment, applyLog := resourceCommandFixture(t)
+		fixture, applyLog := newResourceCommandFixture(t)
 		var stderr bytes.Buffer
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status", "help"},
-			Environment: environment, WorkingDir: root, Stderr: &stderr,
+		program := fixture.New(Options{
+			Arguments: []string{"demo", "status", "help"},
+			Stderr:    &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -474,15 +426,12 @@ func TestResourceHelpAndHiddenSvcUseSafeSharedDispatch(t *testing.T) {
 	})
 
 	t.Run("global yes precedes hidden svc", func(t *testing.T) {
-		root, environment, applyLog := resourceCommandFixture(t)
+		fixture, applyLog := newResourceCommandFixture(t)
 		var stderr bytes.Buffer
-		program, err := New(Options{
-			RepositoryRoot: root, Program: "yard", Arguments: []string{"--yes", "svc", "demo", "run"},
-			Environment: environment, WorkingDir: root, Stderr: &stderr,
+		program := fixture.New(Options{
+			Arguments: []string{"--yes", "svc", "demo", "run"},
+			Stderr:    &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -509,7 +458,8 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 		{"declined payload", []string{"run", "--", "--yes"}, []string{"run", "--", "--yes"}, 1, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			remoteDirectory := filepath.Join(root, "state", "yards", "remote")
 			if err := os.MkdirAll(remoteDirectory, 0o700); err != nil {
 				t.Fatal(err)
@@ -527,13 +477,10 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 			environment = append(environment, "PATH="+path)
 			prompt := &testkit.Prompt{Answers: []bool{!test.decline}}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: append([]string{"-Y", "remote", "demo"}, test.arguments...),
-				Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt,
+			program := fixture.New(Options{
+				Arguments:   append([]string{"-Y", "remote", "demo"}, test.arguments...),
+				Environment: environment, Stderr: &stderr, Prompt: prompt,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			wantCode := 0
 			if test.decline {
 				wantCode = 1
@@ -572,7 +519,14 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 
 func resourceCommandFixture(t *testing.T) (string, []string, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
+	return fixture.Root, fixture.Environment, applyLog
+}
+
+func newResourceCommandFixture(t *testing.T, options ...fixtureOption) (*cliFixture, string) {
+	t.Helper()
+	fixture := newFixture(t, options...)
+	root := fixture.Root
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -675,11 +629,12 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
 esac
 `
 	writeCLIFile(t, filepath.Join(resourceRoot, "demo", "handler.sh"), handler, 0o700)
-	return root, environment, applyLog
+	return fixture, applyLog
 }
 
 func TestResourceReadOnlyVerbBypassesV2MutationGate(t *testing.T) {
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newResourceCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-resource-gate")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	journalPath, _ := installUnfinishedV2MutationGateFixture(
@@ -695,14 +650,11 @@ func TestResourceReadOnlyVerbBypassesV2MutationGate(t *testing.T) {
 	}
 
 	var statusStderr bytes.Buffer
-	status, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status"},
-		Environment: environment, WorkingDir: root,
-		Stdout: &bytes.Buffer{}, Stderr: &statusStderr,
+	status := fixture.New(Options{
+		Arguments:   []string{"demo", "status"},
+		Environment: environment,
+		Stdout:      &bytes.Buffer{}, Stderr: &statusStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := status.Run(context.Background()); code != 0 {
 		t.Fatalf("read-only resource status: code=%d stderr=%q", code, statusStderr.String())
 	}
@@ -716,14 +668,11 @@ func TestResourceReadOnlyVerbBypassesV2MutationGate(t *testing.T) {
 	}
 
 	var escalationStderr bytes.Buffer
-	escalation, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status", "--escalate"},
-		Environment: environment, WorkingDir: root,
-		Stdout: &bytes.Buffer{}, Stderr: &escalationStderr,
+	escalation := fixture.New(Options{
+		Arguments:   []string{"demo", "status", "--escalate"},
+		Environment: environment,
+		Stdout:      &bytes.Buffer{}, Stderr: &escalationStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := escalation.Run(context.Background()); code != 1 ||
 		!strings.Contains(escalationStderr.String(), "does not declare") {
 		t.Fatalf("read verb escalation: code=%d stderr=%q", code, escalationStderr.String())
@@ -734,14 +683,11 @@ func TestResourceReadOnlyVerbBypassesV2MutationGate(t *testing.T) {
 	}
 
 	var mutationStderr bytes.Buffer
-	mutation, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--yes"},
-		Environment: environment, WorkingDir: root,
-		Stdout: &bytes.Buffer{}, Stderr: &mutationStderr,
+	mutation := fixture.New(Options{
+		Arguments:   []string{"demo", "run", "--yes"},
+		Environment: environment,
+		Stdout:      &bytes.Buffer{}, Stderr: &mutationStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := mutation.Run(context.Background()); code != 1 {
 		t.Fatalf("mutating resource gate: code=%d stderr=%q", code, mutationStderr.String())
 	}
@@ -782,7 +728,8 @@ func TestResourceHandlerHelpArgumentDoesNotBypassV2MutationGate(t *testing.T) {
 		{"read handler help", []string{"demo", "status", "--", "--help"}, 0, "status -- --help\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceCommandFixture(t)
+			fixture, applyLog := newResourceCommandFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			runtimeRoot := filepath.Join(root, "runtime-v2-resource-gate")
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 			journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -791,14 +738,11 @@ func TestResourceHandlerHelpArgumentDoesNotBypassV2MutationGate(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
-				Environment: environment, WorkingDir: root,
-				Stdout: &bytes.Buffer{}, Stderr: &stderr,
+			program := fixture.New(Options{
+				Arguments:   test.arguments,
+				Environment: environment,
+				Stdout:      &bytes.Buffer{}, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != test.wantCode {
 				t.Errorf("code=%d want=%d stderr=%q", code, test.wantCode, stderr.String())
 			}
@@ -835,7 +779,8 @@ func readResourceApplyLog(t *testing.T, path string) string {
 }
 
 func TestRemoteControllerSessionUsesTrustedOwnerWireAndLocalEnvironment(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t, withCommands("ssh"))
+	root, environment := fixture.Root, fixture.Environment
 	// The fixture profile identity is kept generic; only a declared session can opt in.
 	matches, _ := filepath.Glob(filepath.Join(root, "config/profiles/*/resources/demo.res"))
 	if len(matches) != 1 {
@@ -863,21 +808,11 @@ func TestRemoteControllerSessionUsesTrustedOwnerWireAndLocalEnvironment(t *testi
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(root, "state/yards/remote/config.env"), "YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
-	fakeBin := filepath.Join(root, "fake-bin")
 	sshLog := filepath.Join(root, "wire-ssh.jsonl")
-	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+`exec python3 -c 'import json,sys; open("`+sshLog+`", "a").write(json.dumps(sys.argv[1:])+"\n"); assert sys.stdin.buffer.read()==b"private-protocol\n"; print("wire-payload")' "$@"
-`, 0o700)
-	path := fakeBin + ":" + os.Getenv("PATH")
-	t.Setenv("PATH", path)
+	fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: trustedSSHMock(t) + `exec python3 -c 'import json,sys; open("` + sshLog + `", "a").write(json.dumps(sys.argv[1:])+"\n"); assert sys.stdin.buffer.read()==b"private-protocol\n"; print("wire-payload")' "$@"`})
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "remote", "demo", "view"},
-		Environment: append(environment, "PATH="+path, "DISPLAY=:77", "SSH_AUTH_SOCK=/fixture/agent"), WorkingDir: root, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"-Y", "remote", "demo", "view"},
+		Environment: append(environment, "DISPLAY=:77", "SSH_AUTH_SOCK=/fixture/agent"), Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -912,7 +847,8 @@ func TestRemoteControllerSessionUsesTrustedOwnerWireAndLocalEnvironment(t *testi
 
 func TestResourceWireIsOptInAndKeepsProtocolStdout(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
-		root, environment, _ := resourceCommandFixture(t)
+		fixture, _ := newResourceCommandFixture(t)
+		root := fixture.Root
 		matches, _ := filepath.Glob(filepath.Join(root, "config/profiles/*/resources/demo.res"))
 		if enabled {
 			value, err := os.ReadFile(matches[0])
@@ -927,11 +863,8 @@ func TestResourceWireIsOptInAndKeepsProtocolStdout(t *testing.T) {
 cat
 `, 0o700)
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "--session-wire", "view"}, Environment: environment,
-			WorkingDir: root, Stdin: strings.NewReader("private-framed-protocol\n"), Stdout: &stdout, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: []string{"demo", "--session-wire", "view"},
+			Stdin: strings.NewReader("private-framed-protocol\n"), Stdout: &stdout, Stderr: &stderr})
 		code := program.Run(context.Background())
 		if enabled {
 			if code != 0 || stdout.String() != "private-framed-protocol\n" {
