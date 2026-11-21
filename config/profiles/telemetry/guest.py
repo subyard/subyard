@@ -35,9 +35,10 @@ BINARY_LIMIT = 64*1024*1024
 REPLACED = 'replaced'
 # Drop-in directories systemd applies to every service, such as the LXC guest's.
 TYPE_DROPINS = (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d'))
-# Settings of the stock LXC guest drop-in, the type-wide one a recognized previous unit may carry.
-LXC_SETTINGS = ('ProcSubset', 'ProtectProc', 'ProtectControlGroups', 'ProtectKernelTunables', 'NoNewPrivileges',
-                'LoadCredential', 'PrivateNetwork', 'ImportCredential')
+# Lines of the stock LXC guest drop-in after its [Service] header, the type-wide one a recognized
+# previous unit may carry. The host's bwrap policy accepts the same set.
+LXC_DROPIN = ('ProcSubset=all', 'ProtectProc=default', 'ProtectControlGroups=no', 'ProtectKernelTunables=no',
+              'NoNewPrivileges=no', 'LoadCredential=', 'PrivateNetwork=no', 'ImportCredential=')
 
 
 def systemctl(*args):
@@ -49,8 +50,8 @@ def systemctl(*args):
 
 
 def stock_dropin(path, before=None):
-    """Whether a type-wide drop-in is a root-owned regular file, older than `before` when given,
-    that sets only what the stock LXC guest drop-in sets. Each physical line stands alone."""
+    """Whether a type-wide drop-in is the stock LXC guest's: a root-owned regular file, older than
+    `before` when given, of a [Service] header and stock lines only."""
     try:
         native.safe(path)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -60,19 +61,11 @@ def stock_dropin(path, before=None):
                     or any(entry.st_uid != os.getuid() or entry.st_mode & 0o022 for entry in (info, path.parent.stat()))):
                 return False
             content = stream.read(native.CONFIG_LIMIT+1)
-        if len(content) > native.CONFIG_LIMIT or b'\0' in content:
-            return False
-        lines = [line.strip() for line in content.decode().splitlines()]
     except (OSError, ValueError):
         return False
-    for line in lines:
-        if line.endswith('\\'):
-            return False
-        if not line or line[0] in '#;' or line.startswith('[') and line.endswith(']'):
-            continue
-        if line.partition('=')[0].strip() not in LXC_SETTINGS:
-            return False
-    return True
+    lines = content.removesuffix(b'\n').split(b'\n')
+    return (len(content) <= native.CONFIG_LIMIT and lines[0] == b'[Service]'
+            and all(line.decode('latin-1') in LXC_DROPIN for line in lines[1:]))
 
 
 class Runtime:

@@ -5,6 +5,7 @@ import importlib.util
 import io
 from contextlib import ExitStack, closing, redirect_stderr
 import os
+import re
 from pathlib import Path
 import select
 import shutil
@@ -132,12 +133,18 @@ class LifecycleTest(unittest.TestCase):
                 stale = {**fields, 'DropInPaths': str(dropin), 'NoNewPrivileges': 'no',
                          'NeedDaemonReload': 'no' if loaded == unit else 'yes'}
                 with patch.object(guest, 'TYPE_DROPINS', (service,)), patch.object(guest, 'systemctl', return_value=show(stale)):
-                    write_dropin(b'# Generated\n\n[Service]\nProcSubset=all\nProtectProc = default\nProtectControlGroups=no\n'
-                                 b'ProtectKernelTunables=no\n ; Container\nNoNewPrivileges=no\nLoadCredential=\nPrivateNetwork=no\nImportCredential=\n')
-                    with self.subTest(state=state, dropin='lxc'):
-                        self.assertEqual(runtime.manager(guest.COLLECTOR)['MemoryMax'], '536870912')
-                    # systemd drops comments before joining continuation lines and ends lines at NUL.
-                    for content in (b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',
+                    stock = b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\nProtectKernelTunables=no\n' \
+                            b'NoNewPrivileges=no\nLoadCredential=\nPrivateNetwork=no\nImportCredential=\n'
+                    for content in (stock, stock.removesuffix(b'\n'), b'[Service]\nProcSubset=all\n'):
+                        write_dropin(content)
+                        with self.subTest(state=state, dropin=content):
+                            self.assertEqual(runtime.manager(guest.COLLECTOR)['MemoryMax'], '536870912')
+                    # Only the stock lines, exactly: other values, keys, spellings and systemd syntax are refused.
+                    for content in (b'[Service]\nLoadCredential=x:/etc/shadow\n', b'[Service]\nImportCredential=*\n',
+                                    b'[Service]\nPrivateNetwork=yes\n', b'ProcSubset=all\n', b'', b'[Unit]\nProcSubset=all\n',
+                                    b'[Service]\n\nProcSubset=all\n', b'[Service]\n# Generated\nProcSubset=all\n',
+                                    b'[Service]\nProtectProc = default\n', b'[Service]\nProcSubset=all\n\n', b'[Service]\r\nProcSubset=all\r\n',
+                                    b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',b'[Service]\nEnvironment=GODEBUG=x\n', b'[Service]\nEnvironmentFile=-/etc/default/x\n',
                                     b'[Service]\nUser=root\n', b'[Service]\nGroup=root\n', b'[Service]\nExecStart=\nExecStart=/bin/sh\n',
                                     b'[Service]\nExecStartPre=/bin/true\n', b'[Service]\n  Environment = A=1\n',
                                     b'[Service]\nEnvironment\\\n=A=1\n', b'[Service]\nProcSubset=all\n# note \\\nEnvironment=A=1\n',
@@ -163,7 +170,11 @@ class LifecycleTest(unittest.TestCase):
                             (root/'lxc.conf').write_bytes(lxc)
                             dropin.symlink_to(root/'lxc.conf')
                         elif case == 'oversized':
-                            write_dropin(lxc+b'#'*guest.native.CONFIG_LIMIT)
+                            # Stock lines fill the read bound exactly; the rest is never read.
+                            short, long = b'ProcSubset=all\n', b'NoNewPrivileges=no\n'
+                            size = guest.native.CONFIG_LIMIT+1-len(b'[Service]\n')
+                            count = next(count for count in range(len(short)) if (size-count*len(long)) % len(short) == 0)
+                            write_dropin(b'[Service]\n'+long*count+short*((size-count*len(long))//len(short))+b'Environment=A=1\n')
                         elif case == 'binary':
                             write_dropin(lxc+b'\xff\n')
                         else:
@@ -205,6 +216,13 @@ class LifecycleTest(unittest.TestCase):
             path.symlink_to(root/'elsewhere')
             with patch.object(guest, 'systemctl', return_value=show({**fields, 'NeedDaemonReload': 'yes'})), self.assertRaises(ValueError):
                 runtime.manager(guest.COLLECTOR)
+
+    def test_stock_lxc_dropin_is_the_one_the_host_bwrap_policy_accepts(self):
+        policy = (Path(guest.__file__).parents[3]/'internal/adapters/reconcileruntime/bwrap_policy.sh').read_text()
+        header, = re.findall(r'NR == 1 \{ if \(\$0 != "(.*)"\) exit 1; next \}', policy)
+        lines, = re.findall(r'!/\^\((.*)\)\$/ \{ exit 1 \}', policy)
+        self.assertEqual(header, '[Service]')
+        self.assertCountEqual(lines.split('|'), guest.LXC_DROPIN)
 
     def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
         profile = Path(guest.__file__).parent
