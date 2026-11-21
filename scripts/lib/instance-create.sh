@@ -22,7 +22,9 @@ subyard_host_timezone() {
   # Prefer the active zone when the legacy timezone file is stale.
   IFS= read -r -d '' target < <(readlink -z -- "$etc/localtime" 2>/dev/null) || target=''
   case "$target" in
-    /usr/share/zoneinfo/* | ../usr/share/zoneinfo/*) zone=${target#*/usr/share/zoneinfo/} ;;
+    /usr/share/zoneinfo/* | ../usr/share/zoneinfo/*)
+      zone=${target#*/usr/share/zoneinfo/}
+      zone=${zone#posix/} ;;
     *)
       [ -f "$etc/timezone" ] || return 1
       # Read the whole file and reject NULs. EOF is normal for a text file.

@@ -605,6 +605,10 @@ printf 'ok: prepared split creation converges fresh disk /tmp and never restarts
   ! subyard_host_timezone "$timezone_etc" || fail 'timezone file with NUL was accepted'
   ln -s ../usr/share/zoneinfo/Europe/Berlin "$timezone_etc/localtime"
   [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'localtime link was ignored'
+  ln -sfnT ../usr/share/zoneinfo/right/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = right/Europe/Berlin ] || fail 'right timezone prefix was stripped'
+  ln -sfnT /usr/share/zoneinfo/posix/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'posix timezone prefix was kept'
 
   # Feed a real fixture symlink to the creation adapter without reading host timezone files.
   export MOCK_TIMEZONE_LINK="$timezone_etc/localtime"
