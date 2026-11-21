@@ -92,8 +92,11 @@ def private_directory(path):
         if parent.is_symlink():
             raise ValueError('unsafe directory')
     try:
-        fd, _ = safefs.open_dir(Path(os.path.abspath(path)), owner=(os.getuid(), -1), parent_mode=0o700,
-                                durability=safefs.BEST_EFFORT)
+        if path.name in ('', '..'):
+            fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+        else:
+            fd, _ = safefs.open_dir(path, owner=(os.getuid(), -1), parent_mode=0o700,
+                                    durability=safefs.BEST_EFFORT)
     except safefs.Unsafe as error:
         if error.reason == safefs.SYMLINK:
             raise ValueError('unsafe directory') from None
@@ -101,7 +104,8 @@ def private_directory(path):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path)) from None
         raise ValueError('private directory required') from None
     try:
-        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise ValueError('private directory required')
     finally:
         os.close(fd)
