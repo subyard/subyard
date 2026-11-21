@@ -1244,14 +1244,19 @@ confirmed observations and the exact active and target artifacts, then records t
 transaction as a completed `rollback-prep-v1-` journal of the active release with no steps, before
 the first hook. It then runs `rollback-apply` for each stale owner. The gate observes every
 prepared owner with the target's own handler from the target's root and checks the history
-verdict again. Finally the active release inspects the target afresh, admits that plan, and
-dispatches the ordinary retained execution, which switches the links. Data is not converted.
+verdict again. Finally the active release inspects the target afresh. The confirmation covers
+that plan only when it has no blockers, no unfinished transaction and no consequence beyond a plain
+rollback; the active release then dispatches the ordinary retained execution, which switches the
+links. Any other plan stops after the gate: a blocked plan names `yard migrate`, and one with its
+own consequences names `yard update --rollback`. Data is not converted.
 
 Every hook is an idempotent observe/apply pair, so an interrupted down transaction resumes by
-observing again: rerunning `yard update --rollback` skips converted owners, and the fault points
-`after-rollback-hook` and `before-target-dispatch` cover both interruptions. Any failure leaves the
-active release active. Its own runtime owners then report the prepared state as drift, the
-completed down journal is ordinary history, and `yard migrate` repairs forward.
+observing again. Rerunning `yard update --rollback` finds the converted owners current, checks the
+gate during planning, and asks to confirm the target's own plan; execution rechecks that every
+prepared owner still observes as confirmed. The fault points `after-rollback-hook` and
+`before-target-dispatch` cover both interruptions. Any failure leaves the active release active.
+Its own runtime owners then report the prepared state as drift, the completed down journal is
+ordinary history, and `yard migrate` repairs forward.
 
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -103,6 +104,13 @@ func (runtime *Runtime) planRollbackPreparation(ctx context.Context, activeRoot,
 			prep.items = append(prep.items, item)
 		}
 	}
+	if len(refusals) == 0 && !prep.needsApply() {
+		gate := prep.gate(ctx, runtime.config)
+		if errors.Is(gate, context.Canceled) || errors.Is(gate, context.DeadlineExceeded) {
+			return nil, nil, gate
+		}
+		refusals = append(refusals, refusalCauses(gate)...)
+	}
 	return prep, domain.CollectRefusals(refusals...), nil
 }
 
@@ -166,6 +174,38 @@ func stoppedYardRefusal(owner, yard string) rollbackPrepRefusal {
 	}
 }
 
+// needsApply reports whether any owner is still stale. A rerun after an
+// interrupted or refused down transaction finds every owner current and
+// confirms the retained release's own plan instead.
+func (prep *rollbackPreparation) needsApply() bool {
+	return slices.ContainsFunc(prep.items, func(item releasetransition.RollbackPrepItem) bool {
+		return item.State == releasetransition.RollbackPrepStale
+	})
+}
+
+// guardPreparedOwners rechecks, before the retained release's own plan runs,
+// that every prepared owner still observes as confirmed.
+func (runtime *Runtime) guardPreparedOwners(prepared Prepared, prep *rollbackPreparation) Prepared {
+	run := prepared.run
+	if run == nil {
+		return prepared
+	}
+	prepared.run = func(ctx context.Context) error {
+		hooks := rollbackPrepHooks{runtime: runtime, prep: prep}
+		for _, item := range prep.items {
+			observed, err := hooks.Observe(ctx, item.Owner, item.Yard)
+			if err != nil {
+				return err
+			}
+			if observed != item {
+				return fmt.Errorf("%w: prepared profile runtime %s in yard %s changed after confirmation", domain.ErrPlanStale, item.Owner, item.Yard)
+			}
+		}
+		return run(ctx)
+	}
+	return prepared
+}
+
 // gate proves, after preparation, that the target release observes every
 // prepared owner from its own root. A target that cannot observe the state,
 // or a yard stopped meanwhile, refuses before dispatch.
@@ -191,13 +231,7 @@ func (prep *rollbackPreparation) gate(ctx context.Context, configuration Config)
 // rollbackPrepOutcome renders collected refusals as one public outcome. The
 // first refusal in stable order supplies the next step.
 func rollbackPrepOutcome(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, refusals error) releasetransition.Outcome {
-	var causes []error
-	var collected *domain.Refusals
-	if errors.As(refusals, &collected) {
-		causes = collected.Unwrap()
-	} else {
-		causes = []error{refusals}
-	}
+	causes := refusalCauses(refusals)
 	messages := make([]string, 0, len(causes))
 	retry := ""
 	for _, cause := range causes {
@@ -212,6 +246,17 @@ func rollbackPrepOutcome(links releasetransition.ReleaseLinks, target releasetra
 	}
 	return publicReleaseOutcome(links, target, nil, releasetransition.CodeRollbackIncompatible,
 		boundedPrepText(strings.Join(messages, "; ")), retry)
+}
+
+func refusalCauses(refusals error) []error {
+	var collected *domain.Refusals
+	if errors.As(refusals, &collected) {
+		return collected.Unwrap()
+	}
+	if refusals == nil {
+		return nil
+	}
+	return []error{refusals}
 }
 
 // mergeRollbackPrepRefusals reports the down plan's refusals beside the
@@ -297,13 +342,32 @@ func (prep *rollbackPreparation) binding(request releasetransition.ProcessReques
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// Consequences every plain retained rollback plan carries: the adapter's
+// reactivation and the V2 engine's generic plan line, verbatim since v0.28.
+var plainRollbackConsequences = []string{
+	"reactivate the verified retained previous runtime",
+	"apply the exact typed migration and release activation plan",
+}
+
 // admitFreshRollbackPlan decides whether the retained release's own plan,
 // inspected after preparation, runs under the operator's one confirmation of
-// the down plan. This is the single switch point for that policy.
-// PROVISIONAL: admit a plan without blockers or an unfinished resume.
-func admitFreshRollbackPlan(inspection releasetransition.Inspection) error {
-	if len(inspection.Blockers) != 0 || inspection.Resume != nil {
-		return errors.New("the retained release's plan after preparation is not admitted under this confirmation")
+// the down plan: only a plan without blockers, an unfinished transaction or
+// consequences beyond a plain rollback. Anything else stops after the gate
+// with the active release still active.
+func admitFreshRollbackPlan(fresh Prepared) error {
+	if len(fresh.inspection.Blockers) != 0 || fresh.inspection.Resume != nil {
+		return rollbackPrepRefusal{
+			message: "the retained release's plan after preparation is blocked; profile runtimes stay prepared and this release stays active",
+			retry:   "run " + domain.RenderAction(domain.Action{Verb: domain.VerbMigrate}),
+		}
+	}
+	for _, consequence := range fresh.Consequences {
+		if !slices.Contains(plainRollbackConsequences, consequence) {
+			return rollbackPrepRefusal{
+				message: "the retained release's plan after preparation needs its own confirmation; profile runtimes stay prepared and this release stays active",
+				retry:   "run yard update --rollback",
+			}
+		}
 	}
 	return nil
 }
@@ -424,9 +488,9 @@ func (runtime *Runtime) dispatchPreparedRollback(
 		return err
 	}
 	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
-	if err := admitFreshRollbackPlan(fresh.inspection); err != nil {
-		return transitionOutcomeError(publicReleaseOutcome(links, request.Target, nil, releasetransition.CodeRollbackIncompatible,
-			err.Error(), "run "+domain.RenderAction(domain.Action{Verb: domain.VerbMigrate})))
+	if err := admitFreshRollbackPlan(fresh); err != nil {
+		outcome := rollbackPrepOutcome(links, request.Target, err)
+		return publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
 	}
 	binding, err := runtime.retainedRuntimeBinding(ctx, prep.activeRoot, prep.targetRoot, prep.configHome, targetOwners)
 	if err != nil {

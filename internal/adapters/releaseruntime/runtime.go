@@ -728,7 +728,11 @@ func (runtime *Runtime) PrepareTransition(
 		exactCompletedTarget := !parsed.offline && protected.journal.SourceIngress != nil &&
 			parsed.version != "" && parsed.version == protected.target.version &&
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
-		if unfinished || exactCompletedTarget {
+		// A completed down transaction is history: its own owners report the
+		// prepared state as drift, and a rollback rerun confirms the target plan.
+		preparedRollback := parsed.rollback && protected.journal.Checkpoint == releasetransition.JournalComplete &&
+			strings.HasPrefix(string(protected.journal.Transaction), releasetransition.RollbackPrepTransactionPrefixV1)
+		if (unfinished || exactCompletedTarget) && !preparedRollback {
 			if unfinished {
 				newerRelease = newerReleaseReplacement(parsed, configHome)
 			}
@@ -1358,7 +1362,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
 			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
 	}
-	if prep != nil {
+	if prep != nil && prep.needsApply() {
 		active, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: observed.Active, root: activeRoot}, parsed.root, nil)
 		if err != nil {
 			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
@@ -1391,7 +1395,11 @@ func (runtime *Runtime) prepareRetainedTransition(
 			"restore a compatible retained release, then run yard update --rollback",
 		)))
 	}
-	return runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners), nil
+	prepared = runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners)
+	if prep != nil {
+		prepared = runtime.guardPreparedOwners(prepared, prep)
+	}
+	return prepared, nil
 }
 
 type candidateVerification struct {
