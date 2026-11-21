@@ -1204,13 +1204,11 @@ later definitions are unchanged. When the active registry is the retired one, th
 parse it: a release engine validates the active registry before it serves any request, and parsers
 up to v0.30.0 require every `dependsOn` to name a migration defined earlier in the same registry.
 A surviving definition that depends on retired history therefore refuses with `registry-unreadable`,
-together with the registry refusal when the pair is also undeclared, unless the target's sealed
-declaration lists the `retired-prefix-dependencies` registry feature. Such a target, like the
-current parser, also accepts a dependency on a retired definition that a retired prefix proves
-against the frozen v0.28 history, when that definition's own prerequisites are retired too. For a
-v0.30.0 target this admits only retirements that also retire the NM guard step, or the
-definition-free `project-state` prefix; a feature-declaring target also admits the retirement of
-the six historical migrations. Any other relation is `refuse`; `steps` is not produced
+together with the registry refusal when the pair is also undeclared. The current registry parser
+applies the same rule, so today the runtime and the verb refuse such an active registry earlier, as
+one whose sealed registry cannot be verified, and do not reach `registry-unreadable`.
+For the v0.30.0 registry this admits only retirements that also retire the NM guard step, or the
+definition-free `project-state` prefix. Any other relation is `refuse`; `steps` is not produced
 yet. For an admitted relation it then reads the authoritative ledger or checkpoint through the
 target registry and its checkpoint-reader marker. Checkpoint reading checks prefix digests and
 epochs, not the writer's registry digest, so either release of an equivalent pair reads history
@@ -1230,17 +1228,12 @@ parsed registries and its own declaration; identical sealed bytes stand in for a
 cannot parse. The sealed
 [`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
 digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
-in schema 1. Its optional `registryFeatures` list names the registry forms the release reads beyond
-the v0.30.0 form: `retired-prefix-dependencies` means live migrations may depend on definitions
-retired into a digest-proved prefix whose own prerequisites are retired too. It is verified from the
-sealed manifest like the checkpoint marker, and a release without it declares no predecessor and no
-registry features. A release parses its own declaration strictly, including that it claims no
-feature its compiled parser does not implement; packaging runs the same check
-(`dev/rollback-declaration-check`). Another release's declaration, which can come from a newer
-release, is read only for `predecessorRegistryDigest` and the string entries of `registryFeatures`:
-unknown fields, features, list entries and schema versions above 1 are tolerated, while the size
-bound, a single JSON object, a schema version of at least 1 and a well-formed digest are still
-required. Later schemas therefore keep those fields and their meaning.
+in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release
+without it declares no predecessor. A release parses its own declaration strictly. Another
+release's declaration, which can come from a newer release, is read only for
+`predecessorRegistryDigest`: unknown fields, list entries and schema versions above 1 are
+tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
+well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the

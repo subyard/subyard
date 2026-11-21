@@ -167,10 +167,7 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	if identity != "" && firstPublication {
 		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	input := releasetransition.HistoryCompatibilityInput{
-		Predecessor: predecessor.Digest, TargetPredecessor: targetPredecessor.Digest,
-		TargetRegistryFeatures: targetPredecessor.RegistryFeatures,
-	}
+	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor, TargetPredecessor: targetPredecessor}
 	if activeIdentity != "" {
 		input.Active = &activeRegistry
 	}
@@ -193,19 +190,13 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	return history, "", nil
 }
 
-// rollbackPredecessorParser reads the predecessor digest and registry
-// features from declaration bytes.
-type rollbackPredecessorParser func([]byte) (releasetransition.RollbackPredecessor, error)
+// rollbackPredecessorParser reads the predecessor digest from declaration bytes.
+type rollbackPredecessorParser func([]byte) (releasetransition.Fingerprint, error)
 
 // strictRollbackPredecessor parses a release's own declaration in full.
-func strictRollbackPredecessor(payload []byte) (releasetransition.RollbackPredecessor, error) {
+func strictRollbackPredecessor(payload []byte) (releasetransition.Fingerprint, error) {
 	declaration, err := releasetransition.ParseRollbackDeclaration(payload)
-	if err != nil {
-		return releasetransition.RollbackPredecessor{}, err
-	}
-	return releasetransition.RollbackPredecessor{
-		Digest: declaration.PredecessorRegistryDigest, RegistryFeatures: declaration.RegistryFeatures,
-	}, nil
+	return declaration.PredecessorRegistryDigest, err
 }
 
 // needsSourceFloor reports when the source floor's upgrade advice may replace
@@ -243,9 +234,9 @@ func retainedHistoryEvidence(target *verifiedPublishedCandidate, registry releas
 // declares. It reads config/release-rollback.json the way the checkpoint
 // marker is read: only manifest-bound bytes captured during verification,
 // unchanged since. A release without it declares no predecessor.
-func declaredPredecessor(verified *verifiedPublishedCandidate, parse rollbackPredecessorParser) (releasetransition.RollbackPredecessor, error) {
+func declaredPredecessor(verified *verifiedPublishedCandidate, parse rollbackPredecessorParser) (releasetransition.Fingerprint, error) {
 	if !verified.rollbackBound {
-		return releasetransition.RollbackPredecessor{}, nil
+		return "", nil
 	}
 	return readRollbackPredecessor(int(verified.root.Fd()), func(payload []byte) error {
 		if sha256.Sum256(payload) != verified.rollbackDigest || !bytes.Equal(payload, verified.rollbackRaw) {
@@ -258,18 +249,18 @@ func declaredPredecessor(verified *verifiedPublishedCandidate, parse rollbackPre
 // readRollbackPredecessor reads config/release-rollback.json below a release
 // root without following links, bounded, checks the bytes and parses its
 // predecessor digest.
-func readRollbackPredecessor(rootFD int, check func([]byte) error, parse rollbackPredecessorParser) (releasetransition.RollbackPredecessor, error) {
+func readRollbackPredecessor(rootFD int, check func([]byte) error, parse rollbackPredecessorParser) (releasetransition.Fingerprint, error) {
 	file, err := openCandidateFile(rootFD, "config/release-rollback.json")
 	if err != nil {
-		return releasetransition.RollbackPredecessor{}, err
+		return "", err
 	}
 	defer file.Close()
 	payload, err := io.ReadAll(io.LimitReader(file, releasetransition.MaxRollbackDeclarationBytes+1))
 	if err != nil {
-		return releasetransition.RollbackPredecessor{}, err
+		return "", err
 	}
 	if err := check(payload); err != nil {
-		return releasetransition.RollbackPredecessor{}, err
+		return "", err
 	}
 	return parse(payload)
 }
@@ -290,5 +281,5 @@ func EngineRollbackPredecessor(releaseRoot string) (releasetransition.Fingerprin
 	if err != nil {
 		return "", fmt.Errorf("read release rollback declaration: %w", err)
 	}
-	return predecessor.Digest, nil
+	return predecessor, nil
 }

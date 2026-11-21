@@ -244,33 +244,8 @@ func TestRollbackDeclarationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	declaration, err := ParseRollbackDeclaration(shipped)
-	if err != nil {
+	if _, err := ParseRollbackDeclaration(shipped); err != nil {
 		t.Fatalf("shipped rollback declaration: %v", err)
-	}
-	// The sealed declaration states exactly what the compiled parser reads.
-	if !slices.Equal(declaration.RegistryFeatures, RegistryReaderFeatures()) {
-		t.Fatalf("shipped registry features = %v, compiled %v", declaration.RegistryFeatures, RegistryReaderFeatures())
-	}
-	// A release's own declaration claims no feature it does not implement.
-	own := `{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) + `","migrations":[],"profileFormats":[],"registryFeatures":`
-	for name, features := range map[string]string{
-		"unimplemented": `["a-later-form","retired-prefix-dependencies"]`,
-		"repeated":      `["retired-prefix-dependencies","retired-prefix-dependencies"]`,
-	} {
-		if _, err := ParseRollbackDeclaration([]byte(own + features + "}")); err == nil {
-			t.Errorf("own declaration with %s features was accepted", name)
-		}
-	}
-	// Another release's features are read tolerantly: unknown or non-string ones are ignored.
-	newer, err := ParseRollbackPredecessor([]byte(own + `["a-later-form",7,"retired-prefix-dependencies"]}`))
-	if err != nil || !newer.ReadsRegistryFeature(RegistryFeatureRetiredPrefixDependencies) ||
-		!slices.Equal(newer.RegistryFeatures, []string{"a-later-form", RegistryFeatureRetiredPrefixDependencies}) {
-		t.Fatalf("declaration with unknown features: %#v %v", newer, err)
-	}
-	older, err := ParseRollbackPredecessor([]byte(`{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) + `"}`))
-	if err != nil || older.ReadsRegistryFeature(RegistryFeatureRetiredPrefixDependencies) {
-		t.Fatalf("declaration without features: %#v %v", older, err)
 	}
 	valid := `{"schemaVersion":1,"predecessorRegistryDigest":"` + strings.Repeat("a", 64) + `","migrations":[],"profileFormats":[]}`
 	if _, err := ParseRollbackDeclaration([]byte(valid)); err != nil {
