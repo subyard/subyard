@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const defaultMaximum = int64(1024 * 1024)
@@ -75,21 +76,19 @@ func WriteInvocation(invocation Invocation) error {
 		defer release()
 	}
 	directory := filepath.Join(invocation.Home, "logs")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := safefs.EnsureDir(directory, safefs.DirOptions{
+		Existing: safefs.Repair, ParentMode: 0o700, Durability: safefs.BestEffort,
+	}); err != nil {
+		if errors.Is(err, safefs.ErrNotDirectory) {
+			return &os.PathError{Op: "mkdir", Path: directory, Err: syscall.ENOTDIR}
+		}
 		return err
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(directory, ".yard.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.Lock(context.Background(), filepath.Join(directory, ".yard.lock"), false, 0)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release()
 	path := filepath.Join(directory, "yard.log")
 	maximum := invocation.Maximum
 	if maximum <= 0 {

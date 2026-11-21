@@ -79,3 +79,28 @@ func TestOperationLogCorrelatesLifecycleWithoutEventData(t *testing.T) {
 		t.Fatalf("unexpected operation audit: %q", text)
 	}
 }
+
+func TestAuditWritersRepairBroadOwnedDirectories(t *testing.T) {
+	home := testkit.TempDir(t)
+	logs := filepath.Join(home, "logs")
+	updates := filepath.Join(logs, "updates")
+	if err := os.MkdirAll(updates, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{logs, updates} {
+		if err := os.Chmod(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteInvocation(Invocation{Home: home, Command: "status", Now: time.Now(), PID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (UpdateHistory{Home: home}).Begin(UpdateRecord{OperationID: "op-repair", Direction: "activate"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{logs, updates} {
+		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s not repaired: %v %v", directory, info, err)
+		}
+	}
+}

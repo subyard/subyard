@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 var ErrNotFound = errors.New("project state not found")
@@ -280,21 +281,23 @@ func (store *FileStore) validateProjectNameUnlocked(
 }
 
 func (store *FileStore) putUnlocked(record domain.ProjectRecord) error {
-	temporary, err := os.CreateTemp(store.directory, "."+record.ProjectID+".json.tmp.*")
+	pending, err := safefs.Create(store.path(record.ProjectID), safefs.Options{
+		TempPattern: "." + record.ProjectID + ".json.tmp.*",
+	})
 	if err != nil {
+		var pathErr *os.PathError
+		var linkErr *os.LinkError
+		switch {
+		case errors.Is(err, safefs.ErrSymlink), errors.Is(err, safefs.ErrNotRegular), errors.As(err, &linkErr):
+			// The target is checked before staging; master reported it on rename.
+			return fmt.Errorf("publish state: %w", err)
+		case errors.As(err, &pathErr) && pathErr.Op == "chmod":
+			return fmt.Errorf("protect state candidate: %w", err)
+		}
 		return fmt.Errorf("create state candidate: %w", err)
 	}
-	temporaryPath := temporary.Name()
-	published := false
-	defer func() {
-		_ = temporary.Close()
-		if !published {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("protect state candidate: %w", err)
-	}
+	defer pending.Abort()
+	temporary := pending.File()
 	encoder := json.NewEncoder(temporary)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(record); err != nil {
@@ -306,14 +309,13 @@ func (store *FileStore) putUnlocked(record domain.ProjectRecord) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close state candidate: %w", err)
 	}
-	if _, err := readRecord(temporaryPath, record.ProjectID); err != nil {
+	if _, err := readRecord(pending.Name(), record.ProjectID); err != nil {
 		return fmt.Errorf("validate state candidate: %w", err)
 	}
-	if err := os.Rename(temporaryPath, store.path(record.ProjectID)); err != nil {
+	if err := pending.Publish(); err != nil {
 		return fmt.Errorf("publish state: %w", err)
 	}
-	published = true
-	return syncDirectory(store.directory)
+	return stateDirectorySyncError(pending.SyncParent())
 }
 
 func (store *FileStore) Delete(ctx context.Context, id string) error {
@@ -335,57 +337,46 @@ func (store *FileStore) path(id string) string {
 	return filepath.Join(store.directory, id+".json")
 }
 
-func (store *FileStore) lock(ctx context.Context, exclusive bool) (*os.File, error) {
+func (store *FileStore) lock(ctx context.Context, exclusive bool) (*safefs.LockFile, error) {
 	if err := ensurePrivateDirectory(store.directory); err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(filepath.Join(store.directory, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.OpenLock(filepath.Join(store.directory, ".lock"), 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open state lock: %w", err)
 	}
-	operation := syscall.LOCK_SH
-	if exclusive {
-		operation = syscall.LOCK_EX
+	if err := lock.Acquire(ctx, !exclusive, 5*time.Millisecond); err != nil {
+		lock.Release()
+		return nil, fmt.Errorf("lock state: %w", err)
 	}
-	for {
-		err = syscall.Flock(int(lock.Fd()), operation|syscall.LOCK_NB)
-		if err == nil {
-			return lock, nil
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			_ = lock.Close()
-			return nil, fmt.Errorf("lock state: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = lock.Close()
-			return nil, fmt.Errorf("lock state: %w", context.Cause(ctx))
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
+	return lock, nil
 }
 
-func unlock(file *os.File) {
-	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	_ = file.Close()
-}
+func unlock(lock *safefs.LockFile) { lock.Release() }
 
 func ensurePrivateDirectory(path string) error {
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return errors.New("state path is not a real directory")
+	// This runs on every lock acquisition, so it does not sync the directory.
+	err := safefs.EnsureDir(path, safefs.DirOptions{
+		ParentMode: 0o700,
+		Owner:      &safefs.Ownership{UID: os.Getuid(), GID: -1},
+		Durability: safefs.BestEffort,
+	})
+	switch {
+	case errors.Is(err, safefs.ErrNotDirectory), errors.Is(err, safefs.ErrSymlink):
+		return errors.New("state path is not a real directory")
+	case errors.Is(err, safefs.ErrUnsafeOwner):
+		return errors.New("state directory is not owned by the operator")
+	case errors.Is(err, safefs.ErrUnsafeMode):
+		var stateErr *safefs.DirStateError
+		if errors.As(err, &stateErr) {
+			return fmt.Errorf("state directory permissions are too broad: %o", stateErr.Mode.Perm())
 		}
-		if info.Mode().Perm()&0o077 != 0 {
-			return fmt.Errorf("state directory permissions are too broad: %o", info.Mode().Perm())
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Op == "mkdir" {
 		return fmt.Errorf("create state directory: %w", err)
 	}
-	return os.Chmod(path, 0o700)
+	return err
 }
 
 func validateReadOnlyStateDirectory(path string) (bool, error) {
@@ -512,13 +503,29 @@ func (store *FileStore) ValidateFile(path, expectedID string) error {
 }
 
 func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+	return stateDirectorySyncError(safefs.SyncDir(path))
+}
+
+// writeStateFile durably publishes a private state file next to its target.
+func writeStateFile(path string, payload []byte, pattern string, noReplace bool) error {
+	pending, err := safefs.Create(path, safefs.Options{TempPattern: pattern, NoReplace: noReplace})
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
+	defer pending.Abort()
+	if _, err := pending.File().Write(payload); err != nil {
+		return err
+	}
+	if err := pending.Publish(); err != nil {
+		return err
+	}
+	return stateDirectorySyncError(pending.SyncParent())
+}
+
+func stateDirectorySyncError(err error) error {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Op == "sync" {
 		return fmt.Errorf("sync state directory: %w", err)
 	}
-	return nil
+	return err
 }

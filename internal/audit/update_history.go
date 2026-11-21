@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -253,15 +254,11 @@ func (history UpdateHistory) write(record UpdateRecord) error {
 	if err := ensurePrivateDirectory(directory); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(filepath.Join(logs, ".updates.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.Lock(context.Background(), filepath.Join(logs, ".updates.lock"), false, 0)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release()
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -271,41 +268,8 @@ func (history UpdateHistory) write(record UpdateRecord) error {
 		return errors.New("update history record is too large")
 	}
 	path := filepath.Join(directory, record.AttemptID+".json")
-	temporary, err := os.CreateTemp(directory, ".update-*.tmp")
-	if err != nil {
+	if err := safefs.WriteFile(path, payload, safefs.Options{TempPattern: ".update-*.tmp"}); err != nil {
 		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	_, err = temporary.Write(payload)
-	if err == nil {
-		err = temporary.Sync()
-	}
-	closeErr := temporary.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	directoryHandle, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	err = directoryHandle.Sync()
-	closeErr = directoryHandle.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
 	}
 	return pruneUpdateHistory(directory)
 }
@@ -383,17 +347,14 @@ func readUpdateRecord(path string) (UpdateRecord, error) {
 }
 
 func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Repair, ParentMode: 0o700})
+	if errors.Is(err, safefs.ErrSymlink) {
 		return errors.New("update history directory is not a directory")
 	}
-	return os.Chmod(path, 0o700)
+	if errors.Is(err, safefs.ErrNotDirectory) {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+	}
+	return err
 }
 
 func (history UpdateHistory) now() time.Time {

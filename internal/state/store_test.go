@@ -613,3 +613,40 @@ func fixtureRecord(id string) domain.ProjectRecord {
 		ImportedAt: "2026-07-20T00:00:00Z",
 	}
 }
+
+func TestFileStoreFinishesNarrowDirectoryAndRefusesBroadOrSymlinked(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.Directory(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
+		t.Fatalf("narrow owned state directory: %v", err)
+	}
+	if info, err := os.Stat(store.Directory()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("narrow state directory not finished: %v %v", info, err)
+	}
+	if err := os.Chmod(store.Directory(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	err := store.Put(context.Background(), fixtureRecord("project-a"))
+	if err == nil || err.Error() != "state directory permissions are too broad: 750" {
+		t.Fatalf("broad state directory: %v", err)
+	}
+	if err := os.Chmod(store.Directory(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(testkit.TempDir(t), "victim.json")
+	testkit.WriteFile(t, victim, []byte("preserve"), 0o600)
+	if err := os.Symlink(victim, filepath.Join(store.Directory(), "project-b.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), fixtureRecord("project-b")); err == nil {
+		t.Fatal("symlinked state target was replaced")
+	}
+	if content, _ := os.ReadFile(victim); string(content) != "preserve" {
+		t.Fatalf("symlink target changed: %q", content)
+	}
+}

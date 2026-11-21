@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const hostIDAdoptionSchema = 1
@@ -252,34 +253,20 @@ func (store Connections) readHostIDAdoptionJournal() (hostIDAdoptionJournal, boo
 }
 
 func writeOwnerFile(path string, payload []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	return writeOwnerRecord(path, payload, ".owner-state-*", nil)
+}
+
+func writeOwnerRecord(path string, payload []byte, pattern string, failIO func(string) error) error {
+	options := safefs.Options{ParentMode: 0o700, TempPattern: pattern}
+	if failIO != nil {
+		options.Fault = func(point safefs.Point) error {
+			if point == safefs.AfterPublish {
+				return failIO(ownerIODirectorySync)
+			}
+			return nil
+		}
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".owner-state-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(payload); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return syncOwnerDirectory(filepath.Dir(path))
+	return safefs.WriteFile(path, payload, options)
 }
 
 func (store Connections) writeJournal(path string, payload []byte) error {
