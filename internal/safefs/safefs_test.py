@@ -11,10 +11,13 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import safefs
+
+NO_REPLACE_REFUSAL = (errno.EOPNOTSUPP, 'atomic no-replace rename requires renameat2(RENAME_NOREPLACE)')
 
 
 class SafeFiles(unittest.TestCase):
@@ -50,11 +53,12 @@ class SafeFiles(unittest.TestCase):
                     actual = 'published'
                 except safefs.Unsafe as error:
                     actual = {safefs.SYMLINK: 'symlink', safefs.NOT_REGULAR: 'not regular'}[error.reason]
-                except FileExistsError:
-                    actual = 'exists'
+                except OSError as error:
+                    self.assertEqual(error.args, NO_REPLACE_REFUSAL)
+                    actual = 'no-replace refused'
                 finally:
                     os.umask(before)
-                self.assertEqual(actual, vector['outcome'])
+                self.assertEqual(actual, vector.get('python_outcome', vector['outcome']))
                 if actual == 'published':
                     self.assertEqual(path.read_bytes(), b'new')
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
@@ -137,9 +141,9 @@ safefs.write_file(sys.argv[3], b'new')
             safefs.ensure_dir(self.path/'foreign', owner=(foreign, -1))
         self.assertFalse((self.path/'foreign').exists())
 
-    def test_parity_finish_keeps_sticky_and_leaves_set_id_directories_untouched(self):
+    def test_parity_finish_preserves_sticky_and_set_id(self):
         self.path.mkdir()
-        for before, after in ((0o1500, 0o1700), (0o2500, 0o2500), (0o4500, 0o4500), (0o7500, 0o7500)):
+        for before, after in ((0o1500, 0o1700), (0o2500, 0o2700), (0o4500, 0o4700), (0o7500, 0o7700)):
             with self.subTest(mode=oct(before)):
                 self.path.chmod(before)
                 identity = self.path.stat().st_uid, self.path.stat().st_gid
@@ -147,6 +151,31 @@ safefs.write_file(sys.argv[3], b'new')
                 info = self.path.stat()
                 self.assertEqual(stat.S_IMODE(info.st_mode), after)
                 self.assertEqual((info.st_uid, info.st_gid), identity)
+
+    def test_setgid_parent_and_restrictive_umask_converge(self):
+        self.path.mkdir()
+        self.path.chmod(0o2755)
+        self.mask(0o077)
+        fresh = self.path/'fresh'
+        self.assertTrue(safefs.ensure_dir(fresh, mode=0o755))
+        self.assertEqual(stat.S_IMODE(fresh.stat().st_mode), 0o2755)
+        interrupted = self.path/'interrupted'
+        interrupted.mkdir(mode=0o755)
+        self.assertEqual(stat.S_IMODE(interrupted.stat().st_mode), 0o2700)
+        safefs.write_file(interrupted/'value', b'data', parent_mode=0o755)
+        self.assertEqual(stat.S_IMODE(interrupted.stat().st_mode), 0o2755)
+
+    def test_setgid_finish_skips_chmod_without_group_membership(self):
+        self.path.mkdir()
+        self.path.chmod(0o2700)
+        info = self.path.stat()
+        uid = info.st_uid or 1
+        with patch.object(safefs.os, 'geteuid', return_value=uid), \
+                patch.object(safefs.os, 'getegid', return_value=info.st_gid+1), \
+                patch.object(safefs.os, 'getgroups', return_value=[]), patch.object(safefs.os, 'chmod') as chmod:
+            self.assertFalse(safefs.ensure_dir(self.path, mode=0o755, owner=(info.st_uid, -1)))
+        chmod.assert_not_called()
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o2700)
 
     def test_parity_dangling_user_link_is_refused(self):
         self.path.symlink_to('missing')
@@ -224,7 +253,7 @@ safefs.write_file(sys.argv[3], b'new')
         info = self.path.stat()
         self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), (*owner, 0o2640))
 
-    def test_concurrent_writers_and_no_replace_fallback(self):
+    def test_concurrent_writers_can_replace(self):
         barrier = threading.Barrier(2, timeout=5)
 
         def fault(point):
@@ -234,23 +263,26 @@ safefs.write_file(sys.argv[3], b'new')
         with patch.object(safefs, 'FAULT', fault), concurrent.futures.ThreadPoolExecutor() as pool:
             list(pool.map(lambda data: safefs.write_file(self.path, data), (b'one', b'two')))
         self.assertIn(self.path.read_bytes(), (b'one', b'two'))
+
+    def test_failed_no_replace_publish_leaves_no_target_or_staging_entry(self):
         stage = self.root/'stage'
         stage.mkdir()
-        with patch.object(safefs.ctypes, 'CDLL', return_value=object()):
-            with self.assertRaises(FileExistsError):
-                safefs.write_file(self.path, b'new', stage_dir=stage, no_replace=True)
-            self.path.unlink()
-            safefs.write_file(self.path, b'new', stage_dir=stage, no_replace=True)
-        self.assertEqual(self.path.read_bytes(), b'new')
-        self.assertEqual(list(stage.iterdir()), [])
+        for libc in (object(), SimpleNamespace(renameat2=lambda *args: -1)):
+            with patch.object(safefs.ctypes, 'CDLL', return_value=libc), patch.object(safefs.os, 'link') as link:
+                with self.assertRaises(OSError) as error:
+                    safefs.write_file(self.path, b'new', stage_dir=stage, no_replace=True)
+            self.assertEqual(error.exception.args, NO_REPLACE_REFUSAL)
+            link.assert_not_called()
+            self.assertFalse(self.path.exists())
+            self.assertEqual(list(stage.iterdir()), [])
 
     def test_no_replace_directory_without_renameat2_refuses_without_linking(self):
         self.path.mkdir()
         target = self.root/'destination'
         with patch.object(safefs.ctypes, 'CDLL', return_value=object()), patch.object(safefs.os, 'link') as link:
-            with self.assertRaisesRegex(OSError, 'atomic no-replace directory rename requires renameat2') as error:
+            with self.assertRaises(OSError) as error:
                 safefs.rename_noreplace(self.path, target)
-        self.assertEqual(error.exception.errno, errno.EOPNOTSUPP)
+        self.assertEqual(error.exception.args, NO_REPLACE_REFUSAL)
         link.assert_not_called()
         self.assertTrue(self.path.is_dir())
         self.assertFalse(target.exists())
