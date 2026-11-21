@@ -45,14 +45,9 @@ func (control *remoteControlStub) Apply(_ context.Context, prepared domain.Remot
 }
 
 func TestRPCRemotePlanContainsPreparedFingerprintBeforeApply(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	control := &remoteControlStub{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, RemoteControl: control,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{RemoteControl: control})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -83,28 +78,21 @@ func TestRPCRemotePlanContainsPreparedFingerprintBeforeApply(t *testing.T) {
 }
 
 func TestDirectAndRPCRemoteAddUseEquivalentOwnerActionPlans(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	environment := fixture.Environment
 	directControl := &remoteControlStub{}
 	directPrompt := &testkit.Prompt{Answers: []bool{true}}
-	direct, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"remote", "add", "demo", "owner"},
+	direct := fixture.New(Options{
+		Arguments:   []string{"remote", "add", "demo", "owner"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-remote-direct"), RemoteControl: directControl,
 		Prompt: directPrompt,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := direct.Run(context.Background()); code != 0 || directControl.applied != 1 || len(directPrompt.Requests) != 1 {
 		t.Fatalf("direct code=%d applies=%d requests=%#v", code, directControl.applied, directPrompt.Requests)
 	}
 
 	rpcControl := &remoteControlStub{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, RemoteControl: rpcControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{RemoteControl: rpcControl})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -134,13 +122,9 @@ func TestDirectAndRPCRemoteAddUseEquivalentOwnerActionPlans(t *testing.T) {
 }
 
 func TestRPCOperationPlanMapsActionPolicyInvalid(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, RemoteControl: &remoteControlStub{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withWorkingDir(""))
+	program := fixture.New(Options{RemoteControl: &remoteControlStub{}})
+	var err error
 	program.coreActions, err = domain.NewActionRegistry(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -163,14 +147,9 @@ func TestRPCOperationPlanMapsActionPolicyInvalid(t *testing.T) {
 }
 
 func TestRPCOperationExecuteRejectsForgedPlanConfirmation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
 	control := &remoteControlStub{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: environment, RemoteControl: control,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{RemoteControl: control})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -248,14 +227,8 @@ func TestRemoteAddAuditedOwnerChild(t *testing.T) {
 
 func auditedRemoteOwnerFixture(t *testing.T) (Options, remotecontrol.Runtime) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
-	filtered := []string{}
-	for _, value := range environment {
-		if !strings.HasPrefix(value, "SUBYARD_NO_AUDIT=") {
-			filtered = append(filtered, value)
-		}
-	}
-	environment = filtered
+	fixture := newFixture(t, withAudit())
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	for _, name := range []string{"HOME", "SUBYARD_CONFIG_HOME"} {
 		if err := os.MkdirAll(environmentValue(environment, name), 0700); err != nil {

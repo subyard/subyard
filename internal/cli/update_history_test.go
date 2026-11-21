@@ -607,7 +607,8 @@ func TestUpdateHistoryWriteFailureDoesNotSkipConfigRefresh(t *testing.T) {
 }
 
 func TestHostLogViewersWorkWithoutYardConfigOrIncus(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	home := environmentValue(environment, "SUBYARD_HOME")
 	recorder, err := (audit.UpdateHistory{Home: home}).Begin(audit.UpdateRecord{
 		OperationID: "op-view-update", Direction: "activate",
@@ -638,14 +639,11 @@ func TestHostLogViewersWorkWithoutYardConfigOrIncus(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard",
+			program := fixture.New(Options{
 				Arguments:   []string{"logs", test.flag, "-n", "10"},
-				Environment: append(environment, "SUBYARD_NO_AUDIT=1"), WorkingDir: root,
-				Stdout: &stdout, Stderr: &stderr,
+				Environment: append(environment, "SUBYARD_NO_AUDIT=1"),
+				Stdout:      &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 ||
 				!strings.Contains(stdout.String(), test.marker) {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -659,7 +657,8 @@ func TestHostLogViewersWorkWithoutYardConfigOrIncus(t *testing.T) {
 }
 
 func TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	environment := fixture.Environment
 	home := environmentValue(environment, "SUBYARD_HOME")
 	recorder, err := (audit.UpdateHistory{Home: home}).Begin(audit.UpdateRecord{
 		OperationID: "op-owner-view", Direction: "activate",
@@ -671,14 +670,11 @@ func TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{
 		Arguments:   []string{"-Y", "default", "logs", "--updates", "-n", "1"},
-		Environment: append(environment, "SUBYARD_NO_AUDIT=1"), WorkingDir: root,
-		Stdout: &stdout, Stderr: &stderr,
+		Environment: append(environment, "SUBYARD_NO_AUDIT=1"),
+		Stdout:      &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "op-owner-view") {
 		t.Fatalf("owner viewer code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -686,43 +682,32 @@ func TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory(t *testing.T) {
 }
 
 func TestExplicitRemoteUpdateLogViewerUsesForwardRoute(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
-	configHome := filepath.Dir(stateDirectory)
-	if err := os.MkdirAll(filepath.Join(configHome, "yards", "remote"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(configHome, "yards", "remote", "config.env"),
-		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
-	fakeBin := filepath.Join(root, "fake-bin")
-	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sshLog := filepath.Join(root, "remote-logs-ssh.log")
-	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
-`+trustedSSHMock(t)+`
-printf '%s\n' "$@" >"$SUBYARD_TEST_SSH_LOG"
-`, 0o700)
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	fixture := newFixture(t, withYards("remote"), withCommands("ssh"))
+	// The forwarded call is answered by the catch-all after the -G resolution rule.
+	fixture.Exec().
+		On(testkit.Match{Tool: "ssh", Prefix: []string{"-G"}}, testkit.Reply{Script: trustedSSHMock(t)}).
+		On(testkit.Match{Tool: "ssh"}, testkit.Reply{})
+	environment := fixture.Environment
+	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"),
+		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n")
 	environment = append(environment,
-		"PATH="+os.Getenv("PATH"),
-		"SUBYARD_TEST_SSH_LOG="+sshLog,
 		"SUBYARD_OPERATION_ID=remote-update-logs",
 	)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{
 		Arguments:   []string{"-Y", "remote", "logs", "--updates", "-n", "3"},
-		Environment: environment, WorkingDir: root,
-		Stdout: &stdout, Stderr: &stderr,
+		Environment: environment,
+		Stdout:      &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote update logs code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	forwarded, err := os.ReadFile(sshLog)
-	if err != nil {
-		t.Fatal(err)
+	// The former stub logged the arguments of its last non -G call, one per line.
+	var forwarded []byte
+	for _, call := range fixture.Exec().Calls() {
+		if len(call.Args) == 0 || call.Args[0] != "-G" {
+			forwarded = []byte(strings.Join(call.Args, "\n") + "\n")
+		}
 	}
 	for _, expected := range []string{"owner.example", "inner", "logs", "--updates", "-n", "3"} {
 		if !strings.Contains(string(forwarded), expected) {

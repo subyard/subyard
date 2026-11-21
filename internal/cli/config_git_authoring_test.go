@@ -12,8 +12,11 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+// configGitAuthoringFixture builds its CLI with fixture; a fixture that embeds
+// it without one, such as configSSHFixture, builds the CLI from root.
 type configGitAuthoringFixture struct {
 	t                              *testing.T
+	fixture                        *cliFixture
 	root, home, configHome, remote string
 	environment                    []string
 	stdout, stderr                 bytes.Buffer
@@ -21,9 +24,10 @@ type configGitAuthoringFixture struct {
 
 func newConfigGitAuthoringFixture(t *testing.T) *configGitAuthoringFixture {
 	t.Helper()
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, _ := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=no\n")
-	f := &configGitAuthoringFixture{t: t, root: root, home: home, configHome: configHome, remote: remote,
+	f := &configGitAuthoringFixture{t: t, fixture: fixture, root: root, home: home, configHome: configHome, remote: remote,
 		environment: append(environment, "GIT_AUTHOR_NAME=Subyard Test", "GIT_AUTHOR_EMAIL=test@invalid",
 			"GIT_COMMITTER_NAME=Subyard Test", "GIT_COMMITTER_EMAIL=test@invalid")}
 	f.run(0, "config", "sync", "connect", remote, "--host-id", "owner-a", "--yes")
@@ -34,10 +38,16 @@ func (f *configGitAuthoringFixture) run(want int, arguments ...string) {
 	f.t.Helper()
 	f.stdout.Reset()
 	f.stderr.Reset()
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,
-		Environment: f.environment, WorkingDir: f.root, Stdout: &f.stdout, Stderr: &f.stderr})
-	if err != nil {
-		f.t.Fatal(err)
+	options := Options{Arguments: arguments, Environment: f.environment, Stdout: &f.stdout, Stderr: &f.stderr}
+	var program *CLI
+	if f.fixture != nil {
+		program = f.fixture.New(options)
+	} else {
+		var err error
+		options.RepositoryRoot, options.Program, options.WorkingDir = f.root, "yard", f.root
+		if program, err = New(options); err != nil {
+			f.t.Fatal(err)
+		}
 	}
 	if code := program.Run(context.Background()); code != want {
 		f.t.Fatalf("%v: code=%d want=%d stdout=%s stderr=%s", arguments, code, want, f.stdout.String(), f.stderr.String())
@@ -54,8 +64,9 @@ func (f *configGitAuthoringFixture) assertSetting(name, value string) {
 
 func TestConfigGitAuthoringSharedDevSudo(t *testing.T) {
 	author := newConfigGitAuthoringFixture(t)
-	root, _, _, environment := configCommandFixture(t)
-	peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
+	peer := configGitAuthoringFixture{t: t, fixture: fixture, root: root, environment: environment}
 	peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
 	peer.assertSetting("DEV_SUDO", "prompt") // The shipped default.
 
@@ -82,8 +93,9 @@ func TestConfigGitAuthoringSharedDevSudoWithdrawal(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			author := newConfigGitAuthoringFixture(t)
 			author.run(0, "config", "set", "DEV_SUDO", "no", "--scope", "shared", "--git", "--yes")
-			root, _, _, environment := configCommandFixture(t)
-			peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
+			fixture := newFixture(t, withCheckoutConfig())
+			root, environment := fixture.Root, fixture.Environment
+			peer := configGitAuthoringFixture{t: t, fixture: fixture, root: root, environment: environment}
 			peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
 			peer.assertSetting("DEV_SUDO", "no")
 
@@ -113,8 +125,9 @@ func TestConfigSyncSharedDevSudoCacheReplacement(t *testing.T) {
 	for _, action := range []string{"restore-drift", "adopt-update"} {
 		t.Run(action, func(t *testing.T) {
 			author := newConfigGitAuthoringFixture(t)
-			root, home, configHome, environment := configCommandFixture(t)
-			peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
+			fixture := newFixture(t, withCheckoutConfig())
+			root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
+			peer := configGitAuthoringFixture{t: t, fixture: fixture, root: root, environment: environment}
 			peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
 			author.run(0, "config", "set", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes")
 			if action == "restore-drift" {
@@ -280,16 +293,13 @@ func TestConfigGitAuthoringRetriesRejectedPushThroughSyncPush(t *testing.T) {
 }
 
 func TestConfigAuthoringStorageChoiceAndNoSource(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
 	for _, arguments := range [][]string{
 		{"config", "set", "DEV_UID", "2301", "--scope", "host", "--local", "--git", "--yes"},
 		{"config", "set", "DEV_UID", "2301", "--scope", "host", "--git", "--yes"},
 	} {
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: arguments, Stderr: &stderr})
 		if code := program.Run(context.Background()); code == 0 {
 			t.Fatalf("accepted %v", arguments)
 		}
@@ -297,19 +307,15 @@ func TestConfigAuthoringStorageChoiceAndNoSource(t *testing.T) {
 }
 
 func TestConfigLocalSaveRequiresMigrationEvenForAnIdenticalLegacyValue(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	path := filepath.Join(configHome, "config.env")
-	writeConfigCommandFile(t, path, "DEV_UID=2301\n", 0o600)
-	writeConfigCommandFile(t, filepath.Join(configHome, ".sync", "manifest.json"),
-		`{"schemaVersion":1,"files":[{"path":"config.env"}]}`, 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	path := fixture.Write(filepath.Join(fixture.ConfigHome, "config.env"), "DEV_UID=2301\n")
+	fixture.Write(filepath.Join(fixture.ConfigHome, ".sync", "manifest.json"),
+		`{"schemaVersion":1,"files":[{"path":"config.env"}]}`)
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-		Arguments:  []string{"config", "set", "DEV_UID", "2301", "--scope", "host", "--local"},
-		WorkingDir: root, Prompt: prompt, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{
+		Arguments: []string{"config", "set", "DEV_UID", "2301", "--scope", "host", "--local"},
+		Prompt:    prompt, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "migrate Git settings") {
 		t.Fatalf("identical legacy save: code=%d stderr=%s", code, stderr.String())
 	}
@@ -357,11 +363,7 @@ func TestConfigGitAuthoringRejectsSourceSymlinksBeforeWriting(t *testing.T) {
 			runConfigSyncGit(t, checkout, "push", "--quiet")
 			before := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
 			prompt := &testkit.Prompt{}
-			program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,
-				Environment: f.environment, WorkingDir: f.root, Prompt: prompt, Stderr: &f.stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := f.fixture.New(Options{Arguments: arguments, Environment: f.environment, Prompt: prompt, Stderr: &f.stderr})
 			diagnostic := "source file must be a regular non-symlink file"
 			if kind == "scalar ancestor" {
 				diagnostic = "source directory must be a real source directory"

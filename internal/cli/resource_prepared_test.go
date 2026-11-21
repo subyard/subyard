@@ -62,7 +62,8 @@ func TestResourceAuditedReaderProcess(t *testing.T) {
 }
 
 func TestResourceExactNestedReaderRetainsAuditAndOwnerBarrier(t *testing.T) {
-	root, environment, _ := resourceExactFixture(t)
+	fixture, _ := newResourceExactFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
@@ -101,12 +102,8 @@ with (root / 'reader-stages').open('a') as output:
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, DispatcherPath: executable, Program: "yard",
-		Arguments: []string{"demo", "run", "--yes"}, Environment: environment, WorkingDir: root,
-		Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{DispatcherPath: executable,
+		Arguments: []string{"demo", "run", "--yes"}, Stdout: io.Discard, Stderr: &stderr})
 	// Race-instrumented helper processes also run their normal exit checks.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -152,15 +149,12 @@ with (root / 'reader-stages').open('a') as output:
 func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 	for _, scenario := range []string{"held", "absent", "other-cli", "wire", "transport", "foreign-home", "retired", "session-prepare", "session-apply", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := resourceExactFixture(t)
+			fixture, _ := newResourceExactFixture(t)
+			environment := fixture.Environment
 			nativeInstallationFixture(t, environment)
 			// This caller value must never become descriptor authority.
 			environment = append(environment, "SUBYARD_OWNER_LOCK_FD=malformed-caller-value")
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
-				Stdout: io.Discard, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -296,9 +290,9 @@ func TestResourceOwnerBarrierUsesOnlyCurrentAdmission(t *testing.T) {
 	}
 }
 
-func resourceExactFixture(t *testing.T) (string, []string, string) {
+func newResourceExactFixture(t *testing.T, options ...fixtureOption) (*cliFixture, string) {
 	t.Helper()
-	root, environment, log := resourceCommandFixture(t)
+	fixture, log := newResourceCommandFixture(t, options...)
 	handler := `#!/usr/bin/env python3
 import hashlib, json, os, pathlib, sys
 root = pathlib.Path(os.environ['SUBYARD_REPOSITORY_ROOT'])
@@ -371,21 +365,18 @@ print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, 
     consequences=[step['consequence'] for step in steps if step['decision'] != 'skip'],
     steps=steps, binding=hashlib.sha256(binding.encode()).hexdigest())))
 `
-	writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)
-	return root, environment, log
+	fixture.Write("config/profiles/fixture/resources/demo/handler.sh", handler, 0o700)
+	return fixture, log
 }
 
 func TestResourceExactDirectAllowsPartialConvergence(t *testing.T) {
-	root, environment, applyLog := resourceExactFixture(t)
+	fixture, applyLog := newResourceExactFixture(t)
+	root := fixture.Root
 	prompt := &callbackPrompt{callback: func() {
 		writeCLIFile(t, filepath.Join(root, "unit-first"), "already-running", 0o600)
 	}}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"},
-		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run"}, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("partial convergence failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -401,15 +392,13 @@ func TestResourceExactDirectAllowsPartialConvergence(t *testing.T) {
 func TestResourceShutdownAddressesInstalledAccountUntilInitAppliesRename(t *testing.T) {
 	for verb, want := range map[string]string{"purge": "installed-dev", "run": "dev"} {
 		t.Run(verb, func(t *testing.T) {
-			root, environment, _ := resourceExactFixture(t)
+			fixture, _ := newResourceExactFixture(t)
+			root := fixture.Root
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", verb},
-				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}},
+			program := fixture.New(Options{Arguments: []string{"demo", verb},
+				Stdout: io.Discard, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}},
 				InitPlatform: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(),
 					settings: map[string]string{"DEV_USER": "installed-dev", "DEV_UID": "1000"}}})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -439,13 +428,10 @@ func TestResourceShutdownAddressesInstalledAccountUntilInitAppliesRename(t *test
 }
 
 func TestResourceExactKeepsHandlerStreamsSeparate(t *testing.T) {
-	root, environment, _ := resourceExactFixture(t)
+	fixture, _ := newResourceExactFixture(t)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--fail-apply"},
-		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run", "--fail-apply"},
+		Stdout: &stdout, Stderr: &stderr, Prompt: &callbackPrompt{callback: func() {}}})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("failed handler returned %d: stderr=%s", code, stderr.String())
 	}
@@ -460,16 +446,14 @@ func TestResourceExactKeepsHandlerStreamsSeparate(t *testing.T) {
 func TestResourceExactRejectsDriftBeforeApply(t *testing.T) {
 	for _, argument := range []string{"--binding-drift", "--target-drift", "--binding-on-second", "--noop-expands"} {
 		t.Run(argument, func(t *testing.T) {
-			root, environment, applyLog := resourceExactFixture(t)
+			fixture, applyLog := newResourceExactFixture(t)
+			root := fixture.Root
 			prompt := &callbackPrompt{callback: func() {
 				writeCLIFile(t, filepath.Join(root, "resource-drift"), "changed", 0o600)
 			}}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", argument},
-				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"demo", "run", argument},
+				Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
 			if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 				t.Fatalf("drift accepted: code=%d stderr=%s", code, stderr.String())
 			}
@@ -483,13 +467,10 @@ func TestResourceExactRejectsDriftBeforeApply(t *testing.T) {
 func TestResourceExactRequiresNativePostconditionVerification(t *testing.T) {
 	for _, argument := range []string{"--no-effect", "--bad-verify", "--verify-not-converged", "--verify-mismatch"} {
 		t.Run(argument, func(t *testing.T) {
-			root, environment, _ := resourceExactFixture(t)
+			fixture, _ := newResourceExactFixture(t)
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", argument, "--yes"},
-				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"demo", "run", argument, "--yes"},
+				Stdout: io.Discard, Stderr: &stderr})
 			if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "verif") {
 				t.Fatalf("unverified apply reported success: code=%d stderr=%s", code, stderr.String())
 			}
@@ -498,16 +479,13 @@ func TestResourceExactRequiresNativePostconditionVerification(t *testing.T) {
 }
 
 func TestResourceExactInitialNoOpRechecksAndVerifiesWithoutPrompt(t *testing.T) {
-	root, environment, applyLog := resourceExactFixture(t)
+	fixture, applyLog := newResourceExactFixture(t)
+	root := fixture.Root
 	for _, unit := range []string{"first", "second"} {
-		writeCLIFile(t, filepath.Join(root, "unit-"+unit), "running", 0o600)
+		fixture.Write("unit-"+unit, "running")
 	}
 	prompt := &testkit.Prompt{}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"},
-		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run"}, Stdout: io.Discard, Stderr: io.Discard, Prompt: prompt})
 	if code := program.Run(context.Background()); code != 0 || len(prompt.Requests) != 0 {
 		t.Fatalf("converged resource prompted or failed: code=%d requests=%#v", code, prompt.Requests)
 	}
@@ -520,13 +498,9 @@ func TestResourceExactInitialNoOpRechecksAndVerifiesWithoutPrompt(t *testing.T) 
 }
 
 func TestResourceExactRPCUsesNativePlanAndSeparateDiagnosticStream(t *testing.T) {
-	root, environment, applyLog := resourceExactFixture(t)
+	fixture, applyLog := newResourceExactFixture(t)
 	var stdout, diagnostics bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-		WorkingDir: root, Stdout: &stdout, Stderr: &diagnostics})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stdout: &stdout, Stderr: &diagnostics})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -560,12 +534,8 @@ func TestResourceExactRPCUsesNativePlanAndSeparateDiagnosticStream(t *testing.T)
 }
 
 func TestResourceExactRPCRefusesV1Mutation(t *testing.T) {
-	root, environment, applyLog := resourceExactFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-		WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture, applyLog := newResourceExactFixture(t)
+	program := fixture.New(Options{Stdout: io.Discard, Stderr: io.Discard})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -597,14 +567,11 @@ func TestResourceExactConsentStopsAtArgumentSeparator(t *testing.T) {
 		{"short prefix and payload flags", []string{"demo", "run", "-y", "--", "-y"}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, applyLog := resourceExactFixture(t)
+			fixture, applyLog := newResourceExactFixture(t)
+			root := fixture.Root
 			prompt := &testkit.Prompt{Answers: []bool{false}}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
-				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: test.arguments, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
 			code := program.Run(context.Background())
 			if test.automated {
 				if code != 0 || len(prompt.Requests) != 0 {

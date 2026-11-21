@@ -123,7 +123,8 @@ func TestResourceMutationDoesNotReadFromOperatorTerminal(t *testing.T) {
 	}
 	defer tty.Close()
 
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handlerPath := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	handler := `#!/bin/sh
 set -eu
@@ -141,19 +142,12 @@ esac
 	writeCLIFile(t, handlerPath, handler, 0o700)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root,
-		Program:        "yard",
-		Arguments:      []string{"demo", "run", "--yes"},
-		Environment:    environment,
-		WorkingDir:     root,
-		Stdin:          tty,
-		Stdout:         tty,
-		Stderr:         &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--yes"},
+		Stdin:     tty,
+		Stdout:    tty,
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -223,7 +217,8 @@ func TestResourceSessionPreservesOperatorInput(t *testing.T) {
 		t.Fatalf("read caller foreground process group: %v", err)
 	}
 
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handlerPath := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	handler := `#!/bin/sh
 set -eu
@@ -240,19 +235,12 @@ esac
 	writeCLIFile(t, handlerPath, handler, 0o700)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root,
-		Program:        "yard",
-		Arguments:      []string{"demo", "view"},
-		Environment:    environment,
-		WorkingDir:     root,
-		Stdin:          tty,
-		Stdout:         tty,
-		Stderr:         &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "view"},
+		Stdin:     tty,
+		Stdout:    tty,
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan int, 1)
@@ -292,7 +280,8 @@ func testForegroundProcessGroup(fd int) (int, error) {
 }
 
 func TestResourceMutationCancellationReapsProcessGroup(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handlerPath := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	handler := `#!/bin/sh
 set -eu
@@ -311,17 +300,10 @@ esac
 	writeCLIFile(t, handlerPath, handler, 0o700)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root,
-		Program:        "yard",
-		Arguments:      []string{"demo", "run", "--yes"},
-		Environment:    environment,
-		WorkingDir:     root,
-		Stderr:         &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "run", "--yes"},
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -386,7 +368,8 @@ func TestResourceSessionCancellationRestoresTerminalAndReapsGroup(t *testing.T) 
 		t.Fatalf("read caller foreground process group: %v", err)
 	}
 
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handlerPath := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
 	handler := `#!/bin/sh
 set -eu
@@ -406,19 +389,12 @@ esac
 	writeCLIFile(t, handlerPath, handler, 0o700)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: root,
-		Program:        "yard",
-		Arguments:      []string{"demo", "view"},
-		Environment:    environment,
-		WorkingDir:     root,
-		Stdin:          tty,
-		Stdout:         tty,
-		Stderr:         &stderr,
+	program := fixture.New(Options{
+		Arguments: []string{"demo", "view"},
+		Stdin:     tty,
+		Stdout:    tty,
+		Stderr:    &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -495,7 +471,8 @@ func TestResourceSessionTerminalInterruptReapsProcessGroup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			root, environment, _ := resourceCommandFixture(t)
+			fixture, _ := newResourceCommandFixture(t)
+			root := fixture.Root
 			handler := `#!/bin/sh
 set -eu
 case "${SUBYARD_RESOURCE_MODE:-}" in
@@ -520,11 +497,7 @@ esac
 			handler = strings.Replace(handler, "INTERRUPT_TRAP", trapCommand, 1)
 			writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-				Environment: environment, WorkingDir: root, Stdin: tty, Stdout: tty, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"demo", "view"}, Stdin: tty, Stdout: tty, Stderr: &stderr})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan int, 1)
@@ -579,7 +552,8 @@ func TestResourceSessionNormalExitReapsOnlyItsProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tty.Close()
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handler := `#!/bin/sh
 set -eu
 case "${SUBYARD_RESOURCE_MODE:-}" in
@@ -596,11 +570,7 @@ esac
 `
 	writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-		Environment: environment, WorkingDir: root, Stdin: tty, Stdout: tty, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "view"}, Stdin: tty, Stdout: tty, Stderr: &stderr})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	code := program.Run(ctx)
@@ -616,7 +586,8 @@ esac
 func TestResourceNonterminalActionsOwnOnlySessionProcessGroup(t *testing.T) {
 	for _, verb := range []string{"view", "run"} {
 		t.Run(verb, func(t *testing.T) {
-			root, environment, _ := resourceCommandFixture(t)
+			fixture, _ := newResourceCommandFixture(t)
+			root := fixture.Root
 			handler := `#!/bin/sh
 set -eu
 case "${SUBYARD_RESOURCE_MODE:-}" in
@@ -631,11 +602,7 @@ esac
 `
 			writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", verb, "--yes"},
-				Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"demo", verb, "--yes"}, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: &stderr})
 			code := program.Run(context.Background())
 			child := resourceTestChildProcess(t, filepath.Join(root, "session-child.pid"))
 			if code != 0 {
@@ -685,7 +652,8 @@ func TestResourceSessionStartFailureRestoresForeground(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root := fixture.Root
 	handler := `#!/bin/sh
 set -eu
 case "${SUBYARD_RESOURCE_MODE:-}" in
@@ -697,11 +665,7 @@ esac
 `
 	writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh"), handler, 0o700)
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
-		Environment: environment, WorkingDir: root, Stdin: tty, Stdout: tty, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "view"}, Stdin: tty, Stdout: tty, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "no such file") {
 		t.Fatalf("session start failure code=%d stderr=%q", code, stderr.String())
 	}
@@ -723,7 +687,8 @@ func TestResourceExactTerminalConsentAndRetainedData(t *testing.T) {
 		}
 		return
 	}
-	root, environment, _ := resourceExactFixture(t)
+	fixture, _ := newResourceExactFixture(t)
+	root := fixture.Root
 	descriptor := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
 	contents, err := os.ReadFile(descriptor)
 	if err != nil {
@@ -733,11 +698,7 @@ func TestResourceExactTerminalConsentAndRetainedData(t *testing.T) {
 	var output bytes.Buffer
 	run := func(arguments ...string) int {
 		t.Helper()
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"demo"}, arguments...),
-			Environment: environment, WorkingDir: root, Stdin: os.Stdin, Stdout: &output, Stderr: &output})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: append([]string{"demo"}, arguments...), Stdin: os.Stdin, Stdout: &output, Stderr: &output})
 		return program.Run(context.Background())
 	}
 	for _, unit := range []string{"first", "second"} {
@@ -940,7 +901,8 @@ func TestSealedDispatcherRemainsExecutableInProfileServiceChild(t *testing.T) {
 		}
 		return
 	}
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	for _, name := range []string{"scripts/lib", "config/profiles/sample"} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0700); err != nil {
 			t.Fatal(err)
