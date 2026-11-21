@@ -20,8 +20,8 @@ import (
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
-// A cleared empty store lets an explicit full teardown continue normally.
-func (cli *CLI) runFullTeardownRecovery(ctx context.Context, args []string) (code int, handled bool) {
+// Each entry point decides what to do when there is no saved plan to resume.
+func (cli *CLI) runFullTeardownRecovery(ctx context.Context, args []string) (code int, noStore bool) {
 	assumeYes := false
 	if len(args) == 2 && args[1] == "--yes" {
 		assumeYes = true
@@ -29,24 +29,21 @@ func (cli *CLI) runFullTeardownRecovery(ctx context.Context, args []string) (cod
 	}
 	if len(args) != 1 {
 		cli.errorf("usage: yard _uninstall-resume /exact/recovery/directory")
-		return 2, true
+		return 2, false
 	}
 	store := uninstall.RecoveryStore{Directory: args[0], UID: uint32(os.Getuid())}
-	saved, binding, err := store.Read()
+	saved, err := store.ReadForResume(ctx)
+	if errors.Is(err, uninstall.ErrNoRecoveryStore) {
+		return 0, true
+	}
 	if err != nil {
-		// Read tries the pending publication only when the original plan is absent.
-		if binding.Path == filepath.Join(store.Directory, ".plan-next") && len(binding.Entries) == 0 {
-			removed, cleanupErr := store.RemoveIfEmpty(ctx)
-			if cleanupErr != nil {
-				cli.errorf("could not remove empty full uninstall recovery directory %s: %v. Retry the same command.", store.Directory, cleanupErr)
-				return 1, true
-			}
-			if removed {
-				return 0, false
-			}
+		var cleanupErr uninstall.EmptyRecoveryCleanupError
+		if errors.As(err, &cleanupErr) {
+			cli.errorf("could not remove empty full uninstall recovery directory %s: %v. Retry the same command.", store.Directory, cleanupErr)
+			return 1, false
 		}
 		cli.errorf("full uninstall recovery at %s: %v; retain this protected store and restore its ORIGINAL approved inventory before continuing", store.Directory, err)
-		return 1, true
+		return 1, false
 	}
 	cli.fullTeardownRecovery = store.Directory
 	loaded := config.Loaded{Catalog: cli.catalog, Environment: map[string]string{}, Context: domain.Context{AccessKind: domain.AccessLocal, YardName: "default", Paths: domain.RuntimePaths{DataHome: saved.Installation.DataHome, ConfigHome: saved.Installation.ConfigHome, RepositoryRoot: cli.options.RepositoryRoot, ConfigDir: filepath.Join(cli.options.RepositoryRoot, "config"), OperatorHome: cli.env["HOME"]}}}
@@ -58,10 +55,10 @@ func (cli *CLI) runFullTeardownRecovery(ctx context.Context, args []string) (cod
 	definition, _ := cli.manifest.Lookup("teardown")
 	prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Definition: definition, Loaded: loaded, Arguments: []string{"--full"}})
 	if err != nil {
-		return cli.reportPreparationError(definition, err), true
+		return cli.reportPreparationError(definition, err), false
 	}
 	defer prepared.Close()
-	return cli.runPreparedCommand(ctx, prepared, assumeYes), true
+	return cli.runPreparedCommand(ctx, prepared, assumeYes), false
 }
 
 func (cli *CLI) restoreFullTeardown(execution *fullTeardown) error {

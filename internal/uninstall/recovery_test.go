@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -446,114 +445,73 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 	}
 }
 
-func completedStore(t *testing.T) RecoveryStore {
+// CompletedRecoveryStoreFixture leaves only final store cleanup pending.
+func CompletedRecoveryStoreFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
 	t.Helper()
 	store, plan := recoveryFixture(t)
-	store.Directory = filepath.Join(store.Directory, "data.uninstall")
+	store.Directory = plan.Installation.DataHome + ".uninstall"
 	if err := os.Mkdir(store.Directory, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(store.Directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	plan.Stage, plan.AssetsReady = RecoveryFilesRemoved, true
+	plan.Schema, plan.Stage, plan.AssetsReady = 1, RecoveryFilesRemoved, true
+	if err := os.Remove(plan.Trees[0].Path); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Save(plan, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range []string{"runtime/bin/yard", "runtime/bin/yard-engine", "runtime/scripts/lib/host.sh"} {
-		path := filepath.Join(store.Directory, file)
+	launcher, err := os.ReadFile("../../bin/yard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		name string
+		body []byte
+		mode os.FileMode
+	}{
+		{"runtime/bin/yard", launcher, 0700},
+		{"runtime/bin/yard-engine", []byte("retained engine"), 0600},
+		{"runtime/scripts/lib/host.sh", []byte("retained library"), 0600},
+	} {
+		path := filepath.Join(store.Directory, file.name)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		body := []byte(file)
-		if file == "runtime/bin/yard" {
-			body = []byte("#!/bin/sh\nexit 0\n")
-		}
-		testkit.WriteFile(t, path, body, 0700)
+		testkit.WriteFile(t, path, file.body, file.mode)
 	}
-	return store
+	return store, plan
 }
 
-// Interrupt at each observation during final removal. The next recovery
-// attempt reads the original plan or clears the empty residue.
-func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
-	for _, onPath := range []bool{false, true} {
-		t.Run(fmt.Sprintf("yard-on-path=%v", onPath), func(t *testing.T) {
-			tools := testkit.TempDir(t)
-			if onPath {
-				testkit.WriteFile(t, filepath.Join(tools, "yard"), []byte("#!/bin/sh\nexit 0\n"), 0700)
-			}
-			t.Setenv("PATH", tools)
-			storeRemovalInterruptions(t)
-		})
-	}
-}
-
-func storeRemovalInterruptions(t *testing.T) {
-	t.Cleanup(func() { statAt = factAt })
-	sawEmpty := false
-	for limit := 0; limit <= 1000; limit++ {
-		store := completedStore(t)
-		testkit.WriteFile(t, filepath.Join(store.Directory, ".plan-next"), []byte("stale publication"), 0600)
-		calls := 0
-		statAt = func(fd int, name, relative string) (Entry, error) {
-			if calls++; calls > limit {
+// InterruptRecoveryStoreRemoval starts counting at the first observation of
+// the store itself. The returned function restores the seam and reports a fault.
+func InterruptRecoveryStoreRemoval(directory string, limit int) func() bool {
+	base := filepath.Base(directory)
+	previous := statAt
+	started, interrupted := false, false
+	calls := 0
+	statAt = func(fd int, name, relative string) (Entry, error) {
+		started = started || relative == "." && name == base
+		if started {
+			if calls >= limit {
+				interrupted = true
 				return Entry{}, errors.New("intentional interruption")
 			}
-			return factAt(fd, name, relative)
+			calls++
 		}
-		err := store.Remove()
-		statAt = factAt
-		names, statErr := os.ReadDir(store.Directory)
-		if err == nil {
-			if !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatal("completed removal left the store")
-			}
-			if !sawEmpty {
-				t.Fatal("interruption never left an empty recovery directory")
-			}
-			return
-		}
-		if statErr != nil {
-			t.Fatalf("observation %d: could not inspect interrupted store: %v", limit, statErr)
-		}
-		hint := store.ResumeHint()
-		lines := strings.Split(strings.TrimSuffix(hint, "\n"), "\n")
-		command := strings.Fields(lines[len(lines)-1])
-		if len(command) != 3 || command[1] != "_uninstall-resume" || command[2] != store.Directory {
-			t.Fatalf("observation %d: printed retry %q", limit, hint)
-		}
-		install := strings.Contains(hint, "install a compatible Subyard version")
-		if executable, lookErr := exec.LookPath(command[0]); lookErr != nil {
-			if !install {
-				t.Fatalf("observation %d: printed retry is not runnable: %v", limit, lookErr)
-			}
-		} else if install || exec.Command(executable, command[1:]...).Run() != nil {
-			t.Fatalf("observation %d: runnable retry %q did not run as printed", limit, hint)
-		}
-		if _, _, readErr := store.Read(); readErr == nil {
-			if err := store.Remove(); err != nil {
-				t.Fatalf("observation %d: exact retry failed: %v", limit, err)
-			}
-		} else {
-			if len(names) != 0 {
-				t.Fatalf("observation %d stranded store content without a plan: %v", limit, readErr)
-			}
-			sawEmpty = true
-			if removed, err := store.RemoveIfEmpty(t.Context()); !removed || err != nil {
-				t.Fatalf("observation %d: empty store retry failed, removed=%t: %v", limit, removed, err)
-			}
-		}
-		if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("observation %d: exact retry left the store", limit)
-		}
+		return previous(fd, name, relative)
 	}
-	t.Fatal("removal never completed")
+	return func() bool {
+		statAt = previous
+		return interrupted
+	}
 }
 
 // An entry that appears after the first pass refuses before the plan is unlinked.
 func TestStoreRemovalFinalPassRefusesUnexpectedEntry(t *testing.T) {
-	store := completedStore(t)
+	store, _ := CompletedRecoveryStoreFixture(t)
 	keep := filepath.Join(store.Directory, "z-keep")
 	t.Cleanup(func() { statAt = factAt })
 	statAt = func(fd int, name, relative string) (Entry, error) {

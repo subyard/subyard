@@ -431,34 +431,42 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 	}
 }
 
-func TestTeardownResumesFinalStoreCleanup(t *testing.T) {
-	for _, withPlan := range []bool{true, false} {
-		t.Run(fmt.Sprintf("plan=%t", withPlan), func(t *testing.T) {
+func TestUninstallResumeRequiresSavedPlan(t *testing.T) {
+	for _, kind := range []string{"empty", "absent"} {
+		t.Run(kind, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			home := filepath.Join(root, "data")
-			store := uninstall.RecoveryStore{Directory: home + ".uninstall", UID: uint32(os.Getuid())}
-			if err := os.Rename(testkit.TempDir(t), store.Directory); err != nil {
+			directory := home + ".uninstall"
+			if err := os.Rename(testkit.TempDir(t), home); err != nil {
 				t.Fatal(err)
 			}
-			if withPlan {
-				plan := uninstall.RecoveryPlan{Schema: 1, Stage: uninstall.RecoveryFilesRemoved, AssetsReady: true,
-					Installation: uninstall.Installation{Schema: 1, OperatorUID: store.UID, DataHome: home,
-						ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}}
-				if _, err := store.Save(plan, nil); err != nil {
+			installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home,
+				ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}
+			body, err := json.Marshal(installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(home, uninstall.ManifestName)
+			testkit.WriteFile(t, manifest, body, 0600)
+			if kind == "empty" {
+				if err := os.Rename(testkit.TempDir(t), directory); err != nil {
 					t.Fatal(err)
 				}
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", store.Directory, "--yes"},
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", directory, "--yes"},
 				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code := program.Run(context.Background()); code != 0 {
+			if code := program.Run(t.Context()); code != 1 || stderr.String() != "yard: No saved full uninstall plan. Run 'yard teardown --full' again.\n" {
 				t.Fatalf("resume exit=%d stderr=%s", code, &stderr)
 			}
-			if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("recovery directory remains: %v", err)
+			}
+			if after, err := os.ReadFile(manifest); err != nil || !bytes.Equal(after, body) {
+				t.Fatalf("resume altered the installed manifest: %v", err)
 			}
 		})
 	}

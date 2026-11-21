@@ -229,39 +229,76 @@ func (store RecoveryStore) Save(plan RecoveryPlan, expected *Tree) (Tree, error)
 	return Capture(path)
 }
 
+// ErrNoRecoveryStore indicates that no saved uninstall is available to resume.
+var ErrNoRecoveryStore = errors.New("no saved full uninstall plan")
+
+// EmptyRecoveryCleanupError identifies a failure while clearing an empty store.
+type EmptyRecoveryCleanupError struct{ error }
+
+func (err EmptyRecoveryCleanupError) Unwrap() error { return err.error }
+
+// ReadForResume reads the saved plan or reports ErrNoRecoveryStore after an
+// absent store or successful cleanup of an empty one.
+func (store RecoveryStore) ReadForResume(ctx context.Context) (RecoveryPlan, error) {
+	binding, err := store.readBinding()
+	if errors.Is(err, os.ErrNotExist) {
+		return RecoveryPlan{}, ErrNoRecoveryStore
+	}
+	if err != nil {
+		return RecoveryPlan{}, err
+	}
+	if len(binding.Entries) == 0 {
+		removed, err := store.removeIfEmpty(ctx)
+		if err != nil {
+			return RecoveryPlan{}, EmptyRecoveryCleanupError{err}
+		}
+		if removed {
+			return RecoveryPlan{}, ErrNoRecoveryStore
+		}
+	}
+	return store.readPlan(binding)
+}
+
 func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
-	var plan RecoveryPlan
+	binding, err := store.readBinding()
+	if err != nil {
+		return RecoveryPlan{}, binding, err
+	}
+	plan, err := store.readPlan(binding)
+	return plan, binding, err
+}
+
+func (store RecoveryStore) readBinding() (Tree, error) {
 	if err := store.validateDirectory(); err != nil {
-		return plan, Tree{}, err
+		return Tree{}, err
 	}
 	path := filepath.Join(store.Directory, "plan.json")
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		path = filepath.Join(store.Directory, ".plan-next")
 	}
-	binding, err := Capture(path)
-	if err != nil {
-		return plan, binding, err
-	}
+	return Capture(path)
+}
+
+func (store RecoveryStore) readPlan(binding Tree) (RecoveryPlan, error) {
+	var plan RecoveryPlan
+	path := binding.Path
 	if len(binding.Entries) != 1 || binding.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || binding.Entries[0].Mode&0777 != 0600 || binding.Entries[0].UID != store.UID {
-		return plan, binding, protectedEntryError(path, "uninstall recovery plan", binding.Entries, store.UID)
+		return plan, protectedEntryError(path, "uninstall recovery plan", binding.Entries, store.UID)
 	}
 	body, err := store.ReadBody(binding)
 	if err != nil {
-		return plan, binding, err
+		return plan, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&plan); err != nil {
-		return plan, binding, config.OwnerMetadataError(path, "uninstall recovery plan", "incomplete original full uninstall plan; retain this protected store and restore its original approved publication before continuing", "", err)
+		return plan, config.OwnerMetadataError(path, "uninstall recovery plan", "incomplete original full uninstall plan; retain this protected store and restore its original approved publication before continuing", "", err)
 	}
 	var extra json.RawMessage
 	if decoder.Decode(&extra) != io.EOF {
-		return plan, binding, errors.New("uninstall recovery plan has trailing data")
+		return plan, errors.New("uninstall recovery plan has trailing data")
 	}
-	if err := plan.Validate(store.UID); err != nil {
-		return plan, binding, err
-	}
-	return plan, binding, nil
+	return plan, plan.Validate(store.UID)
 }
 
 // ReadBody binds transport to the original publication, rather than hashing a
@@ -305,9 +342,11 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 	return body, nil
 }
 
-// RemoveIfEmpty clears the residue before the first plan publication or after
+// removeIfEmpty clears the residue before the first plan publication or after
 // the final plan unlink. An active publisher holds the installation owner lock.
-func (store RecoveryStore) RemoveIfEmpty(ctx context.Context) (bool, error) {
+// As in safefs, the host is the trust boundary. Parent-directory writers can
+// replace names and are outside the contract of the final identity check.
+func (store RecoveryStore) removeIfEmpty(ctx context.Context) (bool, error) {
 	home, ok := strings.CutSuffix(store.Directory, ".uninstall")
 	if !ok {
 		return false, nil

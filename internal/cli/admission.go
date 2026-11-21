@@ -409,7 +409,7 @@ func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.
 				retry = append(retry, "--yes")
 			}
 			cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission
-			if code, handled := cli.runFullTeardownRecovery(ctx, retry); handled {
+			if code, noStore := cli.runFullTeardownRecovery(ctx, retry); !noStore {
 				return code, true
 			}
 			cli.gateAdmitted = nil
