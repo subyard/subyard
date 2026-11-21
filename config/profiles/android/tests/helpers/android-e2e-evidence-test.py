@@ -92,6 +92,18 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
 gradle_source = (E2E / 'android-gradle.sh').read_text()
 connected = gradle_source[gradle_source.index('connected() {'):gradle_source.index('not_writable "$work/connected.log"')]
 
+# Every run starts with an empty Gradle cache, so the fixture project resolves only from Google
+# and the Maven Central mirror: Maven Central answers shared CI addresses with HTTP 429, and the
+# plugin portal redirects its misses there.
+project_stage = gradle_source[gradle_source.index("stage='project'\n"):gradle_source.index('not_writable() {')]
+with tempfile.TemporaryDirectory(prefix='android-gradle-project-', dir='/tmp') as directory:
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\ncd "$1"\n' + project_stage, '_', directory],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    settings = Path(directory, 'project/settings.gradle.kts').read_text()
+    blocks = re.findall(r'repositories \{([^}]*)\}', settings)
+    assert blocks == [' google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") '] * 2, settings
+
 
 def fake_relay(mode, requests):
     listener = socket.create_server(('127.0.0.1', 0))
