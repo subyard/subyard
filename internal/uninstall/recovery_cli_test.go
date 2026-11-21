@@ -3,6 +3,7 @@ package uninstall_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 )
 
 func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
+	t.Setenv("PATH", testkit.TempDir(t))
 	sawEmpty := false
 	for limit := 0; limit <= 1000; limit++ {
 		store, plan := uninstall.CompletedRecoveryStoreFixture(t)
@@ -39,6 +41,15 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 		if interrupted {
 			if code != 1 || !strings.Contains(diagnostics.String(), "_uninstall-resume "+store.Directory) {
 				t.Fatalf("observation %d: interrupted exit=%d output=%s", limit, code, &diagnostics)
+			}
+			launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+			if _, err := os.Lstat(launcher); errors.Is(err, os.ErrNotExist) {
+				want := fmt.Sprintf("Full removal is incomplete. Retain %s, install a compatible Subyard version, then resume with:\n  yard _uninstall-resume %s\n", store.Directory, store.Directory)
+				if !strings.Contains(diagnostics.String(), want) {
+					t.Fatalf("observation %d: missing retry guidance %q in output %s", limit, want, &diagnostics)
+				}
+			} else if err != nil {
+				t.Fatalf("observation %d: inspect retained launcher: %v", limit, err)
 			}
 			entries, err := os.ReadDir(store.Directory)
 			if err != nil {
