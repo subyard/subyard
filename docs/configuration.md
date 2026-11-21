@@ -1058,7 +1058,8 @@ needs its own native acceptance; file presence does not prove that the client lo
 
 Rollback to v0.30.0 replaces `50-subyard-git-approval.json` and leaves the newer drop-ins
 in place. Claude continues to read those files, so sudo prompts or the shared hook can survive
-that rollback. The [v0.30.0 provisioner](https://github.com/subyard/subyard/blob/e2b31943dac13e05837e1b392416d023911abfd0/config/agents/claude/provision.sh#L155-L164)
+that rollback. With both gates off, the surviving hook blocks wrapped Git and sudo forms
+instead of prompting for them. The [v0.30.0 provisioner](https://github.com/subyard/subyard/blob/e2b31943dac13e05837e1b392416d023911abfd0/config/agents/claude/provision.sh#L155-L164)
 publishes only the Git drop-in.
 
 TODO (rollback slice 4 or later): have the rollback hook retire the split approval files

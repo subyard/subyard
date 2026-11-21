@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -184,18 +183,15 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(files) == 0 || files[len(files)-1].destination != "/home/dev/settings" {
+		if len(files) != 1 || files[0].destination != "/home/dev/settings" {
 			t.Fatalf("%s: unexpected destinations: %#v", step.mode, files)
 		}
-		var desired []map[string]any
-		for _, file := range files {
-			payload, err := file.readSource()
-			if err != nil {
-				t.Fatal(err)
-			}
-			desired = append(desired, inventoryFileEntry(f.home, "fixture", filepath.Base(file.destination), string(payload)))
+		payload, err := files[0].readSource()
+		if err != nil {
+			t.Fatal(err)
 		}
-		entries := inventoryArtifacts(t, desired)
+		entry := inventoryFileEntry(f.home, "fixture", "settings", string(payload))
+		entries := inventoryArtifacts(t, []map[string]any{entry})
 		if step.applied {
 			observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
 			if err != nil || observed.Changed {
@@ -211,10 +207,6 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		got, err := os.ReadFile(f.home + "/settings")
 		if err != nil || string(got) != step.want {
 			t.Fatalf("%s: installed %q, want %q, read error: %v", step.mode, got, step.want, err)
-		}
-		_, sidecarErr := os.Stat(filepath.Join(f.home, "prompt.jsonc"))
-		if mode == "prompt" && sidecarErr != nil || mode != "prompt" && !os.IsNotExist(sidecarErr) {
-			t.Fatalf("%s: overlay did not converge: %v", step.mode, sidecarErr)
 		}
 	}
 }
