@@ -453,6 +453,10 @@ func completedStore(t *testing.T) RecoveryStore {
 	if err := os.Mkdir(store.Directory, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(store.Directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	plan.Stage, plan.AssetsReady = RecoveryFilesRemoved, true
 	if _, err := store.Save(plan, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -470,10 +474,9 @@ func completedStore(t *testing.T) RecoveryStore {
 	return store
 }
 
-// Final store removal keeps the plan until last: an interruption at any
-// observation leaves the store absent, empty or still readable, and the
-// printed retry runs as printed or first says to install a compatible release.
-func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
+// Interrupt at each observation during final removal. The next recovery
+// attempt reads the original plan or clears the empty residue.
+func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 	for _, onPath := range []bool{false, true} {
 		t.Run(fmt.Sprintf("yard-on-path=%v", onPath), func(t *testing.T) {
 			tools := testkit.TempDir(t)
@@ -488,8 +491,10 @@ func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
 
 func storeRemovalInterruptions(t *testing.T) {
 	t.Cleanup(func() { statAt = factAt })
-	for limit := 1; ; limit++ {
+	sawEmpty := false
+	for limit := 0; limit <= 1000; limit++ {
 		store := completedStore(t)
+		testkit.WriteFile(t, filepath.Join(store.Directory, ".plan-next"), []byte("stale publication"), 0600)
 		calls := 0
 		statAt = func(fd int, name, relative string) (Entry, error) {
 			if calls++; calls > limit {
@@ -500,14 +505,17 @@ func storeRemovalInterruptions(t *testing.T) {
 		err := store.Remove()
 		statAt = factAt
 		names, statErr := os.ReadDir(store.Directory)
-		if _, _, readErr := store.Read(); statErr == nil && len(names) > 0 && readErr != nil {
-			t.Fatalf("observation %d stranded store content without a plan: %v", limit, readErr)
-		}
 		if err == nil {
 			if !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatal("completed removal left the store")
 			}
+			if !sawEmpty {
+				t.Fatal("interruption never left an empty recovery directory")
+			}
 			return
+		}
+		if statErr != nil {
+			t.Fatalf("observation %d: could not inspect interrupted store: %v", limit, statErr)
 		}
 		hint := store.ResumeHint()
 		lines := strings.Split(strings.TrimSuffix(hint, "\n"), "\n")
@@ -523,16 +531,24 @@ func storeRemovalInterruptions(t *testing.T) {
 		} else if install || exec.Command(executable, command[1:]...).Run() != nil {
 			t.Fatalf("observation %d: runnable retry %q did not run as printed", limit, hint)
 		}
-		if err := store.Remove(); err != nil {
-			t.Fatalf("observation %d: exact retry failed: %v", limit, err)
+		if _, _, readErr := store.Read(); readErr == nil {
+			if err := store.Remove(); err != nil {
+				t.Fatalf("observation %d: exact retry failed: %v", limit, err)
+			}
+		} else {
+			if len(names) != 0 {
+				t.Fatalf("observation %d stranded store content without a plan: %v", limit, readErr)
+			}
+			sawEmpty = true
+			if removed, err := store.RemoveIfEmpty(t.Context()); !removed || err != nil {
+				t.Fatalf("observation %d: empty store retry failed, removed=%t: %v", limit, removed, err)
+			}
 		}
 		if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("observation %d: exact retry left the store", limit)
 		}
-		if limit > 1000 {
-			t.Fatal("removal never completed")
-		}
 	}
+	t.Fatal("removal never completed")
 }
 
 // An entry that appears after the first pass refuses before the plan is unlinked.

@@ -2,6 +2,7 @@ package uninstall
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -304,8 +305,53 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 	return body, nil
 }
 
-// Remove deletes a completed store through the pinned remover, plan last: an
-// interruption leaves the plan for an exact retry of the same removal.
+// RemoveIfEmpty clears the residue before the first plan publication or after
+// the final plan unlink. An active publisher holds the installation owner lock.
+func (store RecoveryStore) RemoveIfEmpty(ctx context.Context) (bool, error) {
+	home, ok := strings.CutSuffix(store.Directory, ".uninstall")
+	if !ok {
+		return false, nil
+	}
+	if err := safePath(store.Directory); err != nil {
+		return false, err
+	}
+	removed := false
+	err := withParent(store.Directory, "uninstall recovery root changed", func(parent int, name string) error {
+		entry, err := statAt(parent, name, ".")
+		if err != nil {
+			return err
+		}
+		if entry.Mode&syscall.S_IFMT != syscall.S_IFDIR || entry.Mode&0777 != 0700 || entry.UID != store.UID {
+			return domain.ErrPlanStale
+		}
+		fd, err := openPinned(parent, name, entry, "uninstall recovery root changed")
+		if err != nil {
+			return err
+		}
+		directory := os.NewFile(uintptr(fd), store.Directory)
+		defer directory.Close()
+		if _, err := directory.Readdirnames(1); !errors.Is(err, io.EOF) {
+			return err
+		}
+		_, unlock, err := TryOwnerLock(ctx, home)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return errors.New("another operation holds the owner lock")
+		}
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := removeEntries(parent, name, []Entry{entry}, true, nil, false, nil); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+// Remove deletes a completed store through the pinned remover, plan last. An
+// interruption leaves either the plan for an exact retry or an empty directory.
 func (store RecoveryStore) Remove() error {
 	whole, err := Capture(store.Directory)
 	if err != nil {

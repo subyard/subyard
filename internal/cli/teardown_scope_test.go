@@ -363,12 +363,12 @@ func TestTeardownFullRejectsRemoteAndKeepDataBeforeConsent(t *testing.T) {
 }
 
 func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T) {
-	for _, kind := range []string{"complete", "truncated", "empty"} {
+	for _, kind := range []string{"complete", "truncated", "empty", "unsafe-empty", "locked-empty"} {
 		t.Run(kind, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			home := filepath.Join(root, "data")
 			directory := home + ".uninstall"
-			if err := os.Mkdir(directory, 0700); err != nil {
+			if err := os.Rename(testkit.TempDir(t), directory); err != nil {
 				t.Fatal(err)
 			}
 			installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home, ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}
@@ -377,7 +377,18 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 			if kind == "truncated" {
 				body = body[:len(body)/2]
 			}
-			if kind != "empty" {
+			switch kind {
+			case "locked-empty":
+				_, unlock, err := uninstall.OwnerLock(t.Context(), home, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unlock()
+			case "unsafe-empty":
+				if err := os.Chmod(directory, 0755); err != nil {
+					t.Fatal(err)
+				}
+			case "complete", "truncated":
 				testkit.WriteFile(t, filepath.Join(directory, ".plan-next"), body, 0600)
 			}
 			// Ordinary context loading must not replace the original recovery facts.
@@ -393,14 +404,61 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 				if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
 					t.Fatal("original first plan did not reach its single default-no confirmation", code, stderr.String())
 				}
+			} else if kind == "empty" {
+				if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("empty recovery directory remains: %v", err)
+				}
+				if code != 2 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "unterminated quoted assignment") {
+					t.Fatal("empty store did not continue to ordinary context loading", code, stderr.String())
+				}
+			} else if kind == "locked-empty" {
+				if code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "another operation holds the owner lock. Retry the same command.") {
+					t.Fatal("active publication was not protected", code, stderr.String())
+				}
 			} else if code == 0 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "ORIGINAL approved inventory") {
 				t.Fatal("incomplete protected store bypassed admission", code, stderr.String())
+			}
+			if _, err := os.Lstat(directory); kind != "empty" && err != nil {
+				t.Fatalf("protected store was lost: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(directory, "plan.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("assessment published recovery", err)
 			}
 			if _, err := os.Stat(filepath.Join(directory, "runtime")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("assessment retained runtime before consent", err)
+			}
+		})
+	}
+}
+
+func TestTeardownResumesFinalStoreCleanup(t *testing.T) {
+	for _, withPlan := range []bool{true, false} {
+		t.Run(fmt.Sprintf("plan=%t", withPlan), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			home := filepath.Join(root, "data")
+			store := uninstall.RecoveryStore{Directory: home + ".uninstall", UID: uint32(os.Getuid())}
+			if err := os.Rename(testkit.TempDir(t), store.Directory); err != nil {
+				t.Fatal(err)
+			}
+			if withPlan {
+				plan := uninstall.RecoveryPlan{Schema: 1, Stage: uninstall.RecoveryFilesRemoved, AssetsReady: true,
+					Installation: uninstall.Installation{Schema: 1, OperatorUID: store.UID, DataHome: home,
+						ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}}
+				if _, err := store.Save(plan, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", store.Directory, "--yes"},
+				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("resume exit=%d stderr=%s", code, &stderr)
+			}
+			if _, err := os.Lstat(store.Directory); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovery directory remains: %v", err)
 			}
 		})
 	}
