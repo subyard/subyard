@@ -5923,3 +5923,39 @@ func TestMutationGateIgnoresV1Files(t *testing.T) {
 		})
 	}
 }
+
+func TestReleaseRuntimeConfigRunsRollbackActionsFromTheGivenRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "releases", "0.31.0-candidate")
+	profileRoot := filepath.Join(root, "config", "profiles", "sample")
+	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	testkit.WriteFile(t, filepath.Join(profileRoot, "profile.json"), []byte(`{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","format":2,"prepares_rollback_to":1}}`), 0o600)
+	testkit.WriteFile(t, filepath.Join(profileRoot, "runtime.sh"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >>`+filepath.Join(root, "calls")+`
+case "$1" in
+rollback-observe) printf '{"state":"current","actual":"`+digest+`","desired":"`+digest+`"}\n' ;;
+*) exit 9 ;;
+esac
+`), 0o700)
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"project/yard": {Name: "yard", Status: "Running"}}}
+	program := &CLI{options: Options{RepositoryRoot: t.TempDir(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Incus: incus}}
+	runtimeConfig := program.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
+	catalog, err := config.LoadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := config.Loaded{Catalog: catalog, Context: domain.Context{IncusProject: "project", YardInstanceName: "yard", YardName: "default"}}
+	observation, err := runtimeConfig.ProfileRuntimeRollbackObservation(context.Background(), root, loaded, "sample-runtime")
+	if err != nil || observation.State != ports.RuntimeStateCurrent {
+		t.Fatalf("rollback observation = %#v, %v", observation, err)
+	}
+	if err := runtimeConfig.ProfileRuntimeRollbackApply(context.Background(), root, loaded, "sample-runtime", "op-1", digest, digest); err != nil {
+		t.Fatalf("converged rollback apply = %v", err)
+	}
+	// The converged apply is verified by rollback-observe alone.
+	if calls, err := os.ReadFile(filepath.Join(root, "calls")); err != nil || string(calls) != "rollback-observe\nrollback-observe\n" {
+		t.Fatalf("hook calls = %q, %v", calls, err)
+	}
+}

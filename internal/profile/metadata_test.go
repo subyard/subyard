@@ -223,3 +223,33 @@ func TestIntegrationMetadataOwnsApprovalSources(t *testing.T) {
 		t.Fatalf("approval sources alias another copy: %#v", again.Artifacts[0].ApprovalSources)
 	}
 }
+
+func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
+	runtime := func(fields string) []byte {
+		return []byte(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh"` + fields + `}}`)
+	}
+	for fields, want := range map[string][2]int{
+		``:                                     {1, 0},
+		`,"format":2`:                          {2, 0},
+		`,"format":2,"prepares_rollback_to":1`: {2, 1},
+		`,"prepares_rollback_to":3`:            {1, 3},
+	} {
+		metadata, err := Decode("synthetic", runtime(fields))
+		if err != nil {
+			t.Fatalf("%s: %v", fields, err)
+		}
+		hook := metadata.definition().Runtime
+		if got := [2]int{hook.EffectiveFormat(), hook.PreparesRollbackTo}; got != want {
+			t.Fatalf("%s: formats %v, want %v", fields, got, want)
+		}
+	}
+	for _, fields := range []string{
+		`,"format":-1`, `,"prepares_rollback_to":-1`,
+		`,"prepares_rollback_to":1`, `,"format":2,"prepares_rollback_to":2`,
+		`,"format":"2"`,
+	} {
+		if _, err := Decode("synthetic", runtime(fields)); err == nil {
+			t.Fatalf("invalid runtime formats were accepted: %s", fields)
+		}
+	}
+}
