@@ -1360,20 +1360,16 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
 	}
 	// Both admissions are independent; a refusal reports both.
-	runtimeBinding, err := retained(ctx)
-	var bindingRefusal error
-	if err != nil {
-		bindingRefusal = retainedBindingRefusal(observed, release, err)
-	}
-	if compatErr != nil && bindingRefusal != nil {
-		joined := joinReleaseRefusals(compatRefusal, bindingRefusal)
+	runtimeBinding, bindingErr := retained(ctx)
+	if compatErr != nil && bindingErr != nil {
+		joined := joinReleaseRefusals(compatRefusal, retainedBindingMessage, bindingErr)
 		return refused(joined, joined.outcome)
 	}
 	if compatErr != nil {
 		return refused(compatErr, compatRefusal.outcome)
 	}
-	if bindingRefusal != nil {
-		return Prepared{}, verifiedPreparation(bindingRefusal)
+	if bindingErr != nil {
+		return Prepared{}, verifiedPreparation(retainedBindingRefusal(observed, release, bindingErr))
 	}
 	if len(pending) != 0 {
 		return runtime.prepareRollbackPreparation(parsed, request, verified, pending, runtimeBinding, retained), nil

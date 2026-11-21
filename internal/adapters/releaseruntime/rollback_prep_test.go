@@ -593,7 +593,8 @@ func TestRollbackPreparationCollectsEveryRefusal(t *testing.T) {
 	fixture.formats["named"] = 0
 	_, err = fixture.prepare(t)
 	if outcome := outcomeOf(t, err); !strings.Contains(outcome.Message, "yard named is stopped") ||
-		!strings.Contains(outcome.Message, "the retained release cannot verify installed runtime activation") || !strings.Contains(err.Error(), "extra-runtime") ||
+		!strings.Contains(outcome.Message, retainedBindingMessage) || strings.Count(err.Error(), retainedBindingMessage) != 1 ||
+		!strings.HasSuffix(err.Error(), "; retained release cannot activate installed profile runtime extra-runtime") ||
 		retryAction(t, outcome.Retry) != (domain.Action{Verb: domain.VerbStart, Yard: "named"}) {
 		t.Fatalf("combined refusal = %#v, %v", outcome, err)
 	}
