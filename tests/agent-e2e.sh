@@ -5274,9 +5274,15 @@ smoke_rollback_fixture_contract() {
                 [ "$scenario" != registry-wrong-code ] || code=dependency-unavailable
                 [ "$scenario" != registry-combined ] || prefix+=' cannot safely list yards for VM rollback inspection;'
                 printf '%s\n' 'Installed version: candidate' 'Inspecting the installed release...'
-                printf '%s release transition operator-action-required: code=%s active=candidate previous=predecessor target=predecessor transaction=none; %s; next: %s\n' \
-                  "$prefix" "$code" "the selected release's migration registry differs from the active release's registry" \
-                  'keep the current release active and resolve all reported release compatibility requirements before retrying' >&2
+                local binding='' detail=''
+                if [ "$scenario" = registry-binding ] || [ "$scenario" = registry-binding-other ]; then
+                  binding='; the retained release cannot verify installed runtime activation'
+                  detail='; retained release cannot activate installed profile runtime github-runtime'
+                  [ "$scenario" != registry-binding-other ] || detail='; cannot safely list yards for VM rollback inspection'
+                fi
+                printf '%s release transition operator-action-required: code=%s active=candidate previous=predecessor target=predecessor transaction=none; %s%s; next: %s%s\n' \
+                  "$prefix" "$code" "the selected release's migration registry differs from the active release's registry" "$binding" \
+                  'keep the current release active and resolve all reported release compatibility requirements before retrying' "$detail" >&2
                 if [ "$scenario" = registry-extra-line ]; then
                   printf '%s\n' 'cannot safely list yards for VM rollback inspection' >&2
                 fi ;;
@@ -5348,7 +5354,7 @@ for smoke_rollback_scenario in success \
   init-fail repeat-init-fail init-unrelated-fail init-wrong-exit init-reboot-required \
   missing-history-checkpoint.json missing-ledger.json missing-journal.json \
   wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
-  rollback-fail rollforward-fail other-blocker epoch-blocker registry-blocker registry-wrong-code \
+  rollback-fail rollforward-fail other-blocker epoch-blocker registry-blocker registry-binding registry-binding-other registry-wrong-code \
   registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change \
   retired-refused retired-successor-refused; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
@@ -5356,12 +5362,12 @@ for smoke_rollback_scenario in success \
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = epoch-blocker || "$smoke_rollback_scenario" = registry-blocker ]]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = epoch-blocker || "$smoke_rollback_scenario" = registry-blocker || "$smoke_rollback_scenario" = registry-binding ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
     fi
-    if [ "$smoke_rollback_scenario" = registry-blocker ]; then
+    if [ "$smoke_rollback_scenario" = registry-blocker ] || [ "$smoke_rollback_scenario" = registry-binding ]; then
       grep -Fxq 'evidence: release smoke predecessor rollback refused by the retained-release registry check' "$smoke_rollback_log" \
         || fail 'release smoke lost retained registry evidence'
     fi
@@ -5384,7 +5390,7 @@ for smoke_rollback_scenario in success \
         [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/rollback-refusal.before.metadata" ] \
           && [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/predecessor-rollback.log" ] \
           || fail 'release smoke entered rollback with a missing file' ;;
-      wrong-reason|other-blocker|registry-wrong-code|registry-combined|registry-extra-line)
+      wrong-reason|other-blocker|registry-wrong-code|registry-combined|registry-extra-line|registry-binding-other)
         while IFS= read -r diagnostic; do
           grep -Fxq -- "$diagnostic" "$smoke_rollback_log" || fail 'release smoke concealed an unexpected refusal'
         done < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/predecessor-rollback.log" ;;

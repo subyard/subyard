@@ -357,14 +357,18 @@ assert_legacy_native_policy() {
 }
 
 # The device-guard epoch can refuse rollback at the retained registry check,
-# the compatibility blocker, or the earlier source provenance check.
+# the compatibility blocker, or the earlier source provenance check. The
+# registry refusal may also report the retained release's independent
+# installed-runtime finding, with its detail.
 classify_epoch_rollback_refusal() { # <log> <label>
   local registry_reason="the selected release's migration registry differs from the active release's registry"
   local registry_retry='keep the current release active and resolve all reported release compatibility requirements before retrying'
+  local binding_reason='the retained release cannot verify installed runtime activation'
+  local binding_detail='retained release cannot activate installed (profile runtime [a-z0-9][a-z0-9-]*|core helper contract)'
   local nl=$'\n' log progress fields registry_refusal
   progress="(Installed version: [^[:space:];]+$nl)?(Inspecting the installed release[.][.][.]$nl)?"
   fields='active=[^[:space:];]+ previous=[^[:space:];]+ target=[^[:space:];]+ transaction=[^[:space:];]+'
-  registry_refusal="^${progress}yard: update: release transition operator-action-required: code=rollback-incompatible $fields; $registry_reason; next: $registry_retry$"
+  registry_refusal="^${progress}yard: update: release transition operator-action-required: code=rollback-incompatible $fields; $registry_reason(; next: $registry_retry|; $binding_reason; next: $registry_retry; $binding_detail)$"
   if grep -Fq "$registry_reason" "$1"; then
     log="$(<"$1")"
     if [[ ! "$log" =~ $registry_refusal ]]; then

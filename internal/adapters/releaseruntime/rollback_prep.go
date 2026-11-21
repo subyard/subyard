@@ -256,23 +256,45 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 // activation binding.
 type retainedBinding func(context.Context) (string, error)
 
-// retainedBindingRefusal reports installed runtime state the retained
+// retainedBindingMessage reports installed runtime state the retained
 // release cannot activate.
+const retainedBindingMessage = "the retained release cannot verify installed runtime activation"
+
 func retainedBindingRefusal(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, cause error) error {
 	outcome := publicReleaseOutcome(links, target, nil, releasetransition.CodeRollbackIncompatible,
-		"the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")
+		retainedBindingMessage, "retain a release with compatible component activation owners, then run yard update --check")
 	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(transitionOutcomeError(outcome), cause), outcome: outcome}
 }
 
-// joinReleaseRefusals reports a further independent refusal beside a public
-// one, whose next step stays first. The wire message keeps 512 bytes; the
-// cause keeps every finding.
-func joinReleaseRefusals(first publicReleaseInspectionError, further error) publicReleaseInspectionError {
+// joinReleaseRefusals reports a further independent finding beside a public
+// refusal, whose next step stays first. The wire message keeps 512 bytes;
+// the cause keeps every detail once.
+func joinReleaseRefusals(first publicReleaseInspectionError, message string, detail error) publicReleaseInspectionError {
 	outcome := first.outcome
-	if next, ok := TransitionOutcome(further); ok && len(outcome.Message)+2+len(next.Message) <= 512 {
-		outcome.Message += "; " + next.Message
+	if len(outcome.Message)+2+len(message) <= 512 {
+		outcome.Message += "; " + message
+	} else {
+		detail = fmt.Errorf("%s: %w", message, detail)
 	}
-	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(transitionOutcomeError(outcome), first.cause, further), outcome: outcome}
+	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(transitionOutcomeError(outcome), outcomeDetails(first.cause), detail), outcome: outcome}
+}
+
+// outcomeDetails is a refusal's cause without its rendered outcomes.
+func outcomeDetails(cause error) error {
+	if _, outcome := cause.(transitionOutcomeFailure); outcome {
+		return nil
+	}
+	refusals, ok := cause.(*domain.Refusals)
+	if !ok {
+		return cause
+	}
+	var details []error
+	for _, part := range refusals.Unwrap() {
+		if _, outcome := part.(transitionOutcomeFailure); !outcome {
+			details = append(details, part)
+		}
+	}
+	return domain.CollectOrderedRefusals(details...)
 }
 
 // staleFormatObservation reports what changed in the owners' observations
