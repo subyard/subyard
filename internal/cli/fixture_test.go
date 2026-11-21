@@ -294,37 +294,75 @@ func below(directory, path string) bool {
 	return err == nil && (relative == "." || filepath.IsLocal(relative))
 }
 
-// ownedPath resolves a fixture path: a local path is below Root; an absolute
-// path must be lexically below one of the fixture's own directories.
-func (fixture *cliFixture) ownedPath(path string) (string, error) {
+// ownedPath resolves a fixture path and the fixture directory that holds it:
+// a local path is below Root; an absolute path must be lexically below one of
+// the fixture's own directories.
+func (fixture *cliFixture) ownedPath(path string) (string, string, error) {
 	if !filepath.IsAbs(path) {
 		if !filepath.IsLocal(path) {
-			return "", fmt.Errorf("fixture path %q is not a local path below Root", path)
+			return "", "", fmt.Errorf("fixture path %q is not a local path below Root", path)
 		}
-		return filepath.Join(fixture.Root, path), nil
+		return fixture.Root, filepath.Join(fixture.Root, path), nil
 	}
-	if !slices.ContainsFunc(fixture.owned, func(owned string) bool { return below(owned, path) }) {
-		return "", fmt.Errorf("fixture path %s is outside the fixture's directories", path)
+	for _, owned := range fixture.owned {
+		if below(owned, path) {
+			return owned, filepath.Clean(path), nil
+		}
 	}
-	return filepath.Clean(path), nil
+	return "", "", fmt.Errorf("fixture path %s is outside the fixture's directories", path)
+}
+
+// writeContained writes path below owned without following links: every
+// parent below owned must be a real directory or is created as one, and the
+// file is opened with O_NOFOLLOW.
+func writeContained(owned, path string, data []byte, mode os.FileMode) error {
+	relative, err := filepath.Rel(owned, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	current := owned
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("fixture path parent %s is %v, not a directory", current, info.Mode().Type())
+		}
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	return errors.Join(writeErr, file.Chmod(mode), file.Close())
 }
 
 // Write creates path, relative to Root or below the fixture's own directories,
-// with its missing parents; the default mode is 0600.
+// with its missing parents and without following links; the default mode is 0600.
 func (fixture *cliFixture) Write(path, content string, mode ...os.FileMode) string {
 	fixture.t.Helper()
-	path, err := fixture.ownedPath(path)
+	owned, path, err := fixture.ownedPath(path)
 	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		fixture.t.Fatal(err)
 	}
 	fileMode := os.FileMode(0o600)
 	if len(mode) != 0 {
 		fileMode = mode[0]
 	}
-	testkit.WriteFile(fixture.t, path, []byte(content), fileMode)
+	if err := writeContained(owned, path, []byte(content), fileMode); err != nil {
+		fixture.t.Fatal(err)
+	}
 	return path
 }
 
@@ -537,9 +575,24 @@ func TestCLIFixtureRefusesPathsAndSettingsItDoesNotOwn(t *testing.T) {
 		private + "-sibling":                            "",
 		filepath.Join(repositoryRoot(t), "config"):      "",
 	} {
-		if got, err := fixture.ownedPath(path); got != want || (err != nil) != (want == "") {
+		if _, got, err := fixture.ownedPath(path); got != want || (err != nil) != (want == "") {
 			t.Errorf("%s: %q %v", path, got, err)
 		}
+	}
+	// Containment holds when the file is opened: a link a test created later
+	// below Root is not followed, as a parent or as the file itself.
+	outside := testkit.TempDir(t)
+	if err := errors.Join(os.Symlink(outside, filepath.Join(fixture.Root, "linked")),
+		os.Symlink(filepath.Join(outside, "target"), filepath.Join(fixture.Root, "config", "linked"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"linked/file", "linked/new/file", "config/linked"} {
+		if err := writeContained(fixture.Root, filepath.Join(fixture.Root, path), []byte("x"), 0o600); err == nil {
+			t.Errorf("%s: write followed a link", path)
+		}
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("write reached outside the fixture: %v %v", entries, err)
 	}
 	for tool, local := range map[string]bool{
 		"scripts/e2e-lab/invoke.sh": true, "../outside/tool": false, "/usr/bin/tool": false,
