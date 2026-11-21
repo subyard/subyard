@@ -97,7 +97,8 @@ def selected(name, records):
 
 
 def section(name, path):
-    if not os.path.isfile(path):
+    # A watcher stopped between rotation and reopening leaves only PATH.1.
+    if not os.path.isfile(path) and not os.path.isfile(path + '.1'):
         print(f'watch: no records file for {name}', file=sys.stderr)
         raise SystemExit(3)
     data = b''
