@@ -1501,7 +1501,7 @@ boot_after="$(timeout --signal=TERM --kill-after=10 15 ssh -F "$HOLDER_CONFIG" -
 [ -n "$boot_before" ] && [ -n "$boot_after" ] && [ "$boot_before" != "$boot_after" ] || die 'singleton did not boot again'
 timeout --signal=TERM --kill-after=10 15 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- \
   'systemctl is-enabled --quiet subyard-e2e-lease-context.service &&
-   ip -4 route show default | grep -q "^default " && cat /run/subyard-e2e-lease.json' </dev/null \
+   ip -4 route show default | grep "^default " >/dev/null && cat /run/subyard-e2e-lease.json' </dev/null \
   | jq -e --argjson lease "$(jq -c '.pool.slots[0]' <<<"$held")" '
       .schema_version == 2 and .yard == $lease.yard and .project == $lease.project and
       .run == $lease.run and .purpose == $lease.purpose and .slot == $lease.slot_id and

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared helpers for lease holders in disposable E2E fixtures.
 # shellcheck shell=bash
+# HOLDER_STARTED_PID is read by the caller.
+# shellcheck disable=SC2034
 
 # A runtime mask loses to a local /etc unit. Refuse the reaper's explicit start
 # instead; its timer is stopped separately while the incident is captured.
