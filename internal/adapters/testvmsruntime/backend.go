@@ -13,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type Backend struct {
@@ -419,23 +420,16 @@ func (backend *Backend) publishRoute(ctx context.Context, state backendState) er
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(state.clientDirectory, 0o755); err != nil {
+	// Clients in unprivileged yards need public traversal even under umask 077.
+	if err := safefs.EnsureDir(state.clientDirectory, safefs.DirOptions{Mode: 0o755, ParentMode: 0o755}); err != nil {
 		return err
 	}
-	// Consumers read this directory as root inside an unprivileged yard, where the
-	// host owner uid is unmapped and grants no privilege: the traversal bits must be
-	// set explicitly, because umask clamps the MkdirAll mode above.
-	// Consumers read this directory as root inside an unprivileged yard, where the
-	// host owner uid is unmapped and grants no privilege: the traversal bits must be
-	// set explicitly, because umask clamps the MkdirAll mode above.
-	if err := os.Chmod(state.clientDirectory, 0o755); err != nil {
-		return err
-	}
+
 	generation, err := os.MkdirTemp(state.clientDirectory, ".route-")
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(generation, 0o755); err != nil {
+	if err := safefs.EnsureDir(generation, safefs.DirOptions{Mode: 0o755}); err != nil {
 		_ = os.RemoveAll(generation)
 		return err
 	}

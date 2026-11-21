@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const provisionedGuestCount = 2
@@ -1008,10 +1010,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 func (runtime *Runtime) ensureStateDir() error {
 	cfg := runtime.Config
 	if os.Geteuid() == 0 {
-		if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
+		if err := safefs.EnsureDir(cfg.StateDir, safefs.DirOptions{ParentMode: 0o700}); err != nil {
 			return err
 		}
 		return writePrivateFile(cfg.stateMarker(), []byte(managedMarker+"\n"))
@@ -1020,7 +1019,7 @@ func (runtime *Runtime) ensureStateDir() error {
 	if err != nil || !info.IsDir() {
 		return errors.New("state directory is not writable; re-run yard init on the owner host")
 	}
-	file, err := os.CreateTemp(cfg.StateDir, ".write-check-*")
+	file, err := os.CreateTemp(cfg.StateDir, ".write-check-*") //nolint:forbidigo // Writability probe.
 	if err != nil {
 		return errors.New("state directory is not writable; re-run yard init on the owner host")
 	}
@@ -1038,7 +1037,9 @@ func (runtime *Runtime) ensureKey(ctx context.Context) error {
 	if _, err := os.Stat(cfg.keyRevision()); os.IsNotExist(err) {
 		if payload, readErr := os.ReadFile(cfg.keyPath() + ".pub"); readErr == nil {
 			if key, normalizeErr := normalizedPublicKey(string(payload)); normalizeErr == nil {
-				_ = writePrivateFile(cfg.revokedKey(), []byte(key+"\n"))
+				if err := writePrivateFile(cfg.revokedKey(), []byte(key+"\n")); err != nil {
+					return err
+				}
 			}
 		}
 		_ = os.Remove(cfg.keyPath())
@@ -1064,35 +1065,13 @@ func (runtime *Runtime) ensureKey(ctx context.Context) error {
 }
 
 func writePrivateFile(path string, payload []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
+	return safefs.WriteFile(path, payload, safefs.Options{Mode: 0o600, ParentMode: 0o700})
 }
 
 func writeAtomic(path string, payload []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	temp := file.Name()
-	defer os.Remove(temp)
-	if _, err = file.Write(payload); err == nil {
-		err = file.Chmod(mode)
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	return safefs.WriteFile(path, payload, safefs.Options{
+		Mode: mode, ParentMode: 0o755, TempPattern: "." + filepath.Base(path) + ".*",
+	})
 }
 
 func regularNonempty(path string) bool {

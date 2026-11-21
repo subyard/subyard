@@ -12,11 +12,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func fixtureBackend(t *testing.T) *Backend {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "scripts", "e2e-lab"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -24,17 +27,11 @@ func fixtureBackend(t *testing.T) *Backend {
 		t.Fatal(err)
 	}
 	dispatcher := filepath.Join(root, "yard-engine")
-	if err := os.WriteFile(dispatcher, []byte("fixture-engine"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "scripts", "e2e-lab", "provision.sh"),
-		[]byte("fixture-provision\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "scripts", "lib", "download.sh"),
-		[]byte("fixture-download\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, dispatcher, []byte("fixture-engine"), 0o755)
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "e2e-lab", "provision.sh"),
+		[]byte("fixture-provision\n"), 0o755)
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "lib", "download.sh"),
+		[]byte("fixture-download\n"), 0o644)
 	for _, name := range recipeFiles {
 		path := filepath.Join(root, filepath.FromSlash(name))
 		if _, err := os.Stat(path); err == nil {
@@ -43,9 +40,7 @@ func fixtureBackend(t *testing.T) *Backend {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("fixture recipe: "+name+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte("fixture recipe: "+name+"\n"), 0o644)
 	}
 	client := filepath.Join(root, "client")
 	return &Backend{
@@ -161,7 +156,10 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 		return nil, nil, fmt.Errorf("unexpected incus call: %s", joined)
 	}}
 	backend.Runner = runner
-	if err := backend.Apply(context.Background()); err != nil {
+	previous := unix.Umask(0o077)
+	err := backend.Apply(context.Background())
+	unix.Umask(previous)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(power, ",") != "start,stop" {
@@ -210,17 +208,13 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if err := os.MkdirAll(generation, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(generation, "route.tsv"), []byte(
+	testkit.WriteFile(t, filepath.Join(generation, "route.tsv"), []byte(
 		"subyard-e2e-route-v1\nhostname\t10.10.0.4\nport\t22\n"+
 			"host_key_alias\tsubyard-e2e-bastion\n",
-	), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	), 0o644)
 	hostKey := fixturePublicKey(t)
-	if err := os.WriteFile(filepath.Join(generation, "known_hosts"),
-		[]byte("subyard-e2e-bastion "+hostKey+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(generation, "known_hosts"),
+		[]byte("subyard-e2e-bastion "+hostKey+"\n"), 0o644)
 	if err := os.Symlink(filepath.Base(generation),
 		filepath.Join(state.clientDirectory, "current")); err != nil {
 		t.Fatal(err)
@@ -257,6 +251,15 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if !converged {
 		t.Fatal("exact stopped backend was not converged")
 	}
+	if err := os.Chmod(generation, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := backend.Converged(context.Background()); err != nil || !ready {
+		t.Fatalf("active route mode alone scheduled route replacement: %t, %v", ready, err)
+	}
+	if active, err := PublishedRouteDirectory(state.clientDirectory); err != nil || active != generation {
+		t.Fatalf("active route = %q, %v", active, err)
+	}
 	delete(memory.Devices, hostMemoryDevice)
 	delete(memory.ExpandedDevices, hostMemoryDevice)
 	if converged, err := backend.Converged(context.Background()); err != nil || converged {
@@ -272,9 +275,7 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if converged {
 		t.Fatal("stale running route was accepted")
 	}
-	if err := os.WriteFile(backend.Dispatcher, []byte("drift"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, backend.Dispatcher, []byte("drift"), 0o755)
 	converged, err = backend.Converged(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -282,13 +283,9 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if converged {
 		t.Fatal("engine drift was accepted")
 	}
-	if err := os.WriteFile(backend.Dispatcher, []byte("fixture-engine"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(backend.RepositoryRoot, "scripts", "lib", "download.sh"),
-		[]byte("drift"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, backend.Dispatcher, []byte("fixture-engine"), 0o755)
+	testkit.WriteFile(t, filepath.Join(backend.RepositoryRoot, "scripts", "lib", "download.sh"),
+		[]byte("drift"), 0o644)
 	converged, err = backend.Converged(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -296,10 +293,8 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 	if converged {
 		t.Fatal("download helper drift was accepted")
 	}
-	if err := os.WriteFile(filepath.Join(backend.RepositoryRoot, "scripts", "lib", "download.sh"),
-		[]byte("fixture-download\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(backend.RepositoryRoot, "scripts", "lib", "download.sh"),
+		[]byte("fixture-download\n"), 0o644)
 	backend.Environment["E2E_VM_MEMORY"] = "2GiB"
 	converged, err = backend.Converged(context.Background())
 	if err != nil {
@@ -550,9 +545,7 @@ func TestBackendBudgetsAndRecipeChangesRequireReconcile(t *testing.T) {
 		}
 		backend.Environment[name] = before
 	}
-	if err := os.WriteFile(filepath.Join(backend.RepositoryRoot, recipeFiles[0]), []byte("changed recipe\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(backend.RepositoryRoot, recipeFiles[0]), []byte("changed recipe\n"), 0o644)
 	changed, err := backend.state()
 	if err != nil {
 		t.Fatal(err)

@@ -15,6 +15,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -57,11 +58,9 @@ func keyLine(t *testing.T, namespace string) string {
 
 func fixture(t *testing.T, namespace string) (*Manager, string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	known, candidate := filepath.Join(root, "known_hosts"), filepath.Join(root, "candidate")
-	if err := os.WriteFile(candidate, []byte(keyLine(t, namespace)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, candidate, []byte(keyLine(t, namespace)), 0o600)
 	program := filepath.Join(root, "ssh")
 	// The transport double negotiates a real public key and enforces exact
 	// candidate pinning. ssh-keygen itself checks the persistent trust store.
@@ -86,9 +85,7 @@ if [ "$assess" = 1 ]; then cp "$CANDIDATE" "$known"; exit 255; fi
 cmp -s "$known" "$CANDIDATE" || { echo 'changed server key' >&2; exit 255; }
 printf 'verified\n' >> "$CANDIDATE.calls"
 `
-	if err := os.WriteFile(program, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, program, []byte(script), 0o700)
 	manager := &Manager{Environment: append(os.Environ(), "KNOWN="+known, "CANDIDATE="+candidate, "NAMESPACE="+namespace)}
 	t.Cleanup(manager.Close)
 	return manager, program, known
@@ -99,9 +96,7 @@ func TestFirstTrustConsentAndVerification(t *testing.T) {
 		t.Run(namespace, func(t *testing.T) {
 			manager, program, known := fixture(t, namespace)
 			unrelated := keyLine(t, "unrelated.test")
-			if err := os.WriteFile(known, []byte(unrelated), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, known, []byte(unrelated), 0o600)
 			prompts := 0
 			manager.Confirm = func(_ context.Context, proposals []Proposal) error {
 				if len(proposals) != 1 {
@@ -153,9 +148,7 @@ func TestReadOnlyTrustRefusesUnknownKeyBeforeAssessment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(known, content, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, known, content, 0o600)
 	options, err := manager.Options(context.Background(), program, "example")
 	if err != nil || !strings.Contains(strings.Join(options, " "), "StrictHostKeyChecking=yes") {
 		t.Fatalf("known key=%v options=%v", err, options)
@@ -176,16 +169,16 @@ func TestFirstTrustFailureLeavesStoreUnchanged(t *testing.T) {
 				case "confirmation-required":
 					return domain.ErrConfirmationRequired
 				case "rotation":
-					return os.WriteFile(candidate, []byte(keyLine(t, "example.test")), 0o600)
+					testkit.WriteFile(t, candidate, []byte(keyLine(t, "example.test")), 0o600)
+					return nil
 				case "concurrent-trust":
-					return os.WriteFile(known, []byte(keyLine(t, "example.test")), 0o600)
+					testkit.WriteFile(t, known, []byte(keyLine(t, "example.test")), 0o600)
+					return nil
 				}
 				return nil
 			}
 			if scenario == "authentication" {
-				if err := os.WriteFile(candidate+".auth-failed", nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, candidate+".auth-failed", nil, 0o600)
 			}
 			if scenario == "witness-mismatch" {
 				manager.Witness = func(context.Context, string, string, ssh.PublicKey) error { return errors.New("owner scan differs") }
@@ -211,9 +204,7 @@ func TestFirstTrustFailureLeavesStoreUnchanged(t *testing.T) {
 func TestExistingTrustNeverOffersFirstTrust(t *testing.T) {
 	for _, marker := range []string{"", "@revoked "} {
 		manager, program, known := fixture(t, "example.test")
-		if err := os.WriteFile(known, []byte(marker+keyLine(t, "example.test")), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, known, []byte(marker+keyLine(t, "example.test")), 0o600)
 		manager.Confirm = func(context.Context, []Proposal) error { t.Fatal("existing key was treated as unknown"); return nil }
 		options, err := manager.Options(context.Background(), program, "example")
 		if err != nil || !strings.Contains(strings.Join(options, " "), "StrictHostKeyChecking=yes") {
@@ -263,9 +254,7 @@ func TestOwnerAndYardFirstTrustAreOneAction(t *testing.T) {
 					script = []byte(strings.ReplaceAll(string(script), "\"$"+name+"\"", shellquote.Word(value)))
 				}
 			}
-			if err := os.WriteFile(ownerProgram, script, 0o700); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, ownerProgram, script, 0o700)
 			manager.Witness = func(ctx context.Context, _, target string, _ ssh.PublicKey) error {
 				if target != "yard" {
 					return nil
@@ -288,14 +277,13 @@ func TestOwnerAndYardFirstTrustAreOneAction(t *testing.T) {
 					return domain.ErrOperationDeclined
 				}
 				if outcome == "owner-rotation" {
-					return os.WriteFile(filepath.Join(filepath.Dir(ownerKnown), "candidate"), []byte(keyLine(t, "owner-namespace")), 0o600)
+					testkit.WriteFile(t, filepath.Join(filepath.Dir(ownerKnown), "candidate"), []byte(keyLine(t, "owner-namespace")), 0o600)
+					return nil
 				}
 				return nil
 			}
 			if outcome == "yard-auth-failure" {
-				if err := os.WriteFile(filepath.Join(filepath.Dir(yardKnown), "candidate.auth-failed"), nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(filepath.Dir(yardKnown), "candidate.auth-failed"), nil, 0o600)
 			}
 			_, err = manager.Options(context.Background(), yardProgram, "yard")
 			if outcome == "accept" {

@@ -25,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -241,7 +242,7 @@ func (runtime Runtime) startSpaceRefresh(yard domain.Context, cache string) bool
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return false
 	}
-	probe, err := os.CreateTemp(directory, ".space-refresh-probe-")
+	probe, err := os.CreateTemp(directory, ".space-refresh-probe-") //nolint:forbidigo // Writability probe.
 	if err != nil {
 		return false
 	}
@@ -321,15 +322,14 @@ func (runtime Runtime) RefreshSpace(
 	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
 		return SpaceMeasurement{}, fmt.Errorf("prepare space cache: %w", err)
 	}
-	lock, err := os.OpenFile(cache+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := safefs.OpenLock(cache+".lock", 0o600)
 	if err != nil {
 		return SpaceMeasurement{}, fmt.Errorf("open space cache lock: %w", err)
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	defer lock.Release()
+	if err := lock.Acquire(ctx, false, 0); err != nil {
 		return SpaceMeasurement{}, fmt.Errorf("lock space cache: %w", err)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	result, err := runtime.Executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: []string{"sh", "-c", spaceMeasureCommand}})
@@ -470,28 +470,9 @@ func writeSpaceCache(path, figure string, measured time.Time) error {
 	if path == "" || !validSpaceFigure(figure) {
 		return fmt.Errorf("invalid status space cache")
 	}
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(directory, ".space-cache-")
-	if err != nil {
-		return err
-	}
-	temp := file.Name()
-	defer os.Remove(temp)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := fmt.Fprintf(file, "%s %d\n", figure, measured.Unix()); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	return safefs.WriteFile(path, fmt.Appendf(nil, "%s %d\n", figure, measured.Unix()), safefs.Options{
+		Mode: 0o600, ParentMode: 0o700, TempPattern: ".space-cache-*",
+	})
 }
 
 func validSpaceFigure(value string) bool {

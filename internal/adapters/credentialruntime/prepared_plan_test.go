@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPreparedMetadataPlanRetainsBindingAndRejectsHeadDrift(t *testing.T) {
@@ -52,7 +53,7 @@ func TestPreparedMetadataPlanRetainsBindingAndRejectsHeadDrift(t *testing.T) {
 func TestProtectedPlanRefusesLiveSourceReplacementWithoutReadingValue(t *testing.T) {
 	runtime := credentialFixture(t)
 	installCredentialIdentity(t, runtime)
-	path := filepath.Join(t.TempDir(), "value")
+	path := filepath.Join(testkit.TempDir(t), "value")
 	writeCredentialFile(t, path, "first-private-value", 0o600)
 	prepared, err := runtime.Prepare(context.Background(), "", []string{"add", "fixture", "--file", path, "--local-only"})
 	if err != nil {

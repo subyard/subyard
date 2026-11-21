@@ -21,6 +21,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/credential"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/term"
 )
 
@@ -248,7 +249,7 @@ func (runtime *Runtime) publish(ctx context.Context, scope ledgerScope, spec rev
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return domain.CredentialMetadata{}, err
 	}
-	plain, err := os.CreateTemp("", ".subyard-credential-*")
+	plain, err := os.CreateTemp("", ".subyard-credential-*") //nolint:forbidigo // Unpublished SOPS input.
 	if err != nil {
 		return domain.CredentialMetadata{}, err
 	}
@@ -269,33 +270,28 @@ func (runtime *Runtime) publish(ctx context.Context, scope ledgerScope, spec rev
 		return domain.CredentialMetadata{}, err
 	}
 	destination := runtime.recordPath(scope, metadata.CredentialID, metadata.RevisionID)
-	temporary := destination + ".tmp"
-	os.Remove(temporary)
-	output, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	_ = os.Remove(destination + ".tmp") // Clean up staging from older versions.
+	pending, err := safefs.Create(destination, safefs.Options{Mode: 0o600})
 	if err != nil {
 		return domain.CredentialMetadata{}, err
 	}
+	defer pending.Abort()
+
 	command := execCommandContext(ctx, runtime.sops,
 		"encrypt", "--age", strings.Join(recipients, ","), "--encrypted-regex", "^(payload)$",
 		"--input-type", "json", "--output-type", "json", plainPath)
 	command.Dir = runtime.config.RepositoryRoot
 	command.Env = runtime.config.Environment
-	command.Stdout = output
+	command.Stdout = pending.File()
 	stderr := &limitedBuffer{limit: maximumOutput}
 	command.Stderr = stderr
-	runErr := command.Run()
-	closeErr := output.Close()
-	if runErr != nil || closeErr != nil {
-		os.Remove(temporary)
-		if runErr != nil {
-			return domain.CredentialMetadata{}, errors.New(firstNonEmpty(strings.TrimSpace(stderr.String()), "SOPS could not encrypt credential revision"))
-		}
-		return domain.CredentialMetadata{}, closeErr
+	if err := command.Run(); err != nil {
+		return domain.CredentialMetadata{}, errors.New(firstNonEmpty(strings.TrimSpace(stderr.String()), "SOPS could not encrypt credential revision"))
 	}
-	if err := os.Rename(temporary, destination); err != nil {
-		os.Remove(temporary)
+	if err := pending.Commit(); err != nil {
 		return domain.CredentialMetadata{}, err
 	}
+
 	if err := runtime.signRecord(ctx, destination); err != nil {
 		return domain.CredentialMetadata{}, err
 	}
@@ -319,11 +315,13 @@ var execCommandContext = func(ctx context.Context, program string, arguments ...
 
 func (runtime *Runtime) commitRecord(ctx context.Context, scope ledgerScope, metadata domain.CredentialMetadata) error {
 	repository := runtime.repository(scope)
-	if _, err := runtime.gitRun(ctx, repository, "add", "--all"); err != nil {
+	revision := filepath.Join("records", metadata.CredentialID, metadata.RevisionID+".json")
+	signature := revision + ".sig"
+	if _, err := runtime.gitRun(ctx, repository, "add", "--", revision, signature); err != nil {
 		return err
 	}
 	message := fmt.Sprintf("Record %s revision %s", metadata.CredentialID, metadata.RevisionID)
-	if _, err := runtime.gitSigned(ctx, repository, "commit", "-S", "-m", message); err != nil {
+	if _, err := runtime.gitSigned(ctx, repository, "commit", "-S", "-m", message, "--only", "--", revision, signature); err != nil {
 		return err
 	}
 	if scope == sharedLedger {
