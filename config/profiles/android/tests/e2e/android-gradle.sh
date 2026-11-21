@@ -217,10 +217,11 @@ connected_watch() {
   local adb="$ANDROID_SDK_ROOT/platform-tools/adb" watch="$ANDROID_GRADLE_WORK/watch"
   local watcher="$ANDROID_GRADLE_WORK/watch.py"
   mkdir -p "$watch"
-  # The snapshot runs beside Gradle; the capture helper bounds it.
+  # The snapshot runs beside Gradle; the capture helper bounds it, and run stops its adb client
+  # with this process group.
   {
     printf 'android-gradle evidence: before connected meminfo\n' >&2
-    android_capture_evidence "$adb" shell dumpsys meminfo || true
+    android_capture_evidence --foreground "$adb" shell dumpsys meminfo || true
   } 2> "$watch/before.log" &
   ANDROID_GRADLE_SNAPSHOT="$!"
   # -D marks every change of buffer, which the crash section follows.
@@ -265,11 +266,13 @@ raise SystemExit(0 if healthy else 1)
   for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
     wait "$pid" 2>/dev/null || true
   done
+  # A failure waits for the bounded snapshot; a pass stops it. Its probe stays in this process
+  # group, which run stops before it releases the lease.
+  if [ -n "${ANDROID_GRADLE_SNAPSHOT:-}" ]; then
+    [ "$result" -ne 0 ] || kill -TERM "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
+    wait "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
+  fi
   if [ "$result" -ne 0 ]; then
-    # Only a failure waits for the bounded snapshot; stopping it would orphan its adb query.
-    if [ -n "${ANDROID_GRADLE_SNAPSHOT:-}" ]; then
-      wait "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
-    fi
     cat "$watch/before.log" >&2 2>/dev/null || true
     printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
     android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true

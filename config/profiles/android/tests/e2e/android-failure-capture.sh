@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Keep the producer status outside the redacted, byte-limited payload.
+# --foreground keeps a single-process probe in the caller's process group, which a lease owner
+# stops before release; without it timeout stops the probe's own process group.
 android_capture_evidence() (
   set -o pipefail
-  local capture_exit=0
+  local capture_exit=0 group=()
+  if [ "${1:-}" = --foreground ]; then
+    group=(--foreground)
+    shift
+  fi
   # Drain the probe and omit any record that crosses the redaction input cap.
-  timeout --kill-after=2 5 "$@" </dev/null 2>&1 | { head -c 65536 && cat >/dev/null; } |
+  timeout "${group[@]}" --kill-after=2 5 "$@" </dev/null 2>&1 | { head -c 65536 && cat >/dev/null; } |
     python3 -c '
 import sys
 
