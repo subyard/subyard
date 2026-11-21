@@ -70,6 +70,33 @@ class ProcessTest(unittest.TestCase):
                         scope_fixture.wait_for_short_run_samples(data, 'run')
                 sleep.assert_called_once_with(0.2)
 
+    def test_detached_final_waits_for_observer_to_retire_the_manifest(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = prepare(Path(name))
+            database = data/'telemetry.sqlite'
+            database.unlink()
+            runs = data/'runs-v5'
+            runs.mkdir(mode=0o700)
+            manifest = runs/'run.json'
+            with closing(sqlite3.connect(database)) as writer:
+                database.chmod(0o600)
+                writer.execute('CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT)')
+                writer.execute('INSERT INTO samples VALUES(?,?,?)', ('run:scope', 1, json.dumps(
+                    dict(populated=False, final=True, cpu_ns=1, memory_peak_bytes=8*1024*1024))))
+                writer.commit()
+            # A failed completion emit keeps the manifest for one more observer
+            # tick after the final sample is already durable.
+            manifest.write_text('{}')
+            with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 1)), \
+                 patch.object(scope_fixture.time, 'sleep', side_effect=lambda _seconds: manifest.unlink()) as sleep:
+                scope_fixture.wait_for_detached_final(data, 'run')
+            sleep.assert_called_once_with(0.2)
+            manifest.write_text('{}')
+            with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 40)), \
+                 patch.object(scope_fixture.time, 'sleep'):
+                with self.assertRaisesRegex(AssertionError, 'run manifest remained after final descendant counters'):
+                    scope_fixture.wait_for_detached_final(data, 'run')
+
     def test_start_identity_reads_stat_but_detail_requires_namespaces(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
