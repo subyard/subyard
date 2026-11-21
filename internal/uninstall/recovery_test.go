@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/testkit/interrupt"
 )
 
 func recoveryFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
@@ -491,28 +492,22 @@ func CompletedRecoveryStoreFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
 	return store, plan
 }
 
-// InterruptRecoveryStoreRemoval starts counting at the first observation of
-// the store itself. The returned function restores the seam and reports a fault.
-func InterruptRecoveryStoreRemoval(directory string, limit int) func() bool {
+// InterruptRecoveryStoreRemoval routes every observation from the first one of the
+// store itself through in. The returned function restores the seam.
+func InterruptRecoveryStoreRemoval(directory string, in *interrupt.Injector) func() {
 	base := filepath.Base(directory)
 	previous := statAt
-	started, interrupted := false, false
-	calls := 0
+	started := false
 	statAt = func(fd int, name, relative string) (Entry, error) {
 		started = started || relative == "." && name == base
 		if started {
-			if calls >= limit {
-				interrupted = true
-				return Entry{}, errors.New("intentional interruption")
+			if err := in.Hit("stat", relative); err != nil {
+				return Entry{}, err
 			}
-			calls++
 		}
 		return previous(fd, name, relative)
 	}
-	return func() bool {
-		statAt = previous
-		return interrupted
-	}
+	return func() { statAt = previous }
 }
 
 // An entry that appears after the first pass refuses before the plan is unlinked.

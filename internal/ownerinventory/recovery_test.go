@@ -223,6 +223,8 @@ func TestRepairRecoveryCompletesConnectionOnlyMixedState(t *testing.T) {
 	}
 }
 
+// state-delete fires once before all deletions, so a cut cannot reach these partial
+// deletions; they stay hand-built next to TestRemovalRecoversFromEveryDurableIOBoundary.
 func TestRemovalRecoveryCompletesEveryDeleteBoundary(t *testing.T) {
 	for _, removedCount := range []int{0, 1, 2} {
 		t.Run(map[int]string{0: "journal-only", 1: "connection-deleted", 2: "connection-and-cache-deleted"}[removedCount], func(t *testing.T) {
