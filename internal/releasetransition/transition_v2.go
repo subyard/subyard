@@ -3660,7 +3660,7 @@ func (transition *V2Transition) reconcileActivationOwners(
 				phase = phased.ActivationPhase()
 			}
 			return transition.reduceActivationReconcilerFailure(
-				ctx, journal, reconciler, id, phase, links, before, err,
+				ctx, journal, reconciler, id, phase, links, err,
 			), nil
 		}
 		actual, err := reconciler.Observe(ctx, journal.Releases, links)
@@ -3766,7 +3766,6 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 	id string,
 	phase string,
 	links ReleaseLinks,
-	before V2ActivationObservation,
 	reconcileErr error,
 ) (outcome Outcome) {
 	defer func() {
@@ -3810,14 +3809,9 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 			"run yard update --check",
 		), observation.activationWarnings)
 	}
-	if after.Actual != before.Actual && !after.Converged {
-		return withActivationWarnings(v2OperatorOutcome(
-			observation.links, journal.Goal.Target,
-			transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
-			fmt.Sprintf("activation reconciler %q reached an unknown state during %s", id, phase),
-			"run yard update --check",
-		), observation.activationWarnings)
-	}
+	// A valid reobservation is a known state of a repeatable owner, also when a
+	// partial apply moved it: resume binds only desired scope and reconciles
+	// from fresh facts, so remaining drift stays retryable.
 	outcome = v2RecoveringOutcome(
 		observation.links, journal.Goal.Target,
 		transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
