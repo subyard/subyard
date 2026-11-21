@@ -76,12 +76,10 @@ func WriteInvocation(invocation Invocation) error {
 		defer release()
 	}
 	directory := filepath.Join(invocation.Home, "logs")
-	if err := safefs.EnsureDir(directory, safefs.DirOptions{
-		Existing: safefs.Repair, ParentMode: 0o700, Durability: safefs.BestEffort,
-	}); err != nil {
-		if errors.Is(err, safefs.ErrNotDirectory) {
-			return &os.PathError{Op: "mkdir", Path: directory, Err: syscall.ENOTDIR}
-		}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
 		return err
 	}
 	lock, err := safefs.Lock(context.Background(), filepath.Join(directory, ".yard.lock"), false, 0)
@@ -94,12 +92,17 @@ func WriteInvocation(invocation Invocation) error {
 	if maximum <= 0 {
 		maximum = defaultMaximum
 	}
-	if info, err := os.Stat(path); err == nil && info.Size() >= maximum {
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symbolic link audit log %s", path)
+	}
+	if err == nil && info.Size() >= maximum {
 		if err := rotateAuditFiles(path); err != nil {
 			return err
 		}
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// O_NOFOLLOW keeps a link created after the check from receiving the entry.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}

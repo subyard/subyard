@@ -458,14 +458,32 @@ func ensureStateDirectory(directory string) error {
 		}
 		return fmt.Errorf("endpoint state parent has unsafe type or permissions: %o", info.Mode().Perm())
 	}
-	err = safefs.EnsureDir(directory, safefs.DirOptions{
-		Owner: &safefs.Ownership{UID: os.Getuid(), GID: -1},
-	})
-	if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
-		errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
+	created := false
+	err = os.Mkdir(directory, 0o700)
+	if err == nil {
+		created = true
+	}
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err = os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || !ownedByUser(info) {
 		return errors.New("endpoint state directory has unsafe type or permissions")
 	}
-	return err
+	if created {
+		parentDirectory, err := os.Open(parent)
+		if err != nil {
+			return err
+		}
+		if err := parentDirectory.Sync(); err != nil {
+			parentDirectory.Close()
+			return err
+		}
+		if err := parentDirectory.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func acquireLock(ctx context.Context, directory string) (*safefs.LockFile, error) {

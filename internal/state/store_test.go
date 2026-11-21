@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/contracttest"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -614,19 +615,20 @@ func fixtureRecord(id string) domain.ProjectRecord {
 	}
 }
 
-func TestFileStoreFinishesNarrowDirectoryAndRefusesBroadOrSymlinked(t *testing.T) {
+func TestFileStoreKeepsDirectoryAdmissionAndRefusesSymlinkedTargets(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(store.Directory(), 0o500); err != nil {
+	// An owned 02700 directory is accepted unchanged, including its setgid bit.
+	if err := os.Chmod(store.Directory(), 0o700|os.ModeSetgid); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
-		t.Fatalf("narrow owned state directory: %v", err)
+		t.Fatalf("setgid state directory: %v", err)
 	}
-	if info, err := os.Stat(store.Directory()); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("narrow state directory not finished: %v %v", info, err)
+	if info, err := os.Stat(store.Directory()); err != nil || info.Mode()&(os.ModeSetgid|os.ModePerm) != os.ModeSetgid|0o700 {
+		t.Fatalf("state directory changed: %v %v", info, err)
 	}
 	if err := os.Chmod(store.Directory(), 0o750); err != nil {
 		t.Fatal(err)
@@ -638,15 +640,54 @@ func TestFileStoreFinishesNarrowDirectoryAndRefusesBroadOrSymlinked(t *testing.T
 	if err := os.Chmod(store.Directory(), 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	victim := filepath.Join(testkit.TempDir(t), "victim.json")
 	testkit.WriteFile(t, victim, []byte("preserve"), 0o600)
-	if err := os.Symlink(victim, filepath.Join(store.Directory(), "project-b.json")); err != nil {
+	link := filepath.Join(store.Directory(), "project-b.json")
+	if err := os.Symlink(victim, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), fixtureRecord("project-b")); err == nil {
-		t.Fatal("symlinked state target was replaced")
+	// putUnlocked is the publisher Put reaches after its listing checks.
+	err = store.putUnlocked(fixtureRecord("project-b"))
+	if err == nil || !strings.HasPrefix(err.Error(), "publish state: ") {
+		t.Fatalf("symlinked state target: %v", err)
 	}
 	if content, _ := os.ReadFile(victim); string(content) != "preserve" {
 		t.Fatalf("symlink target changed: %q", content)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("state symlink replaced: %v", err)
+	}
+}
+
+func TestReservationRefusesSymlinkedReservationFile(t *testing.T) {
+	store := newTestStore(t)
+	reservation := ProjectReservation{
+		Schema: 1, OperationID: "linked-op", ProjectID: "Demo", Name: "Demo",
+		Source: "/work/Demo", Mode: domain.ProjectSync, Requested: "Demo",
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.writeReservation(reservation); err != nil {
+		t.Fatal(err)
+	}
+	path := store.reservationPath(reservation.OperationID)
+	copied := filepath.Join(testkit.TempDir(t), "copy.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, copied, content, 0o600)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(copied, path); err != nil {
+		t.Fatal(err)
+	}
+	want := "project reservation is not a regular file: " + path
+	if err := store.writeReservation(reservation); err == nil || err.Error() != want {
+		t.Fatalf("matching reservation through a symlink: %v", err)
+	}
+	if _, err := store.readReservation(reservation.OperationID); err == nil || err.Error() != want {
+		t.Fatalf("reservation read through a symlink: %v", err)
 	}
 }

@@ -104,3 +104,24 @@ func TestAuditWritersRepairBroadOwnedDirectories(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteInvocationRefusesSymlinkedAuditLog(t *testing.T) {
+	home := testkit.TempDir(t)
+	logs := filepath.Join(home, "logs")
+	if err := os.Mkdir(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(testkit.TempDir(t), "victim")
+	testkit.WriteFile(t, victim, []byte("keep"), 0o600)
+	path := filepath.Join(logs, "yard.log")
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteInvocation(Invocation{Home: home, Command: "status", Now: time.Now(), PID: 1})
+	if err == nil || err.Error() != "refusing symbolic link audit log "+path {
+		t.Fatalf("symlinked audit log: %v", err)
+	}
+	if content, _ := os.ReadFile(victim); string(content) != "keep" {
+		t.Fatalf("symlink target changed: %q", content)
+	}
+}

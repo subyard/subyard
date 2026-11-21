@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -192,9 +193,12 @@ func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := os.MkdirAll(workspaceNamespace, 0o700); err != nil {
+		return "", err
+	}
 	// The descriptor is Subyard-private state: a final symlink is refused.
 	if err := safefs.WriteFile(workspace, append(payload, '\n'), safefs.Options{
-		ParentMode: 0o700, TempPattern: ".workspace-*",
+		TempPattern: ".workspace-*",
 	}); err != nil {
 		return "", err
 	}

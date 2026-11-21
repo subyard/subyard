@@ -98,13 +98,7 @@ func validateDirectory(dir string, create bool) error {
 	}
 	for _, path := range []string{parent, dir} {
 		if create {
-			// An owned directory left narrower by umask is finished to 0700.
-			err := safefs.EnsureDir(path, safefs.DirOptions{Durability: safefs.BestEffort})
-			if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
-				errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
-				return errors.New("SSH agent runtime directory and parent must be owned by the operator with mode 0700")
-			}
-			if err != nil {
+			if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 				return errors.New("cannot create SSH agent runtime directory")
 			}
 		}
@@ -145,9 +139,10 @@ func protectedFile(path string, flags int) (*os.File, error) {
 	return f, nil
 }
 
-// writeWorkerConfig keeps the checks of an existing control file, then replaces it atomically.
+// writeWorkerConfig opens an existing control file for writing with the same
+// checks and errors as before, then replaces it atomically.
 func writeWorkerConfig(path string, raw []byte) error {
-	existing, err := protectedFile(path, unix.O_RDONLY)
+	existing, err := protectedFile(path, unix.O_WRONLY)
 	if err == nil {
 		existing.Close()
 	} else if !errors.Is(err, unix.ENOENT) {

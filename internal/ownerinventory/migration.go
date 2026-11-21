@@ -257,7 +257,10 @@ func writeOwnerFile(path string, payload []byte) error {
 }
 
 func writeOwnerRecord(path string, payload []byte, pattern string, failIO func(string) error) error {
-	options := safefs.Options{ParentMode: 0o700, TempPattern: pattern}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	options := safefs.Options{TempPattern: pattern}
 	if failIO != nil {
 		options.Fault = func(point safefs.Point) error {
 			if point == safefs.AfterPublish {

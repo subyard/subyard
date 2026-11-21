@@ -70,12 +70,10 @@ func EnsureHostID(configHome string, environment map[string]string) (string, err
 	if err != nil || !pending {
 		return hostID, err
 	}
-	// A broader configuration root is repaired, not refused.
-	err = safefs.EnsureDir(configHome, safefs.DirOptions{Existing: safefs.Repair, ParentMode: 0o700})
-	if errors.Is(err, safefs.ErrNotDirectory) {
-		return "", &os.PathError{Op: "mkdir", Path: configHome, Err: syscall.ENOTDIR}
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		return "", err
 	}
-	if err != nil {
+	if err := os.Chmod(configHome, 0o700); err != nil {
 		return "", err
 	}
 	path := HostIDPath(configHome)

@@ -226,9 +226,7 @@ func TestYardRegistrationRepairRechecksSourcesAfterPreparingRecovery(t *testing.
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(replacement, content, 0o600); err != nil { //nolint:forbidigo // fake without testing.TB
-			return err
-		}
+		testkit.WriteFile(t, replacement, content, 0o600)
 		return os.Rename(replacement, nestedPath)
 	})
 	if !errors.Is(err, ErrPersistentTargetStale) {

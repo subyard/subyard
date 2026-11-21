@@ -289,7 +289,7 @@ func (store *FileStore) putUnlocked(record domain.ProjectRecord) error {
 		var linkErr *os.LinkError
 		switch {
 		case errors.Is(err, safefs.ErrSymlink), errors.Is(err, safefs.ErrNotRegular), errors.As(err, &linkErr):
-			// The target is checked before staging; master reported it on rename.
+			// The target is checked before staging; it is a publication failure.
 			return fmt.Errorf("publish state: %w", err)
 		case errors.As(err, &pathErr) && pathErr.Op == "chmod":
 			return fmt.Errorf("protect state candidate: %w", err)
@@ -355,28 +355,21 @@ func (store *FileStore) lock(ctx context.Context, exclusive bool) (*safefs.LockF
 func unlock(lock *safefs.LockFile) { lock.Release() }
 
 func ensurePrivateDirectory(path string) error {
-	// This runs on every lock acquisition, so it does not sync the directory.
-	err := safefs.EnsureDir(path, safefs.DirOptions{
-		ParentMode: 0o700,
-		Owner:      &safefs.Ownership{UID: os.Getuid(), GID: -1},
-		Durability: safefs.BestEffort,
-	})
-	switch {
-	case errors.Is(err, safefs.ErrNotDirectory), errors.Is(err, safefs.ErrSymlink):
-		return errors.New("state path is not a real directory")
-	case errors.Is(err, safefs.ErrUnsafeOwner):
-		return errors.New("state directory is not owned by the operator")
-	case errors.Is(err, safefs.ErrUnsafeMode):
-		var stateErr *safefs.DirStateError
-		if errors.As(err, &stateErr) {
-			return fmt.Errorf("state directory permissions are too broad: %o", stateErr.Mode.Perm())
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("state path is not a real directory")
 		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("state directory permissions are too broad: %o", info.Mode().Perm())
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) && pathErr.Op == "mkdir" {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
-	return err
+	return os.Chmod(path, 0o700)
 }
 
 func validateReadOnlyStateDirectory(path string) (bool, error) {

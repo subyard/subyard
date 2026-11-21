@@ -265,11 +265,27 @@ func saveCleanupRecord(path string, record any) error {
 	}
 	parent := filepath.Dir(path)
 	for _, directory := range []string{filepath.Dir(parent), parent} {
-		err := safefs.EnsureDir(directory, safefs.DirOptions{Owner: &safefs.Ownership{UID: os.Getuid(), GID: -1}})
-		if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
-			errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
+		if err := os.Mkdir(directory, 0700); err == nil {
+			if err := os.Chmod(directory, 0700); err != nil {
+				return err
+			}
+		} else if !os.IsExist(err) {
+			return err
+		}
+		info, err := os.Lstat(directory)
+		if err != nil {
+			return err
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != uint32(os.Getuid()) {
 			return errors.New("unsafe hard cleanup recovery directory")
 		}
+		ancestor, err := os.Open(filepath.Dir(directory))
+		if err != nil {
+			return err
+		}
+		err = ancestor.Sync()
+		ancestor.Close()
 		if err != nil {
 			return err
 		}

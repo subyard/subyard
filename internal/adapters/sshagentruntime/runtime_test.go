@@ -372,6 +372,25 @@ func TestWorkerConfigKeepsControlFileChecksBeforeReplacement(t *testing.T) {
 	if info, err := os.Lstat(symlink); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("symlink replaced: %v", err)
 	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		if err := writeWorkerConfig(path, []byte("{}")); !errors.Is(err, unix.EACCES) || err.Error() != "permission denied" {
+			t.Fatalf("read-only control file: %v", err)
+		}
+		assertPreserved("read-only")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(dir, "directory.json")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkerConfig(directory, []byte("{}")); !errors.Is(err, unix.EISDIR) || err.Error() != "is a directory" {
+		t.Fatalf("directory control file: %v", err)
+	}
 	for _, name := range []string{"replace", "create"} {
 		if err := writeWorkerConfig(path, []byte("{}")); err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -386,31 +405,5 @@ func TestWorkerConfigKeepsControlFileChecksBeforeReplacement(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
-	}
-}
-
-func TestValidateDirectoryFinishesNarrowAndRefusesBroadDirectory(t *testing.T) {
-	dir := filepath.Join(shortRuntimeRoot(t), "run")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateDirectory(dir, true); err != nil {
-		t.Fatalf("narrow owned directory: %v", err)
-	}
-	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("narrow directory not finished: %v %v", info, err)
-	}
-	if err := os.Chmod(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	want := "SSH agent runtime directory and parent must be owned by the operator with mode 0700"
-	if err := validateDirectory(dir, true); err == nil || err.Error() != want {
-		t.Fatalf("broad directory: %v", err)
-	}
-	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o750 {
-		t.Fatalf("broad directory changed: %v %v", info, err)
 	}
 }
