@@ -134,7 +134,8 @@ if os.environ.get('BRIDGE_TEST_CAPTURE'):
     Path(os.environ['BRIDGE_TEST_CAPTURE']).write_text(json.dumps({
         'argv': sys.argv[1:], 'cwd': os.getcwd(),
         'env': {key: os.environ.get(key) for key in ('BRIDGE_TEST_VALUE', 'TMPDIR', 'PATH')},
-        'otel': os.environ.get('OTEL_RESOURCE_ATTRIBUTES')}))
+        'otel': os.environ.get('OTEL_RESOURCE_ATTRIBUTES'),
+        'sessions': [key for key in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID') if key in os.environ]}))
 
 def emit(message):
     print(json.dumps(message), flush=True)
@@ -198,8 +199,10 @@ def fail_turn(error=None):
 
 def begin(text):
     global scenario
-    assert 'standalone worker with no parent agent' in text
-    assert 'full report in your final message' in text
+    assert 'your parent agent, through a bridge' in text
+    assert 'put your full report there' in text
+    if os.environ.get('BRIDGE_TEST_PREAMBLE'):
+        Path(os.environ['BRIDGE_TEST_PREAMBLE']).write_text(text.split('\n')[0])
     scenario = text.split('\n')[-1]
     if codex:
         emit({'method': 'item/started', 'params': {'item': {
@@ -695,25 +698,29 @@ runpy.run_path(bridge, run_name='__main__')
     def test_worker_resource_names_the_starting_session(self):
         for name in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'OTEL_RESOURCE_ATTRIBUTES'):
             self.env.pop(name, None)
-        cases = [({}, [], None),
-                 ({'CODEX_THREAD_ID': 'thread-1'}, [], 'subyard.parent_session.id=thread-1'),
+        cases = [({}, [], None, 'another agent session'),
+                 ({'CODEX_THREAD_ID': 'thread-1'}, [], 'subyard.parent_session.id=thread-1', 'a Codex session'),
                  ({'CLAUDE_CODE_SESSION_ID': 'session 1,=%', 'CODEX_THREAD_ID': 'thread-1',
                    'OTEL_RESOURCE_ATTRIBUTES': 'service.namespace=team,subyard.parent_session.id=stale'}, [],
-                  'service.namespace=team,subyard.parent_session.id=session%201%2C%3D%25'),
+                  'service.namespace=team,subyard.parent_session.id=session%201%2C%3D%25', 'a Claude Code session'),
                  ({'CODEX_THREAD_ID': 'thread-1'}, ['--env', 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=ci'],
-                  'deployment.environment=ci,subyard.parent_session.id=thread-1')]
-        for index, (own, overrides, expected) in enumerate(cases):
+                  'deployment.environment=ci,subyard.parent_session.id=thread-1', 'a Codex session')]
+        for index, (own, overrides, expected, parent) in enumerate(cases):
             for vendor in ('codex', 'claude'):
                 with self.subTest(case=index, vendor=vendor):
                     capture = self.root / f'otel-{index}-{vendor}.json'
+                    preamble = self.root / f'preamble-{index}-{vendor}.txt'
                     saved = dict(self.env)
                     self.env.update(own)
                     try:
-                        root = self.start(vendor, 'complete', '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture), *overrides)
+                        root = self.start(vendor, 'complete', '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture),
+                                          '--env', 'BRIDGE_TEST_PREAMBLE=' + str(preamble), *overrides)
                         self.done(root)
                     finally:
                         self.env = saved
                     self.assertEqual(json.loads(capture.read_text())['otel'], expected)
+                    self.assertEqual(json.loads(capture.read_text())['sessions'], [])
+                    self.assertIn(f'started by {parent}, your parent agent', preamble.read_text())
 
     def test_codex_refuses_mismatched_sandbox_before_starting_turn(self):
         flags = (('--sandbox', 'read-only'), ('-s=read-only',), ('-c', 'sandbox_mode="read-only"'))
