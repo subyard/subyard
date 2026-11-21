@@ -262,11 +262,14 @@ raise SystemExit(0 if healthy else 1)
   for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
     kill -TERM "$pid" 2>/dev/null || true
   done
-  # The bounded snapshot finishes on its own; stopping it would orphan its adb query.
-  for pid in ${ANDROID_GRADLE_WATCHERS:-} ${ANDROID_GRADLE_SNAPSHOT:-}; do
+  for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
     wait "$pid" 2>/dev/null || true
   done
   if [ "$result" -ne 0 ]; then
+    # Only a failure waits for the bounded snapshot; stopping it would orphan its adb query.
+    if [ -n "${ANDROID_GRADLE_SNAPSHOT:-}" ]; then
+      wait "$ANDROID_GRADLE_SNAPSHOT" 2>/dev/null || true
+    fi
     cat "$watch/before.log" >&2 2>/dev/null || true
     printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
     android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true

@@ -203,10 +203,13 @@ class RefusalLog:
             self.dropped += 1
 
     def write(self):
+        # An unbuffered write holds no interpreter lock, so a stalled stderr never blocks exit.
         while True:
             record = self.records.get()
-            with contextlib.suppress(OSError, ValueError):
-                print(record, file=sys.stderr, flush=True)
+            try:
+                os.write(2, (record + '\n').encode())
+            except (OSError, ValueError):
+                self.dropped += 1
 
 
 class TcpRelay(socketserver.ThreadingTCPServer):

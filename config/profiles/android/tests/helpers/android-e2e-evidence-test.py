@@ -135,6 +135,10 @@ with tempfile.TemporaryDirectory(prefix='android-gradle-watch-', dir='/tmp') as 
     assert sample.read_text().startswith('--- sample time='), sample.read_text()
     assert 'sampled\n\n--- exit=timeout\n' in sample.read_text(), sample.read_text()
     assert not live_processes(name)
+    # A watcher stopped between rotation and reopening keeps its rotated records.
+    Path(name, 'rotated.log.1').write_text('kept record\n')
+    result = watch('section', 'kernel', str(Path(name, 'rotated.log')))
+    assert result.returncode == 0 and result.stdout == b'kept record\n', result
     # A missing records file is a failed capture, not an empty one.
     result = watch('section', 'kernel', str(Path(name, 'absent.log')))
     assert result.returncode == 3 and result.stdout == b'' and b'no records file' in result.stderr, result
@@ -260,7 +264,13 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         assert result.returncode == child_exit, result.stderr
         # Gradle starts beside the meminfo snapshot; only the leased child's exit waits for it.
         assert float(gradle_started.read_text()) - started < 2, gradle_started.read_text()
-        # Watchers stop with the leased child, before run releases the lease.
+        # Watchers stop with the leased child, before run releases the lease. A passing child
+        # leaves the bounded snapshot to finish on its own.
+        if child_exit == 0:
+            for _ in range(200):
+                if not live_processes(name):
+                    break
+                time.sleep(0.05)
         assert not live_processes(name)
         observed = calls.read_text().splitlines()
         assert observed[-1] == 'released' and 'released' not in observed[:-1], observed
@@ -269,8 +279,9 @@ for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), 
         commands = [line.split(' ', 1)[1] for line in observed[:-1]]
         assert all(command in commands for command in watch_commands), commands
         assert any(command.startswith('shell cat /proc/loadavg /proc/meminfo') for command in commands), commands
-        # The hung snapshot keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
-        bound = max(1, {124: 5, 137: 5 + 2}.get(adb_exit, 0))
+        # Only a failure waits for the hung snapshot: its 5 s timeout and, ignoring TERM, the 2 s
+        # kill grace.
+        bound = 1 if child_exit == 0 else max(1, {124: 5, 137: 5 + 2}.get(adb_exit, 0))
         assert bound <= elapsed < bound + 4, elapsed
         evidence = (directory / 'emulator-evidence.log').read_text()
         if child_exit == 0:
