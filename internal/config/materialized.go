@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,8 +109,6 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 				} {
 					if path := artifact.ApprovalSources[gate.name]; gate.active && path != "" {
 						asset.ApprovalSources = append(asset.ApprovalSources, path)
-						assets = append(assets, MaterializedAsset{Name: asset.Name + "." + gate.name,
-							Source: path, Destination: filepath.Join(filepath.Dir(clean), filepath.Base(path))})
 					}
 				}
 			}
@@ -126,44 +125,112 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 	return assets, nil
 }
 
-// ReadContent composes installed JSON overlays using the same source reader as
-// the base and the independently managed copies of each overlay.
+// ReadContent merges the shipped approval fragments into the base with the same
+// source reader. Fragments are not installed on their own: the agent reads only
+// the composed file. Key order follows the base, then each fragment in turn.
 func (asset MaterializedAsset) ReadContent(read func(MaterializedAsset) ([]byte, error)) ([]byte, error) {
 	payload, err := read(MaterializedAsset{Source: asset.Source, FollowSymlinks: asset.FollowSymlinks})
 	if err != nil || len(asset.ApprovalSources) == 0 {
 		return payload, err
+	}
+	merged, err := parseApprovalObject(payload)
+	if err != nil {
+		return nil, fmt.Errorf("approval policy base %s: %v", asset.Source, err)
 	}
 	for _, path := range asset.ApprovalSources {
 		fragment, err := read(MaterializedAsset{Source: path})
 		if err != nil {
 			return nil, fmt.Errorf("read approval overlay: %v", err)
 		}
-		payload, err = mergeApprovalJSON(payload, fragment)
+		overlay, err := parseApprovalObject(fragment)
+		if err != nil {
+			return nil, fmt.Errorf("approval overlay %s: %v", path, err)
+		}
+		merged.merge(overlay)
+	}
+	var out strings.Builder
+	merged.render(&out, "")
+	out.WriteByte('\n')
+	return []byte(out.String()), nil
+}
+
+// approvalObject is a JSON object that keeps its key order; nested objects are
+// parsed so that overlays merge into them instead of replacing them.
+type approvalObject struct {
+	keys   []string
+	values map[string]json.RawMessage
+	nested map[string]*approvalObject
+}
+
+func parseApprovalObject(payload []byte) (*approvalObject, error) {
+	if !json.Valid(payload) {
+		return nil, errors.New("approval policies must be plain JSON objects; comments and trailing commas are not supported")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, errors.New("approval policies must be JSON objects")
+	}
+	object := &approvalObject{values: map[string]json.RawMessage{}, nested: map[string]*approvalObject{}}
+	for decoder.More() {
+		token, err := decoder.Token()
 		if err != nil {
 			return nil, err
 		}
-	}
-	return payload, nil
-}
-
-func mergeApprovalJSON(base, overlay json.RawMessage) (json.RawMessage, error) {
-	var fields, extra map[string]json.RawMessage
-	if json.Unmarshal(base, &fields) != nil || fields == nil ||
-		json.Unmarshal(overlay, &extra) != nil || extra == nil {
-		return nil, errors.New("approval overlay requires JSON objects")
-	}
-	for name, value := range extra {
-		if previous := fields[name]; len(previous) > 0 && previous[0] == '{' && value[0] == '{' {
-			merged, err := mergeApprovalJSON(previous, value)
-			if err != nil {
+		key, _ := token.(string)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if _, seen := object.values[key]; seen {
+			return nil, fmt.Errorf("duplicate key %q", key)
+		}
+		object.keys = append(object.keys, key)
+		object.values[key] = value
+		if value[0] == '{' {
+			if object.nested[key], err = parseApprovalObject(value); err != nil {
 				return nil, err
 			}
-			value = merged
 		}
-		fields[name] = value
 	}
-	payload, err := json.MarshalIndent(fields, "", "  ")
-	return append(payload, '\n'), err
+	return object, nil
+}
+
+func (object *approvalObject) merge(overlay *approvalObject) {
+	for _, key := range overlay.keys {
+		if _, present := object.values[key]; !present {
+			object.keys = append(object.keys, key)
+		}
+		if base, extra := object.nested[key], overlay.nested[key]; base != nil && extra != nil {
+			base.merge(extra)
+			continue
+		}
+		object.values[key] = overlay.values[key]
+		object.nested[key] = overlay.nested[key]
+	}
+}
+
+// render matches json.MarshalIndent with a two-space indent.
+func (object *approvalObject) render(out *strings.Builder, indent string) {
+	if len(object.keys) == 0 {
+		out.WriteString("{}")
+		return
+	}
+	out.WriteString("{")
+	for index, key := range object.keys {
+		if index > 0 {
+			out.WriteString(",")
+		}
+		name, _ := json.Marshal(key)
+		out.WriteString("\n" + indent + "  " + string(name) + ": ")
+		if nested := object.nested[key]; nested != nil {
+			nested.render(out, indent+"  ")
+			continue
+		}
+		var value bytes.Buffer
+		_ = json.Indent(&value, object.values[key], indent+"  ", "  ")
+		out.Write(value.Bytes())
+	}
+	out.WriteString("\n" + indent + "}")
 }
 
 // validateManagedDestinations keeps files and managed links from replacing each
