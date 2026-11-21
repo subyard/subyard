@@ -698,6 +698,38 @@ func TestPrepareTransitionExplicitVersionRefusesUnfinishedBelowAnchor(t *testing
 		}
 	}
 
+	t.Run("blocked installed owner", func(t *testing.T) {
+		fixture := newV0111CandidateRoutingFixture(t)
+		runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(fixture.environment()),
+			Installer: fixture.installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+		defer runtime.Close()
+		protected, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+		if err != nil || protected == nil || len(protected.inspection.Blockers) != 1 {
+			t.Fatalf("v0.11.1 owner inspection = %+v, %v; want one blocker", protected, err)
+		}
+		blocker := protected.inspection.Blockers[0]
+		// The owner's diagnosis is independent of the source anchor and sorts before it.
+		want := "release transition blocker: code=plan-stale resource=transition.observation-scope; " + blocker.Message + "; next: " + blocker.Retry +
+			"; source-anchor-required: an unfinished release transition must first be completed by the installed release that started it; next: yard update && yard update --version 0.28.1 && yard update\n" +
+			"This release cannot replace it. If the installed release cannot finish it (yard update reports that the journal-selected release cannot provide a valid transition inspection), run the v0.28.1 installer or use a later v0.28.x fix release. Do not uninstall."
+		before := fixture.snapshot(t)
+		for _, flags := range [][]string{{"--check"}, {"--offline"}} {
+			args := append([]string{"--runtime-root", fixture.runtimeRoot, "--version", fixture.candidateVersion}, flags...)
+			_, err := runtime.PrepareTransition(context.Background(), args, fixture.configHome, "default")
+			if err == nil || err.Error() != want {
+				t.Fatalf("flags=%v: refusal=%v, want %q", flags, err, want)
+			}
+		}
+		if !bytes.Equal(before, fixture.snapshot(t)) {
+			t.Fatal("refusal changed protected history or links")
+		}
+		for _, path := range []string{fixture.publicationCapture, fixture.candidateCalls} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("refusal published or invoked a replacement candidate: %s %v", path, err)
+			}
+		}
+	})
+
 	t.Run("environment version without explicit option", func(t *testing.T) {
 		fixture := newV0111CandidateRoutingFixture(t)
 		environment := fixture.environment()

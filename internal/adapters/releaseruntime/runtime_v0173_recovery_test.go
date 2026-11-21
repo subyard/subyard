@@ -36,8 +36,11 @@ func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
 		t.Fatalf("ordinary recovery hint changed: %q", protected.inspection.Outcome.Retry)
 	}
 	_, err = runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default")
-	if err == nil || err.Error() != unfinishedBelowAnchorError(protected.journal).Error() {
-		t.Fatalf("explicit selection lost the source-anchor refusal: %v", err)
+	// Explicit selection reports the owner's unchanged blocker with the source-anchor refusal.
+	blocker := "release transition blocker: code=precondition-blocked resource=" + protected.inspection.Blockers[0].Resource +
+		"; the yard template is not supported by this migration; next: repair the named yard settings, then run yard update"
+	if want := blocker + "; " + unfinishedBelowAnchorError(protected.journal).Error(); err == nil || err.Error() != want {
+		t.Fatalf("explicit selection lost a refusal: %v, want %q", err, want)
 	}
 	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
 	journal, _ := store.ReadCurrentJournal()

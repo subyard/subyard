@@ -332,3 +332,24 @@ func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtime
 	}
 	return nil
 }
+
+// protectedInspectionRefusals renders why the installed owner's successful
+// inspection cannot finish its transaction: each blocker of an
+// operator-action-required outcome, or that outcome when it names none. A
+// resumable outcome adds nothing; the source-anchor refusal already says to
+// let the installed release finish it.
+func protectedInspectionRefusals(protected *protectedTransitionInspection) []error {
+	if protected == nil || protected.inspection.Outcome == nil ||
+		protected.inspection.Outcome.Status != releasetransition.StatusOperatorActionRequired {
+		return nil
+	}
+	if len(protected.inspection.Blockers) == 0 {
+		return []error{transitionOutcomeError(*protected.inspection.Outcome)}
+	}
+	refusals := make([]error, 0, len(protected.inspection.Blockers))
+	for _, blocker := range protected.inspection.Blockers {
+		refusals = append(refusals, fmt.Errorf("release transition blocker: code=%s resource=%s; %s; next: %s",
+			blocker.Code, blocker.Resource, blocker.Message, blocker.Retry))
+	}
+	return refusals
+}

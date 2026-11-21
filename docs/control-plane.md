@@ -1751,8 +1751,9 @@ published v0.28.1 hop, then update normally.
 An older or equal version, `--rollback`, `--force`, and an experimental owner keep the exact-target refusal, as do source
 migrations and the v0.11.1, v0.17.3 and v0.21.0 owners with their own historical contracts.
 An explicit `--version` with an unfinished journal and an installed release from v0.11.0 to
-below v0.28.0 returns `source-anchor-required` before selecting another candidate. Its `next:`
-first finishes the installed owner's journal, then takes the hop if needed. Plain `yard update`
+below v0.28.0 returns `source-anchor-required` before selecting another candidate, together with
+the installed owner's inspection refusal or operator-action blockers when it reports them. Its
+`next:` first finishes the installed owner's journal, then takes the hop if needed. Plain `yard update`
 keeps exact-owner resume and its existing recovery hints. The current engine creates neither
 v0.11.1 post-activation superseded archives nor migration-owner replacements and does not delegate
 v0.17.3 activation repair. It continues to read their retained evidence. The candidate refuses a journal that

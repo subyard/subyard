@@ -1512,8 +1512,10 @@ func TestV0111ScopeBlockerReportsTruthfulStandaloneRetry(t *testing.T) {
 				}, fixture.configHome, "default",
 			)
 			// Explicit release selection now uses the same anchor refusal as
-			// the child. The ordinary inspection assertions above remain exact.
-			if err == nil || !strings.HasPrefix(err.Error(), "source-anchor-required: ") ||
+			// the child, with the owner's own blocker. The ordinary inspection
+			// assertions above remain exact.
+			if err == nil || !strings.HasPrefix(err.Error(), "release transition blocker: code=plan-stale resource=transition.observation-scope; ") ||
+				!strings.Contains(err.Error(), "; source-anchor-required: ") ||
 				!strings.Contains(err.Error(), "next: yard update && yard update --version 0.28.1 && yard update\n") ||
 				!strings.HasSuffix(err.Error(), "Do not uninstall.") {
 				t.Fatalf("explicit-version refusal = %v", err)
