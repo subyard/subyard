@@ -80,7 +80,7 @@ yard: their collector cannot open this release's store or the producer files it 
 Run `yard -Y NAME profile disable telemetry` first, which also removes both system policy
 files. It also refuses drift that only `yard migrate` converges. The first rollback command
 then converts each yard. It rewrites the collector unit in their form and moves the collector
-token to `/var/lib/subyard/telemetry/auth.token`. The spool and the database stay unchanged.
+token to `/var/lib/subyard/telemetry/auth.token`. No telemetry data is moved or converted.
 Until the rollback itself, this release reports that drift, and `yard migrate` reverts it.
 Those releases cannot read this release's profile declarations, so their own
 `yard update --rollback` back refuses without changing anything. Return with

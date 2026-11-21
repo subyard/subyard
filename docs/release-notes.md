@@ -42,10 +42,13 @@
 
 ### Rollback to v0.30.0
 
-<!-- Rollback hooks: the rollback-hooks change replaces the next entry. -->
-- While the telemetry profile is installed, v0.30.0 refuses `yard update --rollback`. Export the
-  telemetry store first; see [telemetry rollback steps](telemetry.md#capture-policy-and-delivery).
-  After a rollback, v0.30.0 refuses its own `--rollback` back to this release, because it rejects
+- `yard update --rollback` to v0.30.0 works with the telemetry profile installed. It refuses
+  while telemetry is enabled in a local yard, because v0.30.0 cannot open this release's
+  telemetry store; run `yard -Y NAME profile disable telemetry` first. The first rollback
+  command then converts the telemetry runtime to the v0.30.0 format, and the second one rolls
+  back. No telemetry data is moved or converted, and telemetry stays disabled on v0.30.0. See
+  [telemetry](telemetry.md#enable-and-migrate).
+- After a rollback, v0.30.0 refuses its own `--rollback` back to this release, because it rejects
   `advisories` in the telemetry `profile.json` and `approval_sources` in
   `config/agents/opencode/integration.json`; return with `yard update --version` and this
   release's version. Rollback to 0.29.0 or earlier stays refused.
