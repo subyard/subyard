@@ -109,7 +109,6 @@ vm_storage_attach() {
       .config.size == $size and .config["user.subyard.storage"] == "v1"' \
       >/dev/null <<<"$volume" || die 'refusing an unowned or differently sized VM state volume'
   else
-    [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" != 1 ] && [ -z "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ] || die 'original owner-created SRV volume is missing'
     subyard_srv_create_config || die 'invalid original SRV create settings'
     incus storage volume create "$SRV_POOL" "$SRV_VOLUME" --type="$SUBYARD_SRV_CONTENT_TYPE" \
       "${SUBYARD_SRV_CREATE_CONFIG[@]}" --project "$INCUS_PROJECT" >/dev/null

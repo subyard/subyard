@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -220,51 +219,6 @@ func TestStoppedGuestMigrationRetainsPreparedUnavailableIntegrationGuard(t *test
 				if change == "power" {
 					testkit.WriteFile(t, status, []byte("stopped"), 0600)
 				}
-			}
-		})
-	}
-}
-
-func TestPreparedActivationRejectsWrongBoundOwnerRegistrationAndOverrides(t *testing.T) {
-	for _, field := range []string{"registration", "overrides"} {
-		t.Run(field, func(t *testing.T) {
-			fixture := newSourceScopeFixture(t)
-			registration := filepath.Join(fixture.configHome, "yards", "e2e-yard", "config.env")
-			if err := os.MkdirAll(filepath.Dir(registration), 0700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, registration, []byte("YARD_TEMPLATE=test-vms\n"), 0600)
-			final := []byte("YARD_TEMPLATE='test-vms'\n")
-			view := preparedActivationSnapshotFixture{home: fixture.configHome, names: []string{"e2e-yard"}, snapshots: map[string]config.PersistentFileSnapshot{registration: {Exists: true, Content: final}}}
-			owner := newInterruptedRenameOwner(t, fixture.root, fixture.configHome)
-			before, err := owner.Prepare(context.Background(), view)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if before.Registration != releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(final))) {
-				t.Fatal("owner did not bind final prepared settings")
-			}
-			if field == "registration" {
-				before.Registration = releasetransition.Fingerprint(strings.Repeat("1", 64))
-			} else {
-				before.Overrides = releasetransition.Fingerprint(strings.Repeat("2", 64))
-			}
-			draft, err := fixture.program.prepareSourceActivationDraft(fixture.configHome, releasetransition.V2SourceActivationView{Settings: view, OwnerRegistration: &before})
-			if draft != nil {
-				t.Fatal("invalid owner binding returned a draft")
-			}
-			if err == nil {
-				t.Fatal("wrong prepared owner binding was accepted")
-			}
-			if _, err := os.Stat(owner.current); !os.IsNotExist(err) {
-				t.Fatal("invalid owner binding published registration", err)
-			}
-			if len(fixture.boundary.applied) != 0 {
-				t.Fatal("invalid owner binding reached activation writes")
-			}
-			journal, err := fixture.store.ReadCurrentJournal()
-			if err != nil || journal.Exists {
-				t.Fatal("invalid owner binding published checkpoint", err)
 			}
 		})
 	}

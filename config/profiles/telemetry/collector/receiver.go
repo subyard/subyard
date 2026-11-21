@@ -50,9 +50,10 @@ type ReceiverFunc func(context.Context, *Store, Options, *LocalAuth) error
 type runContextKey struct{}
 type sensitiveContextKey struct{}
 type localAuth struct {
-	store *Store
-	token string
-	slots chan struct{}
+	store  *Store
+	token  string
+	slots  chan struct{}
+	policy Policy
 }
 
 func (a *localAuth) Start(context.Context, component.Host) error { return nil }
@@ -100,7 +101,7 @@ func (a *localAuth) GetHTTPHandler(context.Context) (extensionmiddleware.WrapHTT
 			select {
 			case a.slots <- struct{}{}:
 				defer func() { <-a.slots }()
-				if run, ok := r.Context().Value(runContextKey{}).(string); ok && !a.store.RegisteredRun(r.Context(), run) {
+				if run, ok := r.Context().Value(runContextKey{}).(string); ok && !a.store.ensureRun(r.Context(), run, a.policy) {
 					w.Header().Set("Retry-After", "1")
 					http.Error(w, "run registration pending", http.StatusServiceUnavailable)
 					return
@@ -194,7 +195,7 @@ type signalConsumers struct {
 
 const nativeSourceVersion = "collector-pdata/1.69.0"
 
-func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) error {
+func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map, policy Policy) error {
 	headerRun, _ := ctx.Value(runContextKey{}).(string)
 	resourceRun := ""
 	if value, ok := attributes.Get("subyard.agent_run.id"); ok {
@@ -214,7 +215,7 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) err
 	}
 	attributes.Remove("subyard.agent_run.evidence")
 	if run != "" {
-		if !s.RegisteredRun(ctx, run) {
+		if !s.ensureRun(ctx, run, policy) {
 			return status.Error(codes.Unavailable, "run registration pending")
 		}
 		attributes.PutStr("subyard.agent_run.id", run)
@@ -243,7 +244,7 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 	}
 	logs, err := consumer.NewLogs(func(ctx context.Context, data plog.Logs) error {
 		for i := 0; i < data.ResourceLogs().Len(); i++ {
-			if err := s.resourceContext(ctx, data.ResourceLogs().At(i).Resource().Attributes()); err != nil {
+			if err := s.resourceContext(ctx, data.ResourceLogs().At(i).Resource().Attributes(), p); err != nil {
 				return err
 			}
 		}
@@ -258,7 +259,7 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 	}
 	metrics, err := consumer.NewMetrics(func(ctx context.Context, data pmetric.Metrics) error {
 		for i := 0; i < data.ResourceMetrics().Len(); i++ {
-			if err := s.resourceContext(ctx, data.ResourceMetrics().At(i).Resource().Attributes()); err != nil {
+			if err := s.resourceContext(ctx, data.ResourceMetrics().At(i).Resource().Attributes(), p); err != nil {
 				return err
 			}
 		}
@@ -273,7 +274,7 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 	}
 	traces, err := consumer.NewTraces(func(ctx context.Context, data ptrace.Traces) error {
 		for i := 0; i < data.ResourceSpans().Len(); i++ {
-			if err := s.resourceContext(ctx, data.ResourceSpans().At(i).Resource().Attributes()); err != nil {
+			if err := s.resourceContext(ctx, data.ResourceSpans().At(i).Resource().Attributes(), p); err != nil {
 				return err
 			}
 		}

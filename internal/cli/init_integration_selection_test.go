@@ -23,7 +23,8 @@ import (
 )
 
 func TestInitIntegrationSelectionWithAbsentIncusSocket(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\n", 0o600)
 	path := filepath.Join(root, "state/yards/demo/config.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -35,10 +36,7 @@ func TestInitIntegrationSelectionWithAbsentIncusSocket(t *testing.T) {
 	t.Setenv("INCUS_SOCKET", "")
 	t.Setenv("PATH", t.TempDir())
 	client := incusclient.New("", "projects")
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client, Executor: client})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: client, Executor: client})
 	loaded, err := program.loadContext("demo")
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +91,8 @@ func (fixture *initAdoptionExecutor) Exec(_ context.Context, _, _ string, reques
 
 func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(t *testing.T) {
 	ctx := context.Background()
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	path := filepath.Join(root, "state/yards/default/config.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -104,10 +103,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	writeCLIFile(t, instructions, "Selected instructions\n", 0o644)
 	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stdout: &output})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +247,8 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 		{name: "source temporary adoption rejected", yard: "demo", source: true, command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS='codex relay'\nAGENT_codex_COMMAND=codex\nAGENT_relay_DEPENDS=codex\n", 0o600)
 			nested := filepath.Join(root, "state/yards", test.yard, "config.env")
 			target := nested
@@ -274,10 +271,7 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 			}
 			platform := newInitPlatformFixture()
 			platform.converged[ports.ReconcileStageInstance] = test.existing
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Environment: environment, InitPlatform: platform})
 			loaded, err := program.loadContext(test.yard)
 			if err != nil {
 				t.Fatal(err)
@@ -355,7 +349,8 @@ func TestInitGitFallbackSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 		{name: "restricted profile", yard: "demo", settings: "YARD_TEMPLATE=fixture\nSSH_PORT=2223\n", profile: "ALLOWS_CODING_TOOLS=false\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS='codex claude'\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n", 0o600)
 			configHome := filepath.Join(root, "state")
 			target := filepath.Join(configHome, config.GitSettingsRelativePath, "yards", test.yard, "config.env")
@@ -387,12 +382,9 @@ func TestInitGitFallbackSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 			platform := newInitPlatformFixture()
 			for range 2 {
 				var output bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Arguments: arguments,
+				program := fixture.New(Options{Arguments: arguments,
 					Environment: append(environment, "ASSUME_YES=1"), InitPlatform: platform,
 					Stdout: &output, Stderr: &output})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("init failed: code=%d output=%s", code, output.String())
 				}
@@ -414,7 +406,8 @@ func TestInitGitFallbackSelectionUsesDefaultsWithoutWriting(t *testing.T) {
 }
 
 func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\n", 0o600)
 	preset := filepath.Join(root, "config/profiles/minimal/yard.env")
@@ -423,10 +416,7 @@ func TestInitProfileBootstrapPreservesInheritedSelectionWithoutIncus(t *testing.
 	}
 	writeCLIFile(t, preset, "SSH_PORT=2234\n", 0o600)
 	incus := &testkit.Incus{Err: os.ErrNotExist}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Executor: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Environment: environment, Incus: incus, Executor: incus})
 	loaded, bootstrap, err := program.loadInitContext("fresh", true, []string{"--profile", "minimal"})
 	if err != nil {
 		t.Fatal(err)
@@ -456,7 +446,8 @@ func TestInitPreservesProfileSelectionAcrossRuns(t *testing.T) {
 	for _, source := range []bool{false, true} {
 		for _, restricted := range []bool{false, true} {
 			t.Run(fmt.Sprintf("source=%t/restricted=%t", source, restricted), func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
+				root := fixture.Root
 				writeCLIFile(t, filepath.Join(root, "config/agents.env"), "AGENT_codex_COMMAND=codex\nAGENT_relay_DEPENDS=codex\n", 0o600)
 				profile := filepath.Join(root, "config/yards/profiles/tools.env")
 				target := filepath.Join(root, "state/yards/demo/config.env")
@@ -478,18 +469,12 @@ func TestInitPreservesProfileSelectionAcrossRuns(t *testing.T) {
 				}
 				platform := newInitPlatformFixture()
 				platform.converged[ports.ReconcileStageInstance] = false
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{InitPlatform: platform})
 				prepare := func(want string) *initExecution {
 					t.Helper()
 					// Each init invocation starts from persistent inputs, not the previous
 					// command's resolved runtime environment.
-					program, err = New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
-					if err != nil {
-						t.Fatal(err)
-					}
+					program = fixture.New(Options{InitPlatform: platform})
 					loaded, err := program.loadContext("demo")
 					if err != nil {
 						t.Fatal(err)
@@ -538,7 +523,8 @@ func TestInitRestrictedRolePreservesTransitionOwnedRegistration(t *testing.T) {
 	for _, flat := range []bool{false, true} {
 		for _, internal := range []bool{false, true} {
 			t.Run(fmt.Sprintf("flat=%t/internal=%t", flat, internal), func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
+				root, environment := fixture.Root, fixture.Environment
 				profile := filepath.Join(root, "config/yards/profiles/restricted.env")
 				if err := os.MkdirAll(filepath.Dir(profile), 0o700); err != nil {
 					t.Fatal(err)
@@ -560,10 +546,7 @@ func TestInitRestrictedRolePreservesTransitionOwnedRegistration(t *testing.T) {
 				}
 				// A caller-supplied marker alone must retain public init adoption.
 				environment = append(environment, "SUBYARD_INTERNAL_MIGRATION_CHILD=1")
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: newInitPlatformFixture()})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Environment: environment, InitPlatform: newInitPlatformFixture()})
 				program.releaseTransitionChild = internal
 				loaded, err := program.loadContext("demo")
 				if err != nil {
@@ -605,7 +588,8 @@ func TestInitRestrictedRolePreservesTransitionOwnedRegistration(t *testing.T) {
 }
 
 func TestInitIntegrationSelectionRejectsStalePlan(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	target := filepath.Join(root, "state/yards/demo/config.env")
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		t.Fatal(err)
@@ -613,10 +597,7 @@ func TestInitIntegrationSelectionRejectsStalePlan(t *testing.T) {
 	writeCLIFile(t, target, "SSH_PORT=2223\nAGENTS=codex\n", 0o600)
 	platform := newInitPlatformFixture()
 	platform.converged[ports.ReconcileStageInstance] = false
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: platform})
 	loaded, err := program.loadContext("demo")
 	if err != nil {
 		t.Fatal(err)
@@ -641,14 +622,12 @@ func TestInitIntegrationSelectionRejectsStalePlan(t *testing.T) {
 func TestFreshNamedSelectionClearsDerivedRuntimeLinks(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
-			_, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			environment := fixture.Environment
 			if explicit {
 				environment = append(environment, "HOST_LINKS=custom:/mnt/host/custom")
 			}
-			program, err := New(Options{RepositoryRoot: repositoryRoot(t), Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: repositoryRoot(t), Environment: environment})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -683,7 +662,8 @@ func TestFreshNamedSelectionClearsDerivedRuntimeLinks(t *testing.T) {
 func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 	for _, change := range []string{"selection", "role", "same-bytes replacement", "new explicit selection", "new role", "source selection", "source profile"} {
 		t.Run(change, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root := fixture.Root
 			path := filepath.Join(root, "state/yards/default/config.env")
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
@@ -703,10 +683,7 @@ func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 				}
 			}
 			platform := newInitPlatformFixture()
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{InitPlatform: platform})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -749,7 +726,8 @@ func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 }
 
 func TestInitIntegrationBaselineBindsInstalledPackageDefaultsAndAssets(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	packageRoot := filepath.Join(root, "config/agents/sample")
 	if err := os.MkdirAll(packageRoot, 0755); err != nil {
 		t.Fatal(err)
@@ -760,10 +738,7 @@ func TestInitIntegrationBaselineBindsInstalledPackageDefaultsAndAssets(t *testin
 	for _, name := range []string{"provision.sh", "lifecycle.sh", "proxy.sh"} {
 		testkit.WriteFile(t, filepath.Join(packageRoot, name), []byte("#!/bin/sh\nexit 0\n"), 0755)
 	}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

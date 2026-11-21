@@ -25,16 +25,22 @@ import (
 
 func configExactProgram(t *testing.T, root string, environment []string, incus *testkit.Incus, applier *recordingConfigApplier) *CLI {
 	t.Helper()
-	options := Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard, Config: applier}
-	if incus != nil {
-		options.Incus = incus
-		options.Executor = incus
-	}
+	options := configExactOptions(environment, incus, applier)
+	options.RepositoryRoot, options.WorkingDir = root, root
 	program, err := New(options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return program
+}
+
+func configExactOptions(environment []string, incus *testkit.Incus, applier *recordingConfigApplier) Options {
+	options := Options{Environment: environment, Stdout: io.Discard, Stderr: io.Discard, Config: applier}
+	if incus != nil {
+		options.Incus = incus
+		options.Executor = incus
+	}
+	return options
 }
 func configExactPlan(t *testing.T, program *CLI, loaded config.Loaded, arguments []string) *preparedCommand {
 	t.Helper()
@@ -54,7 +60,8 @@ func configExactPlan(t *testing.T, program *CLI, loaded config.Loaded, arguments
 func TestConfigExactScalarRetainsNativeCASAndRejectsNoOpExpansion(t *testing.T) {
 	for _, kind := range []string{"converged", "changed baseline", "no-op expansion"} {
 		t.Run(kind, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			target := filepath.Join(configHome, "config.env")
 			baseline := "SSH_PORT='2290'\n"
 			if kind == "no-op expansion" {
@@ -62,7 +69,7 @@ func TestConfigExactScalarRetainsNativeCASAndRejectsNoOpExpansion(t *testing.T) 
 			}
 			writeConfigCommandFile(t, target, baseline)
 			loaded := loadConfigCommandContext(t, root, environment, "default")
-			prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
+			prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
 			if len(prepared.Plan.Steps) != 1 || prepared.Plan.Steps[0].Desired == "2390" {
 				t.Fatal("scalar plan lacks safe native fingerprint")
 			}
@@ -92,13 +99,14 @@ func TestConfigExactScalarRetainsNativeCASAndRejectsNoOpExpansion(t *testing.T) 
 }
 
 func TestConfigExactApplyRechecksOriginalNoOpBeforeAnyWrite(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running"}}}
 	appendHashSteps(t, fake, loaded)
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	applier := &recordingConfigApplier{}
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, fake, applier), loaded, []string{"apply"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, fake, applier)), loaded, []string{"apply"})
 	if prepared.Plan.Assessment.Changed {
 		t.Fatal("expected original native no-op")
 	}
@@ -111,7 +119,8 @@ func TestConfigExactApplyRechecksOriginalNoOpBeforeAnyWrite(t *testing.T) {
 }
 
 func TestConfigExactSyncRejectsUnmanagedDriftBeforePublishingIdentity(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
@@ -119,7 +128,7 @@ func TestConfigExactSyncRejectsUnmanagedDriftBeforePublishingIdentity(t *testing
 	runConfigSyncGit(t, source, "init", "-q")
 	commitConfigSource(t, source, "candidate")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"sync", source, "--adopt"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"sync", source, "--adopt"})
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "SSH_PORT=2490\n")
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("unmanaged drift did not invalidate publication: %v", err)
@@ -133,7 +142,8 @@ func TestConfigExactSyncRejectsUnmanagedDriftBeforePublishingIdentity(t *testing
 }
 
 func TestConfigExactEligibilityExcludesProtectedDraftsAndSensitiveSettings(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	for _, arguments := range [][]string{{"import", "AGENT_codex_CONFIG", "secret-input", "--scope", "host"}, {"edit", "AGENT_codex_CONFIG", "--scope", "host"}, {"set", "UNKNOWN_SECRET", "secret-input", "--scope", "host"}, {"sync", "status"}, {"sync", "--check"}} {
 		if configExactInvocation(loaded, arguments) {
@@ -146,13 +156,11 @@ func TestConfigExactEligibilityExcludesProtectedDraftsAndSensitiveSettings(t *te
 }
 
 func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stdout: &stdout, Stderr: &stderr})
 	handler := &rpcHandler{cli: program, loaded: loaded}
 	defer handler.closePlans()
 	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","yes","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
@@ -214,7 +222,8 @@ while True:
 }
 
 func TestConfigExactSyncApplyCapturesCandidateConsumersBeforePublication(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
@@ -234,7 +243,7 @@ func TestConfigExactSyncApplyCapturesCandidateConsumersBeforePublication(t *test
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running"}}}
 	appendMismatchedHashSteps(t, fake, contexts[0], "0")
 	applier := &recordingConfigApplier{}
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, fake, applier), loaded, []string{"sync", source, "--adopt", "--apply"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, fake, applier)), loaded, []string{"sync", source, "--adopt", "--apply"})
 	consumer, named := false, false
 	for _, step := range prepared.Plan.Steps {
 		if step.ID == "config.apply.default" {
@@ -272,7 +281,8 @@ func TestConfigExactSyncApplyCapturesCandidateConsumersBeforePublication(t *test
 func TestConfigExactScalarRejectsInvalidProspectiveScopeBeforeConsent(t *testing.T) {
 	for _, action := range []string{"set", "unset"} {
 		t.Run(action, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			target := filepath.Join(configHome, "config.env")
 			initial := "HOST_BASE=/srv/retained\nRESTRICTED_DISK_PATHS=/srv/retained\n"
 			writeConfigCommandFile(t, target, initial)
@@ -282,7 +292,7 @@ func TestConfigExactScalarRejectsInvalidProspectiveScopeBeforeConsent(t *testing
 				arguments = append(arguments, "/srv/invalid")
 			}
 			arguments = append(arguments, "--scope", "host")
-			program := configExactProgram(t, root, environment, nil, nil)
+			program := fixture.New(configExactOptions(environment, nil, nil))
 			definition, _ := program.manifest.Lookup("config")
 			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
 			if prepared != nil {
@@ -303,11 +313,12 @@ func TestConfigExactScalarRejectsInvalidProspectiveScopeBeforeConsent(t *testing
 func TestConfigExactScalarRejectsChangedDependencyBeforeWrite(t *testing.T) {
 	for _, change := range []string{"bytes", "same bytes inode", "mode", "new registration", "invalid neighbor"} {
 		t.Run(change, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			dependency := filepath.Join(configHome, "overrides/shared/config.env")
 			writeConfigCommandFile(t, dependency, "E2E_VM_SLOT_COUNT=2\n")
 			loaded := loadConfigCommandContext(t, root, environment, "default")
-			prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
+			prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
 			switch change {
 			case "bytes":
 				writeConfigCommandFile(t, dependency, "E2E_VM_SLOT_COUNT=3\n")
@@ -338,10 +349,11 @@ func TestConfigExactScalarRejectsChangedDependencyBeforeWrite(t *testing.T) {
 }
 
 func TestConfigExactSharedScalarValidatesRegisteredNeighbor(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/neighbor/config.env"), "HOST_BASE=/srv/a\nRESTRICTED_DISK_PATHS=/srv/b\n")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	definition, _ := program.manifest.Lookup("config")
 	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "E2E_VM_SLOT_COUNT", "3", "--scope", "shared"}})
 	if prepared != nil {
@@ -357,14 +369,15 @@ func TestConfigExactSharedScalarValidatesRegisteredNeighbor(t *testing.T) {
 }
 
 func TestConfigExactUnsetKeepsEmptyRegistration(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	legacy := filepath.Join(filepath.Dir(loaded.Context.Paths.ConfigDir), "private/yards/named.env")
 	writeConfigCommandFile(t, legacy, "SSH_PORT=2290\n")
 	target := filepath.Join(configHome, "yards/named/config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT=2390\n")
 	loaded = loadConfigCommandContext(t, root, environment, "named")
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"unset", "SSH_PORT", "--scope", "yard"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"unset", "SSH_PORT", "--scope", "yard"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +390,8 @@ func TestConfigExactUnsetKeepsEmptyRegistration(t *testing.T) {
 }
 
 func TestConfigExactHostScalarIgnoresCheckoutOverlay(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	host := filepath.Join(home, "config.env")
 	if err := os.Remove(host); err != nil {
 		t.Fatal(err)
@@ -385,7 +399,7 @@ func TestConfigExactHostScalarIgnoresCheckoutOverlay(t *testing.T) {
 	private := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_DIR"), "..", "private", "config.env")
 	const initial = "GIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
 	writeConfigCommandFile(t, private, initial, 0o640)
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	prepared := configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "--scope", "host"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
@@ -409,7 +423,8 @@ func TestConfigExactHostScalarIgnoresCheckoutOverlay(t *testing.T) {
 }
 
 func TestConfigProspectiveRefusesFlatRegistrationArrivingAfterTargetSelection(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), "")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	path, err := configScalarAuthoringPath(loaded, config.ScopeYard)
@@ -418,7 +433,7 @@ func TestConfigProspectiveRefusesFlatRegistrationArrivingAfterTargetSelection(t 
 	}
 	flat := filepath.Join(home, "yards/named.env")
 	writeConfigCommandFile(t, flat, "GIT_USER_EMAIL=flat@example.invalid\n")
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeYard}, path,
 		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
 	if plan != nil {
@@ -431,11 +446,12 @@ func TestConfigProspectiveRefusesFlatRegistrationArrivingAfterTargetSelection(t 
 }
 
 func TestConfigProspectiveCollectsExpansionAndDependencyRefusals(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(home, "yards/alpha/config.env"), "GIT_USER_EMAIL=$GIT_USER_NAME\n")
 	writeConfigCommandFile(t, filepath.Join(home, "yards/beta/config.env"), "GIT_USER_NAME=Jane\n", 0o620)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeHost}, filepath.Join(home, "config.env"),
 		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
 	if plan != nil {
@@ -449,11 +465,12 @@ func TestConfigProspectiveCollectsExpansionAndDependencyRefusals(t *testing.T) {
 }
 
 func TestConfigExactScalarRewritesLegacyProfileAliasWithoutConflict(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "yards/named/config.env")
 	writeConfigCommandFile(t, target, "# retained\nYARD_PROFILES=alpha\nSSH_PORT=2290\n", 0o640)
 	loaded := loadConfigCommandContext(t, root, environment, "named")
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"set", "ENVIRONMENT_PROFILES", "beta", "--scope", "yard"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "ENVIRONMENT_PROFILES", "beta", "--scope", "yard"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +488,8 @@ func TestConfigExactScalarRewritesLegacyProfileAliasWithoutConflict(t *testing.T
 }
 
 func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/isolated.env"), "YARD_KIND=vm\nREQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nENVIRONMENT_PROFILES=service\nALLOWS_CODING_TOOLS=false\n")
@@ -479,7 +497,7 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 	target := filepath.Join(configHome, "yards/named/config.env")
 	writeConfigCommandFile(t, target, "YARD_TEMPLATE=isolated\n")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	valid := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Loaded: loaded}
 	err := valid.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"})
 	_ = valid.Close()
@@ -500,7 +518,8 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 }
 
 func TestConfigExactScalarCreatesAbsentConfigurationRoot(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	if err := os.Remove(filepath.Join(configHome, "config.env")); err != nil {
 		t.Fatal(err)
@@ -508,7 +527,7 @@ func TestConfigExactScalarCreatesAbsentConfigurationRoot(t *testing.T) {
 	if err := os.Remove(configHome); err != nil {
 		t.Fatal(err)
 	}
-	prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
+	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +537,8 @@ func TestConfigExactScalarCreatesAbsentConfigurationRoot(t *testing.T) {
 }
 
 func TestConfigProspectiveRejectsFailedDependencySnapshot(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT=2290\n")
@@ -532,7 +552,7 @@ func TestConfigProspectiveRejectsFailedDependencySnapshot(t *testing.T) {
 	// The scalar loader can read this source, but the retained dependency
 	// snapshot must refuse a symbolic link instead of discarding its error.
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	program := configExactProgram(t, root, environment, nil, nil)
+	program := fixture.New(configExactOptions(environment, nil, nil))
 	plan, err := program.prepareConfigProspective(loaded,
 		configAuthoringRequest{scope: config.ScopeHost}, target,
 		config.PersistentFileSnapshot{Exists: true, Content: []byte("SSH_PORT=2390\n")})
@@ -551,7 +571,8 @@ func TestConfigProspectiveRejectsFailedDependencySnapshot(t *testing.T) {
 func TestConfigProspectiveExternalReadInputsDoNotRequireWriterPermissions(t *testing.T) {
 	for _, change := range []string{"unchanged", "large unchanged", "bytes", "mode", "same bytes inode"} {
 		t.Run(change, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			asset := filepath.Join(t.TempDir(), "codex.toml")
 			content := "# external configuration\n"
 			if change == "large unchanged" {
@@ -562,7 +583,7 @@ func TestConfigProspectiveExternalReadInputsDoNotRequireWriterPermissions(t *tes
 			initial := "AGENT_codex_CONFIG='" + asset + "'\n"
 			writeConfigCommandFile(t, target, initial)
 			loaded := loadConfigCommandContext(t, root, environment, "default")
-			prepared := configExactPlan(t, configExactProgram(t, root, environment, nil, nil), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
+			prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "SSH_PORT", "2390", "--scope", "host"})
 			switch change {
 			case "bytes":
 				writeConfigCommandFile(t, asset, "# changed external configuration\n", 0o666)
@@ -597,7 +618,8 @@ func TestConfigProspectiveExternalReadInputsDoNotRequireWriterPermissions(t *tes
 func TestConfigProspectiveDiagnosticsDoNotDiscloseInvalidNeighborValue(t *testing.T) {
 	for _, surface := range []string{"text host", "text shared", "RPC host", "RPC shared"} {
 		t.Run(surface, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			const marker = "SECRET_MARKER"
 			writeConfigCommandFile(t, filepath.Join(configHome, "yards/neighbor/config.env"), "YARD_TEMPLATE="+marker+"\n")
 			loaded := loadConfigCommandContext(t, root, environment, "default")
@@ -606,10 +628,7 @@ func TestConfigProspectiveDiagnosticsDoNotDiscloseInvalidNeighborValue(t *testin
 				arguments = []string{"set", "E2E_VM_SLOT_COUNT", "3", "--scope", "shared", "--yes"}
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"config"}, arguments...), Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: append([]string{"config"}, arguments...), Stdout: &stdout, Stderr: &stderr})
 			if strings.HasPrefix(surface, "RPC") {
 				handler := &rpcHandler{cli: program, loaded: loaded}
 				defer handler.closePlans()
@@ -650,7 +669,8 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 	for _, input := range []string{"comment-only template", "owner service", "runtime handler", "guest handler", "credential stop handler", "resource handler", "integration declaration", "integration provision", "integration lifecycle handler", "integration source"} {
 		for _, change := range []string{"bytes", "mode", "same bytes inode"} {
 			t.Run(input+"/"+change, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t)
+				root, environment := fixture.Root, fixture.Environment
 				configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 				writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 				target := filepath.Join(configHome, "yards/named/config.env")
@@ -699,7 +719,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 				writeConfigCommandFile(t, dependency, content, mode)
 				writeConfigCommandFile(t, target, initial)
 				loaded := loadConfigCommandContext(t, root, environment, "named")
-				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(configExactProgram(t, root, environment, nil, nil)), Loaded: loaded}
+				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(fixture.New(configExactOptions(environment, nil, nil))), Loaded: loaded}
 				t.Cleanup(func() { _ = prepared.Close() })
 				if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
 					t.Fatal(errors.Unwrap(err))
@@ -729,7 +749,8 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 }
 
 func TestConfigProspectiveSelectedProfileThroughConfigAlias(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/sample/profile.conf"), "PROFILE_NAME=sample\n")
 	target := filepath.Join(configHome, "yards/named/config.env")
@@ -743,7 +764,7 @@ func TestConfigProspectiveSelectedProfileThroughConfigAlias(t *testing.T) {
 	if loaded.Environment["ENVIRONMENT_PROFILES"] != "sample" {
 		t.Fatal("selected profile lost through alias")
 	}
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(configExactProgram(t, root, environment, nil, nil)), Loaded: loaded}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(fixture.New(configExactOptions(environment, nil, nil))), Loaded: loaded}
 	t.Cleanup(func() { _ = prepared.Close() })
 	if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
 		t.Fatal(err)
@@ -762,7 +783,8 @@ func TestConfigProspectiveSelectedProfileThroughConfigAlias(t *testing.T) {
 }
 
 func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
 	home := filepath.Join(root, "state")
 	for _, directory := range []string{home, filepath.Join(root, "config", "profiles", "fixture")} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -774,10 +796,7 @@ func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *tes
 	before := "ENVIRONMENT_PROFILES='fixture'\nSSH_PORT='2398'\n"
 	testkit.WriteFile(t, path, []byte(before), 0o600)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: append(environment, "ENVIRONMENT_PROFILES="), Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Environment: append(environment, "ENVIRONMENT_PROFILES="), Stdout: &stdout, Stderr: &stderr})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatalf("ordinary supplied context should load: %v", err)
@@ -796,7 +815,8 @@ func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *tes
 }
 
 func TestConfigProspectiveContextDefaultsCannotMaskPersistentPaths(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	path := filepath.Join(root, "state", "config.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -804,10 +824,7 @@ func TestConfigProspectiveContextDefaultsCannotMaskPersistentPaths(t *testing.T)
 	before := "HOST_BASE='/'\nRESTRICTED_DISK_PATHS='/'\nSSH_PORT='2398'\n"
 	writeCLIFile(t, path, before, 0o600)
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stderr: &stderr})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatalf("ordinary overridden context: %v", err)
@@ -825,11 +842,12 @@ func TestConfigProspectiveContextDefaultsCannotMaskPersistentPaths(t *testing.T)
 // including the additional targets of --all-local, nor RPC authoring. RPC
 // config unset removes one through ordinary exact authoring.
 func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	other := filepath.Join(configHome, "yards", "other", "config.env")
 	writeConfigCommandFile(t, other, "YARD_DEVICES=fuse\n")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	program := configExactProgram(t, root, environment, nil, &recordingConfigApplier{})
+	program := fixture.New(configExactOptions(environment, nil, &recordingConfigApplier{}))
 	targets, err := program.localConfigTargets(loaded, true)
 	if err != nil {
 		t.Fatal(err)
@@ -842,10 +860,7 @@ func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	program, err = New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = fixture.New(Options{Stdout: io.Discard, Stderr: &stderr})
 	host := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, host, "YARD_CAPS=nesting\n")
 	execute := func(id, call string) {
@@ -872,7 +887,8 @@ func TestConfigApplyAndRPCAuthoringIgnoreProfileOnlyAssignments(t *testing.T) {
 }
 
 func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
@@ -896,10 +912,7 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 	permits, route, kind := `selected yard role permits only environment profile "service"`, `profile "route" requires host access`, "selected yard role requires YARD_KIND=vm"
 	run := func(extra []string, arguments ...string) (int, string) {
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: arguments, Environment: append(slices.Clone(environment), extra...), Stdout: &stdout, Stderr: &stderr})
 		return program.Run(context.Background()), stdout.String() + stderr.String()
 	}
 	for _, test := range []struct {
@@ -930,12 +943,10 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 }
 
 func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	environment := fixture.Environment
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Stdout: io.Discard, Stderr: &stderr})
 	definition, _ := program.manifest.Lookup("config")
 	for _, test := range []struct {
 		err  error
@@ -966,10 +977,7 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 		t.Fatalf("a non-config command printed a config next step: %s", stderr.String())
 	}
 	stderr.Reset()
-	invalid, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "SSH_PORT", "nope", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	invalid := fixture.New(Options{Arguments: []string{"config", "set", "SSH_PORT", "nope", "--scope", "host", "--yes"}, Stdout: io.Discard, Stderr: &stderr})
 	if code := invalid.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "SSH_PORT") || !strings.Contains(stderr.String(), "Next: use a supported value for the named setting") || strings.Contains(stderr.String(), "nope") {
 		t.Fatalf("invalid scalar lacks a next step: code=%d %s", code, stderr.String())
 	}
@@ -983,19 +991,13 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 		{[]string{"config", "set", "NO_SUCH_FIELD", "x", "SSH_PORT", "2223", "--scope", "host", "--git"}, nil, "Next: use a supported value for the named setting", ""},
 	} {
 		stderr.Reset()
-		command, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.arguments, Environment: append(slices.Clone(environment), test.environment...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		command := fixture.New(Options{Arguments: test.arguments, Environment: append(slices.Clone(environment), test.environment...), Stdout: io.Discard, Stderr: &stderr})
 		if code := command.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), test.want) || test.refuse != "" && strings.Contains(stderr.String(), test.refuse) {
 			t.Errorf("%v: code=%d %s", test.arguments, code, stderr.String())
 		}
 	}
 	stderr.Reset()
-	retired, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	retired := fixture.New(Options{Arguments: []string{"config", "set", "CODING_TOOL_INTEGRATIONS", "aiobserver", "--scope", "host", "--yes"}, Stdout: io.Discard, Stderr: &stderr})
 	if code := retired.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "integration aiobserver is retired and can no longer be selected") ||
 		!strings.Contains(stderr.String(), "Next: remove the retired integration") || strings.Contains(stderr.String(), "unknown integration") {
 		t.Fatalf("retired integration refusal: code=%d %s", code, stderr.String())
@@ -1004,15 +1006,13 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 
 func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
 	for _, assignment := range []string{"YARD_TEMPLATE=s3cr3tvalue\n", "CODING_TOOL_INTEGRATIONS=s3cr3tvalue\n", "export s3cr3tvalue\n", "SSH_PORT='s3cr3tvalue\n", "SSH_PORT=$(s3cr3tvalue)\n"} {
-		root, _, configHome, environment := configCommandFixture(t)
+		fixture := newFixture(t, withCheckoutConfig())
+		configHome := fixture.ConfigHome
 		writeConfigCommandFile(t, filepath.Join(configHome, "yards", "sibling", "config.env"), assignment)
 		for _, query := range []string{"status", "yards", "list"} {
 			var stdout, stderr bytes.Buffer
 			incus := lifecycleIncus()
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{query}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{query}, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
 			program.Run(context.Background())
 			output := stdout.String() + stderr.String()
 			// The root cause is reported once, not again by the legacy route listing.
@@ -1024,17 +1024,15 @@ func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
 }
 
 func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	withSyntheticYardTemplate(t, root, environment)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome := fixture.Root, fixture.ConfigHome
+	environment := withPreparedYardTemplate(t, fixture)
 	target := filepath.Join(configHome, "yards", "default", "config.env")
 	writeConfigCommandFile(t, target, "# keep this comment\nYARD_TEMPLATE=no-tools\n", 0o640)
 	run := func(wantCode int, arguments ...string) string {
 		t.Helper()
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"config", "set"}, arguments...), Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: append([]string{"config", "set"}, arguments...), Environment: environment, Stdout: io.Discard, Stderr: &stderr})
 		if code := program.Run(context.Background()); code != wantCode {
 			t.Fatalf("exit = %d, want %d: %s", code, wantCode, &stderr)
 		}
@@ -1085,6 +1083,18 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 		t.Fatalf("dynamic record refusal: %s", output)
 	}
 	assertFile()
+}
+
+func withPreparedYardTemplate(t *testing.T, fixture *cliFixture) []string {
+	t.Helper()
+	// The synthetic template helper replaces this empty directory with its own config tree.
+	configDir := filepath.Join(filepath.Dir(fixture.Home), "source", "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	environment := append(withoutCommandSetting(fixture.Environment, "SUBYARD_CONFIG_DIR"), "SUBYARD_CONFIG_DIR="+configDir)
+	withSyntheticYardTemplate(t, fixture.Root, environment)
+	return environment
 }
 
 func TestConfigSetLocalBatchRefusals(t *testing.T) {
@@ -1194,16 +1204,16 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 			assignments: []string{"SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, home, configHome, environment := configCommandFixture(t)
-			withSyntheticYardTemplate(t, root, environment)
+			fixture := newFixture(t, withCheckoutConfig())
+			home, configHome := fixture.Home, fixture.ConfigHome
+			if test.retired {
+				fixture.Write("config/retired-components.json",
+					`{"schema_version":1,"components":[{"kind":"integration","id":"old","settings":["AGENT_old_COMMAND"]}]}`)
+			}
+			environment := withPreparedYardTemplate(t, fixture)
 			source := filepath.Join(filepath.Dir(home), "source")
 			if test.dedicated {
 				writeConfigCommandFile(t, filepath.Join(source, "config", "profiles", "fixture", "profile.conf"), "PROVISION_SCOPE=dedicated\n")
-			}
-			if test.retired {
-				writeConfigCommandFile(t, filepath.Join(source, "config", "retired-components.json"),
-					`{"schema_version":1,"components":[{"kind":"integration","id":"old","settings":["AGENT_old_COMMAND"]}]}`)
-				root = source
 			}
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
@@ -1256,10 +1266,7 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 			var stderr bytes.Buffer
 			arguments := append([]string{"config", "set"}, test.assignments...)
 			arguments = append(arguments, "--scope", test.scope, "--yes")
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: arguments, Environment: environment, Stdout: io.Discard, Stderr: &stderr})
 			if code := program.Run(context.Background()); code != test.code {
 				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
 			}
@@ -1295,15 +1302,13 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 }
 
 func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	configHome, environment := fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "tv", "config.env"), "YARD_TEMPLATE=test-vms\n")
 	run := func(extra []string, arguments ...string) string {
 		t.Helper()
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: append(slices.Clone(environment), extra...), WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: arguments, Environment: append(slices.Clone(environment), extra...), Stdout: io.Discard, Stderr: &stderr})
 		if code := program.Run(context.Background()); code == 0 {
 			t.Fatalf("%v succeeded: %s", arguments, stderr.String())
 		}
@@ -1340,7 +1345,8 @@ func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
 }
 
 func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	configHome := fixture.ConfigHome
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "idy", "config.env"), "YARD_TEMPLATE=s3cr3tvalue\n")
 	digest := strings.Repeat("a", 64)
 	marker, err := json.Marshal(config.DeveloperIdentityMarker{Schema: 1, Yard: "idy", Inputs: digest, Identity: digest, Release: digest})
@@ -1349,10 +1355,7 @@ func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
 	}
 	testkit.WriteFile(t, config.DeveloperIdentityMarkerPath(configHome, "idy"), marker, 0o600)
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "idy", "init"}, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"-Y", "idy", "init"}, Stdout: io.Discard, Stderr: &stderr})
 	if code := program.Run(context.Background()); code == 0 || strings.Contains(stderr.String(), "s3cr3tvalue") || strings.Contains(stderr.String(), configHome) ||
 		!strings.Contains(stderr.String(), `developer identity: load yard "idy": unknown YARD_TEMPLATE`) {
 		t.Fatalf("identity gate load refusal: code=%d %s", code, stderr.String())
@@ -1392,7 +1395,8 @@ func (executor syncUnreadableExecutor) Exec(_ context.Context, _, instance strin
 // its candidate and refreshes the other consumer, then reports the refused
 // yard with its file and next step.
 func TestConfigSyncApplyRefusesOnlyTheConsumerWithAnUnreadableFile(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
@@ -1427,7 +1431,7 @@ func TestConfigSyncApplyRefusesOnlyTheConsumerWithAnUnreadableFile(t *testing.T)
 	if !slices.Contains(slices.Collect(maps.Values(executor.yards)), "hermes") {
 		t.Fatalf("hermes is not a candidate consumer: %v", executor.yards)
 	}
-	program := configExactProgram(t, root, environment, fake, applier)
+	program := fixture.New(configExactOptions(environment, fake, applier))
 	program.options.Executor = executor
 	prepared := configExactPlan(t, program, loaded, []string{"sync", source, "--adopt", "--apply"})
 	var output bytes.Buffer

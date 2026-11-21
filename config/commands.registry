@@ -50,7 +50,7 @@ _info||@info||local|read|never|hidden|internal|none|_info|machine-readable owner
 _authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize a controller key inside a yard||
 _state||@state||local|mutate|dynamic|hidden|internal|none|_state|native project state adapter||
 _project-state||@project-state||forward|mutate|dynamic|hidden|internal|none|_project-state|converge owner-host project state||
-_migrate||@migrate||local|mutate|dynamic|hidden|internal|none|_migrate|inspect compatibility state and run bounded migration helpers||paths check reconcile-test-vm-broker reconcile-power-reconciler
+_migrate||@migrate||local|mutate|dynamic|hidden|internal|none|_migrate|inspect compatibility state||paths check
 _release-transition||@release-transition||local|mutate|dynamic|hidden|internal|none|_release-transition|inspect or converge one exact release transition||
 # Releases that read headless+reporting VM values must keep this command with effect mutate for rollback compatibility.
 _vm-start-policy||@vm-start-policy||local|mutate|never|hidden|internal|none|_vm-start-policy PROJECT INSTANCE [SOCKET]|apply the owner headless VM policy before start||

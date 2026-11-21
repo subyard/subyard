@@ -175,8 +175,10 @@ it cannot guarantee that external resources remain unchanged afterward. The clos
 historical v0.11.1 recovery policy keeps its existing eligibility checks.
 
 Derived runtime artifacts are outside migration epochs. Owner/registration schema changes are
-one-time migrations; broker engine/facade and installed power executable/unit convergence are
-activation responsibilities, including systemd reload and verification. A resource's persisted
+one-time migrations; installed power executable/unit convergence is an activation responsibility,
+including systemd reload and verification. A forward transition recreates a registered broker
+whose engine changed instead of converging it in place; other drift and rollback converge in place. The
+pre-v0.11 test yard name `e2e-yard` is reserved: release activation never loads or updates it. A resource's persisted
 schema and its executable generation are separate contracts.
 
 Activation observes exact `current`/`previous` release-store links and resource generations/digests.

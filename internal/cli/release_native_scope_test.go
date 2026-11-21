@@ -16,7 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -312,30 +311,6 @@ func (deniedServer) Server(context.Context) (ports.ServerInfo, error) {
 
 func (deniedServer) Instance(context.Context, string, string) (ports.InstanceInfo, error) {
 	return ports.InstanceInfo{}, fmt.Errorf("get instance: %w: %w", domain.ErrIncusAccessDenied, os.ErrPermission)
-}
-
-// Test-yard recreation inspection runs the native CLI; socket denial is typed
-// before it can surface as an untyped exit status.
-func TestRegisteredTestYardMigrationTypesSocketDenial(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	seedOwnerHostID(t, configHome)
-	native := deniedServer{&testkit.Incus{}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := program.registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: configHome}, false, "test-yard").(*migration.RegisteredYardMigration)
-	_, err = owner.LoadTargets(context.Background(), nil)
-	message, retry := "", ""
-	var public interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(err, &public) {
-		message, retry = public.ActivationDiagnostic()
-	}
-	if !errors.Is(err, domain.ErrIncusAccessDenied) || retry != domain.IncusAccessNextStep ||
-		message != "yard test-yard: native state cannot be inspected: this account cannot access the Incus socket" {
-		t.Fatalf("test-yard socket denial = %v (%q / %q)", err, message, retry)
-	}
 }
 
 // Init's compatibility probe reports every local yard it cannot read, in

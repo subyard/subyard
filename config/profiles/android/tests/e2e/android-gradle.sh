@@ -66,12 +66,15 @@ gradle=("$work/gradle-$gradle_version/bin/gradle" --console=plain)
 stage='project'
 mkdir -p project/app/src/main/java/org/subyard/gradle project/app/src/androidTest/java/org/subyard/gradle
 cd project
+# Maven Central answers shared CI addresses with HTTP 429; Google's mirror of it serves the
+# same artifacts. Each run starts with an empty Gradle cache in a fresh yard. The plugin portal
+# redirects misses to Maven Central, and the only plugin comes from Google.
 cat > settings.gradle.kts <<'KTS'
 pluginManagement {
-    repositories { google(); mavenCentral(); gradlePluginPortal() }
+    repositories { google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") }
 }
 dependencyResolutionManagement {
-    repositories { google(); mavenCentral() }
+    repositories { google(); maven("https://maven-central.storage-download.googleapis.com/maven2/") }
 }
 rootProject.name = "subyard-gradle-acceptance"
 include(":app")

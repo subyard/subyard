@@ -6385,8 +6385,11 @@ mark_created_default_project() {
   printf 'mark owned project\n' >> "$trace"
 }
 p0_retry_init_after_plan_stale() { "$@"; }
+p0_container_image_reference() { [ "$1" = fixture-cached-cloud ] && printf 'fixture-fingerprint\n'; }
 operator_yard() {
   case "$*" in
+    '-Y test-yard config set YARD_IMAGE fixture-fingerprint YARD_IMAGE_FALLBACK fixture-fingerprint --scope yard --yes')
+      printf 'select fixture image\n' >> "$trace" ;;
     "config sync $CONFIG_CHECKOUT --yes")
       printf 'config sync checkout --yes\n' >> "$trace"
       [ "$scenario" != sync-failure ] || return 23
@@ -6407,10 +6410,7 @@ operator_yard() {
       else
         if [ "$scenario" = ordinary-change ]; then touch "$F/changed"; fi
         if [ "$scenario" = config-change ]; then printf changed > "$OPERATOR_HOME/.config/subyard/changed"; fi
-        status=ready warning='test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
-        if [ ! -e "$F/synced" ]; then
-          warning='test-yard requires recreation; run yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
-        fi
+        status=ready warning="e2e-yard requires recreation and is not updated; preserve other sessions' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"
         [ "$scenario" != wrong-guidance ] || warning='unrelated warning'
         [ "$scenario" != unready ] || status=migration-required
         jq -n --arg status "$status" --arg warning "$warning" \
@@ -6422,6 +6422,7 @@ operator_yard() {
 recreate_legacy_test_owner
 expected=$'config sync checkout --yes\n-Y e2e-yard teardown --reset-config --yes\nservice install test-vms --yes\nmark owned project'
 if [ "$scenario" = image-miss ]; then expected+=$'\nshare owned cache\nverify shared image\nservice install test-vms --yes'; fi
+expected+=$'\nselect fixture image'
 [ "$(cat "$trace")" = "$expected" ]
 RECREATE
   case "$recreate_case" in

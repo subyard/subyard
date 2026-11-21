@@ -10,8 +10,6 @@ import (
 
 const MaxInstalledRecipe = 96 << 20
 
-var installedRuntimeHelpers = []string{"download.sh", "engine-context.sh", "host-path-ownership.py", "host.sh", "native-install-custody.py", "native-install-custody.sh", "native-installed-stage.py", "native-installed-stage.sh", "owner-address.sh", "preview-proxy.sh", "runtime.sh", "ssh-config.sh", "ssh-listener.sh", "teardown-services.sh", "teardown-session.sh", "ui.sh"}
-
 type installedRecipeFile struct {
 	Path    string `json:"path"`
 	Content []byte `json:"content"`
@@ -61,7 +59,6 @@ type PreparedInstalledRuntime struct {
 	profile, handler       string
 	native                 []installedSourceGuard
 	executionFiles         map[string][]byte
-	ownerInputs            []ownerSourceInputBinding
 }
 
 func (p *PreparedInstalledRuntime) Close() error {

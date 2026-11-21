@@ -134,7 +134,9 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if receive == nil {
 		receive = serveOTLP
 	}
-	go func() { finished <- receive(ctx, s, options, &localAuth{s, token, admission}) }()
+	go func() {
+		finished <- receive(ctx, s, options, &localAuth{store: s, token: token, slots: admission, policy: options.Policy})
+	}()
 	select {
 	case err = <-finished:
 		return err

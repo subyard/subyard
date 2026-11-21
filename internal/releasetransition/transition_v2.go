@@ -2005,7 +2005,7 @@ func (transition *V2Transition) observeFresh(
 				transition.options.ConfigHome, settingsView, plan.Files,
 			)
 		case "test-yard-owner-v1-to-v2":
-			plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, settingsView)
+			plan, inspectErr := inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, settingsView)
 			if inspectErr != nil {
 				if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
 					observation.blockers = append(observation.blockers, blocker)
@@ -2085,24 +2085,6 @@ func (transition *V2Transition) appendFreshIngressWork(
 		Resource: intent.Resource, Class: class, Fingerprint: operation.Expected,
 	})
 	observation.work = append(observation.work, ingressMigrationWork(intent, operation, V2IngressBinding{}))
-}
-
-// Preserve excluded owners consistently before and after authorization. An
-// existing journaled owner effect retains its exact recorded recovery contract.
-func (transition *V2Transition) inspectUnjournaledOwnerRegistration(ctx context.Context, observation *v2Observation, view V2SettingsSnapshotView) (*ownerRegistrationV2Plan, error) {
-	if guard, ok := transition.options.OwnerRegistration.(interface {
-		FreshWarning(context.Context, V2SettingsSnapshotView) (string, error)
-	}); ok {
-		warning, err := guard.FreshWarning(ctx, view)
-		if err != nil {
-			return nil, err
-		}
-		if warning != "" {
-			observation.activationWarnings = append(observation.activationWarnings, warning)
-			return nil, nil
-		}
-	}
-	return inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, view)
 }
 
 func (transition *V2Transition) observeResume(
@@ -2484,7 +2466,7 @@ func (transition *V2Transition) observeResume(
 		}
 	}
 	if journalOwnerMigration && !journalOwner {
-		plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, nil)
+		plan, inspectErr := inspectOwnerRegistrationV2(ctx, transition.options.OwnerRegistration, nil)
 		if inspectErr != nil {
 			if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
 				observation.blockers = append(observation.blockers, blocker)

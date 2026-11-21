@@ -12,6 +12,9 @@ import (
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
+// ownerCreateTokenKey marked a project created by a retired owner migration; adoption never copies it.
+const ownerCreateTokenKey = "user.subyard.owner_create"
+
 // AdoptProject uses the ETag returned by the same read that checked the exact
 // approved configuration. A concurrent project edit cannot be overwritten.
 func (client *Client) AdoptProject(ctx context.Context, project string, before, metadata map[string]string) error {

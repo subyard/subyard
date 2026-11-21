@@ -9,6 +9,8 @@ TOKEN="${2:-}"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 # shellcheck source=dev/e2e/lib-p0-init-retry.sh
 . "$ROOT/dev/e2e/lib-p0-init-retry.sh"
+# shellcheck source=dev/e2e/lib-p0-incus-image.sh
+. "$ROOT/dev/e2e/lib-p0-incus-image.sh"
 p0_capacity_init "$TOKEN"
 
 MARKER="subyard-p0-source-$TOKEN"
@@ -480,7 +482,7 @@ bootstrap_failure_diagnostics() {
        "verification-failed", "activation-ambiguous", "recovery-ambiguous", "journal-invalid",
        "rollback-incompatible", "rollback-expired"] as $codes |
       {"activation.materialized-config":"materialized-config", "activation.host-power":"host-power",
-       "activation.test-vm-broker":"test-vm-broker", "activation.test-yard-route-consumers":"route-consumers",
+       "activation.test-vm-broker":"test-vm-broker",
        "activation.orca-runtime":"orca-runtime",
        "source-install.config":"source-config", "source-install.entrypoints":"source-entrypoints",
        "test-yard-owner":"owner-registration", "migration-history.checkpoint":"migration-history",
@@ -779,7 +781,7 @@ ordinary_yard_facts() {
 }
 
 recreate_legacy_test_owner() {
-  local before after report init_rc=0
+  local before after report image init_rc=0
   before="$(operator_env tar -C "$OPERATOR_HOME/.config/subyard" -cf - . | sha256sum)"
   before+="$(incus config show "$INSTANCE" --project "$PROJECT" --expanded)"
   # Init has no check mode. Inspect the active release's public warning before
@@ -787,8 +789,8 @@ recreate_legacy_test_owner() {
   report="$(operator_yard migrate --check --json)"
   jq -e '
     .schemaVersion == 1 and .outcome.status == "ready" and .outcome.reachedGoal == true and
-    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
-      contains("yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"))
+    any(.outcome.warnings[]?; contains("e2e-yard requires recreation") and
+      contains("yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"))
   ' <<<"$report" >/dev/null || {
     printf '%s\n' "$report" >&2
     die 'legacy owner readiness did not name executable recreation commands'
@@ -798,17 +800,10 @@ recreate_legacy_test_owner() {
   [ "$before" = "$after" ] || die 'owner inspection mutated protected configuration or native state'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'owner inspection changed the ordinary yard'
 
-  # Supply the original checkout for the advertised argument; sync's --yes is
-  # fresh consent for its own guarded plan. No --apply or guest refresh is needed.
+  # Release work leaves the legacy yard and its pending settings alone; sync's
+  # --yes is fresh consent for its own guarded plan before the reset.
   operator_yard config sync "$CONFIG_CHECKOUT" --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'settings migration changed the ordinary yard'
-  report="$(operator_yard migrate --check --json)"
-  jq -e '
-    .outcome.status == "ready" and .outcome.reachedGoal == true and
-    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
-      contains("yard -Y e2e-yard teardown --reset-config, then yard service install test-vms") and
-      (contains("config sync") | not))
-  ' <<<"$report" >/dev/null || die 'settings migration did not clear its recreation prerequisite'
   # Direct sync needs no registered checkout for later offline cache use.
   operator_env find "$CONFIG_CHECKOUT" -depth -delete
   CONFIG_CHECKOUT=''
@@ -829,12 +824,16 @@ recreate_legacy_test_owner() {
       || die 'fresh test-yard cannot access the shared fixture image'
     p0_retry_init_after_plan_stale operator_yard service install test-vms --yes
   fi
+  # A later update recreates the broker in a fresh project with isolated images;
+  # select the same immutable public image so that install resolves it there.
+  image="$(p0_container_image_reference "$BASE_IMAGE")"
+  operator_yard -Y test-yard config set YARD_IMAGE "$image" YARD_IMAGE_FALLBACK "$image" --scope yard --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'fresh test-yard installation changed the ordinary yard'
   operator_yard test-vms status --json
   operator_yard -Y test-yard check --host
   operator_yard migrate --check --json | jq -e '
     .schemaVersion == 1 and .outcome.status == "ready" and
-    all(.outcome.warnings[]?; contains("test-yard requires recreation") | not)' >/dev/null \
+    all(.outcome.warnings[]?; contains("requires recreation") | not)' >/dev/null \
     || die 'fresh test-yard is not ready'
 }
 
@@ -1021,7 +1020,7 @@ prepare() {
     cat "$SHARED_ROOT/first-update.log" >&2
     return "$update_rc"
   fi
-  grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
+  grep -Fq 'e2e-yard requires recreation and is not updated; preserve other sessions'"'"' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
   # The old default converges to prompt without operator action: release activation
@@ -1098,6 +1097,9 @@ resume() {
   operator_no_go env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT/b" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$VERSION_B" --yes
   verify_v2_release_transition "$VERSION_B"
+  # The update recreated the broker; prove and mark its successor project for cleanup.
+  DEFAULT_PROJECT="$PROJECT" DEFAULT_INSTANCE="$INSTANCE" mark_created_default_project "$YARD_NAME" \
+    || die 'recreated test-yard project ownership could not be proved'
   operator_yard -Y "$YARD_NAME" stop --yes
   operator_yard start --yes
   operator_yard migrate --yes

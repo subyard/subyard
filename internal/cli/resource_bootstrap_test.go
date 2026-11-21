@@ -22,7 +22,14 @@ import (
 
 func bootstrapCommandFixture(t *testing.T) (string, []string, string) {
 	t.Helper()
-	root, environment, applyLog := resourceCommandFixture(t)
+	fixture, applyLog := newBootstrapCommandFixture(t)
+	return fixture.Root, fixture.Environment, applyLog
+}
+
+func newBootstrapCommandFixture(t *testing.T) (*cliFixture, string) {
+	t.Helper()
+	fixture, applyLog := newResourceCommandFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	path := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -39,18 +46,16 @@ func bootstrapCommandFixture(t *testing.T) (string, []string, string) {
  {"name":"DEMO_HOST_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","optional":true,"minimum":1,"maximum":65535,"host_listener":true},
  {"name":"OTHER_LISTENER_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","optional":true,"minimum":1,"maximum":65535,"host_listener":true}
  ]}`, 0o600)
-	return root, environment, applyLog
+	return fixture, applyLog
 }
 
 func TestResourceBootstrapProfileCASFailureDoesNotReserveEndpoint(t *testing.T) {
-	root, environment, _ := bootstrapCommandFixture(t)
+	fixture, _ := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	if err := os.MkdirAll(filepath.Join(root, "data"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +100,8 @@ func TestResourceBootstrapProfileCASFailureDoesNotReserveEndpoint(t *testing.T) 
 }
 
 func TestResourceEndpointReservesPortsOfStoppedLocalYards(t *testing.T) {
-	root, environment, _ := bootstrapCommandFixture(t)
+	fixture, _ := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	for name, contents := range map[string]string{
 		"other":  "SSH_PORT=6769\nDEMO_HOST_PORT=6768\nOTHER_LISTENER_PORT=6770\n",
 		"remote": "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\nOWNER_YARD_NAME=default\nSSH_PORT=6771\nDEMO_HOST_PORT=6772\n",
@@ -106,10 +112,7 @@ func TestResourceEndpointReservesPortsOfStoppedLocalYards(t *testing.T) {
 		}
 		writeCLIFile(t, path, contents, 0600)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +135,8 @@ func TestResourceEndpointReservesPortsOfStoppedLocalYards(t *testing.T) {
 }
 
 func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T) {
-	root, environment, _ := bootstrapCommandFixture(t)
+	fixture, _ := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	path := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -142,10 +146,7 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=existing\nDEMO_ADVERTISE_HOST=127.0.0.1\nDEMO_HOST_PORT=16768\n", 0600)
 	platform := newInitPlatformFixture()
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run", "--yes"}, Environment: environment, WorkingDir: root, Stderr: &stderr, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run", "--yes"}, WorkingDir: root, Stderr: &stderr, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -156,10 +157,7 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 	// Removing the manual defaults must retain the endpoint chosen on first up.
 	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=existing\n", 0600)
 	var status bytes.Buffer
-	next, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status"}, Environment: environment, Stdout: &status})
-	if err != nil {
-		t.Fatal(err)
-	}
+	next := fixture.New(Options{Arguments: []string{"demo", "status"}, Stdout: &status})
 	loaded, err := next.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -167,10 +165,7 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 	if loaded.Environment["ENVIRONMENT_PROFILES"] != "existing fixture" || loaded.Environment["DEMO_HOST_PORT"] != "16768" || loaded.Environment["DEMO_ADVERTISE_HOST"] != "127.0.0.1" {
 		t.Fatal("next command lost saved profile or endpoint")
 	}
-	next, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "status"}, Environment: environment, Stdout: &status})
-	if err != nil {
-		t.Fatal(err)
-	}
+	next = fixture.New(Options{Arguments: []string{"demo", "status"}, Stdout: &status})
 	if code := next.Run(context.Background()); code != 0 {
 		t.Fatalf("status failed: %d", code)
 	}
@@ -180,7 +175,8 @@ func TestResourceBootstrapPersistsEndpointAndLoadsItForNextCommand(t *testing.T)
 }
 
 func TestResourceBootstrapPreservesProfilesAndInitializesAfterConsent(t *testing.T) {
-	root, environment, applyLog := bootstrapCommandFixture(t)
+	fixture, applyLog := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	platform := newInitPlatformFixture()
 	selection := filepath.Join(root, "state", "yards", "default", "config.env")
 	prompt := &callbackPrompt{callback: func() {
@@ -192,10 +188,7 @@ func TestResourceBootstrapPreservesProfilesAndInitializesAfterConsent(t *testing
 		}
 	}}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run"}, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -215,12 +208,9 @@ func TestResourceBootstrapPreservesProfilesAndInitializesAfterConsent(t *testing
 }
 
 func TestResourceBootstrapResumesResourceAfterPlatformRebuild(t *testing.T) {
-	root, environment, _ := bootstrapCommandFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+	fixture, _ := newBootstrapCommandFixture(t)
+	program := fixture.New(Options{
 		InitPlatform: newInitPlatformFixture()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +230,8 @@ func TestResourceBootstrapResumesResourceAfterPlatformRebuild(t *testing.T) {
 }
 
 func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
-	root, environment, _ := bootstrapCommandFixture(t)
+	fixture, _ := newBootstrapCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	descriptor := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
 	content, err := os.ReadFile(descriptor)
 	if err != nil {
@@ -263,10 +254,7 @@ func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
 	}
 	platform := newInitPlatformFixture()
 	environment = append(environment, "DEMO_ADVERTISE_HOST=127.0.0.1", "DEMO_HOST_PORT=16768")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Environment: environment, InitPlatform: platform})
 	loaded, err := program.loadContext("cached")
 	if err != nil {
 		t.Fatal(err)
@@ -293,10 +281,7 @@ func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
 	if err != nil || string(content) != original {
 		t.Fatalf("resource bootstrap changed cached settings: %q, %v", content, err)
 	}
-	nextProgram, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	nextProgram := fixture.New(Options{Environment: environment})
 	next, err := nextProgram.loadContext("cached")
 	if err != nil {
 		t.Fatal(err)
@@ -314,14 +299,12 @@ func TestResourceBootstrapKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
 }
 
 func TestResourceBootstrapDeclineLeavesSelectionAndInitUntouched(t *testing.T) {
-	root, environment, applyLog := bootstrapCommandFixture(t)
+	fixture, applyLog := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	platform := newInitPlatformFixture()
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run"}, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -342,7 +325,8 @@ func TestResourceBootstrapDeclineLeavesSelectionAndInitUntouched(t *testing.T) {
 }
 
 func TestResourceBootstrapRejectsSelectionDriftBeforeInit(t *testing.T) {
-	root, environment, applyLog := bootstrapCommandFixture(t)
+	fixture, applyLog := newBootstrapCommandFixture(t)
+	root := fixture.Root
 	platform := newInitPlatformFixture()
 	selection := filepath.Join(root, "state", "yards", "default", "config.env")
 	prompt := &callbackPrompt{callback: func() {
@@ -352,10 +336,7 @@ func TestResourceBootstrapRejectsSelectionDriftBeforeInit(t *testing.T) {
 		writeCLIFile(t, selection, "ENVIRONMENT_PROFILES=changed\n", 0600)
 	}}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "run"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"demo", "run"}, WorkingDir: root, Stderr: &stderr, Prompt: prompt, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}

@@ -182,6 +182,9 @@ case "${1:-} ${2:-} ${3:-}" in
           : > "$MOCK_TMP_CHECK_FILE"
           exit 10
         fi ;;
+      'exec yard --project subyard -T -- sh -c '*)
+        printf '%s\n' "${11}" > "$MOCK_TMP_CHECK_FILE.timezone"
+        exit "${MOCK_TIMEZONE_EXIT:-0}" ;;
       *'ip -4 -o address show dev'*)
         if [ "$MOCK_BOOT_AFTER_RESTART" = 1 ]; then
           [ "$(cat "$MOCK_TMP_CHECK_FILE.boot" 2>/dev/null)" = running ] || exit 1
@@ -202,7 +205,7 @@ run_create() {
   local rc=0
   : > "$MOCK_INCUS_LOG"
   : > "$MOCK_CAPTURE_FILE"
-  bash "$ROOT/scripts/03-create-subyard.sh" "$@" --yes >"$TMP/output" 2>&1 || rc=$?
+  bash "$ROOT/scripts/03-create-subyard.sh" --yes >"$TMP/output" 2>&1 || rc=$?
   if [ -s "$MOCK_CAPTURE_FILE" ]; then
     [ ! -e "$(cat "$MOCK_CAPTURE_FILE")" ] || fail 'private image metadata capture survived the operation'
   fi
@@ -549,42 +552,51 @@ unset SUBYARD_INCUS_STOPPED_WINDOW
 MOCK_REBOOT=0
 printf 'ok: a new VM is started once more after a lost first boot; other lost boots refuse at once\n'
 
-# Native creation precedes the split shell portions. Only a fresh POST result
-# may authorize their initial storage restart; retained identity alone may not.
-(
-  export SUBYARD_PREPARED_OWNER_PHASE=1
-  export SUBYARD_PREPARED_OWNER_INSTANCE_UUID=fixture-new-yard-uuid
-  export SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN=fixture-owner-token
-  export SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=fixture-new-yard-uuid
-  for kind in container vm; do
-    reset_creation
-    printf '1\n' > "$MOCK_INSTANCE_FILE"
-    MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=RUNNING
-    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
-    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-before-srv
-    ! grep -Eq '^(init |image |stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
-      || fail "native $kind before-srv crossed the storage boot boundary"
-    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-after-srv
-    [ "$(grep -c '^stop yard --project subyard$' "$MOCK_INCUS_LOG")" = 1 ] \
-      || fail "fresh native $kind did not complete the initial storage restart"
-    [ "$(grep -c '^exec yard --project subyard -T -- sh -s -- check$' "$MOCK_INCUS_LOG")" = 2 ] \
-      || fail "fresh native $kind did not verify actual storage after restart"
-    ! grep -Eq '^(init |image )' "$MOCK_INCUS_LOG" || fail "native $kind repeated SDK creation"
+rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
 
-    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
-    SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID='' YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
-      run_create --owner-after-srv
-    ! grep -Eq '^(stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
-      || fail "retained native $kind identity authorized a storage restart"
-    if SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=replacement-uuid YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
-        run_create --owner-after-srv; then
-      fail "native $kind accepted a different fresh-instance UUID"
-    fi
-    ! grep -Eq '^(start |stop |config (set|device (add|remove)))' "$MOCK_INCUS_LOG" \
-      || fail "native $kind mutated a different fresh-instance identity"
+(
+  # shellcheck source=scripts/lib/instance-create.sh
+  . "$ROOT/scripts/lib/instance-create.sh"
+  timezone_etc="$TMP/timezone-etc"
+  install -d -m 0700 "$timezone_etc"
+  ! subyard_host_timezone "$timezone_etc" || fail 'missing timezone yielded a zone'
+  for zone in '' UTC Etc/UTC 'Europe/../Berlin' 'Europe/Berlin; true'; do
+    printf '%s\n' "$zone" > "$timezone_etc/timezone"
+    ! subyard_host_timezone "$timezone_etc" || fail 'invalid or UTC timezone yielded a zone'
   done
+  printf '  Asia/Kolkata\n' > "$timezone_etc/timezone"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Asia/Kolkata ] || fail 'timezone file was ignored'
+  printf 'Asia/Kolkata\0junk' > "$timezone_etc/timezone"
+  ! subyard_host_timezone "$timezone_etc" || fail 'timezone file with NUL was accepted'
+  ln -s ../usr/share/zoneinfo/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'localtime link was ignored'
+  ln -sfnT ../usr/share/zoneinfo/right/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = right/Europe/Berlin ] || fail 'right timezone prefix was stripped'
+  ln -sfnT /usr/share/zoneinfo/posix/Europe/Berlin "$timezone_etc/localtime"
+  [ "$(subyard_host_timezone "$timezone_etc")" = Europe/Berlin ] || fail 'posix timezone prefix was kept'
+
+  # Feed a real fixture symlink to the creation adapter without reading host timezone files.
+  export MOCK_TIMEZONE_LINK="$timezone_etc/localtime"
+  cat > "$TMP/bin/readlink" <<'MOCK'
+#!/usr/bin/env bash
+if [ "$*" = '-z -- /etc/localtime' ]; then
+  exec /usr/bin/readlink -z -- "$MOCK_TIMEZONE_LINK"
+fi
+exec /usr/bin/readlink "$@"
+MOCK
+  chmod 0700 "$TMP/bin/readlink"
+  reset_creation
+  MOCK_TIMEZONE_EXIT=1 run_create
+  [ "$(cat "$MOCK_TMP_CHECK_FILE.timezone")" = Europe/Berlin ] \
+    || fail 'new yard did not receive the timezone argument'
+  grep -Fq 'could not set the new yard timezone from the host' "$TMP/output" \
+    || fail 'timezone failure did not warn'
+  rm -f -- "$MOCK_TMP_CHECK_FILE.timezone"
+  run_create
+  [ ! -e "$MOCK_TMP_CHECK_FILE.timezone" ] || fail 'existing yard received a timezone command'
+  rm -f -- "$TMP/bin/readlink"
 )
-printf 'ok: prepared split creation converges fresh disk /tmp and never restarts retained instance results\n'
+printf 'ok: timezone detection and best-effort inheritance apply only to new yards\n'
 
 # Consume the physical fixture's actual generated inputs through normal creation.
 # The selected project has its own local catalog: a bare default-project cache

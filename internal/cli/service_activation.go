@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerservice"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -16,29 +18,8 @@ import (
 // Bind only new-release activation. Readiness, same-release repair and config
 // gates retain the native owner, including every optional interface.
 func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.ProcessRequest, reconcilers []releasetransition.V2ActivationReconciler) []releasetransition.V2ActivationReconciler {
-	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
-	if err != nil {
+	if !cli.newReleaseActivation(request) {
 		return reconcilers
-	}
-	active, err := links.Observe()
-	if err != nil || request.Direction != releasetransition.DirectionActivateTarget {
-		return reconcilers
-	}
-	if active.Active == request.Target {
-		// After activation, only the exact incomplete cross-release journal
-		// proves this is a new-release resume rather than same-release repair.
-		store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
-		if err != nil {
-			return reconcilers
-		}
-		snapshot, err := store.ReadCurrentJournal()
-		if err != nil || !snapshot.Exists {
-			return reconcilers
-		}
-		journal, err := releasetransition.ParseJournal(snapshot.Payload)
-		if err != nil || journal.Checkpoint == releasetransition.JournalComplete || journal.Goal != (releasetransition.Goal{Target: request.Target, Direction: request.Direction}) || journal.Releases.From == journal.Releases.Target {
-			return reconcilers
-		}
 	}
 	for _, definition := range cli.catalog.Profiles() {
 		service := definition.InfrastructureService
@@ -64,6 +45,13 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 					loaded, err := cli.resolveReleaseTransitionContext(context.Background(), name, request.ConfigHome, nil)
 					if err == nil && !cli.unobservedReleaseYard(name, request.ConfigHome) &&
 						loaded.Context.AccessKind == domain.AccessLocal && service.Matches(loaded.Environment) {
+						// Settings without a finished runtime have nothing to register;
+						// the stage warning names their reinstall.
+						incus, _ := cli.statusPorts()
+						instance, err := incus.Instance(context.Background(), loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+						if errors.Is(err, ports.ErrInstanceNotFound) || err == nil && instanceUninitialized(configTarget{Name: name}, instance) {
+							return nil
+						}
 						return []string{fmt.Sprintf("register service %s (pool default) when exactly one owned runtime is proven; runtime and leases retained", service.ID)}
 					}
 				}

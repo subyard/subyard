@@ -305,7 +305,6 @@ func (r *profileRuntimeActivationReconciler) activationConfiguration() *CLI     
 func (r *materializedConfigActivationReconciler) activationConfiguration() *CLI { return r.cli }
 func (r *installationActivationReconciler) activationConfiguration() *CLI       { return r.cli }
 func (r *activationStageReconciler) activationConfiguration() *CLI              { return r.configuration }
-func (r *routeConsumerActivationReconciler) activationConfiguration() *CLI      { return r.configuration }
 
 // uninitializedLocked is releaseYardUninitialized for a caller that holds the
 // mutex. It reads only the instance, never the guest; a failed read leaves the
@@ -327,6 +326,19 @@ func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli
 	}
 	source.uninitialized[target.Name] = true
 	return true
+}
+
+// leaveRecreatedYardToInstall drops the installed view of a yard whose runtime
+// recreation removed. Its install, and every later load in this transition,
+// reads the yard's desired context like a yard left to its init.
+func (source *releaseConfiguration) leaveRecreatedYardToInstall(yard, home string) {
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	delete(source.yards, home+"/"+yard)
+	if source.uninitialized == nil {
+		source.uninitialized = map[string]bool{}
+	}
+	source.uninitialized[yard] = true
 }
 
 // unobservedReleaseYard reports a yard whose activation context was never read

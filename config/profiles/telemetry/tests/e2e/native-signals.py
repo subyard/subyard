@@ -846,6 +846,53 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         provider.server_close()
 
 
+def assert_short_run_traces(data, endpoint, env):
+    """Check both immediate exports from a short-lived managed run."""
+    trace_id = uuid.uuid4().hex
+    span_ids = ['0000000000000001', '0000000000000002']
+    now = time.time_ns()
+    batches = [dict(resourceSpans=[dict(scopeSpans=[dict(spans=[
+        dict(traceId=trace_id, spanId=span_id, name='codex.turn',
+             startTimeUnixNano=str(now), endTimeUnixNano=str(now+1))])])]) for span_id in span_ids]
+    code = """import os, sys, urllib.request
+from pathlib import Path
+data = Path(os.environ['SUBYARD_TELEMETRY_DATA_DIR'])
+token = (data.with_name(data.name+'-private')/'auth.token').read_text().strip()
+run = os.environ['SUBYARD_AGENT_RUN_ID']
+for batch in sys.stdin.buffer:
+    request = urllib.request.Request(sys.argv[1]+'/v1/traces', data=batch, headers={
+        'Content-Type': 'application/json', 'Authorization': 'Bearer '+token, 'X-Subyard-Agent-Run-ID': run})
+    with urllib.request.urlopen(request, timeout=1) as response:
+        assert response.status == 200
+print(run)
+"""
+    started = time.monotonic()
+    completed = subprocess.run(['subyard-telemetry-run', '--agent', 'other', '--agent-version', 'fixture',
+                                '--scope-mode', 'require', '--', sys.executable, '-c', code, endpoint],
+                               env=env, input=''.join(json.dumps(batch)+'\n' for batch in batches),
+                               text=True, stdout=subprocess.PIPE, check=True, timeout=10)
+    elapsed = time.monotonic()-started
+    run = completed.stdout.strip()
+    found = []
+    for payload in raw_otlp(data, 'otlp/traces'):
+        for field, group in protobuf_fields(payload):
+            if field != 1:
+                continue
+            for scope_field, scope in protobuf_fields(group):
+                if scope_field != 2:
+                    continue
+                for span_field, span in protobuf_fields(scope):
+                    if span_field != 2:
+                        continue
+                    fields = dict(protobuf_fields(span))
+                    if fields.get(1) == bytes.fromhex(trace_id):
+                        attributes = otlp_attributes(dict(protobuf_fields(group))[1], 1)
+                        assert attributes.get('subyard.agent_run.id') == run, 'fast span lost its run identity'
+                        found.append(fields[2].hex())
+    assert sorted(found) == span_ids, 'fast trace fixture lost or duplicated spans'
+    print(f'ok: {elapsed:.3f}s managed run kept both immediate trace exports', flush=True)
+
+
 class CoordinatorProvider(http.server.BaseHTTPRequestHandler):
     """A Claude coordinator delegates to a native subagent, then runs a worker in Bash."""
     def log_message(self, *_):
@@ -1172,6 +1219,7 @@ def main():
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
     # The Claude probe here runs no tool; the resources exercise covers its success field.
     assert_native_log_fields(args.data_dir, success=('codex',))
+    assert_short_run_traces(args.data_dir, endpoint, env)
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
     assert_usage_attribution(state/'usage', binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence; '
