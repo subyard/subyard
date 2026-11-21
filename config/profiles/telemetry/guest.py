@@ -33,6 +33,12 @@ BINARY_LIMIT = 64*1024*1024
 # Inventory key for the other digest an interrupted asset update may leave on
 # disk. Path entries stay single digests, which v0.30 can still read.
 REPLACED = 'replaced'
+# Drop-in directories systemd applies to every service, such as the LXC guest's.
+TYPE_DROPINS = (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d'))
+# Lines of the stock LXC guest drop-in after its [Service] header, the type-wide one a recognized
+# previous unit may carry. The host's bwrap policy accepts the same set.
+LXC_DROPIN = ('ProcSubset=all', 'ProtectProc=default', 'ProtectControlGroups=no', 'ProtectKernelTunables=no',
+              'NoNewPrivileges=no', 'LoadCredential=', 'PrivateNetwork=no', 'ImportCredential=')
 
 
 def systemctl(*args):
@@ -41,6 +47,25 @@ def systemctl(*args):
     if result.returncode:
         raise ValueError('system manager unavailable')
     return result.stdout.decode().strip()
+
+
+def stock_dropin(path, before=None):
+    """Whether a type-wide drop-in is the stock LXC guest's: a root-owned regular file, older than
+    `before` when given, of a [Service] header and stock lines only."""
+    try:
+        native.safe(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or (before is not None and info.st_mtime_ns >= before)
+                    or any(entry.st_uid != os.getuid() or entry.st_mode & 0o022 for entry in (info, path.parent.stat()))):
+                return False
+            content = stream.read(native.CONFIG_LIMIT+1)
+    except (OSError, ValueError):
+        return False
+    lines = content.removesuffix(b'\n').split(b'\n')
+    return (len(content) <= native.CONFIG_LIMIT and lines[0] == b'[Service]'
+            and all(line.decode('latin-1') in LXC_DROPIN for line in lines[1:]))
 
 
 class Runtime:
@@ -265,7 +290,7 @@ class Runtime:
         return self.token()
 
     def manager(self, unit, startup=False):
-        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
+        raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,NeedDaemonReload,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
         fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
         # A failed service waiting for Restart= has failed, e.g. after a reboot
         # during a rename, while its unit still names the previous account.
@@ -273,41 +298,40 @@ class Runtime:
             fields['ActiveState'] = 'failed'
         if fields.get('LoadState') not in ('not-found', None):
             dropins = fields.get('DropInPaths', '').split()
-            if any(Path(path).parent not in (Path('/run/systemd/system/service.d'), Path('/etc/systemd/system/service.d'), Path('/usr/lib/systemd/system/service.d')) for path in dropins):
+            if any(Path(path).parent not in TYPE_DROPINS for path in dropins):
                 raise ValueError('foreign loaded unit')
-            expected_mode = 'process' if unit == MANAGER else 'control-group'
-            if fields.get('KillMode') != expected_mode:
+            # Apply stops the loaded unit: the workloads the manager delegates must survive it.
+            if unit == MANAGER and fields.get('KillMode') != 'process':
                 raise ValueError('foreign loaded unit stop policy')
             expected = {'FragmentPath': str(self.units/unit), 'User': self.user, 'Group': str(self.gid),
                         'Type': 'simple', 'UMask': '0077', 'LimitCORE': '0', 'AmbientCapabilities': '',
                         'ExecStartPre': '', 'ExecStartPost': '', 'ExecStop': '', 'ExecStopPost': '', 'Environment': '', 'EnvironmentFiles': ''}
             if unit == COLLECTOR:
-                expected.update(MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
+                expected.update(KillMode='control-group', MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
             else:
                 expected['Delegate'] = 'yes'
             command = self.starts[unit]
-            path = self.units/unit
-            current = self.assets[path][0]
-            # Recognize only the prior managed service envelopes recorded in
-            # the inventory. Its bearer moves outside the analytics directory.
-            old_auth = str(self.data/'auth.token')
-            candidates = {command, command.removeprefix('/usr/bin/setpriv --no-new-privs ')}
-            if unit == COLLECTOR:
-                candidates.update(value.replace(str(self.auth), old_auth) for value in tuple(candidates))
             start = fields.get('ExecStart', '')
-            for candidate in sorted(candidates):
-                if candidate == command or not start.startswith('{ path='+candidate.split()[0]+' ; argv[]='+candidate+' ; ignore_errors=no ; '):
-                    continue
-                prior = current.replace(command.encode(), candidate.encode(), 1)
-                if (self.asset_snapshot(path) in (prior, current)
-                        and hashlib.sha256(prior).hexdigest() in self.recorded_digests(self.saved_inventory(), path)):
-                    command = candidate  # Known previous startup, stale until migrated.
-                    break
-            valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
-            nnp = fields.get('NoNewPrivileges')
-            if (any(fields.get(key, '') != value for key, value in expected.items()) or not valid_start
-                    or nnp not in (('yes', 'no') if dropins else ('yes',))):
-                raise ValueError('foreign loaded unit envelope')
+            if (any(fields.get(key, '') != value for key, value in expected.items())
+                    or not start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ')
+                    or start.count('argv[]=') != 1 or fields.get('NoNewPrivileges') not in (('yes', 'no') if dropins else ('yes',))):
+                # Any other loaded unit is a previous one of ours, stale until apply rewrites it,
+                # only when it is a file the inventory recorded: a previous file loaded from disk,
+                # or one an interrupted apply replaced after recording both versions. Over the
+                # loaded current file, any difference comes from a drop-in.
+                path = self.units/unit
+                content = self.asset_snapshot(path)
+                saved = self.saved_inventory()
+                replacing = isinstance(saved.get(REPLACED), dict) and str(path) in saved[REPLACED]
+                if (fields.get('FragmentPath') != str(path) or content is None
+                        or hashlib.sha256(content).hexdigest() not in self.recorded_digests(saved, path)
+                        or not (replacing or fields.get('NeedDaemonReload') == 'no' and content != self.assets[path][0])):
+                    raise ValueError('foreign loaded unit envelope')
+                # Its own fields are ours; type-wide drop-ins may only be the stock LXC one. Before
+                # daemon-reload, one changed after the unit file was replaced is not the loaded one.
+                before = None if fields.get('NeedDaemonReload') == 'no' else path.stat().st_mtime_ns
+                if not all(stock_dropin(Path(dropin), before) for dropin in dropins):
+                    raise ValueError('foreign loaded unit drop-in')
         return fields
 
     def running_no_new_privs(self, fields):
