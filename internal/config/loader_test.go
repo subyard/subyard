@@ -465,7 +465,8 @@ func TestDevSudoAliasSnapshotsEqualCanonical(t *testing.T) {
 		if !maps.Equal(oldInputs, currentInputs) || oldInputs["DEV_SUDO"] != canonical {
 			t.Fatalf("DEV_SUDO=%s init inputs differ from %s: %v %v", alias, canonical, oldInputs, currentInputs)
 		}
-		if ApprovalGates(old.Environment) != ApprovalGates(current.Environment) {
+		if SudoApprovalPrompt(old.Environment["DEV_SUDO"]) != SudoApprovalPrompt(current.Environment["DEV_SUDO"]) ||
+			GitApprovalOff(old.Environment["CODING_TOOL_GIT_APPROVAL"]) != GitApprovalOff(current.Environment["CODING_TOOL_GIT_APPROVAL"]) {
 			t.Fatalf("DEV_SUDO=%s approval gates differ from %s", alias, canonical)
 		}
 	}
