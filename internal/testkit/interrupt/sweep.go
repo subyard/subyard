@@ -10,6 +10,10 @@
 // temporary-file removal hides the leftovers a real crash keeps. A case that relies on an
 // error-returning seam must say why its error path is crash-faithful, use Crash where the
 // seam honours safefs.ErrCrash, or leave the gap documented in the test.
+//
+// Signature must return an independent snapshot: the sweep keeps the uncut and initial
+// signatures and compares later ones against them, so a value that shares mutable state
+// with the fixture would change together with it.
 package interrupt
 
 import (
@@ -122,7 +126,8 @@ type Case[S any] struct {
 	Run func(t *testing.T, s S, in *Injector) Outcome
 	// Resume retries or recovers. Nil means Run again without a cut.
 	Resume func(t *testing.T, s S) Outcome
-	// Signature returns the comparable state, for example Tree plus domain reads.
+	// Signature returns an independent, comparable snapshot of the state, for example Tree
+	// plus domain reads.
 	Signature func(t *testing.T, s S) any
 	// Completed checks the outcome and domain meaning of the uncut run once; Signature
 	// equality carries that meaning to every cut that converges to the final state.
@@ -136,7 +141,11 @@ type Case[S any] struct {
 	Repeated func(t *testing.T, s S, p Point, o Outcome)
 
 	Convergence Convergence
-	Mode        Mode
+	// Committed, when set, pins the side of a known commit point: a cut at p must converge
+	// to the final state when it returns true and to the initial state otherwise. It
+	// overrides Convergence.
+	Committed func(p Point) bool
+	Mode      Mode
 	// MinPoints guards against a refactor that silently removes seam calls.
 	MinPoints int
 	// Require lists seam names that the uncut run must reach.
@@ -183,6 +192,14 @@ func Sweep[S any](t *testing.T, c Case[S]) []Point {
 			c.Resumed(t, s, point, resume(t, s))
 			got := c.Signature(t, s)
 			switch {
+			case c.Committed != nil && c.Committed(point):
+				if !reflect.DeepEqual(got, after) {
+					t.Fatalf("%s is past the commit point but did not converge to the final state:\n%s", point, signatureDiff(after, got))
+				}
+			case c.Committed != nil:
+				if !reflect.DeepEqual(got, before) {
+					t.Fatalf("%s is before the commit point but did not keep the initial state:\n%s", point, signatureDiff(before, got))
+				}
 			case reflect.DeepEqual(got, after):
 				committed = true
 			case c.Convergence == BeforeOrAfter && !committed && reflect.DeepEqual(got, before):
@@ -207,7 +224,7 @@ func repeat[S any](t *testing.T, c Case[S], resume func(*testing.T, S) Outcome, 
 		c.Repeated(t, s, p, outcome)
 	}
 	if got := c.Signature(t, s); !reflect.DeepEqual(got, want) {
-		t.Fatalf("a second retry changed the state:\n%s", signatureDiff(want, got))
+		t.Fatalf("%s: a second retry changed the state:\n%s", p, signatureDiff(want, got))
 	}
 }
 

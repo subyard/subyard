@@ -26,7 +26,7 @@ func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connectio
 		store Connections
 		apply func(Connections) error
 	}
-	interrupt.Sweep(t, interrupt.Case[state]{
+	points := interrupt.Sweep(t, interrupt.Case[state]{
 		Setup: func(t *testing.T) state {
 			store, apply := setup(t)
 			return state{store, apply}
@@ -39,8 +39,7 @@ func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connectio
 		Resume: func(t *testing.T, s state) interrupt.Outcome {
 			return interrupt.Outcome{Err: s.store.Recover()}
 		},
-		// Lock files are created empty by acquiring a lock and never carry state.
-		Signature: func(t *testing.T, s state) any { return interrupt.Tree(t, s.store.Root, ".lock", "mutations") },
+		Signature: func(t *testing.T, s state) any { return ownerSignature(t, s.store.Root) },
 		Completed: func(t *testing.T, s state, o interrupt.Outcome) {
 			if o.Err != nil {
 				t.Fatal(o.Err)
@@ -62,10 +61,32 @@ func ownerSweep(t *testing.T, minPoints int, setup func(t *testing.T) (Connectio
 				t.Fatalf("second Recover after %s: %v", p, o.Err)
 			}
 		},
-		Convergence: interrupt.BeforeOrAfter,
-		MinPoints:   minPoints,
-		Require:     require,
+		// The journal publication is the commit point: a cut at journal-write keeps the old
+		// state and every later cut recovers to the new one.
+		Committed: func(p interrupt.Point) bool { return p.Ordinal > 1 },
+		MinPoints: minPoints,
+		Require:   require,
 	})
+	if points[0].Name != ownerIOJournalWrite {
+		t.Fatalf("first durable effect is %s, want %s", points[0], ownerIOJournalWrite)
+	}
+}
+
+// ownerSignature drops only the lock files that acquiring a lock leaves empty; any other
+// entry, including a non-empty or unexpected lock, stays in the signature.
+func ownerSignature(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := interrupt.Tree(t, root)
+	const emptyLock = "file -rw------- e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	for _, name := range []string{".lock", "mutations/owner-a.lock", "mutations/owner-b.lock"} {
+		if tree[name] == emptyLock {
+			delete(tree, name)
+		}
+	}
+	if tree["mutations"] == "dir -rwx------" {
+		delete(tree, "mutations")
+	}
+	return tree
 }
 
 func TestRegistrationRecoversFromEveryDurableIOBoundary(t *testing.T) {

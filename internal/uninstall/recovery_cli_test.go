@@ -23,8 +23,9 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 		store uninstall.RecoveryStore
 		plan  uninstall.RecoveryPlan
 	}
-	empty, sawEmpty := false, false
-	interrupt.Sweep(t, interrupt.Case[state]{
+	const noPlan = "yard: No saved full uninstall plan. Run 'yard teardown --full' again.\n"
+	empty, sawEmpty, resumed := false, false, 0
+	points := interrupt.Sweep(t, interrupt.Case[state]{
 		Setup: func(t *testing.T) state {
 			store, plan := uninstall.CompletedRecoveryStoreFixture(t)
 			testkit.WriteFile(t, filepath.Join(store.Directory, ".plan-next"), []byte("stale publication"), 0600)
@@ -45,7 +46,13 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			code := program.Run(t.Context())
 			return interrupt.Outcome{Code: code, Output: diagnostics.String()}
 		},
-		Signature: func(t *testing.T, s state) any { return interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome)) },
+		Signature: func(t *testing.T, s state) any {
+			// The owner epoch lives outside the fixture root, in the shared owner-lock directory.
+			tree := interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome))
+			epoch, err := uninstall.ReadOwnerEpoch(s.plan.Installation.DataHome)
+			tree["<owner epoch>"] = fmt.Sprint(epoch, err)
+			return tree
+		},
 		Completed: func(t *testing.T, s state, o interrupt.Outcome) {
 			if o.Code != 0 {
 				t.Fatalf("uninterrupted exit=%d output=%s", o.Code, o.Output)
@@ -60,17 +67,16 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			}
 		},
 		Interrupted: func(t *testing.T, s state, p interrupt.Point, o interrupt.Outcome) {
-			if o.Code != 1 || !strings.Contains(o.Output, "_uninstall-resume "+s.store.Directory) {
-				t.Fatalf("%s: interrupted exit=%d output=%s", p, o.Code, o.Output)
-			}
-			launcher := filepath.Join(s.store.Directory, "runtime", "bin", "yard")
+			directory := s.store.Directory
+			launcher := filepath.Join(directory, "runtime", "bin", "yard")
+			want := fmt.Sprintf("Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", directory, launcher, directory)
 			if _, err := os.Lstat(launcher); errors.Is(err, os.ErrNotExist) {
-				want := fmt.Sprintf("Full removal is incomplete. Retain %s, install a compatible Subyard version, then resume with:\n  yard _uninstall-resume %s\n", s.store.Directory, s.store.Directory)
-				if !strings.Contains(o.Output, want) {
-					t.Fatalf("%s: missing retry guidance %q in output %s", p, want, o.Output)
-				}
+				want = fmt.Sprintf("Full removal is incomplete. Retain %s, install a compatible Subyard version, then resume with:\n  yard _uninstall-resume %s\n", directory, directory)
 			} else if err != nil {
 				t.Fatalf("%s: inspect retained launcher: %v", p, err)
+			}
+			if o.Code != 1 || !strings.Contains(o.Output, want) {
+				t.Fatalf("%s: interrupted exit=%d, want 1 and retry guidance %q in output %s", p, o.Code, want, o.Output)
 			}
 			entries, err := os.ReadDir(s.store.Directory)
 			if err != nil {
@@ -79,23 +85,25 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			empty = len(entries) == 0
 		},
 		Resumed: func(t *testing.T, s state, p interrupt.Point, o interrupt.Outcome) {
+			resumed++
 			if empty {
 				sawEmpty = true
-				if o.Code != 1 || !strings.Contains(o.Output, "Run 'yard teardown --full' again.") {
-					t.Fatalf("%s: empty-store retry exit=%d output=%s", p, o.Code, o.Output)
+				if o.Code != 1 || o.Output != noPlan {
+					t.Fatalf("%s: empty-store retry exit=%d output=%q, want %q", p, o.Code, o.Output, noPlan)
 				}
 			} else if o.Code != 0 {
 				t.Fatalf("%s: saved-plan retry exit=%d output=%s", p, o.Code, o.Output)
 			}
 		},
 		Repeated: func(t *testing.T, s state, p interrupt.Point, o interrupt.Outcome) {
-			if want := "yard: No saved full uninstall plan. Run 'yard teardown --full' again.\n"; o.Code != 1 || o.Output != want {
-				t.Fatalf("%s: repeated retry exit=%d output=%q, want %q", p, o.Code, o.Output, want)
+			if o.Code != 1 || o.Output != noPlan {
+				t.Fatalf("%s: repeated retry exit=%d output=%q, want %q", p, o.Code, o.Output, noPlan)
 			}
 		},
 		MinPoints: 49,
 	})
-	if !sawEmpty {
+	// Replaying one cut with -run skips the cut that empties the store.
+	if resumed == len(points) && !sawEmpty {
 		t.Fatal("interruption never left an empty recovery directory")
 	}
 }

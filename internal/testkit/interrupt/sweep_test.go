@@ -17,9 +17,11 @@ const toyBugEnv = "SUBYARD_INTERRUPT_TOY_BUG"
 
 // toy is a journaled two-file update: journal, write a, write b, remove journal.
 type toy struct {
-	dir  string
-	bug  string
-	runs *int
+	dir         string
+	bug         string
+	runs        *int
+	interrupted *bool
+	resumes     *int
 }
 
 func (s toy) path(name string) string { return filepath.Join(s.dir, name) }
@@ -28,12 +30,21 @@ func (s toy) write(t *testing.T, name, body string) {
 	testkit.WriteFile(t, s.path(name), []byte(body), 0o600)
 }
 
+func (s toy) hit(in *Injector, name string) error {
+	err := in.Hit("toy", name)
+	*s.interrupted = *s.interrupted || err != nil
+	return err
+}
+
 func (s toy) run(t *testing.T, in *Injector) Outcome {
 	*s.runs++
 	if s.bug == "order" && *s.runs%2 == 0 {
-		_ = in.Hit("toy", "stat")
+		_ = s.hit(in, "stat")
 	}
-	if err := in.Hit("toy", "journal"); err != nil {
+	if s.bug == "commit" {
+		s.write(t, "journal", "new")
+	}
+	if err := s.hit(in, "journal"); err != nil {
 		return Outcome{Code: 1, Err: err}
 	}
 	s.write(t, "journal", "new")
@@ -41,9 +52,9 @@ func (s toy) run(t *testing.T, in *Injector) Outcome {
 		if s.bug == "leftover" {
 			s.write(t, name+".tmp", "new")
 		}
-		if err := in.Hit("toy", "write"); err != nil {
+		if err := s.hit(in, "write"); err != nil {
 			if s.bug == "late" {
-				_ = in.Hit("toy", "rollback")
+				_ = s.hit(in, "rollback")
 			}
 			return Outcome{Code: 1, Err: err}
 		}
@@ -55,7 +66,7 @@ func (s toy) run(t *testing.T, in *Injector) Outcome {
 		}
 	}
 	if s.bug != "unfired" || *s.runs == 1 {
-		if err := in.Hit("toy", "cleanup"); err != nil {
+		if err := s.hit(in, "cleanup"); err != nil {
 			return Outcome{Code: 1, Err: err}
 		}
 	}
@@ -66,9 +77,9 @@ func (s toy) run(t *testing.T, in *Injector) Outcome {
 }
 
 func (s toy) resume(t *testing.T) Outcome {
-	if s.bug == "repeat" {
-		body, _ := os.ReadFile(s.path("log"))
-		s.write(t, "log", string(body)+"resumed\n")
+	*s.resumes++
+	if s.bug == "repeat" && *s.interrupted && *s.resumes == 2 {
+		s.write(t, "log", "resumed twice\n")
 	}
 	if _, err := os.Stat(s.path("journal")); errors.Is(err, os.ErrNotExist) {
 		return Outcome{}
@@ -91,7 +102,7 @@ func toyCase(bug string, mode Mode) Case[toy] {
 	runs := 0
 	return Case[toy]{
 		Setup: func(t *testing.T) toy {
-			s := toy{dir: testkit.TempDir(t), bug: bug, runs: &runs}
+			s := toy{dir: testkit.TempDir(t), bug: bug, runs: &runs, interrupted: new(bool), resumes: new(int)}
 			s.write(t, "a", "old")
 			s.write(t, "b", "old")
 			return s
@@ -121,16 +132,23 @@ func toyCase(bug string, mode Mode) Case[toy] {
 	}
 }
 
+func toyCommitted(p Point) bool { return p.Ordinal > 1 }
+
 func TestSweepCutsEveryCallInOrder(t *testing.T) {
-	for _, mode := range []Mode{Fail, Crash} {
-		points := Sweep(t, toyCase("", mode))
-		var got []string
-		for _, point := range points {
-			got = append(got, point.String())
-		}
-		want := []string{"001-toy:journal", "002-toy:write", "003-toy:write", "004-toy:cleanup"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("points = %v, want %v", got, want)
+	for _, pinned := range []bool{false, true} {
+		for _, mode := range []Mode{Fail, Crash} {
+			c := toyCase("", mode)
+			if pinned {
+				c.Committed = toyCommitted
+			}
+			var got []string
+			for _, point := range Sweep(t, c) {
+				got = append(got, point.String())
+			}
+			want := []string{"001-toy:journal", "002-toy:write", "003-toy:write", "004-toy:cleanup"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("points = %v, want %v", got, want)
+			}
 		}
 	}
 }
@@ -148,6 +166,8 @@ func TestSweepToyBug(t *testing.T) {
 		c.MinPoints = 10
 	case "require":
 		c.Require = append(c.Require, "fsync")
+	case "commit":
+		c.Committed = toyCommitted
 	}
 	Sweep(t, c)
 }
@@ -155,7 +175,8 @@ func TestSweepToyBug(t *testing.T) {
 func TestSweepCatchesBrokenCases(t *testing.T) {
 	for bug, want := range map[string]string{
 		"leftover":   `a.tmp: want "", got "file`,
-		"repeat":     "a second retry changed the state",
+		"repeat":     "001-toy:journal: a second retry changed the state",
+		"commit":     "001-toy:journal is before the commit point but did not keep the initial state",
 		"order":      "hook order differs from the uncut run",
 		"unfired":    "cut 004-toy:cleanup never fired",
 		"late":       "the error path reached seams after the cut",
@@ -214,12 +235,19 @@ func TestTreeRecordsTypesModesContentAndLinks(t *testing.T) {
 	if err := os.Symlink("/elsewhere", filepath.Join(root, "outside")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, "shared"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "shared"), 0o700|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
 	got := Tree(t, root, "skip")
 	want := map[string]string{
 		".":       "dir -rwx------",
 		"file":    "file -rw-r----- 230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5",
 		"inside":  "link -rwxrwxrwx -> $ROOT/file",
 		"outside": "link -rwxrwxrwx -> /elsewhere",
+		"shared":  "dir trwx------",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tree = %v", got)

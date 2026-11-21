@@ -13,8 +13,8 @@ import (
 	"testing"
 )
 
-// Tree is a "no leftovers" signature of root: relative path → type, mode and content
-// digest or link target. A missing root yields an empty map. Ignore takes path.Match
+// Tree is a "no leftovers" signature of root: relative path → type, permission and
+// setuid, setgid and sticky bits, and content digest or link target. A missing root yields an empty map. Ignore takes path.Match
 // patterns on slash-separated relative paths; a matching directory is skipped whole.
 // Link targets under root are recorded relative to it, so fresh fixture roots compare equal.
 func Tree(t *testing.T, root string, ignore ...string) map[string]string {
@@ -45,6 +45,7 @@ func Tree(t *testing.T, root string, ignore ...string) map[string]string {
 			return err
 		}
 		mode := info.Mode()
+		bits := mode & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
 		switch {
 		case mode&fs.ModeSymlink != 0:
 			target, err := os.Readlink(name)
@@ -54,16 +55,16 @@ func Tree(t *testing.T, root string, ignore ...string) map[string]string {
 			if strings.HasPrefix(target, root+string(filepath.Separator)) {
 				target = "$ROOT" + strings.TrimPrefix(target, root)
 			}
-			tree[relative] = fmt.Sprintf("link %v -> %s", mode.Perm(), target)
+			tree[relative] = fmt.Sprintf("link %v -> %s", bits, target)
 		case mode.IsDir():
-			tree[relative] = fmt.Sprintf("dir %v", mode.Perm())
+			tree[relative] = fmt.Sprintf("dir %v", bits)
 		case mode.IsRegular():
 			body, err := os.ReadFile(name)
 			if err != nil {
 				return err
 			}
 			digest := sha256.Sum256(body)
-			tree[relative] = fmt.Sprintf("file %v %s", mode.Perm(), hex.EncodeToString(digest[:]))
+			tree[relative] = fmt.Sprintf("file %v %s", bits, hex.EncodeToString(digest[:]))
 		default:
 			tree[relative] = fmt.Sprintf("special %v", mode)
 		}
