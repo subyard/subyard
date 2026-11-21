@@ -121,7 +121,8 @@ def _finish_directory(fd, info, mode, gid):
     if actual == wanted and not (change_group and wanted & _SET_ID):
         return
     group = gid if change_group else info.st_gid
-    # Linux would clear setgid on chmod without group membership or CAP_FSETID.
+    # Without CAP_FSETID, chmod by a nonmember clears setgid. The owner can
+    # still chmod a setuid-only directory without clearing setuid.
     if wanted & stat.S_ISGID and os.geteuid() != 0 and group != os.getegid() and group not in os.getgroups():
         return
     # Procfs addresses the open inode even when its mode is 0000.
@@ -295,9 +296,14 @@ def rename_noreplace(src, dst, *, src_dir_fd=-100, dst_dir_fd=-100):
     src_bytes, dst_bytes = os.fsencode(src), os.fsencode(dst)
     if b'\0' in src_bytes or b'\0' in dst_bytes:
         raise ValueError('embedded null byte')
-    rename = getattr(ctypes.CDLL(None), 'renameat2', None)
-    if rename is None or rename(src_dir_fd, src_bytes, dst_dir_fd, dst_bytes, 1) != 0:
-        raise OSError(errno.EOPNOTSUPP, 'atomic no-replace rename requires renameat2(RENAME_NOREPLACE)')
+    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+    if rename is not None:
+        if rename(src_dir_fd, src_bytes, dst_dir_fd, dst_bytes, 1) == 0:
+            return
+        error = ctypes.get_errno()
+        if error not in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            raise OSError(error, os.strerror(error), src, None, dst)
+    raise OSError(errno.EOPNOTSUPP, 'atomic no-replace rename requires renameat2(RENAME_NOREPLACE)')
 
 
 class Pending:

@@ -653,6 +653,37 @@ assert launcher.launch(args) == 0
                 runtime.private_directory(path, refusal)
             self.assertEqual(path.stat().st_uid, 0)
 
+    @unittest.skipUnless(os.geteuid() == 0, 'creating a directory as another UID needs root')
+    def test_concurrent_developer_directory_creation_validates_the_winner(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = 65534, 65534
+            publish = guest.safefs.rename_noreplace
+            for mode in (0o700, 0o750):
+                with self.subTest(mode=oct(mode)):
+                    path = root/str(mode)
+                    winner = None
+
+                    def publish_with_winner(src, dst, *, src_dir_fd, dst_dir_fd):
+                        nonlocal winner
+                        with patch.object(guest.safefs, 'rename_noreplace', publish):
+                            runtime.create_developer_directory(dst_dir_fd, dst)
+                        path.chmod(mode)
+                        winner = path.stat()
+                        return publish(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+                    with patch.object(guest.safefs, 'rename_noreplace', side_effect=publish_with_winner):
+                        if mode == 0o700:
+                            runtime.private_directory(path, 'foreign data directory')
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'foreign data directory'):
+                                runtime.private_directory(path, 'foreign data directory')
+                    info = path.stat()
+                    self.assertTrue(os.path.samestat(info, winner))
+                    self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), (runtime.uid, runtime.gid, mode))
+            self.assertEqual(list(root.glob('.telemetry-dir-*')), [])
+
     def test_apply_finishes_or_refuses_the_data_directory_before_the_bearer(self):
         class Reached(Exception):
             pass
@@ -1049,6 +1080,29 @@ for path, value in (
                 native_check.assert_called_once_with(check=True)
                 self.assertEqual(str(raised.exception), 'managed asset changed; '+str(policy))
                 self.assertEqual(raised.exception.reasons[1:], policy.reasons)
+
+    def test_observe_and_apply_keep_each_combined_errno(self):
+        runtime = object.__new__(guest.Runtime)
+        runtime.selected = True
+        runtime.owned = lambda: True
+        native_io = OSError(errno.ENOTDIR, 'private error text', '/private/native')
+        errno_reason = ('check-errno', 'native', errno.ENOTDIR)
+        cases = (
+            (ValueError('managed asset changed'), ('check-refusal', 'managed asset changed')),
+            (OSError(errno.EACCES, 'private module error', '/private/module'), ('check-errno', 'safefs', errno.EACCES)),
+        )
+        for operation in (runtime.observe, runtime.apply):
+            for module_error, module_reason in cases:
+                with self.subTest(operation=operation.__name__, module=module_reason[0]), \
+                        patch.object(runtime, 'safefs_state', side_effect=module_error), \
+                        patch.object(runtime, 'reconcile_native', side_effect=native_io) as native_check:
+                    with self.assertRaises(guest.native.Refusal) as raised:
+                        operation()
+                    native_check.assert_called_once_with(check=True)
+                    self.assertEqual(raised.exception.reasons, [module_reason, errno_reason])
+                    self.assertEqual(str(raised.exception), '; '.join(guest.native.refusal_messages(raised.exception.reasons)))
+                    self.assertIn(f'[Errno {errno.ENOTDIR}]', str(raised.exception))
+                    self.assertNotIn('/private/', str(raised.exception))
 
     def test_running_child_no_new_privs_uses_actual_kernel_status_and_uid(self):
         process=subprocess.Popen(['/usr/bin/setpriv','--no-new-privs',sys.executable,'-c',

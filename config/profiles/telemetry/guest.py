@@ -337,7 +337,11 @@ class Runtime:
                 os.fchmod(fd, 0o770)
                 with native.developer_files(self.uid, self.gid):
                     safefs.ensure_dir(name, dir_fd=fd)
-                safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
+                try:
+                    safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
+                except FileExistsError:
+                    # private_directory checks the winner through the pinned parent.
+                    pass
             finally:
                 os.close(fd)
 
@@ -492,11 +496,11 @@ class Runtime:
         failures = []
         try:
             support = self.safefs_state()
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             failures.append(error)
         try:
             native_current = self.reconcile_native(check=True)
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             failures.append(error)
         if len(failures) == 2:
             raise native.combined_check_refusal(*failures)

@@ -34,8 +34,32 @@ class SafeFiles(unittest.TestCase):
         vectors = json.loads(Path(__file__).with_name('testdata').joinpath('python-parity.json').read_bytes())
         for index, vector in enumerate(vectors):
             with self.subTest(vector=vector):
-                mode, kind = vector['mode'], vector['target']
                 path = self.root/str(index)
+                want = vector.get('python_outcome', vector['outcome'])
+                operation = vector.get('operation', 'write-file')
+                if operation == 'finish-directory':
+                    path.mkdir()
+                    path.chmod(vector['initial_mode'])
+                    before = path.stat()
+                    self.assertFalse(safefs.ensure_dir(path, mode=vector['mode']))
+                    after = path.stat()
+                    self.assertEqual(f'{stat.S_IMODE(after.st_mode):04o}', want)
+                    self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+                    continue
+                if operation == 'resolve-file':
+                    path.symlink_to('missing')
+                    # Exercise the user-file policy even in the root permission run.
+                    with patch.object(safefs.os, 'geteuid', return_value=1):
+                        with self.assertRaises(FileNotFoundError):
+                            safefs.resolve_file(path)
+                        with self.assertRaises(FileNotFoundError):
+                            safefs.write_file(path, b'new', follow_symlink=True)
+                    self.assertEqual(want, 'dangling target refused')
+                    self.assertEqual(os.readlink(path), 'missing')
+                    self.assertFalse((self.root/'missing').exists())
+                    continue
+                self.assertEqual(operation, 'write-file')
+                mode, kind = vector['mode'], vector['target']
                 other = self.root/'untouched'
                 other.write_bytes(b'untouched')
                 if kind == 'regular':
@@ -53,12 +77,11 @@ class SafeFiles(unittest.TestCase):
                     actual = 'published'
                 except safefs.Unsafe as error:
                     actual = {safefs.SYMLINK: 'symlink', safefs.NOT_REGULAR: 'not regular'}[error.reason]
-                except OSError as error:
-                    self.assertEqual(error.args, NO_REPLACE_REFUSAL)
-                    actual = 'no-replace refused'
+                except FileExistsError:
+                    actual = 'exists'
                 finally:
                     os.umask(before)
-                self.assertEqual(actual, vector.get('python_outcome', vector['outcome']))
+                self.assertEqual(actual, want)
                 if actual == 'published':
                     self.assertEqual(path.read_bytes(), b'new')
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
@@ -141,17 +164,6 @@ safefs.write_file(sys.argv[3], b'new')
             safefs.ensure_dir(self.path/'foreign', owner=(foreign, -1))
         self.assertFalse((self.path/'foreign').exists())
 
-    def test_parity_finish_preserves_sticky_and_set_id(self):
-        self.path.mkdir()
-        for before, after in ((0o1500, 0o1700), (0o2500, 0o2700), (0o4500, 0o4700), (0o7500, 0o7700)):
-            with self.subTest(mode=oct(before)):
-                self.path.chmod(before)
-                identity = self.path.stat().st_uid, self.path.stat().st_gid
-                self.assertFalse(safefs.ensure_dir(self.path))
-                info = self.path.stat()
-                self.assertEqual(stat.S_IMODE(info.st_mode), after)
-                self.assertEqual((info.st_uid, info.st_gid), identity)
-
     def test_setgid_parent_and_restrictive_umask_converge(self):
         self.path.mkdir()
         self.path.chmod(0o2755)
@@ -165,28 +177,18 @@ safefs.write_file(sys.argv[3], b'new')
         safefs.write_file(interrupted/'value', b'data', parent_mode=0o755)
         self.assertEqual(stat.S_IMODE(interrupted.stat().st_mode), 0o2755)
 
-    def test_setgid_finish_skips_chmod_without_group_membership(self):
+    def test_finish_preserves_setuid_and_setgid_without_group_membership(self):
         self.path.mkdir()
-        self.path.chmod(0o2700)
         info = self.path.stat()
         uid = info.st_uid or 1
-        with patch.object(safefs.os, 'geteuid', return_value=uid), \
-                patch.object(safefs.os, 'getegid', return_value=info.st_gid+1), \
-                patch.object(safefs.os, 'getgroups', return_value=[]), patch.object(safefs.os, 'chmod') as chmod:
-            self.assertFalse(safefs.ensure_dir(self.path, mode=0o755, owner=(info.st_uid, -1)))
-        chmod.assert_not_called()
-        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o2700)
-
-    def test_parity_dangling_user_link_is_refused(self):
-        self.path.symlink_to('missing')
-        # Exercise the user-file policy even in the root permission run.
-        with patch.object(safefs.os, 'geteuid', return_value=1):
-            with self.assertRaises(FileNotFoundError):
-                safefs.resolve_file(self.path)
-            with self.assertRaises(FileNotFoundError):
-                safefs.write_file(self.path, b'new', follow_symlink=True)
-        self.assertEqual(os.readlink(self.path), 'missing')
-        self.assertFalse((self.root/'missing').exists())
+        for initial, target, wanted in ((0o2700, 0o755, 0o2700), (0o4500, 0o700, 0o4700)):
+            with self.subTest(initial=oct(initial)):
+                self.path.chmod(initial)
+                with patch.object(safefs.os, 'geteuid', return_value=uid), \
+                        patch.object(safefs.os, 'getegid', return_value=info.st_gid+1), \
+                        patch.object(safefs.os, 'getgroups', return_value=[]):
+                    self.assertFalse(safefs.ensure_dir(self.path, mode=target, owner=(info.st_uid, -1)))
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), wanted)
 
     def test_anchored_publication_and_root_checks(self):
         before = self.root/'before'
@@ -267,14 +269,24 @@ safefs.write_file(sys.argv[3], b'new')
     def test_failed_no_replace_publish_leaves_no_target_or_staging_entry(self):
         stage = self.root/'stage'
         stage.mkdir()
-        for libc in (object(), SimpleNamespace(renameat2=lambda *args: -1)):
-            with patch.object(safefs.ctypes, 'CDLL', return_value=libc), patch.object(safefs.os, 'link') as link:
+        for code in (None, errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            libc = object() if code is None else SimpleNamespace(renameat2=lambda *args: -1)
+            with self.subTest(code=code), patch.object(safefs.ctypes, 'CDLL', return_value=libc), \
+                    patch.object(safefs.ctypes, 'get_errno', return_value=code), patch.object(safefs.os, 'link') as link:
                 with self.assertRaises(OSError) as error:
                     safefs.write_file(self.path, b'new', stage_dir=stage, no_replace=True)
-            self.assertEqual(error.exception.args, NO_REPLACE_REFUSAL)
-            link.assert_not_called()
-            self.assertFalse(self.path.exists())
-            self.assertEqual(list(stage.iterdir()), [])
+                self.assertEqual(error.exception.args, NO_REPLACE_REFUSAL)
+                link.assert_not_called()
+                self.assertFalse(self.path.exists())
+                self.assertEqual(list(stage.iterdir()), [])
+
+    def test_rename_noreplace_preserves_missing_source_errno(self):
+        self.path.mkdir()
+        target = self.root/'destination'
+        with self.assertRaises(FileNotFoundError) as error:
+            safefs.rename_noreplace(self.path/'missing', target)
+        self.assertEqual(error.exception.errno, errno.ENOENT)
+        self.assertFalse(target.exists())
 
     def test_no_replace_directory_without_renameat2_refuses_without_linking(self):
         self.path.mkdir()

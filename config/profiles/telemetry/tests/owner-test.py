@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exact generic release observations use the declared owning transport."""
+import errno
 import json
 import io
 import os
@@ -312,6 +313,8 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 ('telemetry-native-refusal-v2 [["template-conflict","codex","PRIVATE_CREDENTIAL"]]', ''),
                 ('telemetry-native-refusal-v2 [["unsafe-policy","PRIVATE_CREDENTIAL"]]', ''),
                 ('telemetry-native-refusal-v2 [["check-refusal","PRIVATE_CREDENTIAL"]]', ''),
+                ('telemetry-native-refusal-v2 [["check-errno","PRIVATE_CREDENTIAL",20]]', ''),
+                ('telemetry-native-refusal-v2 [["check-errno","native","PRIVATE_CREDENTIAL"]]', ''),
                 (safe.replace('PermissionError','PRIVATE_CREDENTIAL'), '')]:
             with self.subTest(message_class=bool(expected)):
                 stderr = io.StringIO()
@@ -327,6 +330,17 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             owner['run']([sys.executable, '-c',
                           "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
                           'telemetry-native-refusal-v2 [["check-refusal","managed asset changed"],["unsafe-policy","codex"]]'])
+
+    def test_combined_module_and_native_errnos_reach_the_owner_in_order(self):
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        reasons = [('check-errno', 'safefs', errno.EACCES), ('check-errno', 'native', errno.ENOTDIR)]
+        with self.assertRaises(owner['Refusal']) as raised:
+            owner['run']([sys.executable, '-c',
+                          "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
+                          'telemetry-native-refusal-v2 '+json.dumps(reasons)])
+        self.assertEqual(str(raised.exception),
+                         f'shared safefs module check failed ([Errno {errno.EACCES}] {os.strerror(errno.EACCES)}); '
+                         f'native telemetry check failed ([Errno {errno.ENOTDIR}] {os.strerror(errno.ENOTDIR)})')
 
     def test_all_exact_absent_release_observations_are_declared(self):
         from unittest.mock import patch

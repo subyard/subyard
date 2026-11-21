@@ -357,25 +357,27 @@ class Refusal(ValueError):
         super().__init__(rendered if message is None else message)
 
 
+CHECK_FAILURES = {'safefs': 'shared safefs module check failed', 'native': 'native telemetry check failed'}
 CHECK_REFUSAL_MESSAGES = frozenset((
     'managed asset changed', 'foreign control directory', 'unsafe native path',
     'native configuration is not regular', 'unsafe native file', 'native file exceeds size bound',
-    'private collector token required', 'invalid collector token',
-    'shared safefs module check failed', 'native telemetry check failed',
+    'private collector token required', 'invalid collector token', *CHECK_FAILURES.values(),
 ))
 
 
 def combined_check_refusal(support_error, native_error):
-    def check_reason(error, fallback):
+    def check_reason(check, error):
+        if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 4096:
+            return ('check-errno', check, error.errno)
         message = str(error)
-        return ('check-refusal', message if message in CHECK_REFUSAL_MESSAGES else fallback)
+        return ('check-refusal', message if message in CHECK_REFUSAL_MESSAGES else CHECK_FAILURES[check])
 
-    reasons = [check_reason(support_error, 'shared safefs module check failed')]
-    if isinstance(native_error, Refusal):
-        reasons.extend(native_error.reasons)
-    else:
-        reasons.append(check_reason(native_error, 'native telemetry check failed'))
-    return Refusal(reasons, message='; '.join(map(str, (support_error, native_error))))
+    reasons, messages = [], []
+    for check, error in (('safefs', support_error), ('native', native_error)):
+        details = error.reasons if isinstance(error, Refusal) else [check_reason(check, error)]
+        reasons.extend(details)
+        messages.extend(refusal_messages(details) if isinstance(error, OSError) else [str(error)])
+    return Refusal(reasons, message='; '.join(messages))
 
 
 def field_paths(fields, prefix=''):
@@ -395,6 +397,8 @@ def refusal_messages(reasons):
         match reason:
             case ('check-refusal', str(message)) if message in CHECK_REFUSAL_MESSAGES:
                 messages.append(message)
+            case ('check-errno', str(check), code) if check in CHECK_FAILURES and type(code) is int and 0 < code < 4096:
+                messages.append(f'{CHECK_FAILURES[check]} ([Errno {code}] {os.strerror(code)})')
             case ('legacy-receipt',):
                 messages.append('invalid legacy telemetry receipt')
             case ('legacy-token-unverified',):
