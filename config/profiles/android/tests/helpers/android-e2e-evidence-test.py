@@ -401,6 +401,71 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
         assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))
 
 
+# A passing connected test still needs evidence from the expected slot journal.
+sample_probe = runtime_source[runtime_source.index('android_require_gradle_console() {'):
+                              runtime_source.index('\ncleanup() {')]
+for records, journal_exit, expected in (
+        ('[  12.345678] wlan0: token=canary 192.0.2.1\n', 0, 0),
+        ('', 0, 1), ('-- No entries --\n', 0, 1), ('[  12.345678] partial\n', 124, 1)):
+    script = ('set -euo pipefail\nrecords="$1"; journal_exit="$2"\n'
+              'project=fixture; instance=fixture; incus_binary=(incus)\n'
+              'timeout() { printf "%s" "$records"; return "$journal_exit"; }\n'
+              + capture_helper + sample_probe + '\nandroid_require_gradle_console\n')
+    result = subprocess.run(['bash', '-c', script, '_', records, str(journal_exit)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, result.stderr
+    if expected:
+        assert 'could not verify guest kernel console records in the slot journal' in result.stderr
+    else:
+        assert '[  12.345678] wlan0: [redacted] [address]' in result.stderr
+        assert 'canary' not in result.stderr and '192.0.2.1' not in result.stderr
+
+
+# Run the controller's actual EXIT and signal traps with a fixture-local drop-in.
+runtime_cleanup = runtime_source[runtime_source.index('android_remove_gradle_console() {'):
+                                 runtime_source.index('[ "$(sudo -n cat')]
+cleanup_fixture = r'''
+set -euo pipefail
+state="$1"; dropin="$2"; export reload_exit="$3"; root="$4"
+console_dropin="$dropin"
+lane=gradle; android_phase=gradle; project=fixture; instance=fixture; incus_binary=(incus)
+monitor_pid=''; monitor_host_stop="$state/monitor-stop"; hold_seconds=1; init_attempted=0
+android_phase_begin() { :; }
+android_phase_end() { printf 'phase exit=%s\n' "$1"; }
+android_capture_evidence() { :; }
+sudo() { shift; "$@"; }
+incus() { shift 6; bash "$@"; }
+systemctl() { printf '%s\n' "$1"; return "$reload_exit"; }
+export -f systemctl
+timeout() {
+    case "$1" in
+        --kill-after=5) shift 2; "$@" ;;
+        15) : ;;
+        1) test ! -e "$dropin" && printf 'hold after removal\n' ;;
+        *) return 99 ;;
+    esac
+}
+'''
+for outcome, reload_exit, original_exit, dropin_present in (
+        ('android_remove_gradle_console', 0, 0, True), ('exit 23', 0, 23, True),
+        ('exit 124', 0, 124, True), ('kill -INT "$$"', 0, 130, True),
+        ('kill -TERM "$$"', 0, 130, True), ('exit 23', 7, 23, True), ('exit 23', 0, 23, False)):
+    with tempfile.TemporaryDirectory(prefix='android-gradle-dropin-', dir='/tmp') as directory:
+        state, dropin = Path(directory, 'state'), Path(directory, 'gradle.conf')
+        state.mkdir()
+        (state / '.marker').write_text('subyard-android-pool-runtime-v1\n')
+        if dropin_present:
+            dropin.touch()
+        result = subprocess.run(['bash', '-c', cleanup_fixture + runtime_cleanup + outcome,
+                                 '_', str(state), str(dropin), str(reload_exit), str(ROOT)],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == original_exit and not dropin.exists(), (result.stdout, result.stderr)
+        assert result.stdout.count('daemon-reload\n') == 1, result.stdout
+        if original_exit:
+            assert result.stdout.index('daemon-reload\n') < result.stdout.index('hold after removal\n'), result.stdout
+        assert result.stdout.endswith(f'phase exit={3 if reload_exit else 0}\n'), result.stdout
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(name, E2E / (name + '.py'))
     value = importlib.util.module_from_spec(spec)
@@ -1765,18 +1830,17 @@ with patch.object(monitor, 'initialize'), patch.object(monitor, 'slot_states', r
 assert '"state": "idle"' in output.getvalue()
 
 # Exercise real cleanup bodies with host operations replaced by bounded local stubs.
+cleanup = runtime_cleanup.split('\ntrap cleanup EXIT', 1)[0]
 with tempfile.TemporaryDirectory() as directory:
     for attempted, initial, teardown, expected in ((1, 23, 1, 23), (1, 0, 1, 3), (1, 0, 0, 0),
                                                    (0, 23, 99, 23)):
-        source = (E2E / 'android-pool-runtime.sh').read_text()
-        cleanup = source[source.index('cleanup() {'):source.index('\ntrap cleanup EXIT')]
         state = Path(directory) / f'owned-{attempted}-{initial}-{teardown}'
         state.mkdir()
         (state / '.marker').write_text('subyard-android-pool-runtime-v1\n')
         script = ('set -euo pipefail\n. "$1/android-pool-phases.sh"\n'
                   'android_fixture=runtime\nandroid_phase_begin check\n'
                   'state="$2"; project=""; instance=""; monitor_pid=""; monitor_stop=""; monitor_host_stop="$2/stop"; lane=diagnostics\n'
-                  'incus_binary=(false); hold_seconds=0; teardown_status="$3"; init_attempted="$5"\n'
+                  'incus_binary=(false); console_dropin=""; hold_seconds=0; teardown_status="$3"; init_attempted="$5"\n'
                   'yard() { printf called > "$state/teardown-called"; return "$teardown_status"; }; sudo() { shift; "$@"; }\n' + cleanup +
                   '\ntrap cleanup EXIT\nexit "$4"\n')
         result = subprocess.run(['bash', '-c', script, '_', str(E2E), str(state), str(teardown), str(initial), str(attempted)], capture_output=True, text=True)
@@ -1810,7 +1874,7 @@ with tempfile.TemporaryDirectory() as directory:
 android_fixture=runtime; android_phase_begin check
 state="$2"; outcome="$3"; lane=full; YARD_NAME=fixture; project=fixture
 instance=fixture; monitor_pid=''; monitor_stop=''; monitor_host_stop="$state/stop"; init_attempted=1
-SUBYARD_CONFIG_HOME="$state/config"; hold_seconds=0
+SUBYARD_CONFIG_HOME="$state/config"; console_dropin=''; hold_seconds=0
 sdk_pool=default; sdk_volume=yard-srv-fixture; incus_binary=("$state/fixture-incus")
 export BACKING_OUTCOME="$outcome"
 definition_checksum="$(sha256sum "$SUBYARD_CONFIG_HOME/yards/fixture/config.env")"
