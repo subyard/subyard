@@ -1,12 +1,14 @@
 package safefs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestResolveFileClasses(t *testing.T) {
@@ -33,47 +35,51 @@ func TestResolveFileClasses(t *testing.T) {
 		}
 		return path
 	}
-	type result struct{ path, err string }
-	cases := []struct {
-		name           string
-		input          string
-		strict, create result
-	}{
-		{"absent plain", filepath.Join(root, "plain.env"), result{path: filepath.Join(root, "plain.env")}, result{path: filepath.Join(root, "plain.env")}},
-		{"regular plain", filepath.Join(root, "file"), result{path: filepath.Join(root, "file")}, result{path: filepath.Join(root, "file")}},
-		{"present entry", link("present", "existing.env"), result{path: filepath.Join(base, "existing.env")}, result{path: filepath.Join(base, "existing.env")}},
-		{"absent entry", link("absent", "dir/new.env"), result{path: filepath.Join(base, "dir", "new.env")}, result{path: filepath.Join(base, "dir", "new.env")}},
-		{"dot-dot after alias", link("alias-up", "alias/../x.env"), result{path: filepath.Join(base, "real", "x.env")}, result{path: filepath.Join(base, "real", "x.env")}},
-		{"missing dot-dot", link("missing-up", "missing/../existing.env"), result{err: "open " + filepath.Join(root, "missing-up") + ": no such file or directory"}, result{err: "open " + filepath.Join(root, "missing-up") + ": no such file or directory"}},
-		{"absolute missing parent", link("abs-new", filepath.Join(root, "new", "config")), result{err: "open " + filepath.Join(root, "abs-new") + ": no such file or directory"}, result{path: filepath.Join(root, "new", "config")}},
-		{"relative missing parent", link("rel-new", "new/config"), result{err: "open " + filepath.Join(root, "rel-new") + ": no such file or directory"}, result{path: filepath.Join(base, "new", "config")}},
-		{"through a file", link("file-x", "file/x"), result{err: "open " + filepath.Join(root, "file-x") + ": not a directory"}, result{err: "open " + filepath.Join(root, "file-x") + ": not a directory"}},
-		{"file dot", link("file-dot", "file/."), result{err: "open " + filepath.Join(root, "file-dot") + ": not a directory"}, result{err: "open " + filepath.Join(root, "file-dot") + ": not a directory"}},
-		{"dot", link("dot", "."), result{path: base}, result{path: base}},
-		{"dot-dot", link("dotdot", ".."), result{path: filepath.Dir(base)}, result{path: filepath.Dir(base)}},
-		{"dir slash", link("dir-slash", "dir/"), result{path: filepath.Join(base, "dir")}, result{path: filepath.Join(base, "dir")}},
-		{"dir dot", link("dir-dot", "dir/."), result{path: filepath.Join(base, "dir")}, result{path: filepath.Join(base, "dir")}},
-		{"plain directory", link("dir-name", "dir"), result{path: filepath.Join(base, "dir")}, result{path: filepath.Join(base, "dir")}},
+	type result struct {
+		path  string
+		op    string
+		errno unix.Errno
 	}
-	loop := link("loop", "loop")
-	cases = append(cases, struct {
-		name           string
-		input          string
-		strict, create result
-	}{"loop", loop, result{err: "readlink " + loop + ": too many levels of symbolic links"}, result{err: "readlink " + loop + ": too many levels of symbolic links"}})
+	ok := func(path string) result { return result{path: path} }
+	fail := func(op string, errno unix.Errno) result { return result{op: op, errno: errno} }
+	both := func(want result) [2]result { return [2]result{want, want} }
+	cases := []struct {
+		name  string
+		input string
+		want  [2]result // strict, create
+	}{
+		{"absent plain", filepath.Join(root, "plain.env"), both(ok(filepath.Join(root, "plain.env")))},
+		{"regular plain", filepath.Join(root, "file"), both(ok(filepath.Join(root, "file")))},
+		{"present entry", link("present", "existing.env"), both(ok(filepath.Join(base, "existing.env")))},
+		{"absent entry", link("absent", "dir/new.env"), both(ok(filepath.Join(base, "dir", "new.env")))},
+		{"dot-dot after alias", link("alias-up", "alias/../x.env"), both(ok(filepath.Join(base, "real", "x.env")))},
+		{"missing dot-dot", link("missing-up", "missing/../existing.env"), both(fail("open", unix.ENOENT))},
+		{"missing slash", link("missing-slash", "missing/"), both(fail("open", unix.ENOENT))},
+		{"absolute missing parent", link("abs-new", filepath.Join(root, "new", "config")), [2]result{fail("open", unix.ENOENT), ok(filepath.Join(root, "new", "config"))}},
+		{"relative missing parent", link("rel-new", "new/config"), [2]result{fail("open", unix.ENOENT), ok(filepath.Join(base, "new", "config"))}},
+		{"through a file", link("file-x", "file/x"), both(fail("open", unix.ENOTDIR))},
+		{"file slash", link("file-slash", "file/"), both(fail("open", unix.ENOTDIR))},
+		{"file dot", link("file-dot", "file/."), both(fail("open", unix.ENOTDIR))},
+		{"dot", link("dot", "."), both(ok(base))},
+		{"dot-dot", link("dotdot", ".."), both(ok(filepath.Dir(base)))},
+		{"dir slash", link("dir-slash", "dir/"), both(ok(filepath.Join(base, "dir")))},
+		{"dir dot", link("dir-dot", "dir/."), both(ok(filepath.Join(base, "dir")))},
+		{"plain directory", link("dir-name", "dir"), both(ok(filepath.Join(base, "dir")))},
+		{"loop", link("loop", "loop"), both(fail("readlink", unix.ELOOP))},
+	}
 	for _, test := range cases {
-		for mode, want := range map[string]result{"strict": test.strict, "create": test.create} {
-			resolve := ResolveFile
-			if mode == "create" {
-				resolve = ResolveFileForCreate
-			}
+		for i, resolve := range []func(string) (string, error){ResolveFile, ResolveFileForCreate} {
+			mode, want := [2]string{"strict", "create"}[i], test.want[i]
 			path, err := resolve(test.input)
-			got := result{path: path}
-			if err != nil {
-				got = result{err: err.Error()}
+			if want.errno == 0 {
+				if err != nil || path != want.path {
+					t.Errorf("%s/%s: got %q, %v; want %q", test.name, mode, path, err, want.path)
+				}
+				continue
 			}
-			if got != want {
-				t.Errorf("%s/%s: got %+v, want %+v", test.name, mode, got, want)
+			text := want.op + " " + test.input + ": " + want.errno.Error()
+			if err == nil || !errors.Is(err, want.errno) || err.Error() != text {
+				t.Errorf("%s/%s: got %q, %v; want error %q (%d)", test.name, mode, path, err, text, want.errno)
 			}
 		}
 	}

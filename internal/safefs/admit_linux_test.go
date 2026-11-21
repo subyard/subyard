@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestAdmitDirStates(t *testing.T) {
@@ -79,5 +80,25 @@ func admitFixtureLink(t *testing.T, target, path string) {
 	t.Helper()
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdmitDirLeavesSetgidDirectoryOfForeignGroup(t *testing.T) {
+	setgid := unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o500, Gid: 4242}
+	for _, test := range []struct {
+		name   string
+		stat   unix.Stat_t
+		euid   int
+		groups []int
+		want   bool
+	}{
+		{"caller group", setgid, 1000, []int{100, 4242}, true},
+		{"foreign group", setgid, 1000, []int{100, 1000}, false},
+		{"foreign group as root", setgid, 0, []int{0}, true},
+		{"no setgid", unix.Stat_t{Mode: unix.S_IFDIR | 0o500, Gid: 4242}, 1000, []int{100}, true},
+	} {
+		if got := chmodKeepsSetgid(test.stat, test.euid, test.groups); got != test.want {
+			t.Errorf("%s: chmodKeepsSetgid = %v, want %v", test.name, got, test.want)
+		}
 	}
 }

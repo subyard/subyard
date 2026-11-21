@@ -136,6 +136,32 @@ func TestCleanupJournalDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
 	}
 }
 
+func TestCleanupJournalFinishesOuterDirectoryWithoutSearchPermission(t *testing.T) {
+	root := testkit.TempDir(t)
+	outer := filepath.Join(root, "cleanup")
+	parent := filepath.Join(outer, "yard")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outer, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outer, 0o700) })
+	path := filepath.Join(parent, "journal.json")
+	journal := &hardCleanupJournal{Schema: 1, Token: "0123456789abcdef0123456789abcdef", Phase: "recreate"}
+	if err := saveHardCleanup(path, journal); err != nil {
+		t.Fatalf("outer journal directory without search permission: %v", err)
+	}
+	for _, directory := range []string{outer, parent} {
+		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("journal directory %s not finished: %v %v", directory, info, err)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWriteExportedConfigFileNeverOpensSpecialFiles(t *testing.T) {
 	root := testkit.TempDir(t)
 	fifo := filepath.Join(root, "config.env")

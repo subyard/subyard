@@ -83,11 +83,32 @@ func AdmitDir(path string, mode fs.FileMode) error {
 		return nil
 	}
 	want, have := uint32(mode.Perm()), stat.Mode&0o777
-	if stat.Uid == uint32(os.Geteuid()) && have != want && have&^want == 0 {
+	if stat.Uid == uint32(os.Geteuid()) && have != want && have&^want == 0 && chmodKeepsSetgid(stat, os.Geteuid(), callerGroups()) {
 		// A failed finish leaves the directory for the caller's policy.
 		_ = dir.chmod(want | stat.Mode&0o7000)
 	}
 	return nil
+}
+
+// chmodKeepsSetgid reports whether chmod keeps a set-group-ID bit. Without
+// CAP_FSETID the kernel silently clears it when the directory's group is not
+// one of the caller's groups; such a directory is left for the caller's policy.
+// Only root is treated as privileged.
+func chmodKeepsSetgid(stat unix.Stat_t, euid int, groups []int) bool {
+	if stat.Mode&unix.S_ISGID == 0 || euid == 0 {
+		return true
+	}
+	for _, gid := range groups {
+		if uint32(gid) == stat.Gid {
+			return true
+		}
+	}
+	return false
+}
+
+func callerGroups() []int {
+	groups, _ := os.Getgroups()
+	return append(groups, os.Getegid())
 }
 
 func SyncDir(path string) error {

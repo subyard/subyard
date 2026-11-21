@@ -260,10 +260,21 @@ func saveHardCleanup(path string, journal *hardCleanupJournal) error {
 }
 
 func saveCleanupRecord(path string, record any) error {
+	parent := filepath.Dir(path)
+	// Finish narrower owned cleanup directories outermost first, after checking
+	// their ancestors, so an inner lookup does not fail on an outer directory
+	// without search permission.
+	for _, directory := range []string{filepath.Dir(parent), parent} {
+		if err := cleanupAncestors(directory); err != nil {
+			return err
+		}
+		if err := safefs.AdmitDir(directory, 0o700); err != nil {
+			return errors.New("unsafe hard cleanup recovery directory")
+		}
+	}
 	if err := cleanupAncestors(path); err != nil {
 		return err
 	}
-	parent := filepath.Dir(path)
 	for _, directory := range []string{filepath.Dir(parent), parent} {
 		if err := os.Mkdir(directory, 0700); err == nil {
 			if err := os.Chmod(directory, 0700); err != nil {
@@ -271,9 +282,6 @@ func saveCleanupRecord(path string, record any) error {
 			}
 		} else if !os.IsExist(err) {
 			return err
-		}
-		if err := safefs.AdmitDir(directory, 0o700); err != nil {
-			return errors.New("unsafe hard cleanup recovery directory")
 		}
 		info, err := os.Lstat(directory)
 		if err != nil {
