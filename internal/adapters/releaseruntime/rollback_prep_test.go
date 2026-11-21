@@ -967,3 +967,40 @@ func TestForwardUpdateIgnoresRuntimeFormats(t *testing.T) {
 		}
 	}
 }
+
+type ownerDiagnostic struct{ message, retry string }
+
+func (diagnostic ownerDiagnostic) Error() string { return "handler exited 3" }
+func (diagnostic ownerDiagnostic) ActivationDiagnostic() (string, string) {
+	return diagnostic.message, diagnostic.retry
+}
+
+// An owner's own public refusal keeps its message and typed next step.
+func TestRollbackPreparationKeepsAnOwnersNextStep(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	refusal := ownerDiagnostic{"sample export is enabled", "run yard -Y named profile disable sample"}
+	fixture.formats["named"] = 2
+	observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
+	fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+		if loaded.Context.YardName == "named" {
+			return ports.RuntimeObservation{}, refusal
+		}
+		return observe(ctx, root, loaded, id)
+	}
+	_, err := fixture.prepare(t)
+	outcome := outcomeOf(t, err)
+	if !strings.Contains(outcome.Message, "yard named: profile runtime sample-runtime cannot be observed for rollback preparation: sample export is enabled") ||
+		outcome.Retry != refusal.retry || !errors.Is(err, refusal) {
+		t.Fatalf("owner refusal = %#v, %v", outcome, err)
+	}
+	// A failed conversion keeps it too.
+	fixture.runtime.config.ProfileRuntimeRollbackObservation = observe
+	prepared, err := fixture.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.applyErr = refusal
+	if outcome := outcomeOf(t, prepared.Execute(context.Background())); outcome.Retry != refusal.retry {
+		t.Fatalf("failed conversion = %#v", outcome)
+	}
+}

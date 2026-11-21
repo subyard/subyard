@@ -1246,7 +1246,8 @@ A rollback refuses a difference that the active release does not prepare. The ot
 observed with the rollback compatibility findings. The active release's `rollback-observe` runs for
 each owner in every local yard, from the verified active root. `absent` passes. `current` passes once
 the target's own `observe`, from its root, accepts the prepared state; otherwise the next step is
-`yard migrate`. A stopped yard refuses with `yard -Y NAME start`, and a failed observation refuses.
+`yard migrate`. A stopped yard refuses with `yard -Y NAME start`, and a failed observation refuses, with the owner's
+own refusal and next command when it reports one.
 `stale` needs preparation. Each local yard's settings are also read with the target release; settings
 it cannot read refuse before any conversion. These findings are reported together with the retained
 release's installed-runtime check.

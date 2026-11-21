@@ -117,6 +117,23 @@ func profileFormatAdmission(active, target *verifiedPublishedCandidate, rollback
 	return owners, describe(differing), retry, cause
 }
 
+// ownerRefusal is an owner's own public refusal and next command, or else
+// the given ones.
+func ownerRefusal(err error, message, retry string) (string, string) {
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(err, &diagnostic) {
+		if owned, next := diagnostic.ActivationDiagnostic(); owned != "" {
+			if strings.HasPrefix(next, "run ") {
+				if message != "" {
+					owned = message + ": " + owned
+				}
+				return owned, next
+			}
+		}
+	}
+	return message, retry
+}
+
 // formatItem is one owner's rollback-observe result in one local yard.
 type formatItem struct {
 	owner, yard, instance string
@@ -219,7 +236,8 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 				state: state.State, actual: state.Actual, desired: state.Desired, consequence: state.Consequence}
 			switch {
 			case err != nil:
-				observation.refuse(fmt.Sprintf("yard %s: profile runtime %s cannot be observed for rollback preparation", name, owner), rollbackRetry, err)
+				message, retry := ownerRefusal(err, fmt.Sprintf("yard %s: profile runtime %s cannot be observed for rollback preparation", name, owner), rollbackRetry)
+				observation.refuse(message, retry, err)
 				continue
 			case state.State == ports.RuntimeStateDeferred:
 				observation.refuse(fmt.Sprintf("yard %s is stopped, so profile runtime %s cannot be prepared for rollback", name, owner), stopped, nil)
@@ -234,7 +252,8 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 					return formatObservation{}, ctx.Err()
 				}
 				if err != nil || accepted.State == ports.RuntimeStateDeferred {
-					observation.refuse(fmt.Sprintf("yard %s: release %s does not accept the prepared profile runtime %s", name, target.candidate.release, owner), migrateRetry, err)
+					message, retry := ownerRefusal(err, fmt.Sprintf("yard %s: release %s does not accept the prepared profile runtime %s", name, target.candidate.release, owner), migrateRetry)
+					observation.refuse(message, retry, err)
 					continue
 				}
 			case state.State != ports.RuntimeStateAbsent && state.State != ports.RuntimeStateStale:
@@ -447,9 +466,9 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 
 // partialPreparation reports a failure after the first conversion could
 // have run: this release stays active, a rerun resumes and yard migrate
-// undoes the preparation. A refusal's own typed next step comes first.
+// undoes the preparation. An owner's or refusal's own next step comes first.
 func partialPreparation(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, err error) error {
-	retry := rollbackRetry
+	_, retry := ownerRefusal(err, "", rollbackRetry)
 	if outcome, ok := TransitionOutcome(err); ok {
 		if _, _, typed := domain.ParseRetry(outcome.Retry); typed {
 			retry = outcome.Retry
