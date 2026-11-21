@@ -259,19 +259,30 @@ func saveHardCleanup(path string, journal *hardCleanupJournal) error {
 	return saveCleanupRecord(path, journal)
 }
 
+// admitCleanupDirectories finishes narrower owned cleanup directories outermost
+// first, so the lookup of the inner directory does not fail on an outer one
+// without search permission. The inner directory is touched only after the
+// outer one passes the recovery directory rules. Every refusal is left to
+// saveCleanupRecord.
+func admitCleanupDirectories(outer, inner string) {
+	if cleanupAncestors(outer) != nil {
+		return
+	}
+	_ = safefs.AdmitDir(outer, 0o700)
+	info, err := os.Lstat(outer)
+	if err != nil {
+		return
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != uint32(os.Getuid()) {
+		return
+	}
+	_ = safefs.AdmitDir(inner, 0o700)
+}
+
 func saveCleanupRecord(path string, record any) error {
 	parent := filepath.Dir(path)
-	// Finish narrower owned cleanup directories outermost first, after checking
-	// their ancestors, so an inner lookup does not fail on an outer directory
-	// without search permission.
-	for _, directory := range []string{filepath.Dir(parent), parent} {
-		if err := cleanupAncestors(directory); err != nil {
-			return err
-		}
-		if err := safefs.AdmitDir(directory, 0o700); err != nil {
-			return errors.New("unsafe hard cleanup recovery directory")
-		}
-	}
+	admitCleanupDirectories(filepath.Dir(parent), parent)
 	if err := cleanupAncestors(path); err != nil {
 		return err
 	}

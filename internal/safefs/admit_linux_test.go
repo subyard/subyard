@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
-	"golang.org/x/sys/unix"
 )
 
 func TestAdmitDirStates(t *testing.T) {
@@ -24,7 +23,9 @@ func TestAdmitDirStates(t *testing.T) {
 		{"group only", admitFixtureDir(t, 0o050), 0o050 | fs.ModeDir},
 		{"narrower", admitFixtureDir(t, 0o500), 0o700 | fs.ModeDir},
 		{"no permissions", admitFixtureDir(t, 0o000), 0o700 | fs.ModeDir},
-		{"narrower setgid", admitFixtureDir(t, 0o500|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
+		{"narrower setgid", admitFixtureDir(t, 0o500|fs.ModeSetgid), 0o500 | fs.ModeSetgid | fs.ModeDir},
+		{"narrower setuid", admitFixtureDir(t, 0o500|fs.ModeSetuid), 0o500 | fs.ModeSetuid | fs.ModeDir},
+		{"narrower sticky", admitFixtureDir(t, 0o500|fs.ModeSticky), 0o500 | fs.ModeSticky | fs.ModeDir},
 		{"exact setgid", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
 		{"regular file", func(path string) { testkit.WriteFile(t, path, nil, 0o600) }, 0o600},
 		{"dangling symlink", func(path string) { admitFixtureLink(t, filepath.Join(root, "absent-target"), path) }, 0},
@@ -53,7 +54,7 @@ func TestAdmitDirStates(t *testing.T) {
 			}
 			continue
 		}
-		if statErr != nil || info.Mode()&(fs.ModeType|fs.ModePerm|fs.ModeSetgid) != test.want {
+		if statErr != nil || info.Mode()&(fs.ModeType|fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != test.want {
 			t.Errorf("%s: mode = %v, want %v (%v)", test.name, info.Mode(), test.want, statErr)
 		}
 	}
@@ -80,25 +81,5 @@ func admitFixtureLink(t *testing.T, target, path string) {
 	t.Helper()
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestAdmitDirLeavesSetgidDirectoryOfForeignGroup(t *testing.T) {
-	setgid := unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISGID | 0o500, Gid: 4242}
-	for _, test := range []struct {
-		name   string
-		stat   unix.Stat_t
-		euid   int
-		groups []int
-		want   bool
-	}{
-		{"caller group", setgid, 1000, []int{100, 4242}, true},
-		{"foreign group", setgid, 1000, []int{100, 1000}, false},
-		{"foreign group as root", setgid, 0, []int{0}, true},
-		{"no setgid", unix.Stat_t{Mode: unix.S_IFDIR | 0o500, Gid: 4242}, 1000, []int{100}, true},
-	} {
-		if got := chmodKeepsSetgid(test.stat, test.euid, test.groups); got != test.want {
-			t.Errorf("%s: chmodKeepsSetgid = %v, want %v", test.name, got, test.want)
-		}
 	}
 }

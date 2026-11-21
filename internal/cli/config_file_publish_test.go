@@ -162,6 +162,41 @@ func TestCleanupJournalFinishesOuterDirectoryWithoutSearchPermission(t *testing.
 	}
 }
 
+func TestCleanupJournalRefusesBroadOuterBeforeFinishingInner(t *testing.T) {
+	root := testkit.TempDir(t)
+	outer := filepath.Join(root, "cleanup")
+	parent := filepath.Join(outer, "yard")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	if err := os.Chmod(outer, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	journal := &hardCleanupJournal{Schema: 1, Token: "0123456789abcdef0123456789abcdef", Phase: "recreate"}
+	if err := saveHardCleanup(filepath.Join(parent, "journal.json"), journal); err == nil || err.Error() != "unsafe hard cleanup recovery directory" {
+		t.Fatalf("broad outer journal directory: %v", err)
+	}
+	for directory, want := range map[string]os.FileMode{outer: 0o750, parent: 0o500} {
+		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != want {
+			t.Fatalf("journal directory %s changed: %v %v", directory, info, err)
+		}
+	}
+}
+
+func TestCleanupJournalKeepsAncestorRefusalText(t *testing.T) {
+	dataHome := filepath.Join(testkit.TempDir(t), "data")
+	testkit.WriteFile(t, dataHome, nil, 0o600)
+	journal := &hardCleanupJournal{Schema: 1, Token: "0123456789abcdef0123456789abcdef", Phase: "recreate"}
+	err := saveHardCleanup(filepath.Join(dataHome, "cleanup", "yard", "journal.json"), journal)
+	if want := "lstat " + filepath.Join(dataHome, "cleanup", "yard") + ": not a directory"; err == nil || err.Error() != want {
+		t.Fatalf("regular data home: %v, want %q", err, want)
+	}
+}
+
 func TestWriteExportedConfigFileNeverOpensSpecialFiles(t *testing.T) {
 	root := testkit.TempDir(t)
 	fifo := filepath.Join(root, "config.env")
