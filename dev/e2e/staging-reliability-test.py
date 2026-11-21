@@ -62,8 +62,8 @@ with tempfile.TemporaryDirectory(prefix='subyard-boot-observer-', dir='/tmp') as
     assert rows[0]['reason'] == 'guest-reset' and rows[0]['guest'] is True
     assert 'secret' not in json.dumps(evidence) and 'private' not in json.dumps(evidence)
 
-p0_fixture = pathlib.Path(__file__).with_name('p0-broker-recovery.sh').read_text()
-pause_source = p0_fixture.split("<<'PYREAPERPAUSE'\n",1)[1].split('\nPYREAPERPAUSE',1)[0]
+holder_fixture = pathlib.Path(__file__).with_name('lease-holder.sh').read_text()
+pause_source = holder_fixture.split("<<'PYREAPERPAUSE'\n",1)[1].split('\nPYREAPERPAUSE',1)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-reaper-pause-', dir='/tmp') as directory:
     root=pathlib.Path(directory)/'run/systemd/system'; root.mkdir(parents=True)
     dropin=root/'subyard-test-vms-lease-reaper.service.d/subyard-e2e-pause.conf'
@@ -103,34 +103,22 @@ with tempfile.TemporaryDirectory(prefix='subyard-reaper-pause-', dir='/tmp') as 
 print('shared reaper pause preserves owned drop-in and verifies effective/inactive state before recovery')
 
 cleanup = re.search(r'^cleanup\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
-for failed in ['pause', 'start', 'evidence']:
+for failed in ['fault', 'pause', 'start', 'evidence']:
     script = '''set +e
 HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1
 stop_sampler() { :; }
 retire_minimal_owner() { echo retired; }
-restore_inventory_fault() { :; }
+restore_inventory_fault() { [ "$FAILED" != fault ]; }
 collect_evidence() { [ "$FAILED" != evidence ]; }
 reaper_pause() { [ "$FAILED" != pause ]; }
-outer_exec() { case "$*" in *"$FAILED"*) return 42;; *) return 0;; esac; }
+outer_exec() { echo reaper_start; case "$*" in *"$FAILED"*) return 42;; *) return 0;; esac; }
 owner_cleanup() { local rc=$?; echo shared; exit "$rc"; }
 ''' + f'FAILED={failed}\n' + cleanup + '\ntrue\ncleanup\n'
     result = subprocess.run(['bash', '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
     assert result.returncode == 3, (failed, result.returncode, result.stdout, result.stderr)
-    if failed == 'pause': assert 'retired' not in result.stdout and 'shared' not in result.stdout, result
+    if failed in ['fault', 'pause']:
+        assert not {'retired', 'shared', 'reaper_start'}.intersection(result.stdout.splitlines()), result
 print('staging observer projection and cleanup checks passed')
-
-p0_cleanup = re.search(r'^cleanup\(\) \{\n.*?^\}',p0_fixture,re.MULTILINE|re.DOTALL)[0]
-for failed in ['fault','pause']:
-    script = '''set +e
-NEIGHBOR_CONFIG=''; RECLAIM_MARKER=''; STATE_PARENT=''
-VICTIM_PID=''; NEIGHBOR_PID=''; REUSE_PID=''
-REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1; REAPER_PAUSE_MARKER=subyard-p0-123
-restore_targeted_incus_failure() { [ "$FAILED" != fault ]; }
-reaper_pause() { echo pause_restore; [ "$FAILED" != pause ]; }
-outer_root() { echo unexpected_start; }
-''' + f'FAILED={failed}\n' + p0_cleanup + '\ntrue\ncleanup\n'
-    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
-    assert result.returncode==3 and 'unexpected_start' not in result.stdout, result
 
 # A failed diagnostic/export must not replace the original bootstrap failure.
 script = '''set +e
@@ -1389,7 +1377,7 @@ p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}
 python3() {{ cat >/dev/null; echo consumed; }}
-reclaim_broker_recovery_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; echo image; OWNER_BASE_IMAGE_CREATED=0; }}
+reclaim_owner_build_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; echo image; OWNER_BASE_IMAGE_CREATED=0; }}
 """+reclaim+'\nreclaim_supported_upgrade_inputs\n'
     result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
     assert (result.returncode==0)==(fault==''),(fault,result)

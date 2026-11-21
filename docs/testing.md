@@ -105,6 +105,28 @@ fixture roots. Shell/Python fixtures can use `install -m`, `chmod` on fixture in
 or `tempfile.TemporaryDirectory`. Keep raw creation calls when creation is the operation
 under test; do not chmod its outputs to make an assertion pass.
 
+`internal/cli` tests build their environment with `newFixture` in
+[`fixture_test.go`](../internal/cli/fixture_test.go). `withCheckoutConfig()` makes `Root` a
+fixture-owned copy of the checkout's tracked `bin/`, `completions/`, `config/` and `scripts/`
+files, without links, `.git` or `private/`, and loads the shipped config from it; tests that
+read other checkout files for reference use `repositoryRoot` read-only. The homes are fixed when
+the fixture is built: `withEnv` and `withoutEnv` refuse the home, config and `PATH` settings,
+so a test that needs another home passes `Options.Environment`. `Write` accepts a path below
+`Root` or below the fixture's own directories. `withCommands` replaces external tools with
+[`testkit.ExecFake`](../internal/testkit/execfake.go) shims that use only shell builtins: assert
+their argv with `AssertCalls`; an unexpected call exits 127 and fails the test at cleanup. Create
+the fixture before anything whose cleanup can still call a fake tool, because cleanups run in
+reverse order.
+
+A slice that moves tests onto the fixture keeps every assertion statement byte-identical: assign
+the old local names from the fixture (`root, environment := fixture.Root, fixture.Environment`)
+instead of renaming them. The only assertion changes allowed are removing the `New` error check
+and the error checks of setup the fixture now does, and turning a stub-log compare into
+`AssertCalls`; each such conversion gets a mutant row, which may mutate the expected argv in the
+test file. Run `dev/cli-fixture-slice-check.sh --base REF`: it requires every `go test` run to
+exit 0, equal test lists and pass sets, no lost coverage blocks, and every mutant in
+`dev/cli-fixture-mutants.tsv` for a changed test file to build and fail its tests.
+
 The normal host-free entrypoints (`make test`, `make verify`, `./tests/run.sh`,
 `bash dev/test-profiles.sh` and each profile's `tests/run.sh`) use baseline umask `0022`,
 including their Shell/Python checks. This changes only the runner's process and children.
@@ -227,6 +249,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 | Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
 | Periodic hosted VM image selection | `tests/workflow-real-adapter-gate.sh` checks the dispatch choices, all planned commands, pool boundary and Intel retry | Owning client and broker tests check lease request negotiation, grant validation and Incus alias selection | Periodic E2E on the selected OS, including both optional `periodic:nm-guard/fresh` and `periodic:nm-guard/upgrade` lanes | Changes to Periodic image routing, supported lease images or the NM guard fixture |
 | Test-VM client handles and skill delivery | `config/profiles/test-vms-client/tests/run.sh`: host-access refusal and selection, skill/client delivery with Hermes links and deselection, session handles against a fake facade | `tests/agent-e2e.sh`: the runner built on the same client | `config/profiles/test-vms-client/tests/e2e/acceptance.sh --slot N`: installed candidate provisions the profile into a Hermes-preset yard, then deselection and init retire it; installed copy outside a checkout acquires, runs root commands in two calls of one lease, releases; runner `--verify-boundary` | Shared client, its profile hook or skill, or facade lease protocol changes |
+| Broker slot quarantine, recovery and cross-slot isolation | `go:adapters/testvmsruntime` covers exact-slot identity, quarantine, automatic recovery, public status, release, pool resize and drain before broker recreation through `broker_pool_test.go` and the lease store and facade tests | `tests/test-vms.sh` checks the firewall rule. `config/profiles/test-vms-client/tests/client-handles.sh` checks busy wait and banner attribution | `vm:staging-reliability` checks installed quarantine, reaper recovery and lease context after guest reboot. Test-vms `memory-boundary` checks namespace TCP forwarding, held renewal, requester-death expiry and clean reuse | Broker release, recovery, slot identity, data access, firewall or lease-context changes |
 | Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse. The full profile run repeats the installer check except under `make verify`, whose passed core suite sets `SUBYARD_CORE_INSTALLER_CHECKED=1` | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.28.0 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
 | Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Required full-uninstall and optional Periodic-only source-upgrade lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
 | Static skill inventory, transport and readiness | `go:adapters/reconcileruntime`: `TestAgentSkillSourcesParityWithCapturedReadiness`, unsafe-source refusal and captured-source guest readiness; `tests/agent-skills.sh`: delivery under three umasks | `tests/release-candidate.sh`: actual wrapper against a strict nonexecuting shim, independent synthetic inventory, all checkout/private/frozen layouts and umasks, exact member/command mutants; `go:internal/testkit/cmd/empty-incus`: `TestHistoryReadinessContract` connects public runtime readiness through the native Incus adapter to the migration-history responder | `config/profiles/android/tests/e2e/acceptance.sh --slot N --lane skills`: packaged delivery, repeat refresh, discovery repair and disable with unrelated content retained | Shared skill producer, helpers, source admission or transport changes; local contracts before T3 |
@@ -913,9 +936,8 @@ load capacity, and a diagnostic timeout or interrupted run is incomplete evidenc
 ## Choose the VM allocation
 
 Android acceptance runs on one `android-test` VM (8 GiB RAM / 40 GiB disk). Ordinary full P0
-uses the standard `subyard-pair` (two 4 GiB / 20 GiB guests) for its two-host scenarios. It does
-not recursively run the separate physical broker pool diagnostic. Do not request two 16 GiB
-guests for Android or ordinary full P0.
+uses the standard `subyard-pair` (two 4 GiB / 20 GiB guests) for its two-host scenarios.
+Do not request two 16 GiB guests for Android or ordinary full P0.
 
 `--vm 1` only selects where a command runs; it does not turn a pair allocation into a singleton.
 Use `--vm-count 1` for one standard VM; `--type android-test` retains the larger Android

@@ -31,6 +31,8 @@ func vmSleepPolicy(architecture string) (lowlevel, rawQEMU string) {
 }
 
 type Runtime struct {
+	slotAccountRoot   string
+	lookupUser        func(string) (*user.User, error)
 	allocation        *LeaseIdentity
 	agentLogOwner     string
 	memoryProbe       func() (MemoryCapacity, error)
@@ -687,7 +689,7 @@ func (runtime *Runtime) gc(ctx context.Context) error {
 
 func (runtime *Runtime) cleanupManaged(ctx context.Context, quiet bool) error {
 	cfg := runtime.Config
-	if _, err := user.Lookup(cfg.AgentUser); err == nil {
+	if _, err := runtime.findUser(cfg.AgentUser); err == nil {
 		if err := runtime.restrictAgentAccess("cleanup"); err != nil {
 			return err
 		}
@@ -1098,10 +1100,9 @@ func nonemptyLines(value string) []string {
 	return result
 }
 
-func userGroup(name string) (int, error) {
-	account, err := user.Lookup(name)
-	if err != nil {
-		return -1, err
+func (runtime *Runtime) findUser(name string) (*user.User, error) {
+	if runtime.lookupUser != nil {
+		return runtime.lookupUser(name)
 	}
-	return strconv.Atoi(account.Gid)
+	return user.Lookup(name)
 }

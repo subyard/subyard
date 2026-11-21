@@ -280,7 +280,10 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	)
 	home := filepath.Join(root, "full-owner")
 	pending := home + ".uninstall"
-	if err := os.Mkdir(pending, 0o700); err != nil {
+	if err := os.Rename(testkit.TempDir(t), pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(pending, "runtime"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	blocker := filepath.Join(root, "not-a-directory")

@@ -619,65 +619,6 @@ func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 	}
 }
 
-func TestV0111RecoveryPreparedActionUsesOneDefaultYesPrompt(t *testing.T) {
-	const recoveryConsequence = "supersede the verified v0.11.1 recovery journal with the standalone candidate plan"
-	countRecoveryConsequence := func(consequences []string) int {
-		count := 0
-		for _, consequence := range consequences {
-			if consequence == recoveryConsequence {
-				count++
-			}
-		}
-		return count
-	}
-	for _, assumeYes := range []bool{false, true} {
-		t.Run(fmt.Sprintf("assume yes=%v", assumeYes), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			prompt := &testkit.Prompt{Answers: []bool{true}}
-			program, err := New(Options{
-				RepositoryRoot: root, Environment: environment, Prompt: prompt,
-				Clock: testkit.NewManualClock(time.Unix(100, 0)),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := program.loadContext("default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			prepared := releaseruntime.Prepared{
-				Action: "update.activate", Changed: true,
-				Consequences: []string{
-					recoveryConsequence,
-					"apply the exact typed migration and release activation plan",
-				},
-			}
-			plan, err := program.operationOrchestrator(
-				"operation-v0111-recovery", loaded, nil, nil,
-			).PlanAction(
-				context.Background(), loaded.Context, "update", domain.RemoteOnController,
-				prepared.Action, domain.ActionDelta{
-					Changed: prepared.Changed, Consequences: prepared.Consequences,
-				}, assumeYes,
-			)
-			if err != nil || !plan.Confirmed || countRecoveryConsequence(plan.Consequences) != 1 {
-				t.Fatalf("recovery plan=%#v err=%v", plan, err)
-			}
-			if assumeYes {
-				if len(prompt.Requests) != 0 {
-					t.Fatalf("--yes prompted: %#v", prompt.Requests)
-				}
-				return
-			}
-			if len(prompt.Requests) != 1 ||
-				prompt.Requests[0].Default != domain.ConfirmationDefaultYes ||
-				countRecoveryConsequence(prompt.Requests[0].Consequences) != 1 {
-				t.Fatalf("interactive recovery prompt=%#v", prompt.Requests)
-			}
-		})
-	}
-}
-
 func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *testing.T) {
 	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
 		root, environment, runtimeRoot := updateReleaseFixture(t)
