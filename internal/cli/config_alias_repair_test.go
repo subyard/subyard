@@ -351,8 +351,9 @@ func TestConfigAliasRepairRejectsUnsealedToolingAndSelectors(t *testing.T) {
 }
 
 // A deprecated DEV_SUDO alias is valid configuration; validate and show name it
-// with its replacement, and config set saves the canonical value.
-func TestConfigReportsDeprecatedDevSudoAliasAndSavesCanonicalValue(t *testing.T) {
+// with its replacement. config set stores it as given, for owner hosts that
+// still run an older runtime.
+func TestConfigReportsDeprecatedDevSudoAlias(t *testing.T) {
 	root, _, home, environment := configCommandFixture(t)
 	host := filepath.Join(home, "config.env")
 	writeConfigCommandFile(t, host, "DEV_SUDO=0\n")
@@ -383,10 +384,11 @@ func TestConfigReportsDeprecatedDevSudoAliasAndSavesCanonicalValue(t *testing.T)
 	if code, output := run("config", "set", "DEV_SUDO", "1", "--scope", "host", "--yes"); code != 0 {
 		t.Fatalf("set code=%d output=%s", code, output)
 	}
-	if content := string(mustReadConfigFixture(t, host)); strings.Contains(content, "DEV_SUDO=1") || !strings.Contains(content, "yes") {
-		t.Fatalf("config set saved the alias: %q", content)
+	if content := string(mustReadConfigFixture(t, host)); content != "DEV_SUDO='1'\n" {
+		t.Fatalf("config set did not store the value as given: %q", content)
 	}
-	if code, output := run("config", "validate"); code != 0 || output != "yard default: configuration schema valid\n" {
-		t.Fatalf("canonical value still reported: code=%d output=%q", code, output)
+	note = "DEV_SUDO=1 in " + host + ":1 is deprecated and read as yes; yard -Y default config set DEV_SUDO yes --scope host --local"
+	if code, output := run("config", "validate"); code != 0 || output != "yard default: configuration schema valid\n  deprecated: "+note+"\n" {
+		t.Fatalf("stored alias not reported: code=%d output=%q", code, output)
 	}
 }

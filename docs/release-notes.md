@@ -13,7 +13,7 @@
   update unchanged; `yard check` and `yard config validate` name each one with its replacement.
   Older runtimes refuse the new values: switch to `yes` and `no` once every owner host is
   updated, and publish a shared value only then. Before downgrading a yard that applied
-  `yes` or `no`, run `yard init` without the assignment. See
+  `yes` or `no`, also through a kept `1` or `0`, run `yard init` without the assignment. See
   [passwordless sudo inside the yard](configuration.md#passwordless-sudo-inside-the-yard).
 - With `CODING_TOOL_GIT_APPROVAL=prompt`, the Claude and Codex hook now refuses any literal
   mention of `git commit` or `git push` that the client's own prompt does not cover: anything

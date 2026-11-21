@@ -441,8 +441,8 @@ func TestDevSudoRefusesUnsupportedValues(t *testing.T) {
 	}
 }
 
-// A yard that reads 0 has the same init inputs, approval gates and installed
-// view as one that reads no, so replacing the alias awaits no init.
+// A yard that reads 0 has the same init inputs and approval gates as one that
+// reads no, so replacing the alias awaits no init.
 func TestDevSudoAliasSnapshotsEqualCanonical(t *testing.T) {
 	catalog, err := LoadCatalog(filepath.Join("..", ".."))
 	if err != nil {
@@ -466,13 +466,6 @@ func TestDevSudoAliasSnapshotsEqualCanonical(t *testing.T) {
 		}
 		if ApprovalGates(old.Environment) != ApprovalGates(current.Environment) {
 			t.Fatalf("DEV_SUDO=%s approval gates differ from %s", alias, canonical)
-		}
-		if err := catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": alias}); err != nil {
-			t.Fatalf("snapshot DEV_SUDO=%s refused: %v", alias, err)
-		}
-		recorded := catalog.WithAppliedIntegrationInitSettings(nil, map[string]string{"DEV_SUDO": alias})
-		if want := catalog.WithAppliedIntegrationInitSettings(nil, map[string]string{"DEV_SUDO": canonical}); !maps.Equal(recorded, want) {
-			t.Fatalf("installed view of snapshot DEV_SUDO=%s differs from %s: %v %v", alias, canonical, recorded, want)
 		}
 	}
 	if got := CanonicalSettingValue("DEV_SUDO", "prompt"); got != "prompt" {

@@ -26,7 +26,7 @@ func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[str
 	result := map[string]string{}
 	for name, value := range values {
 		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !ImplicitAppliedSetting(name, value) {
-			result[name], _ = catalog.CanonicalSettingValue(name, value)
+			result[name] = value
 		}
 	}
 	if value, ok := values["INTEGRATION_HOST_LINKS"]; ok {
@@ -52,10 +52,8 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 	// default. A snapshot from before the setting also reads as prompt: release
 	// activation reprovisions those agents with prompt, since their hooks changed.
 	result["DEV_SUDO"] = "prompt"
-	// Snapshots from before the canonical DEV_SUDO values record 0 and 1, which
-	// read as no and yes, so an unchanged mode never awaits init.
 	for name, value := range applied {
-		result[name], _ = catalog.CanonicalSettingValue(name, value)
+		result[name] = value
 	}
 	return result
 }

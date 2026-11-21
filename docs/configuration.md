@@ -216,8 +216,7 @@ Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
 The earlier values `1` and `0` are deprecated aliases of `yes` and `no`. An existing assignment
 keeps its behaviour across `yard update`, and a yard whose `0` becomes `no` has nothing to
 reapply. `yard check` and `yard config validate` report each such assignment with its file, its
-line and the replacement, and `yard config set DEV_SUDO 0` saves `no`. Any other value is
-refused. Older runtimes refuse `yes`, `no` and `prompt`, so replace `1` and `0` only after every
+line and the replacement. Any other value is refused. Older runtimes refuse `yes`, `no` and `prompt`, so replace `1` and `0` only after every
 owner host that reads the file runs this release, for example
 `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`.
 
@@ -295,11 +294,13 @@ Restrict write access to the configuration repository to trusted operators.
 
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
 the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
-`DEV_SUDO` assignment and, if one was Git-backed, sync the removal while the runtime still
-supports it. A yard that runs the default needs nothing more: an older runtime reads its
-installed record, its own default keeps the grant, and its hooks remove the sudo prompts. A yard
-that applied `yes` or `no` must also run `yard init` without the assignment before downgrading,
-because older runtimes refuse an installed record of either value. For a `no` yard that init
+`DEV_SUDO` assignment, `1` and `0` included, and, if one was Git-backed, sync the removal while
+the runtime still supports it. A yard that runs the default needs nothing more: an older runtime
+reads its installed record, its own default keeps the grant, and its hooks remove the sudo
+prompts. A yard that applied `yes` or `no` must also run `yard init` without the assignment
+before downgrading, because older runtimes refuse an installed record of either value. That
+includes a yard that kept `1` or `0`: release activation or `yard init` records them as `yes` and
+`no`. For a `no` yard that init
 publishes the grant; after the downgrade, set `DEV_SUDO=0` and run `yard init` to remove it.
 
 ### Git identity

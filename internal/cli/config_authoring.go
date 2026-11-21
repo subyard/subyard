@@ -378,8 +378,7 @@ func parseConfigAuthoringRequests(
 		requests := make([]configAuthoringRequest, 0, len(positional)/2)
 		for index := 0; index < len(positional); index += 2 {
 			pair := request
-			// A deprecated value alias is saved as its canonical value.
-			pair.name, pair.value = positional[index], config.CanonicalSettingValue(positional[index], positional[index+1])
+			pair.name, pair.value = positional[index], positional[index+1]
 			requests = append(requests, pair)
 		}
 		return requests, nil
