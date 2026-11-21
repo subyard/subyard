@@ -109,9 +109,22 @@ func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
 			t.Fatalf("desired %q with snapshot %#v projected as %q, want %q", test.desired, test.applied, got, test.want)
 		}
 	}
-	for _, value := range []string{"1", "0"} {
+	// Snapshots from earlier releases record the deprecated aliases 1 and 0: they
+	// stay valid and project as yes and no. New snapshots record only the canonical value.
+	for alias, canonical := range map[string]string{"1": "yes", "0": "no"} {
+		if err := catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": alias}); err != nil {
+			t.Fatalf("installed snapshot refused deprecated DEV_SUDO=%s: %v", alias, err)
+		}
+		if got := catalog.WithAppliedIntegrationInitSettings(nil, map[string]string{"DEV_SUDO": alias})["DEV_SUDO"]; got != canonical {
+			t.Fatalf("snapshot DEV_SUDO=%s projected as %q, want %q", alias, got, canonical)
+		}
+		if got := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": alias})["DEV_SUDO"]; got != canonical {
+			t.Fatalf("DEV_SUDO=%s recorded as %q, want %q", alias, got, canonical)
+		}
+	}
+	for _, value := range []string{"true", "off", "2"} {
 		if catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": value}) == nil {
-			t.Fatalf("installed snapshot accepted legacy DEV_SUDO=%s", value)
+			t.Fatalf("installed snapshot accepted unsupported DEV_SUDO=%s", value)
 		}
 	}
 }

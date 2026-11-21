@@ -26,7 +26,7 @@ func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[str
 	result := map[string]string{}
 	for name, value := range values {
 		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !ImplicitAppliedSetting(name, value) {
-			result[name] = value
+			result[name], _ = catalog.CanonicalSettingValue(name, value)
 		}
 	}
 	if value, ok := values["INTEGRATION_HOST_LINKS"]; ok {
