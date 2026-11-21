@@ -1273,6 +1273,11 @@ yard's next step, and `current` or `absent` everywhere leaves the ordinary rollb
 `yard update --rollback` is then the ordinary rollback with its own confirmation. Its execution
 observes the prepared owners again before the target runs. Data is not converted.
 
+`yard update --rollback` runs in the newer release, which prepares the state for the older one;
+afterwards the older release reads only its own files, so new fields in the newer release's metadata
+do not block that rollback. The older release refuses only its own `yard update --rollback` back to
+the newer release; the way back is `yard update --version VERSION`.
+
 `yard-engine _history-compatibility RUNTIME_ROOT CONFIG_HOME TARGET_RELEASE` prints this verdict as
 JSON for a release published under `RUNTIME_ROOT/releases`. It assembles its input like the
 runtime's installed-engine selection, including first publication. Run it from the active
