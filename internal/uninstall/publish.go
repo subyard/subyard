@@ -388,7 +388,7 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, limit+1))
 }
 
-// splitLines keeps the manifest's historical str.splitlines boundaries.
+// splitLines recognizes all manifest record separators before path filtering.
 func splitLines(text string) []string {
 	lines := []string{}
 	for text != "" {
@@ -553,7 +553,7 @@ func privateDirectory(path string) error {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Getuid()) {
-		return errors.New("unsafe recovery runtime directory")
+		return guardRefusal("unsafe recovery runtime directory")
 	}
 	return nil
 }

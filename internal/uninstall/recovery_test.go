@@ -45,7 +45,13 @@ func TestRecoveryRetainsPackagedCoreDependencies(t *testing.T) {
 		testkit.WriteFile(t, filepath.Join(source, path), body, 0644)
 		fmt.Fprintf(&manifest, "%x  %s\n", sha256.Sum256(body), path)
 	}
-	testkit.WriteFile(t, filepath.Join(source, "runtime-files.sha256"), []byte(manifest.String()), 0644)
+	manifestPath := filepath.Join(source, "runtime-files.sha256")
+	malformed := strings.TrimSuffix(manifest.String(), "\n") + "\rmalformed record\n"
+	testkit.WriteFile(t, manifestPath, []byte(malformed), 0644)
+	if _, err := CaptureAssets(source); err == nil || !strings.Contains(err.Error(), "invalid installed asset line") {
+		t.Fatalf("malformed record after an unselected path was not refused: %v", err)
+	}
+	testkit.WriteFile(t, manifestPath, []byte(manifest.String()), 0644)
 	assets, err := CaptureAssets(source)
 	if err != nil {
 		t.Fatal(err)
