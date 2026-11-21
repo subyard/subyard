@@ -19,15 +19,13 @@ import (
 )
 
 func TestProvisionSelectionDoesNotExpandActiveProfilesFromProjects(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample-a")
 	writeProvisionProfile(t, root, "sample-h")
 	writeProvisionProfile(t, root, "sample-o")
 	writeProvisionProfile(t, root, "sample-s")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -53,14 +51,12 @@ func TestProvisionSelectionDoesNotExpandActiveProfilesFromProjects(t *testing.T)
 }
 
 func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "service")
 	writeCLIFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROFILE_NAME=service\nPROVISION_SCOPE=dedicated\n", 0o600)
 	writeProvisionProfile(t, root, "sample-a")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -84,14 +80,12 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 }
 
 func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
 	writeProvisionProfile(t, root, "selected")
 	writeProvisionProfile(t, root, "legacy")
 	testkit.WriteFile(t, filepath.Join(root, "config", "profiles", "selected", "profile.json"), []byte(`{"schema_version":1,"selected_provision_only":true,"default_yards":["default"],"disabled_when":{"DISABLE_SERVICE":"1"}}`), 0o644)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	if _, err := program.loadContext("default"); err != nil {
 		t.Fatal(err)
 	}
@@ -110,10 +104,7 @@ func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) 
 	} {
 		// Resolve an authored snapshot as the config loader does before provisioning.
 		path := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "yards", scenario.yard, "config.env")
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, path, "", 0600)
+		fixture.Write(path, "")
 		values := append([]string{}, environment...)
 		if scenario.selection != nil {
 			values = append(values, "ENVIRONMENT_PROFILES="+*scenario.selection)
@@ -137,17 +128,12 @@ func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) 
 }
 
 func TestProvisionRejectsHookWithoutCheckProtocol(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	directory := filepath.Join(root, "config", "profiles", "legacy")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeCLIFile(t, filepath.Join(directory, "profile.conf"), "PROFILE_NAME=legacy\n", 0o600)
-	writeCLIFile(t, filepath.Join(directory, "provision.sh"), "true\n", 0o700)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture.Write(filepath.Join(directory, "profile.conf"), "PROFILE_NAME=legacy\n")
+	fixture.Write(filepath.Join(directory, "provision.sh"), "true\n", 0o700)
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +144,8 @@ func TestProvisionRejectsHookWithoutCheckProtocol(t *testing.T) {
 }
 
 func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=provision-assessment"))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample-a")
 	writeProvisionProfile(t, root, "sample-o")
 	incus := lifecycleIncus()
@@ -169,14 +156,9 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 		{Result: domain.AdapterResult{Schema: 1, OperationID: "provision-assessment", Status: "ok"}, Stderr: "converged\n"},
 		{Result: domain.AdapterResult{Schema: 1, OperationID: "provision-assessment", Status: "ok"}, Stderr: "changed\n"},
 	}}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Environment: append(environment,
-			"SUBYARD_OPERATION_ID=provision-assessment"),
-		WorkingDir: root, Incus: incus, AdapterRunner: runner,
+	program := fixture.New(Options{
+		Incus: incus, AdapterRunner: runner,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -209,11 +191,13 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 }
 
 func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	const engine = "scripts/selected-engine"
+	fixture := newFixture(t, withCommands(engine),
+		withEnv("ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm", "VM_CPU_WEIGHT=100", "SUBYARD_DISPATCHER_PATH=/ambient/engine"))
+	root, environment := fixture.Root, fixture.Environment
 	writeProvisionProfile(t, root, "sample-s")
-	dispatcher := filepath.Join(root, "selected-engine")
-	writeCLIFile(t, dispatcher, "#!/bin/sh\nexit 0\n", 0o700)
-	environment = append(environment, "ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm", "VM_CPU_WEIGHT=100", "SUBYARD_DISPATCHER_PATH=/ambient/engine")
+	dispatcher := fixture.Exec().Path(engine)
+	fixture.Exec().On(testkit.Match{Tool: engine}, testkit.Reply{})
 	for _, scenario := range []struct{ rpcMode, stopped bool }{{false, true}, {true, true}, {false, false}, {true, false}} {
 		rpcMode := scenario.rpcMode
 		incus := lifecycleIncus()
@@ -249,26 +233,19 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 			powerScriptedIncus(runner, incus)
 		}
 		options := Options{
-			RepositoryRoot: root, Program: "yard", Environment: environment,
-			WorkingDir: root, Incus: incus, AdapterRunner: runner, Clock: clock,
+			Incus: incus, AdapterRunner: runner, Clock: clock,
 			DispatcherPath: dispatcher,
 			NetworkPolicy:  &yardnetwork.Service{Host: &networkCLIHost{}, Lock: testNetworkPolicyLock{}},
 		}
 		if !rpcMode {
 			options.Arguments = []string{"provision", "--yes"}
 			options.Environment = append(slices.Clone(environment), "SUBYARD_OPERATION_ID="+operationID)
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(options)
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("CLI provision failed with %d", code)
 			}
 		} else {
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(options)
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -317,19 +294,15 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 }
 
 func TestProvisionCPUAuthorizationPrecedesTemporaryStart(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withCommands("systemctl", "sudo"), withEnv("ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm"))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample-s")
-	commands := testkit.TempDir(t)
-	writeCLIFile(t, filepath.Join(commands, "systemctl"), "#!/bin/sh\nprintf 'inactive\\n'\nexit 3\n", 0o700)
-	writeCLIFile(t, filepath.Join(commands, "sudo"), "#!/bin/sh\nexit 1\n", 0o700)
-	t.Setenv("PATH", commands)
+	fixture.Exec().
+		On(testkit.Match{Tool: "systemctl", Args: []string{"is-active", "NetworkManager"}}, testkit.Reply{Stdout: "inactive\n", Exit: 3}).
+		On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}}, testkit.Reply{Exit: 1})
 	incus := lifecycleIncus()
 	incus.Instances["subyard/yard"].Config["user.subyard.vm_cpu_weight"] = "1000"
-	program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Incus: incus,
-		Environment: append(environment, "ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm", "PATH="+commands)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus})
 	program.effectiveUID = func() int { return 1000 }
 	program.operatorTerminal = func() bool { return false }
 	loaded, err := program.loadContext("default")
@@ -355,7 +328,8 @@ func TestProvisionCPUAuthorizationPrecedesTemporaryStart(t *testing.T) {
 }
 
 func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withEnv("SUBYARD_OPERATION_ID=provision-noop"))
+	root := fixture.Root
 	platform := convergedProvisionInit(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "host.env"), "ENVIRONMENT_PROFILES=sample-s\n", 0o600)
 	writeProvisionProfile(t, root, "sample-s")
@@ -371,14 +345,10 @@ func TestProvisionNoOpSkipsPromptAndApply(t *testing.T) {
 		Stderr: "converged\n",
 	}}}
 	prompt := &testkit.Prompt{}
-	program, err := New(Options{
-		RepositoryRoot: root, Program: "yard", Arguments: []string{"provision", "sample-s"},
-		Environment: append(environment, "SUBYARD_OPERATION_ID=provision-noop"),
-		WorkingDir:  root, Incus: incus, AdapterRunner: runner, Prompt: prompt, InitPlatform: platform,
+	program := fixture.New(Options{
+		Arguments: []string{"provision", "sample-s"},
+		Incus:     incus, AdapterRunner: runner, Prompt: prompt, InitPlatform: platform,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("provision no-op failed with %d", code)
 	}

@@ -40,14 +40,11 @@ func writeUnmigratedSettingsManifest(t *testing.T, configHome string) {
 func TestSelectedNamedProvisionAssessesOnlyItsNativePrerequisites(t *testing.T) {
 	for _, scenario := range []string{"ready", "missing", "unmarked", "foreign"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root := fixture.Root
 			writeProvisionProfile(t, root, "sample")
 			writeProvisionProfile(t, root, "other")
-			path := filepath.Join(root, "state", "config.env")
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIFile(t, path, "ENVIRONMENT_PROFILES='sample other'\n", 0600)
+			fixture.Write("state/config.env", "ENVIRONMENT_PROFILES='sample other'\n")
 			runtime, incus := legacyContinuationFixture(t)
 			runtime.RepositoryRoot = root
 			runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=sample other")
@@ -70,10 +67,7 @@ func TestSelectedNamedProvisionAssessesOnlyItsNativePrerequisites(t *testing.T) 
 					incus.Reconcile.ProjectConfig["user.subyard.data_home"] = "/foreign"
 				}
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{InitPlatform: runtime})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -176,13 +170,10 @@ func TestSelectedProvisionReusesLimitedContinuation(t *testing.T) {
 }
 
 func TestProvisionBootstrapPreservesGroupReexecContinuation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
-		InitPlatform: newInitPlatformFixture()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: newInitPlatformFixture()})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +221,8 @@ func TestProvisionActivatesProfile(t *testing.T) {
 	for _, yard := range []string{"default", "demo"} {
 		for _, scenario := range []string{"apply", "registered source", "decline", "stale", "unmigrated source appeared", "init failure", "hook failure", "no hook"} {
 			t.Run(yard+"/"+scenario, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t)
+				root := fixture.Root
 				writeProvisionProfile(t, root, "sample")
 				if scenario == "no hook" {
 					if err := os.Remove(filepath.Join(root, "config/profiles/sample/provision.sh")); err != nil {
@@ -244,11 +236,8 @@ func TestProvisionActivatesProfile(t *testing.T) {
 					platform.applyErr = errors.New("fixture init failed")
 				}
 				path := filepath.Join(root, "state", "yards", yard, "config.env")
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
 				original := "ENVIRONMENT_PROFILES=existing\nSSH_PORT=2345\n"
-				writeCLIFile(t, path, original, 0o600)
+				fixture.Write(path, original)
 				incus := lifecycleIncus()
 				var stderr bytes.Buffer
 				prompt := &callbackPrompt{callback: func() {
@@ -268,14 +257,11 @@ func TestProvisionActivatesProfile(t *testing.T) {
 						writeCLIFile(t, path, original+"# concurrent edit\n", 0o600)
 					}
 				}}
-				options := Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", yard, "provision", "sample"}, Environment: environment, WorkingDir: root, Incus: incus, InitPlatform: platform, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr}
+				options := Options{Arguments: []string{"-Y", yard, "provision", "sample"}, Incus: incus, InitPlatform: platform, AdapterRunner: runner, Prompt: prompt, Stderr: &stderr}
 				if scenario == "decline" {
 					options.Prompt = &testkit.Prompt{Answers: []bool{false}}
 				}
-				program, err := New(options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(options)
 				loaded, err := program.resolveContextWithYardSettings(yard, "")
 				if err != nil {
 					t.Fatal(err)
@@ -314,10 +300,7 @@ func TestProvisionActivatesProfile(t *testing.T) {
 				retryPrompt := &testkit.Prompt{Answers: []bool{true}}
 				options.Prompt = retryPrompt
 				for i := 0; i < 2; i++ {
-					retry, err := New(options)
-					if err != nil {
-						t.Fatal(err)
-					}
+					retry := fixture.New(options)
 					if code := retry.Run(context.Background()); code != 0 {
 						t.Fatalf("retry=%d stderr=%s", code, stderr.String())
 					}
@@ -349,12 +332,10 @@ func TestProvisionActivatesProfile(t *testing.T) {
 }
 
 func TestProvisionActivationAllowsRegisteredSource(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: newInitPlatformFixture()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: newInitPlatformFixture()})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -372,7 +353,8 @@ func TestProvisionActivationAllowsRegisteredSource(t *testing.T) {
 }
 
 func TestProvisionActivationKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	writeProvisionProfile(t, root, "sample")
 	configHome := filepath.Join(root, "state")
 	gitPath := filepath.Join(configHome, config.GitSettingsRelativePath, "yards/demo/config.env")
@@ -384,10 +366,7 @@ func TestProvisionActivationKeepsGitOnlyYardSettingsAsFallback(t *testing.T) {
 	if err := configsync.RegisterSource(configHome, testkit.TempDir(t)); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: newInitPlatformFixture()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{InitPlatform: newInitPlatformFixture()})
 	loaded, err := program.loadContext("demo")
 	if err != nil {
 		t.Fatal(err)
