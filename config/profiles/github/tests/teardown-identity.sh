@@ -49,22 +49,11 @@ chmod 0755 "$TMP/bin/systemctl" "$TMP/bin/incus"
 export PATH="$TMP/bin:$PATH"
 
 capture() {
-  python3 -B - "$ROOT/scripts/lib/teardown-plan.py" "$UNIT_FILE" \
-    "$SUBYARD_HOME/github-broker/fixture.json" "$SUBYARD_HOME/github-broker/fixture-engine" <<'PY'
-import importlib.util, json, os, sys
-spec = importlib.util.spec_from_file_location('teardown_plan', sys.argv[1])
-helper = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(helper)
-artifacts = []
-for path in sys.argv[2:]:
-    parent = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        entries = helper.artifact_entries(parent, os.path.basename(path))
-        artifacts.append({'Path': path, 'Binding': helper.artifact_digest(entries) if entries else ''})
-    finally:
-        os.close(parent)
-print(json.dumps(artifacts))
-PY
+  local path
+  for path in "$UNIT_FILE" "$SUBYARD_HOME/github-broker/fixture.json" "$SUBYARD_HOME/github-broker/fixture-engine"; do
+    PATH_VALUE="$path" python3 -c 'import json, os; print(json.dumps({"Path": os.environ["PATH_VALUE"]}))' \
+      | "${YARD_ENGINE_PATH:-$ROOT/.build/yard}" _teardown-guard capture-artifact || return
+  done | python3 -c 'import json, sys; print(json.dumps([{"Path": item["Path"], "Binding": item["Binding"]} for item in map(json.loads, sys.stdin)]))'
 }
 
 for phase in before-stop during-stop during-disable; do

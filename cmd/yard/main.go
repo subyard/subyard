@@ -65,6 +65,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == releaseruntime.HistoryCompatibilityVerb {
 		os.Exit(releaseruntime.RunHistoryCompatibility(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	// Teardown shell and profile adapters run the native guard without a repository.
+	if len(os.Args) > 1 && os.Args[1] == "_teardown-guard" {
+		os.Exit(uninstall.RunGuard(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if len(os.Args) > 1 && (os.Args[1] == "_test-vms-facade" || os.Args[1] == "_test-vms-worker") {
@@ -399,7 +403,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "yard: %v\n", err)
 		os.Exit(2)
 	}
-	uninstall.UseArtifactGuard(root)
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "yard: resolve working directory: %v\n", err)

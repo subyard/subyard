@@ -25,14 +25,9 @@ func TestTeardownResetConfigRejectsKeepData(t *testing.T) {
 func teardownResetFixture(t *testing.T) (*CLI, config.Loaded, *testkit.Incus, string) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
-	helper, err := os.ReadFile("../../scripts/lib/teardown-plan.py")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(root, "scripts", "lib"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(root, "scripts", "lib", "teardown-plan.py"), helper, 0600)
 	incus := lifecycleIncus()
 	incus.Reconcile.InstanceFound = false
 	incus.Instances = map[string]ports.InstanceInfo{}
@@ -318,5 +313,33 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 	}
 	if code := retry.Run(context.Background()); code != 0 {
 		t.Fatalf("completed public CLI retry failed: %d", code)
+	}
+}
+
+func TestTeardownConfigArtifactRemovalKeepsTypedStaleOutcome(t *testing.T) {
+	program, _, _, path := teardownResetFixture(t)
+	binding, err := teardownArtifactBinding(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []ports.TeardownArtifactBinding{{Path: path, Binding: binding}}
+	// A size change is observable within one coarse filesystem timestamp tick.
+	testkit.WriteFile(t, path, []byte("SSH_PORT=44444\n"), 0600)
+	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != domain.ErrPlanStale {
+		t.Fatalf("changed settings removal outcome changed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("changed settings were removed", err)
+	}
+	binding, err = teardownArtifactBinding(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = []ports.TeardownArtifactBinding{{Path: path, Binding: binding}}
+	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("approved settings remain", err)
 	}
 }

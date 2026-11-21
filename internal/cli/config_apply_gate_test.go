@@ -343,7 +343,7 @@ type configApplyRepairFixture struct {
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)
-	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py", "scripts/lib/teardown-plan.py"} {
+	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)

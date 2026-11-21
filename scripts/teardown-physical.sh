@@ -25,7 +25,7 @@ case "${1:-apply}" in
     require_root "initializing the approved host coordination lock requires root"
     exec "${SUBYARD_DISPATCHER_PATH:?}" _network-lock ensure ;;
   check-sessions)
-    python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-all "$INCUS_PROJECT"
+    teardown_guard guard-all "$INCUS_PROJECT"
     PROJ=(--project "$INCUS_PROJECT"); have_incus=1
     # shellcheck source=scripts/lib/teardown-session.sh
     . "$SCRIPT_DIR/lib/teardown-session.sh"
@@ -33,10 +33,10 @@ case "${1:-apply}" in
     exit 0 ;;
   check-profiles)
     require_root "conditionally inspecting approved private owner metadata requires root"
-    exec python3 -B "$SCRIPT_DIR/lib/teardown-profile-checks.py" ;;
+    exec "${SUBYARD_DISPATCHER_PATH:?}" _teardown-guard check-profiles "$SCRIPT_DIR/.." ;;
   remove-shared)
     require_root "retiring approved shared host resources requires root"
-    removed_bridges="$(python3 -B "$SCRIPT_DIR/lib/teardown-shared.py")" || exit "$?"
+    removed_bridges="$(teardown_guard remove-shared)" || exit "$?"
     while IFS= read -r removed_bridge; do
       [ -n "$removed_bridge" ] || continue
       ufw_yard_rules_remove "$removed_bridge" || die "approved bridge firewall cleanup failed"
@@ -44,13 +44,10 @@ case "${1:-apply}" in
     nm_unmanaged_guard_reconcile
     exit 0 ;;
   remove-files)
-    if python3 - "$SUBYARD_TEARDOWN_PLAN" <<'PY_NEEDS_ROOT'
-import json,os,sys
-with open(sys.argv[1],encoding="utf-8") as handle: plan=json.load(handle)
-raise SystemExit(0 if any(tree.get("Opaque") or any(entry["UID"] != os.getuid() for entry in tree["Entries"]) for tree in plan["Trees"]) else 1)
-PY_NEEDS_ROOT
-    then require_root "removing approved private installation roots requires root"; fi
-    exec python3 -B "$SCRIPT_DIR/lib/teardown-files.py" ;;
+    if teardown_guard files-need-root "$SUBYARD_TEARDOWN_PLAN"; then
+      require_root "removing approved private installation roots requires root"
+    fi
+    exec "${SUBYARD_DISPATCHER_PATH:?}" _teardown-guard remove-files ;;
   stop-services)
     # shellcheck source=scripts/lib/teardown-services.sh
     . "$SCRIPT_DIR/lib/teardown-services.sh"
@@ -81,10 +78,9 @@ subyard_home_validate_root "$SUBYARD_HOME" \
   || die "refusing unsafe Subyard data root: $SUBYARD_HOME"
 SUBYARD_HOME="$SUBYARD_VALIDATED_HOME"
 [ "$INCUS_PROJECT" != default ] || die "teardown requires a dedicated project"
-TEARDOWN_GUARD="$SCRIPT_DIR/lib/teardown-plan.py"
-python3 "$TEARDOWN_GUARD" validate || die "prepared exact teardown inventory is required"
-approved_names() { python3 "$TEARDOWN_GUARD" list "$1"; }
-guard_resource() { python3 "$TEARDOWN_GUARD" guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || die "plan_stale: teardown resource changed after confirmation"; }
+teardown_guard validate || die "prepared exact teardown inventory is required"
+approved_names() { teardown_guard list "$1"; }
+guard_resource() { teardown_guard guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || die "plan_stale: teardown resource changed after confirmation"; }
 require_root "removing the NetworkManager guard, ufw rules, and the Incus storage data needs root"
 
 if command -v incus >/dev/null 2>&1 && ! incus info >/dev/null 2>&1; then
@@ -97,8 +93,8 @@ PROJ=(--project "$INCUS_PROJECT")
 bridge_gone=0; pool_gone=0
 [ "$have_incus" = 1 ] || { bridge_gone=1; pool_gone=1; }
 
-python3 "$TEARDOWN_GUARD" guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
-python3 "$TEARDOWN_GUARD" guard-artifacts || exit 75
+teardown_guard guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
+teardown_guard guard-artifacts || exit 75
 # shellcheck source=scripts/lib/teardown-session.sh
 . "$SCRIPT_DIR/lib/teardown-session.sh"
 teardown_session_guard "$YARD_INSTANCE_NAME"
@@ -134,7 +130,7 @@ if [ "$KEEP_DATA" = 0 ]; then
       guard_resource volume "$approved_volume" "$approved_pool"
       incus storage volume delete "$approved_pool" "$approved_volume" "${PROJ[@]}" >/dev/null 2>&1 \
         && ok "deleted approved volume '$approved_volume'" || die "approved volume removal failed"
-    done < <(python3 "$TEARDOWN_GUARD" volumes)
+    done < <(teardown_guard volumes)
     if incus_project_has_isolated_images "$INCUS_PROJECT"; then
       while IFS= read -r fp; do
         [ -n "$fp" ] || continue
@@ -174,7 +170,7 @@ if [ "$KEEP_DATA" = 0 ]; then
       warn "other Incus instances exist — keeping shared bridge '$BRIDGE' and pool '$STORAGE_POOL':"
       printf '%s\n' "$others" | sed 's/^/      - /'
     else
-      removed_bridges="$(python3 -B "$SCRIPT_DIR/lib/teardown-shared.py" --selected)" || exit "$?"
+      removed_bridges="$(teardown_guard remove-shared --selected)" || exit "$?"
       while IFS= read -r removed_bridge; do
         [ "$removed_bridge" != "$BRIDGE" ] || bridge_gone=1
       done <<< "$removed_bridges"
@@ -191,20 +187,16 @@ elif command -v ufw >/dev/null 2>&1; then
 fi
 sshdir="$SUBYARD_OPERATOR_HOME/.ssh"
 snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
-# A verified runtime may be pinned through a root process's /proc/PID/fd.
-# Send the already-loaded helper; the operator cannot reopen that source path.
+# The pinned guard unlinks the approved snippet with the operator's filesystem
+# credentials. The engine may be pinned through a root process's /proc/PID/fd,
+# which the operator cannot reopen, so only the config rewrite runs via sudo.
+teardown_guard remove-artifact-as "$OPERATOR_USER" "$snip" || exit 75
 # shellcheck disable=SC2016
 {
   declare -f ssh_config_remove_exact &&
-    printf '%s\n' 'set -e' "python3 -B - remove-artifact \"\$1\" <<'SUBYARD_TEARDOWN_GUARD_CODE'" &&
-    cat "$TEARDOWN_GUARD" &&
-    printf '%s\n' 'SUBYARD_TEARDOWN_GUARD_CODE' 'ssh_config_remove_exact "$2" "$3"'
-} | sudo -n -u "$OPERATOR_USER" -- env "SUBYARD_TEARDOWN_ARTIFACTS=$SUBYARD_TEARDOWN_ARTIFACTS" \
-  "SUBYARD_TEARDOWN_PLAN=${SUBYARD_TEARDOWN_PLAN:-}" "SUBYARD_TEARDOWN_PLAN_SHA256=${SUBYARD_TEARDOWN_PLAN_SHA256:-}" bash -s -- "$snip" "$cfg" "Include $YARD_SNIP" || {
-  cleanup_status=$?
-  [ "$cleanup_status" != 75 ] || exit 75
-  die "could not remove this yard's operator SSH config"
-}
+    printf '%s\n' 'set -e' 'ssh_config_remove_exact "$1" "$2"'
+} | sudo -n -u "$OPERATOR_USER" -- bash -s -- "$cfg" "Include $YARD_SNIP" \
+  || die "could not remove this yard's operator SSH config"
 ok "removed ~/.ssh/$YARD_SNIP (if present)"
 ok "removed 'Include $YARD_SNIP' from ~/.ssh/config (if present)"
 known="$SUBYARD_HOME/ssh/known_hosts"
@@ -231,7 +223,7 @@ else
   rmdir --ignore-fail-on-non-empty "$SUBYARD_CONFIG_HOME" 2>/dev/null || true
 fi
 for cache in "$YARD_SPACE_CACHE" "$YARD_SPACE_CACHE.lock" "$YARD_SPACE_CACHE.tmp"; do
-  python3 "$TEARDOWN_GUARD" remove-artifact "$cache" || exit 75
+  teardown_guard remove-artifact "$cache" || exit 75
 done
 if [ "$KEEP_DATA" = 1 ]; then
   ok "kept data: $STORAGE_PATH (and $SUBYARD_HOME)"

@@ -26,7 +26,6 @@ func TestResourceAuditedReaderProcess(t *testing.T) {
 	if role == "" {
 		return
 	}
-	uninstall.UseArtifactGuard(repositoryRoot(t))
 	if role == "waiter" {
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		defer cancel()
