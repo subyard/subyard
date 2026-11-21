@@ -16,6 +16,7 @@ type ExistingDir uint8
 const (
 	Finish ExistingDir = iota // Finish narrower modes on owned directories.
 	Repair                    // Also repair broader modes on owned directories.
+	Accept                    // Keep existing directories as they are.
 )
 
 type DirOptions struct {
@@ -39,7 +40,7 @@ func (e *DirStateError) Error() string { return e.err.Error() }
 func (e *DirStateError) Unwrap() error { return e.err }
 
 func EnsureDir(path string, o DirOptions) error {
-	if expectedUID(o.Owner) != os.Geteuid() {
+	if o.Existing != Accept && expectedUID(o.Owner) != os.Geteuid() {
 		return refusal(path, ErrUnsafeOwner)
 	}
 	if o.Owner != nil && !validOwnerID(o.Owner.GID) {
@@ -149,7 +150,11 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	path := filepath.Join(d.path, name)
 	mode := unixMode(o.Mode)
 	dir, stat, err := openDirectoryAt(d.fd, name, path)
+	created := false
 	if errors.Is(err, fs.ErrNotExist) {
+		if expectedUID(o.Owner) != os.Geteuid() {
+			return nil, refusal(path, ErrUnsafeOwner)
+		}
 		initialMode := mode
 		if o.Owner != nil && o.Owner.GID != -1 {
 			initialMode &= 0o700
@@ -159,6 +164,7 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 			return nil, pathError("mkdir", path, mkdirErr)
 		}
 		if mkdirErr == nil {
+			created = true
 			if err := faultAt(o.Fault, AfterDirCreate); err != nil {
 				return nil, err
 			}
@@ -170,9 +176,11 @@ func (d *directory) ensure(name string, o DirOptions) (*directory, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	if err := dir.finish(stat, mode, o); err != nil {
-		dir.close()
-		return nil, err
+	if o.Existing != Accept || created {
+		if err := dir.finish(stat, mode, o); err != nil {
+			dir.close()
+			return nil, err
+		}
 	}
 	// Sync the directory inode as well as its entry in the parent. Do this
 	// even on an exact match so retry finishes an interrupted sync.
