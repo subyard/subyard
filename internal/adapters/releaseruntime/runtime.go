@@ -730,7 +730,7 @@ func (runtime *Runtime) PrepareTransition(
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
 		// Owners prepared for rollback report their converted state as drift;
 		// only that drift leaves the rollback admitted.
-		if (unfinished || exactCompletedTarget) && !(parsed.rollback && runtime.preparedDriftOnly(ctx, parsed.root, protected)) {
+		if (unfinished || exactCompletedTarget) && !(parsed.rollback && runtime.preparedDriftOnly(ctx, parsed.root, configHome, protected)) {
 			if unfinished {
 				newerRelease = newerReleaseReplacement(parsed, configHome)
 			}
@@ -1321,13 +1321,19 @@ func (runtime *Runtime) prepareRetainedTransition(
 	ctx = selectionContext(ctx, parsed.selection)
 	// Owners the active release still has to prepare are not a refusal here;
 	// once every other admission passes, they are the whole plan.
-	pending, err := runtime.rollbackCompatibility(ctx, verified, request, parsed.selection, true)
-	if err != nil {
-		var refusal publicReleaseInspectionError
-		if parsed.check && errors.As(err, &refusal) {
-			return runtime.preparePublicInspectionOutcome(parsed, refusal.outcome), nil
+	pending, compatErr := runtime.rollbackCompatibility(ctx, verified, request, parsed.selection, true)
+	var compatRefusal publicReleaseInspectionError
+	if compatErr != nil && !errors.As(compatErr, &compatRefusal) {
+		return Prepared{}, verifiedPreparation(compatErr)
+	}
+	refused := func(err error, outcome releasetransition.Outcome) (Prepared, error) {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(parsed, outcome), nil
 		}
 		return Prepared{}, verifiedPreparation(err)
+	}
+	if compatErr != nil && compatRefusal.outcome.Code == releasetransition.CodePlanStale {
+		return refused(compatErr, compatRefusal.outcome)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
@@ -1335,7 +1341,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 	targetOwners := map[string]bool{}
 	applicable, err := retainedRuntimeApplicable(activeRoot)
 	if err != nil {
-		return Prepared{}, verifiedPreparation(err)
+		return Prepared{}, verifiedPreparation(domain.CollectOrderedRefusals(compatErr, err))
 	}
 	if applicable && verified.registryDigest != "" {
 		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, parsed.root, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
@@ -1351,13 +1357,27 @@ func (runtime *Runtime) prepareRetainedTransition(
 	// still requires the independent runtime binding below AND a successful
 	// ordinary V1 inspection before returning a plan. Neither an exit status nor
 	// a version claim proves compatibility; execution rechecks both proofs.
-	runtimeBinding, err := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
+	retained := func(ctx context.Context) (string, error) {
+		return runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
+	}
+	// Both admissions are independent; a refusal reports both.
+	runtimeBinding, err := retained(ctx)
+	var bindingRefusal error
 	if err != nil {
-		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
-			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
+		bindingRefusal = retainedBindingRefusal(observed, release, err)
+	}
+	if compatErr != nil && bindingRefusal != nil {
+		joined := joinReleaseRefusals(compatRefusal, bindingRefusal)
+		return refused(joined, joined.outcome)
+	}
+	if compatErr != nil {
+		return refused(compatErr, compatRefusal.outcome)
+	}
+	if bindingRefusal != nil {
+		return Prepared{}, verifiedPreparation(bindingRefusal)
 	}
 	if len(pending) != 0 {
-		return runtime.prepareRollbackPreparation(parsed, request, verified, pending), nil
+		return runtime.prepareRollbackPreparation(parsed, request, verified, pending, runtimeBinding, retained), nil
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {
