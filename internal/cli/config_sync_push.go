@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type configSyncPushOptions struct {
@@ -308,14 +309,18 @@ func (cli *CLI) checkConfigGitPushTarget(ctx context.Context, checkout, remote, 
 	return nil
 }
 
+// writeExportedConfigFile replaces a user file in the export checkout. A final
+// symlink is kept and its target is written; the target's directory must exist.
 func writeExportedConfigFile(path string, content []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	resolved, err := safefs.ResolveFile(path)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, content, mode); err != nil {
-		return err
+	options := safefs.Options{Mode: mode, ExactMode: true}
+	if resolved == path {
+		options.ParentMode = 0o700
 	}
-	return os.Chmod(path, mode)
+	return safefs.WriteFile(resolved, content, options)
 }
 
 func (prepared *preparedConfigSyncPush) cleanup(cli *CLI, ctx context.Context) {

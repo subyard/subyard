@@ -225,7 +225,7 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 		cli.reportConfigNext(configProspectiveError{configHome, err})
 		return 1
 	}
-	file, err := os.CreateTemp("/tmp", "subyard-alias-repair-*")
+	file, err := os.CreateTemp("/tmp", "subyard-alias-repair-*") //nolint:forbidigo // scratch draft, never published
 	if err != nil {
 		cli.errorf("%s", label+": retained draft is unavailable")
 		return 1
