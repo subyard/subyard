@@ -10,8 +10,6 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-budget|memory-lease|gradle) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
-gradle_headroom="${SUBYARD_ANDROID_E2E_GRADLE:-default}"
-case "$gradle_headroom" in default|raised) ;; *) printf 'invalid Gradle memory headroom\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -130,7 +128,7 @@ android_require_gradle_console() {
 android_gradle_boot_evidence() {
   android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
     journalctl --no-pager -q -n 8 -o cat -u subyard-android-pool.service \
-      --grep='^android (boot readiness|gradle memory events) ' || true
+      --grep='^android boot readiness ' || true
 }
 cleanup() {
   status=$?
@@ -331,13 +329,19 @@ android_repeat_provision() {
 }
 android_phase_begin provision
 android_network_received provision before
-if [ "$lane" = gradle ]; then
-  printf 'android gradle fixture headroom=%s lease_cpus=%s\n' "$gradle_headroom" "${SUBYARD_E2E_CPU_PER_VM:-unknown}"
-  incus --project "$project" exec "$instance" -- sh -se -- "$gradle_headroom" <<'SH'
-directory=/run/systemd/system/subyard-android-pool.service.d
-install -d -m 0755 "$directory"
-printf '[Service]\nEnvironment=SUBYARD_ANDROID_E2E_GRADLE=%s\n' "$1" > "$directory/gradle-boot.conf"
-SH
+if [ "$lane" = gradle ] && [ "${SUBYARD_E2E_ANDROID_GRADLE_TWO_CORES:-}" = 1 ]; then
+  # Only the broker derives ncore from this mask. Its transient emulator service can use the full VM.
+  incus --project "$project" exec "$instance" -- python3 - <<'PY'
+import os
+from pathlib import Path
+
+cpus = sorted(os.sched_getaffinity(0))
+if len(cpus) < 3:
+    raise SystemExit('Gradle two-core comparison requires at least three VM vCPUs')
+directory = Path('/run/systemd/system/subyard-android-pool.service.d')
+directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+(directory / 'gradle-cpu-control.conf').write_text(f'[Service]\nCPUAffinity={cpus[0]} {cpus[1]}\n')
+PY
 fi
 yard provision --yes
 android_network_received provision after
@@ -459,6 +463,7 @@ if [ "$lane" = projects ]; then
 fi
 # Retain slot cgroup samples before the connected lease is released.
 if [ "$lane" = gradle ]; then
+  printf 'android gradle fixture lease_cpus=%s\n' "${SUBYARD_E2E_CPU_PER_VM:-unknown}"
   android_start_monitor || true
   incus --project "$project" exec "$instance" -- timeout 30 sh -c '
     until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do

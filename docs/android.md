@@ -112,8 +112,8 @@ No additional persistent archive cache is enabled.
 
 Provision adequate capacity before use: two devices reserve 7.5 GiB including the pool's
 yard allowance. Yard processes and other workloads need additional capacity; this budget
-does not guarantee that two active emulators fit in 8 GiB. Both presets use
-two guest vCPUs and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtime and renderer. Phone is
+does not guarantee that two active emulators fit in 8 GiB. Both presets use the vCPUs available
+to the pool, capped at three, and 2560 MiB guest RAM plus 1024 MiB per emulator for the runtime and renderer. Phone is
 1080×1920 at 420 dpi; tablet is 800×1280 at 160 dpi (an 800×1280 dp tablet layout).
 These are fixed presets, not a fallback chosen under memory pressure. The tablet stays below
 the emulator's three-million-pixel threshold, which otherwise forces 4 GiB guest RAM in
@@ -126,6 +126,11 @@ read-only physical-owner meminfo bind. Virtualized LXCFS counters require that p
 missing or unsafe evidence blocks allocation. Status reports these bounds, the limiting source,
 a 512 MiB reserve and pending startup promises. Concurrent provisioning reserves the full preset
 budget until readiness or confirmed cleanup; held emulators are already reflected in available RAM.
+The pool grants a lease after boot completion, guest network readiness and a responsive package
+manager. The same Android framework must pass those checks while the emulator cgroup's CPU and
+memory pressure (`some avg10`) stay at or below 20% and 5%, respectively, for 20 seconds. The boot
+readiness wait is bounded at 20 minutes after network setup; a timeout reports the last guest probe
+and cgroup pressure readings.
 Swap does not increase allocation headroom. The pool service has its own 2 GiB RAM and 2 GiB swap
 ceilings, verified against ancestor RAM limits. Runtime services use separate cgroups and their
 existing per-device memory ceilings. Initial image installation requires at least

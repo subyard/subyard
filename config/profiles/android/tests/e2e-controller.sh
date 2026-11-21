@@ -13,8 +13,8 @@ for lane in full diagnostics projects recovery viewer viewer-native-debug sdk-im
   grep -Fxq -- "--slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane $lane" "$tmp/calls"
   assert_controller_failure "${arguments[@]}"
 done
-SUBYARD_ANDROID_E2E_GRADLE=raised bash "$tmp/$controller" --slot 7 --lane gradle > "$tmp/calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- env SUBYARD_ANDROID_E2E_GRADLE=raised bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane gradle' "$tmp/calls"
+SUBYARD_E2E_ANDROID_GRADLE_TWO_CORES=1 bash "$tmp/$controller" --slot 7 --lane gradle > "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- env SUBYARD_E2E_ANDROID_GRADLE_TWO_CORES=1 bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane gradle' "$tmp/calls"
 bash "$tmp/$controller" --slot 7 --lane skills > "$tmp/calls"
 grep -Fxq -- '--slot 7 --type subyard-pair --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane skills' "$tmp/calls"
 assert_controller_failure --slot 7 --lane skills
