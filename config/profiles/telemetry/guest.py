@@ -438,12 +438,28 @@ class Runtime:
         return native.reconcile(self.etc, self.home, receipt, self.agents if self.selected else [],
                                 self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check)
 
+    def check_support_and_native(self):
+        failures = []
+        try:
+            support = self.safefs_state()
+        except ValueError as error:
+            failures.append(error)
+        try:
+            native_current = self.reconcile_native(check=True)
+        except ValueError as error:
+            failures.append(error)
+        if len(failures) == 2:
+            raise native.combined_check_refusal(*failures)
+        if failures:
+            raise failures[0]
+        return support, native_current
+
     def observe(self):
         installed = self.owned()
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
-        support = self.safefs_state() if installed or self.selected else None
-        native_current = self.reconcile_native(check=True) if installed or self.selected else True
+        if installed or self.selected:
+            support, native_current = self.check_support_and_native()
         if not installed:
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
@@ -499,6 +515,9 @@ class Runtime:
                 diagnostics.append({'parameter': 'telemetry.asset.safefs.py', 'installed': 'missing' if support.before is None else 'changed', 'desired': 'current'})
             elif support.mode != 0o644:
                 diagnostics.append({'parameter': 'telemetry.mode.safefs.py', 'installed': 'mismatch', 'desired': 'matched'})
+            if support.receipt != support.wanted:
+                diagnostics.append({'parameter': 'telemetry.receipt.safefs.py',
+                                    'installed': 'missing' if support.receipt is None else 'pending', 'desired': 'current'})
             if not native_current:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             if not skill_current:
@@ -801,8 +820,7 @@ class Runtime:
         installed = self.owned()
         if not self.selected and not installed:
             return
-        support = self.safefs_state()
-        self.reconcile_native(check=True)
+        support, _ = self.check_support_and_native()
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():

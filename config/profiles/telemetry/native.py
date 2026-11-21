@@ -346,9 +346,31 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
 
 
 class Refusal(ValueError):
-    def __init__(self, reasons):
+    def __init__(self, reasons, *, message=None):
         self.reasons = reasons
-        super().__init__('; '.join(refusal_messages(reasons)))
+        rendered = '; '.join(refusal_messages(reasons))
+        super().__init__(rendered if message is None else message)
+
+
+CHECK_REFUSAL_MESSAGES = frozenset((
+    'managed asset changed', 'foreign control directory', 'unsafe native path',
+    'native configuration is not regular', 'unsafe native file', 'native file exceeds size bound',
+    'private collector token required', 'invalid collector token',
+    'shared safefs module check failed', 'native telemetry check failed',
+))
+
+
+def combined_check_refusal(support_error, native_error):
+    def check_reason(error, fallback):
+        message = str(error)
+        return ('check-refusal', message if message in CHECK_REFUSAL_MESSAGES else fallback)
+
+    reasons = [check_reason(support_error, 'shared safefs module check failed')]
+    if isinstance(native_error, Refusal):
+        reasons.extend(native_error.reasons)
+    else:
+        reasons.append(check_reason(native_error, 'native telemetry check failed'))
+    return Refusal(reasons, message='; '.join(map(str, (support_error, native_error))))
 
 
 def field_paths(fields, prefix=''):
@@ -361,11 +383,13 @@ def field_paths(fields, prefix=''):
 
 def refusal_messages(reasons):
     """Render known identifiers against local policy, without using guest text."""
-    if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= 10:
+    if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= 11:
         raise ValueError('invalid telemetry refusal')
     messages = []
     for reason in reasons:
         match reason:
+            case ('check-refusal', str(message)) if message in CHECK_REFUSAL_MESSAGES:
+                messages.append(message)
             case ('legacy-receipt',):
                 messages.append('invalid legacy telemetry receipt')
             case ('legacy-token-unverified',):

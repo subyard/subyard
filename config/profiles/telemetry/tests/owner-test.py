@@ -284,6 +284,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 ('telemetry-native-refusal-v1 PRIVATE_CREDENTIAL', ''),
                 ('telemetry-native-refusal-v2 [["template-conflict","codex","PRIVATE_CREDENTIAL"]]', ''),
                 ('telemetry-native-refusal-v2 [["unsafe-policy","PRIVATE_CREDENTIAL"]]', ''),
+                ('telemetry-native-refusal-v2 [["check-refusal","PRIVATE_CREDENTIAL"]]', ''),
                 (safe.replace('PermissionError','PRIVATE_CREDENTIAL'), '')]:
             with self.subTest(message_class=bool(expected)):
                 stderr = io.StringIO()
@@ -292,13 +293,13 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 self.assertEqual(stderr.getvalue(), expected)
                 self.assertNotIn('PRIVATE', stderr.getvalue())
 
-    def test_policy_refusal_reports_the_system_path(self):
+    def test_module_and_policy_refusals_reach_the_owner_in_order(self):
         owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
         path = '/etc/codex/managed_config.toml'
-        with self.assertRaisesRegex(owner['Refusal'], path):
+        with self.assertRaisesRegex(owner['Refusal'], 'managed asset changed; unsafe or foreign telemetry policy '+path):
             owner['run']([sys.executable, '-c',
                           "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
-                          'telemetry-native-refusal-v2 [["unsafe-policy","codex"]]'])
+                          'telemetry-native-refusal-v2 [["check-refusal","managed asset changed"],["unsafe-policy","codex"]]'])
 
     def test_all_exact_absent_release_observations_are_declared(self):
         from unittest.mock import patch

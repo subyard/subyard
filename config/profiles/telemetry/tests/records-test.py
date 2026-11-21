@@ -24,6 +24,8 @@ class RecordsTest(unittest.TestCase):
             data.chmod(0o700)
             program = '''
 import sys
+from pathlib import Path
+from unittest import TestCase
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import launcher
@@ -35,6 +37,14 @@ with patch.object(sys, 'argv', ['launcher.py', 'manager', '--data-dir', '.']), \
 assert records.private_directory('.').name == ''
 records.atomic_json('current.json', {'ready': True})
 assert records.operational_directory('.') == records.Path(sys.argv[2])
+Path('file').touch()
+with TestCase().assertRaises(NotADirectoryError):
+    records.private_directory('file/../unintended')
+assert not Path('unintended').exists()
+Path('.').chmod(0o500)
+with TestCase().assertRaisesRegex(ValueError, 'private directory required'):
+    records.private_directory('.')
+assert Path('.').stat().st_mode & 0o777 == 0o500
 '''
             subprocess.run([sys.executable, '-B', '-c', program, str(Path(records.__file__).parent),
                             str(root/'data-private')], cwd=data, check=True, timeout=5)

@@ -909,7 +909,7 @@ for path, value in (
                 remove(root)
                 remove(pristine)
 
-    def test_runtime_diagnostics_name_changed_asset_without_contents(self):
+    def test_runtime_diagnostics_name_asset_and_receipt_drift_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
             path.write_bytes(b'private observed content')
@@ -925,7 +925,7 @@ for path, value in (
             runtime.safefs_path = Path(name)/'support/safefs.py'
             runtime.safefs_content = b'expected support'
             runtime.safefs_state = lambda: types.SimpleNamespace(before=runtime.safefs_content, mode=0o644,
-                                                                 receipt=b'', current=True, digest=b'd', wanted=b'd')
+                                                                 receipt=b'd', current=True, digest=b'd', wanted=b'd')
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
@@ -937,6 +937,17 @@ for path, value in (
             self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
             self.assertNotIn('private observed content', str(observation))
 
+            path.write_bytes(b'desired content')
+            path.chmod(0o644)
+            runtime.policy_status = lambda: 'present'
+            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
+            for receipt, status in ((None, 'missing'), (b'd\nd\n', 'pending')):
+                with self.subTest(status=status), patch.object(runtime, 'safefs_state', return_value=types.SimpleNamespace(
+                        before=runtime.safefs_content, mode=0o644, receipt=receipt, wanted=b'd', digest=b'd', current=False)):
+                    self.assertEqual(runtime.observe()['diagnostics'], [
+                        {'parameter': 'telemetry.receipt.safefs.py', 'installed': status, 'desired': 'current'},
+                    ])
+
     def test_shared_module_refuses_unmanaged_bytes_and_adopts_exact_bytes(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -946,6 +957,7 @@ for path, value in (
             runtime.assets = runtime.retained = {}
             runtime.selected = True
             runtime.owned = lambda: False
+            runtime.reconcile_native = lambda check: True
             runtime.safefs_path.parent.mkdir()
             runtime.safefs_path.parent.chmod(0o2755)
             runtime.safefs_path.write_bytes(b'unmanaged')
@@ -965,6 +977,22 @@ for path, value in (
             guest.native.publish(state.receipt_path, state.wanted, pending)
             self.assertTrue(runtime.safefs_state().current)
             self.assertEqual(stat.S_IMODE(runtime.safefs_path.parent.stat().st_mode), 0o2755)
+
+    def test_observe_and_apply_combine_module_and_native_refusals(self):
+        runtime = object.__new__(guest.Runtime)
+        runtime.selected = True
+        runtime.owned = lambda: True
+        policy = guest.native.Refusal([('unsafe-policy', 'codex'), ('unreadable-policy', 'claude')])
+        for operation in (runtime.observe, runtime.apply):
+            with self.subTest(operation=operation.__name__), \
+                    patch.object(runtime, 'safefs_state', side_effect=ValueError('managed asset changed')) as support, \
+                    patch.object(runtime, 'reconcile_native', side_effect=policy) as native_check:
+                with self.assertRaises(guest.native.Refusal) as raised:
+                    operation()
+                support.assert_called_once_with()
+                native_check.assert_called_once_with(check=True)
+                self.assertEqual(str(raised.exception), 'managed asset changed; '+str(policy))
+                self.assertEqual(raised.exception.reasons[1:], policy.reasons)
 
     def test_running_child_no_new_privs_uses_actual_kernel_status_and_uid(self):
         process=subprocess.Popen(['/usr/bin/setpriv','--no-new-privs',sys.executable,'-c',
