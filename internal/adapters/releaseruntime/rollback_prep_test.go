@@ -411,6 +411,8 @@ func TestRollbackPreparesOwnersByDeclaredFormats(t *testing.T) {
 func TestRollbackThroughAProfileHookTakesTwoCommands(t *testing.T) {
 	fixture := newPreparedRollbackFixture(t, preparedSample)
 	fixture.consequence["default"] = "restart the sample service"
+	var progress strings.Builder
+	fixture.runtime.config.Progress = &progress
 	prepared, err := fixture.prepare(t)
 	if err != nil {
 		t.Fatal(err)
@@ -422,13 +424,17 @@ func TestRollbackThroughAProfileHookTakesTwoCommands(t *testing.T) {
 	// active until a second confirmation.
 	if prepared.Action != PrepareRollbackAction || !prepared.Changed || len(prepared.Steps) != 2 ||
 		!slices.Equal(domain.OperationStepConsequences(prepared.Steps), prepared.Consequences) || !slices.Equal(prepared.Consequences, []string{
-		"prepare profile runtime sample-runtime in yard default for release " + fixture.targetID + ": restart the sample service",
+		"prepare profile runtime sample-runtime for release " + fixture.targetID + " in yard default: restart the sample service",
 		"keep release " + fixture.activeID + " active; then run yard update --rollback to review and confirm the rollback",
 	}) {
 		t.Fatalf("step 1 plan = %#v", prepared)
 	}
 	if err := prepared.Execute(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	// The admission reruns print no progress of their own.
+	if strings.Count(progress.String(), "Inspecting the installed release...") != 1 || strings.Count(progress.String(), "Installed version: ") > 1 {
+		t.Fatalf("step 1 progress:\n%s", progress.String())
 	}
 	// The gate is the second command's admission, target inspection included.
 	if !slices.Equal(fixture.applies, []string{"default sample-runtime yard " + fixture.activeID}) ||
@@ -518,7 +524,7 @@ func TestPreparedDriftRoutesEachYardByRollbackObserve(t *testing.T) {
 			}
 			fixture.formats["default"] = 3
 		}, func(t *testing.T, fixture *preparedRollbackFixture, prepared Prepared, err error) {
-			if err != nil || prepared.Action != PrepareRollbackAction || len(prepared.Steps) != 2 || prepared.Steps[0].Target != "activation.sample-runtime yard.default" {
+			if err != nil || prepared.Action != PrepareRollbackAction || len(prepared.Steps) != 2 || prepared.Steps[0].Observed != "rollback-observe stale in yard default" {
 				t.Fatalf("resumed plan = %s %#v, %v", prepared.Action, prepared.Steps, err)
 			}
 		}},
@@ -547,25 +553,60 @@ func TestPreparedDriftRoutesEachYardByRollbackObserve(t *testing.T) {
 	}
 }
 
-// The engine omits yard attribution beyond its wire limit; step 2 stays
-// reachable after preparing 255 yards.
+// The engine omits yard attribution beyond its wire limit, and the plan
+// stays within the operation step limit: step 2 stays reachable after
+// preparing more yards than a plan has steps.
 func TestRollbackPreparationOfEveryYardReachesTheRollback(t *testing.T) {
 	fixture := newPreparedRollbackFixture(t, preparedSample)
 	fixture.formats["named"] = 2
-	for index := 2; index < 255; index++ {
+	for index := 2; index < 300; index++ {
 		yard := fmt.Sprintf("y%03d", index)
 		declareRollbackPrepYard(t, fixture.home, yard)
 		fixture.formats[yard] = 2
 	}
 	prepared, err := fixture.prepare(t)
-	if err != nil || len(prepared.Steps) != 256 {
-		t.Fatalf("plan = %d steps, %v", len(prepared.Steps), err)
+	if err != nil || len(prepared.Steps) != 2 || domain.ValidateOperationSteps(prepared.Steps) != nil ||
+		prepared.Steps[0].Observed != "rollback-observe stale in 300 yards" || !strings.Contains(prepared.Steps[0].Consequence, " more yards") {
+		t.Fatalf("plan = %#v, %v", prepared.Steps, err)
 	}
-	if err := prepared.Execute(context.Background()); err != nil || len(fixture.applies) != 255 {
+	if err := prepared.Execute(context.Background()); err != nil || len(fixture.applies) != 300 {
 		t.Fatalf("preparation = %v, %d conversions", err, len(fixture.applies))
 	}
 	if rollback, err := fixture.prepare(t); err != nil || rollback.Action != rollbackAction {
 		t.Fatalf("after preparation = %s, %v", rollback.Action, err)
+	}
+}
+
+// Each owner is one step whatever its yard count; its text names the yards
+// and distinct effects within the step limits, and the binding every yard.
+func TestRollbackPreparationPlansOneStepPerOwner(t *testing.T) {
+	var items []formatItem
+	for index := range 400 {
+		owner, consequence := "first-runtime", "restart the first service"
+		if index%2 == 1 {
+			owner, consequence = "second-runtime", fmt.Sprintf("rewrite unit %03d of the second service %s", index%5, strings.Repeat("x", 150))
+		}
+		items = append(items, formatItem{owner: owner, yard: fmt.Sprintf("yard-%03d", index/2), state: ports.RuntimeStateStale, consequence: consequence})
+	}
+	items = append(items, formatItem{owner: "third-runtime", yard: "yard-000", state: ports.RuntimeStateCurrent})
+	steps := ownerPreparationSteps(items, "0.28.0")
+	if err := domain.ValidateOperationSteps(steps); err != nil || len(steps) != 2 {
+		t.Fatalf("steps = %#v, %v", steps, err)
+	}
+	if steps[0].Target != "activation.first-runtime" || steps[1].Target != "activation.second-runtime" || steps[1].DependsOn[0] != steps[0].ID ||
+		steps[0].Observed != "rollback-observe stale in 200 yards" ||
+		!strings.HasPrefix(steps[0].Consequence, "prepare profile runtime first-runtime for release 0.28.0 in 200 yards: yard-000, yard-001, ") ||
+		!strings.HasSuffix(steps[0].Consequence, " more yards: restart the first service") ||
+		!strings.Contains(steps[1].Consequence, "rewrite unit 001 of the second service") || !strings.HasSuffix(steps[1].Consequence, " and 4 more effects") {
+		t.Fatalf("steps = %#v", steps)
+	}
+	if got := boundedList("2 yards: ", []string{strings.Repeat("y", 300), "z"}, ", ", 200, "yards"); got != "2 yards (2 yards not listed)" {
+		t.Fatalf("bounded list = %q", got)
+	}
+	changed := slices.Clone(items)
+	changed[398].yard = "yard-other"
+	if slices.Equal(boundItems(items), boundItems(changed)) {
+		t.Fatal("the binding omits a yard the step text leaves out")
 	}
 }
 
@@ -590,7 +631,7 @@ func TestInterruptedRollbackPreparationResumes(t *testing.T) {
 		t.Fatalf("interruption = %v, applies %v", err, fixture.applies)
 	}
 	resumed, err := fixture.prepare(t)
-	if err != nil || resumed.Action != PrepareRollbackAction || len(resumed.Steps) != 2 || resumed.Steps[0].Target != "activation.sample-runtime yard.named" {
+	if err != nil || resumed.Action != PrepareRollbackAction || len(resumed.Steps) != 2 || resumed.Steps[0].Observed != "rollback-observe stale in yard named" {
 		t.Fatalf("rerun = %s %#v, %v", resumed.Action, resumed.Steps, err)
 	}
 	if err := resumed.Execute(context.Background()); err != nil {
@@ -1002,5 +1043,17 @@ func TestRollbackPreparationKeepsAnOwnersNextStep(t *testing.T) {
 	fixture.applyErr = refusal
 	if outcome := outcomeOf(t, prepared.Execute(context.Background())); outcome.Retry != refusal.retry {
 		t.Fatalf("failed conversion = %#v", outcome)
+	}
+	// So does an owner refusal of the recheck before any conversion.
+	fixture.applyErr = nil
+	if prepared, err = fixture.prepare(t); err != nil {
+		t.Fatal(err)
+	}
+	fixture.runtime.config.ProfileRuntimeRollbackObservation = func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error) {
+		return ports.RuntimeObservation{}, refusal
+	}
+	if outcome := outcomeOf(t, prepared.Execute(context.Background())); outcome.Retry != refusal.retry ||
+		!strings.Contains(outcome.Message, "nothing was converted") || !strings.Contains(outcome.Message, "sample export is enabled") {
+		t.Fatalf("recheck refusal = %#v", outcome)
 	}
 }

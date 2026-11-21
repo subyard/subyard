@@ -587,13 +587,25 @@ func (runtime *Runtime) PrepareTransition(
 	configHome string,
 	yard string,
 ) (Prepared, error) {
+	return runtime.prepareTransition(ctx, arguments, configHome, yard, false)
+}
+
+func (runtime *Runtime) prepareTransition(
+	ctx context.Context,
+	arguments []string,
+	configHome string,
+	yard string,
+	rerun bool,
+) (Prepared, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, help, err := runtime.parse(arguments)
 	if err != nil {
 		return Prepared{}, err
 	}
+	// A rerun repeats the admission without its progress.
+	parsed.quiet = rerun
 	parsed.rerun = func(ctx context.Context) (Prepared, error) {
-		return runtime.PrepareTransition(ctx, arguments, configHome, yard)
+		return runtime.prepareTransition(ctx, arguments, configHome, yard, true)
 	}
 	if help {
 		return runtime.prepareHelp(), nil
@@ -1835,7 +1847,7 @@ type publishedCandidate struct {
 }
 
 func (runtime *Runtime) progress(options options, format string, arguments ...any) {
-	if !options.check && runtime.config.Progress != nil {
+	if !options.check && !options.quiet && runtime.config.Progress != nil {
 		fmt.Fprintf(runtime.config.Progress, format+"\n", arguments...)
 	}
 }
@@ -1933,7 +1945,7 @@ type options struct {
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool
-	rootExplicit                                            bool
+	rootExplicit, quiet                                     bool
 	// rerun plans this same command again.
 	rerun func(context.Context) (Prepared, error)
 }

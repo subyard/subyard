@@ -1004,7 +1004,7 @@ this validated location and names the read-only `yard -Y NAME config paths` comm
 for inspecting configuration while ordinary mutation admission remains blocked.
 An owner may explicitly publish one `subyard-profile-observation-refusal-v1` JSON
 record with public `message` and `retry` fields (each at most 480 bytes, no control
-characters; retry starts with `run `). Unknown fields, duplicate records and malformed
+characters; retry starts with `run `); a failing `rollback-apply` may publish one too. Unknown fields, duplicate records and malformed
 values are ignored. This deliberate public record may name a configuration file and
 a preservation command; ordinary stderr and exception text remain private.
 State-drift refusals identify each affected yard and each independently known
@@ -1254,8 +1254,8 @@ release's installed-runtime check.
 
 Rollback through a profile hook takes two commands. When every other rollback admission passes and
 only owners that need preparation remain, the first `yard update --rollback` plans the
-`update.prepare-rollback` action. That plan shows each conversion and its declared consequence, and
-nothing else. Before the first conversion, execution reruns the same rollback admission, which must
+`update.prepare-rollback` action. That plan shows one conversion step per owner, naming its yards
+and declared consequences, and nothing else; the confirmation binds every yard. Before the first conversion, execution reruns the same rollback admission, which must
 offer exactly the confirmed plan; a refusal converts nothing and keeps its own next step, such as
 `yard -Y NAME start`. It then runs each `rollback-apply` under the yard's integration lock. The apply
 assessment also binds the confirmed consequence. Afterwards the admission runs once more as the gate,
@@ -2791,7 +2791,9 @@ Such a handler also accepts `rollback-observe` and `rollback-apply OPERATION_ID 
 DESIRED_SHA256`. Both follow the output, assessment and verification contract of `observe` and
 `apply`, reported against the prepared format. `rollback-apply` need not be atomic, but it must be
 rerunnable from any state it can leave, and both `rollback-observe` and the active release's `observe`
-report such an intermediate state as `stale`. [Release migrations](#release-migrations) describe
+report such an intermediate state as `stale`. `rollback-observe` must refuse any drift that is not
+a preparation state, since a rollback from prepared owners relies on it to route each yard.
+[Release migrations](#release-migrations) describe
 how update and rollback use the declared formats.
 
 Releases up to v0.30 decode `profile.json` strictly and cannot read a release that declares `format`.

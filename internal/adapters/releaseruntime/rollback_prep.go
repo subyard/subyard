@@ -319,6 +319,18 @@ func outcomeDetails(cause error) error {
 	return domain.CollectOrderedRefusals(details...)
 }
 
+// preparationRetry is a preparation failure's own next step: a typed
+// outcome's, else an owner's, else rerunning the rollback.
+func preparationRetry(err error) string {
+	_, retry := ownerRefusal(err, "", rollbackRetry)
+	if outcome, ok := TransitionOutcome(err); ok {
+		if _, _, typed := domain.ParseRetry(outcome.Retry); typed {
+			retry = outcome.Retry
+		}
+	}
+	return retry
+}
+
 // staleAfterConfirmation reports a refusal of the admission rerun before
 // the first conversion, with its own next step.
 func staleAfterConfirmation(request releasetransition.ProcessRequest, refusal error) error {
@@ -327,12 +339,9 @@ func staleAfterConfirmation(request releasetransition.ProcessRequest, refusal er
 	if !typed {
 		return refusal
 	}
-	message, retry := changed+"; "+outcome.Message, outcome.Retry
+	message, retry := changed+"; "+outcome.Message, preparationRetry(refusal)
 	if len(message) > 512 {
 		message = changed + "; full details: stderr of yard update --rollback"
-	}
-	if _, _, ok := domain.ParseRetry(retry); !ok {
-		retry = rollbackRetry
 	}
 	stale := observedPublicReleaseOutcome(request.RuntimeRoot, request.Target, nil, releasetransition.CodePlanStale, message, retry)
 	cause := fmt.Errorf("%w: %w", domain.ErrPlanStale, transitionOutcomeError(stale))
@@ -340,6 +349,86 @@ func staleAfterConfirmation(request releasetransition.ProcessRequest, refusal er
 		cause = fmt.Errorf("%w; %s", cause, outcome.Message)
 	}
 	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(cause, outcomeDetails(refusal)), outcome: stale}
+}
+
+// ownerPreparationSteps is one step per owner with stale yards, in the
+// order observed: a step's text names its yards and effects within the
+// operation step limits, and the plan binding covers every yard exactly.
+func ownerPreparationSteps(items []formatItem, target releasetransition.ReleaseID) []domain.OperationStep {
+	var owners []string
+	yards, effects := map[string][]string{}, map[string][]string{}
+	for _, item := range items {
+		if item.state != ports.RuntimeStateStale {
+			continue
+		}
+		if _, seen := yards[item.owner]; !seen {
+			owners = append(owners, item.owner)
+		}
+		yards[item.owner] = append(yards[item.owner], item.yard)
+		if item.consequence != "" && !slices.Contains(effects[item.owner], item.consequence) {
+			effects[item.owner] = append(effects[item.owner], item.consequence)
+		}
+	}
+	steps := []domain.OperationStep{}
+	for _, owner := range owners {
+		named := yards[owner]
+		where := "yard " + named[0]
+		if len(named) > 1 {
+			where = boundedList(fmt.Sprintf("%d yards: ", len(named)), named, ", ", 200, "yards")
+		}
+		consequence := fmt.Sprintf("prepare profile runtime %s for release %s in %s", owner, target, where)
+		if len(effects[owner]) != 0 {
+			consequence = boundedList(consequence+": ", effects[owner], "; ", 512, "effects")
+		}
+		if len(consequence) > 512 {
+			consequence = fmt.Sprintf("prepare profile runtime %s for release %s in %d yards", owner, target, len(named))
+		}
+		step := domain.OperationStep{ID: fmt.Sprintf("release.prepare-rollback.%d", len(steps)), Target: "activation." + owner,
+			Observed: fmt.Sprintf("rollback-observe stale in %d yards", len(named)), Desired: "format of release " + string(target), Decision: domain.StepApply,
+			Preconditions: []string{"a rerun of the rollback admission offers this same plan"},
+			Verify:        "rollback-observe reports current in each yard, then the retained release accepts the owner", Consequence: consequence}
+		if len(named) == 1 {
+			step.Observed = "rollback-observe stale in yard " + named[0]
+		}
+		if len(steps) != 0 {
+			step.DependsOn = []string{steps[len(steps)-1].ID}
+		}
+		steps = append(steps, step)
+	}
+	return steps
+}
+
+// boundedList appends values to prefix within limit bytes, naming how many
+// it leaves out.
+func boundedList(prefix string, values []string, separator string, limit int, noun string) string {
+	text := prefix
+	for index, value := range values {
+		next := text + value
+		if index != 0 {
+			next = text + separator + value
+		}
+		rest := ""
+		if left := len(values) - index - 1; left != 0 {
+			rest = fmt.Sprintf(" and %d more %s", left, noun)
+		}
+		if len(next)+len(rest) > limit {
+			if index == 0 {
+				return fmt.Sprintf("%s (%d %s not listed)", strings.TrimSuffix(prefix, ": "), len(values), noun)
+			}
+			return fmt.Sprintf("%s and %d more %s", text, len(values)-index, noun)
+		}
+		text = next
+	}
+	return text
+}
+
+// boundItems is every observed item a confirmation binds.
+func boundItems(items []formatItem) []string {
+	bound := make([]string, 0, len(items))
+	for _, item := range items {
+		bound = append(bound, strings.Join([]string{item.owner, item.yard, item.instance, string(item.state), item.actual, item.desired, item.consequence}, "\x00"))
+	}
+	return bound
 }
 
 // prepareRollbackPreparation offers the conversion of the stale owners among
@@ -354,24 +443,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 	links := releaseLinksFromRuntimeSnapshot(*parsed.expectedLinks)
 	activeVerification := candidateVerification{candidate: publishedCandidate{release: links.Active}, digest: selection.activeArtifact}
 	targetVerification := verificationOf(target)
-	steps := []domain.OperationStep{}
-	for _, item := range items {
-		if item.state != ports.RuntimeStateStale {
-			continue
-		}
-		consequence := fmt.Sprintf("prepare profile runtime %s in yard %s for release %s", item.owner, item.yard, request.Target)
-		if item.consequence != "" {
-			consequence += ": " + item.consequence
-		}
-		step := domain.OperationStep{ID: fmt.Sprintf("release.prepare-rollback.%d", len(steps)), Target: "activation." + item.owner + " yard." + item.yard,
-			Observed: "rollback-observe stale", Desired: "format of release " + string(request.Target), Decision: domain.StepApply,
-			Preconditions: []string{"a rerun of the rollback admission offers this same plan"},
-			Verify:        "rollback-observe reports current, then the retained release accepts the owner", Consequence: consequence}
-		if len(steps) != 0 {
-			step.DependsOn = []string{steps[len(steps)-1].ID}
-		}
-		steps = append(steps, step)
-	}
+	steps := ownerPreparationSteps(items, request.Target)
 	steps = append(steps, domain.OperationStep{ID: "release.prepare-rollback.gate", Target: "release." + string(links.Active),
 		Observed: "active", Desired: "active", Decision: domain.StepApply, DependsOn: []string{steps[len(steps)-1].ID},
 		Verify:      "a rerun of the rollback admission offers the rollback to release " + string(request.Target),
@@ -386,8 +458,9 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 			activeVerification, targetVerification, struct {
 				Links    any
 				Steps    []domain.OperationStep
+				Items    []string
 				Retained string
-			}{parsed.expectedLinks, steps, retained}),
+			}{parsed.expectedLinks, steps, boundItems(items), retained}),
 	}
 	plan.check = func(context.Context) (releasetransition.Inspection, error) {
 		if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
@@ -468,14 +541,8 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 // have run: this release stays active, a rerun resumes and yard migrate
 // undoes the preparation. An owner's or refusal's own next step comes first.
 func partialPreparation(links releasetransition.ReleaseLinks, target releasetransition.ReleaseID, err error) error {
-	_, retry := ownerRefusal(err, "", rollbackRetry)
-	if outcome, ok := TransitionOutcome(err); ok {
-		if _, _, typed := domain.ParseRetry(outcome.Retry); typed {
-			retry = outcome.Retry
-		}
-	}
 	outcome := publicReleaseOutcome(links, target, nil, releasetransition.CodeRollbackIncompatible,
-		fmt.Sprintf("release %s stays active and its profile runtimes may be partly prepared for %s; rerun yard update --rollback to continue, or run yard migrate to undo the preparation", links.Active, target), retry)
+		fmt.Sprintf("release %s stays active and its profile runtimes may be partly prepared for %s; rerun yard update --rollback to continue, or run yard migrate to undo the preparation", links.Active, target), preparationRetry(err))
 	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(transitionOutcomeError(outcome), err), outcome: outcome}
 }
 
