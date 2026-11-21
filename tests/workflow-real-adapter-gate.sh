@@ -571,11 +571,10 @@ for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "pu
     assert selected == expected
 selected = json.loads(subprocess.check_output(
     ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
-    env=dict(os.environ, ONLY="profile:android/gradle", RETRY="", GRADLE_COPIES="1 3 4 6", plan=json.dumps(plan))))
+    env=dict(os.environ, ONLY="profile:android/gradle", RETRY="", GRADLE_COPIES="1 3 4", plan=json.dumps(plan))))
 assert selected["checks"]["include"] == []
-assert [(entry["id"], entry["copy"], entry["headroom"]) for entry in selected["nested"]["include"]] == [
-    ("profile:android/gradle", copy, headroom) for copy, headroom in
-    [(1, "default"), (3, "default"), (4, "raised"), (6, "raised")]]
+assert [(entry["id"], entry["copy"], entry["two_cores"]) for entry in selected["nested"]["include"]] == [
+    ("profile:android/gradle", 1, False), ("profile:android/gradle", 3, False), ("profile:android/gradle", 4, True)]
 print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
 # Periodic-only profile lanes are planned for Periodic E2E but are never release checks.
 periodic_only = {"profile:" + name + "/" + lane["id"] for name, entry in a.profile_inventory(root).items()

@@ -989,7 +989,7 @@ class Leases(unittest.TestCase):
                 self.assertEqual(launch.returncode, 42, launch.stderr)
                 self.assertEqual(launch.stdout.splitlines(), expected)
 
-    def test_start_passes_software_mode_and_ram_floor_to_avd_and_runtime(self):
+    def test_start_caps_available_cores_and_passes_ram_floor_to_avd_and_runtime(self):
         sdk, image = self.root / 'sdk', self.root / 'image'
         image.mkdir()
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root=str(sdk), size=2,
@@ -1013,20 +1013,19 @@ class Leases(unittest.TestCase):
             (dict(slot_id='004', generation=1,
                   request=dict(api=35, variant='google_apis', abi='x86_64', device='phone')), 2560),
         ]
-        modes = [('', 4, 2, 1024), ('default', 3, 3, 1024), ('raised', 4, 3, 2048), ('raised', 1, 1, 2048)]
+        core_counts = [(2, 2), (3, 3), (4, 3), (1, 1)]
         with patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3)), \
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
              patch.object(poolmod.pwd, 'getpwnam', return_value=account), \
              patch.object(poolmod.os, 'chown'), patch.object(poolmod, 'run', side_effect=record), \
              patch.object(poolmod.Runtime, 'start_network'), patch.object(runtime, 'wait_for_boot') as wait_for_boot, \
-             patch.object(poolmod.Runtime, 'NETNS_ROOT', netns):
-            for (slot, _), (mode, available, cores, _) in zip(slots, modes, strict=True):
+             patch.object(poolmod.Runtime, 'NETNS_ROOT', netns), patch.object(poolmod.time, 'monotonic', return_value=42):
+            for (slot, _), (available, cores) in zip(slots, core_counts, strict=True):
                 cancel = threading.Event()
-                with patch.dict(os.environ, SUBYARD_ANDROID_E2E_GRADLE=mode), \
-                     patch.object(poolmod.os, 'sched_getaffinity', return_value=set(range(available))):
+                with patch.object(poolmod.os, 'sched_getaffinity', return_value=set(range(available))):
                     runtime.start(slot, image, cancel)
-                wait_for_boot.assert_called_with(slot, cancel, cores, settle=bool(mode))
-        for (slot, memory), (_, _, cores, headroom) in zip(slots, modes, strict=True):
+                wait_for_boot.assert_called_with(slot, cancel, cores, 42)
+        for (slot, memory), (_, cores) in zip(slots, core_counts, strict=True):
             avd = runtime.root / runtime.unit(slot).removesuffix('.service') / 'home/avd/managed.avd/config.ini'
             self.assertIn('hw.gpu.mode=swiftshader\n', avd.read_text())
             self.assertIn(f'hw.ramSize={memory}\n', avd.read_text())
@@ -1039,12 +1038,11 @@ class Leases(unittest.TestCase):
                            and command[command.index('--unit') + 1] == runtime.unit(slot))
             self.assertIn('--setenv=EMULATOR_GPU=software', command)
             self.assertNotIn('SUBYARD_ANDROID_E2E_SHOW_KERNEL', ' '.join(command))
-            self.assertNotIn('SUBYARD_ANDROID_E2E_GRADLE', ' '.join(command))
-            self.assertIn(f'--property=MemoryMax={memory + headroom}M', command)
+            self.assertIn(f'--property=MemoryMax={memory + 1024}M', command)
             self.assertIn('--property=NetworkNamespacePath=' + str(netns / runtime.namespace_name(slot)), command)
             self.assertNotIn('--property=PrivateNetwork=yes', command)
 
-    def test_gradle_boot_wait_resets_until_pressure_and_framework_stay_stable(self):
+    def test_pool_boot_wait_resets_until_pressure_and_framework_stay_stable(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
         ready = b'101'
         restart = b'102'
@@ -1053,9 +1051,9 @@ class Leases(unittest.TestCase):
             ([ready] * 5, [10, None, 10, 10, 10], [0] * 5, 8, None),
             ([ready] * 5, [10] * 5, [0, 30, 0, 0, 0], 8, None),
             ([ready] * 5, [10] * 5, [0, None, 0, 0, 0], 8, None),
-            ([ready, None, ready, ready, ready], [10] * 4, [0] * 4, 8, None),
+            ([ready, None, ready, ready, ready], [10] * 5, [0] * 5, 8, None),
             ([ready, ready, restart, restart, restart], [10] * 5, [0] * 5, 8, None),
-            ([None] * 5, [], [], 10, 'boot_timeout'),
+            ([None] * 5, [35] * 5, [None] * 5, 10, True),
         ]
         for samples, cpu, memory, elapsed, failure in cases:
             with self.subTest(samples=samples, cpu=cpu, memory=memory):
@@ -1069,14 +1067,21 @@ class Leases(unittest.TestCase):
                      patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
                      patch.object(runtime, 'adb_ready', side_effect=[(sample, False) for sample in samples]), \
                      patch.object(runtime, 'boot_pressure', side_effect=lambda _, resource: next(pressures[resource])), \
-                     contextlib.redirect_stderr(io.StringIO()):
+                     contextlib.redirect_stderr(io.StringIO()) as journal:
                     if failure:
                         with self.assertRaises(poolmod.PoolError) as error:
-                            runtime.wait_for_boot({}, cancel, 3, settle=True)
-                        self.assertEqual(error.exception.code, failure)
+                            runtime.wait_for_boot({}, cancel, 3, -3)
+                        self.assertEqual(error.exception.code, 'boot_timeout')
+                        self.assertIn('within 10 seconds', str(error.exception))
+                        self.assertIn('package manager probe did not pass', str(error.exception))
+                        self.assertIn('CPU PSI was 35% (limit 20%)', str(error.exception))
+                        self.assertIn('memory PSI was unavailable (limit 5%)', str(error.exception))
+                        self.assertIn('needs 4 consecutive seconds', str(error.exception))
                     else:
-                        runtime.wait_for_boot({}, cancel, 3, settle=True)
+                        runtime.wait_for_boot({}, cancel, 3, -3)
                 self.assertEqual(now[0], elapsed)
+                self.assertIn(f'settled={str(not failure).lower()} boot_to_ready_seconds={elapsed + 3}.0 '
+                              f'elapsed_seconds={elapsed}.0', journal.getvalue())
 
     def test_runtime_namespace_rejects_collisions_and_cleans_only_its_name(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root='/unused'))
@@ -1291,6 +1296,7 @@ os.write(1, result.stdout)
                            WIFI_ENABLED=wifi, WIFI_EXIT=wifi_exit, WIFI_CALL=str(wifi_call),
                            CONNECT_EXIT=connect_exit, CONNECT_CALL=str(connect_call),
                            FRAMEWORK_PID='101', WIFI_SERVICE='Service wifi: found',
+                           PACKAGE_REPLY='package:/system/framework/framework-res.apk', PACKAGE_EXIT='0',
                            ACTUAL_WIFI_STATUS='Wifi is enabled\nprivate connection details',
                            PATH=str(commands) + ':' + os.environ['PATH'])
                 process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
@@ -1309,14 +1315,10 @@ os.write(1, result.stdout)
                 if connect:
                     self.assertEqual(connect_call.read_text(), 'wifi connect-network AndroidWifi open\n')
                 if expected == (b'101', False):
-                    for package, package_exit, settled in (
-                            ('package:/system/framework/framework-res.apk', '0', b'101'),
-                            ('Can\'t find service: package', '0', None),
-                            ('package:/system/framework/framework-res.apk', '1', None)):
+                    for package, package_exit in (("Can't find service: package", '0'), (env['PACKAGE_REPLY'], '1')):
                         with subprocess.Popen([sys.executable, '-c', protocol], env=dict(env, PACKAGE_REPLY=package,
                                               PACKAGE_EXIT=package_exit), stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
-                            self.assertEqual(poolmod.Runtime.adb_ready(process, timeout=1, settle=True),
-                                             (settled, False))
+                            self.assertEqual(poolmod.Runtime.adb_ready(process, timeout=1), (None, False))
 
     def test_wifi_submission_recovers_only_after_framework_or_service_change(self):
         commands = self.root / 'framework-readiness-bin'
@@ -1332,6 +1334,7 @@ os.write(1, result.stdout)
         command.write_text('#!/bin/sh\ncase "$*" in\n'
                            '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
                            '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" >> "$SUBMISSIONS";;\n'
+                           '"package path android") printf "package:/system/framework/framework-res.apk\\n";;\n'
                            '*) exit 2;;\nesac\n')
         command.chmod(0o755)
         protocol = r'''
