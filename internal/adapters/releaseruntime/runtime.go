@@ -2186,7 +2186,8 @@ func (runtime *Runtime) fetch(ctx context.Context, options options, name, destin
 		}
 		return nil
 	}
-	pending, err := safefs.Create(destination, safefs.Options{TempPattern: ".download-*"})
+	// The destination is checked at publication, after the source, as the rename was before.
+	pending, err := safefs.Create(destination, safefs.Options{TempPattern: ".download-*", CheckAtPublish: true})
 	if err != nil {
 		return err
 	}
