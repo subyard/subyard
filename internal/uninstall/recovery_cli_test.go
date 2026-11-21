@@ -22,14 +22,13 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 	type state struct {
 		store uninstall.RecoveryStore
 		plan  uninstall.RecoveryPlan
-		empty *bool
 	}
-	sawEmpty := false
+	empty, sawEmpty := false, false
 	interrupt.Sweep(t, interrupt.Case[state]{
 		Setup: func(t *testing.T) state {
 			store, plan := uninstall.CompletedRecoveryStoreFixture(t)
 			testkit.WriteFile(t, filepath.Join(store.Directory, ".plan-next"), []byte("stale publication"), 0600)
-			return state{store, plan, new(bool)}
+			return state{store, plan}
 		},
 		Run: func(t *testing.T, s state, in *interrupt.Injector) interrupt.Outcome {
 			var diagnostics bytes.Buffer
@@ -42,14 +41,11 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restore := uninstall.InterruptRecoveryStoreRemoval(s.store.Directory, in)
-			defer restore()
+			defer uninstall.InterruptRecoveryStoreRemoval(s.store.Directory, in)()
 			code := program.Run(t.Context())
 			return interrupt.Outcome{Code: code, Output: diagnostics.String()}
 		},
-		Signature: func(t *testing.T, s state) any {
-			return interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome))
-		},
+		Signature: func(t *testing.T, s state) any { return interrupt.Tree(t, filepath.Dir(s.plan.Installation.DataHome)) },
 		Completed: func(t *testing.T, s state, o interrupt.Outcome) {
 			if o.Code != 0 {
 				t.Fatalf("uninterrupted exit=%d output=%s", o.Code, o.Output)
@@ -80,10 +76,10 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: inspect interrupted store: %v", p, err)
 			}
-			*s.empty = len(entries) == 0
+			empty = len(entries) == 0
 		},
 		Resumed: func(t *testing.T, s state, p interrupt.Point, o interrupt.Outcome) {
-			if *s.empty {
+			if empty {
 				sawEmpty = true
 				if o.Code != 1 || !strings.Contains(o.Output, "Run 'yard teardown --full' again.") {
 					t.Fatalf("%s: empty-store retry exit=%d output=%s", p, o.Code, o.Output)

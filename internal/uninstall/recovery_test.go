@@ -501,11 +501,7 @@ func InterruptRecoveryStoreRemoval(directory string, in *interrupt.Injector) fun
 	statAt = func(fd int, name, relative string) (Entry, error) {
 		started = started || relative == "." && name == base
 		if started {
-			label := relative
-			if relative == "." {
-				label = name
-			}
-			if err := in.Hit("stat", label); err != nil {
+			if err := in.Hit("stat", relative); err != nil {
 				return Entry{}, err
 			}
 		}
