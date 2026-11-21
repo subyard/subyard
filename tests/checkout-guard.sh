@@ -36,11 +36,10 @@ done
 run_dir=''
 begin() {
   run_dir="$(mktemp -d "$TMP/run.XXXXXX")"
-  # File times have a coarse clock: existing files predate the start, and the run's
-  # writes follow it.
+  # File times have a coarse clock: backdate existing files so that the run's writes
+  # change their stamps.
   find "$checkout/private" -path "$checkout/private/.git" -prune -o -type f -exec touch -d '-2 seconds' {} +
   bash "$GUARD" start "$checkout" "$run_dir"
-  touch -d '-1 second' "$run_dir/checkout-before"
 }
 
 # expect STATUS [CHANGE...]: match the exit status and the complete list of reported changes.
@@ -86,6 +85,14 @@ for name in agents/codex/repo.rules config.env "$tab_name" "$newline_name"; do
 done
 expect 1 '~ private/agents/codex/repo.rules' '~ private/config.env' "~ private/$tab_name" "~ private/${newline_name%%$'\n'*}"
 grep -Fxq 'line.env' "$TMP/stderr" || fail "newline name was cut: $(cat "$TMP/stderr")"
+
+# A stray overlay file with a future modification time passes until the run writes it.
+touch -d '+1 hour' "$checkout/private/yards/neighbor.env"
+run_dir="$(mktemp -d "$TMP/run.XXXXXX")"
+bash "$GUARD" start "$checkout" "$run_dir"
+expect 0
+printf 'stale\n' > "$checkout/private/yards/neighbor.env"
+expect 1 '~ private/yards/neighbor.env'
 
 # Outside a private/ clone only the checkout paths are compared.
 rm -rf "$checkout/private/.git"

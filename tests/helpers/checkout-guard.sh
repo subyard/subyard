@@ -23,27 +23,31 @@ checkout_state() {
   checkout_paths "$1/private" | { grep -vE "$PRIVATE_DOCUMENTS" || true; } | sed 's|^|private/|'
 }
 
-private_config_files() {
-  [ ! -e "$1/private/.git" ] || git -C "$1/private" ls-files -z --others -- "${PRIVATE_CONFIG[@]}"
+# NUL-separated pairs of name and stamp: inode, size, modification and change times.
+private_config_stamps() {
+  [ -e "$1/private/.git" ] || return 0
+  git -C "$1/private" ls-files -z --others -- "${PRIVATE_CONFIG[@]}" \
+    | (cd "$1/private" || exit 0; xargs -0r stat --printf '%n\0%i %s %.9Y %.9Z\0' -- 2>/dev/null || true)
 }
 
-# The snapshot's modification time marks the start of the run.
 start() {
-  private_config_files "$1" > "$2/checkout-private-config"
+  private_config_stamps "$1" > "$2/checkout-private-config"
   checkout_state "$1" | LC_ALL=C sort > "$2/checkout-before"
 }
 
 check() {
-  local root="$1" before="$2/checkout-before" changes file
-  changes="$(LC_ALL=C comm -3 "$before" <(checkout_state "$root" | LC_ALL=C sort) \
+  local root="$1" changes file stamp
+  changes="$(LC_ALL=C comm -3 "$2/checkout-before" <(checkout_state "$root" | LC_ALL=C sort) \
     | sed -e 's/^\t/+ /' -e '/^+ /!s/^/- /')"
-  local -A existing=()
-  while IFS= read -r -d '' file; do existing["$file"]=1; done < "$2/checkout-private-config"
-  while IFS= read -r -d '' file; do
-    if [ -n "${existing["$file"]:-}" ] && [ "$root/private/$file" -nt "$before" ]; then
+  local -A started=()
+  while IFS= read -r -d '' file && IFS= read -r -d '' stamp; do
+    started["$file"]="$stamp"
+  done < "$2/checkout-private-config"
+  while IFS= read -r -d '' file && IFS= read -r -d '' stamp; do
+    if [ -n "${started["$file"]:-}" ] && [ "${started["$file"]}" != "$stamp" ]; then
       changes+="${changes:+$'\n'}~ private/$file"
     fi
-  done < <(private_config_files "$root")
+  done < <(private_config_stamps "$root")
   [ -z "$changes" ] || {
     printf 'FAIL: tests added (+), removed (-) or rewrote (~) checkout paths outside .build/:\n%s\n' "$changes" >&2
     exit 1
