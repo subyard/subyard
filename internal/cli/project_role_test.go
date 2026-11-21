@@ -393,7 +393,7 @@ func TestProjectRoleRecheckedBeforeMutation(t *testing.T) {
 func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 	for _, name := range []string{"sync", "code"} {
 		t.Run(name, func(t *testing.T) {
-			fixture := newFixture(t)
+			fixture := newFixture(t, withCommands("ssh"))
 			root := fixture.Root
 			// The controller role is unrelated to the selected remote owner's role.
 			writeDisabledProjectRole(t, root)
@@ -416,14 +416,9 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			bin := filepath.Join(root, "fake-bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
-				t.Fatal(err)
-			}
 			denied := filepath.Join(root, "owner-denied")
-			fake := testkit.NewExecFake(t, bin, "ssh").On(testkit.Match{}, testkit.Reply{Script: trustedSSHMock(t) +
+			fake := fixture.Exec().On(testkit.Match{}, testkit.Reply{Script: trustedSSHMock(t) +
 				"if [ -f " + shellquote.Word(denied) + " ]; then printf 'selected yard role does not accept work projects\\n' >&2; exit 1; fi\nexit 0\n"})
-			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 			execution := &projectExecution{Loaded: selected, RequiresProjects: projectCommandRequiresProjects(name)}
 			if err := program.captureProjectOwner(context.Background(), execution); err != nil {
 				t.Fatal(err)

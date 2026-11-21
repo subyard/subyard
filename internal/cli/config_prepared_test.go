@@ -1087,13 +1087,9 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 
 func withPreparedYardTemplate(t *testing.T, fixture *cliFixture) []string {
 	t.Helper()
-	// The synthetic template helper replaces this link with its own config tree.
-	source := filepath.Join(filepath.Dir(fixture.Home), "source")
-	if err := os.Mkdir(source, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	configDir := filepath.Join(source, "config")
-	if err := os.Symlink(filepath.Join(fixture.Root, "config"), configDir); err != nil {
+	// The synthetic template helper replaces this empty directory with its own config tree.
+	configDir := filepath.Join(filepath.Dir(fixture.Home), "source", "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	environment := append(withoutCommandSetting(fixture.Environment, "SUBYARD_CONFIG_DIR"), "SUBYARD_CONFIG_DIR="+configDir)
@@ -1209,16 +1205,15 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newFixture(t, withCheckoutConfig())
-			root, home, configHome := fixture.Root, fixture.Home, fixture.ConfigHome
+			home, configHome := fixture.Home, fixture.ConfigHome
+			if test.retired {
+				fixture.Write("config/retired-components.json",
+					`{"schema_version":1,"components":[{"kind":"integration","id":"old","settings":["AGENT_old_COMMAND"]}]}`)
+			}
 			environment := withPreparedYardTemplate(t, fixture)
 			source := filepath.Join(filepath.Dir(home), "source")
 			if test.dedicated {
 				writeConfigCommandFile(t, filepath.Join(source, "config", "profiles", "fixture", "profile.conf"), "PROVISION_SCOPE=dedicated\n")
-			}
-			if test.retired {
-				writeConfigCommandFile(t, filepath.Join(source, "config", "retired-components.json"),
-					`{"schema_version":1,"components":[{"kind":"integration","id":"old","settings":["AGENT_old_COMMAND"]}]}`)
-				root = source
 			}
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
@@ -1271,7 +1266,7 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 			var stderr bytes.Buffer
 			arguments := append([]string{"config", "set"}, test.assignments...)
 			arguments = append(arguments, "--scope", test.scope, "--yes")
-			program := fixture.New(Options{RepositoryRoot: root, WorkingDir: root, Arguments: arguments, Environment: environment, Stdout: io.Discard, Stderr: &stderr})
+			program := fixture.New(Options{Arguments: arguments, Environment: environment, Stdout: io.Discard, Stderr: &stderr})
 			if code := program.Run(context.Background()); code != test.code {
 				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
 			}
