@@ -340,7 +340,6 @@ func TestInitProfileDirectCommandConfirmsOnce(t *testing.T) {
 			platform := newInitPlatformFixture()
 			var output bytes.Buffer
 			cli := fixture.New(Options{Arguments: []string{"init"}, InitPlatform: platform, Prompt: prompt, Stdin: strings.NewReader("42\n987\n"), Stdout: &output, Stderr: &output})
-			var err error
 			cli.promptInputTerminal = func() bool { return true }
 			code := cli.Run(context.Background())
 			if (code == 0) != approve {
@@ -349,7 +348,7 @@ func TestInitProfileDirectCommandConfirmsOnce(t *testing.T) {
 			if len(prompt.Requests) != 1 || !strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "Account ID: 42") {
 				t.Fatalf("prompts=%v output=%s", prompt.Requests, output.String())
 			}
-			_, err = os.Stat(filepath.Join(root, "state", "fixture.json"))
+			_, err := os.Stat(filepath.Join(root, "state", "fixture.json"))
 			if approve && err != nil || !approve && !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("config write on approve=%t: %v", approve, err)
 			}

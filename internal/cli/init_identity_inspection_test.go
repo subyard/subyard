@@ -265,7 +265,7 @@ func TestStoppedIdentityInspectionStartReceivesSudoPreauthorization(t *testing.T
 	record := filepath.Join(root, "guard.env")
 	// The guard records its arguments and the sudo preparation it received, then fails.
 	fixture.Exec().
-		On(testkit.Match{Tool: "systemctl"}, testkit.Reply{Stdout: "active\n"}).
+		On(testkit.Match{Tool: "systemctl", Args: []string{"is-active", "NetworkManager"}}, testkit.Reply{Stdout: "active\n"}).
 		On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}}, testkit.Reply{}).
 		On(testkit.Match{Tool: "scripts/lifecycle-guard.sh"}, testkit.Reply{Script: "printf '%s\\n' \"$*\" \"${SUBYARD_SUDO_PREAUTHORIZED:-unset}\" > \"$GUARD_RECORD\"\nreturn 1"})
 	environment := append(fixture.Environment, "GUARD_RECORD="+record)
