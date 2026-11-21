@@ -10,6 +10,7 @@ import secrets
 import signal
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,20 @@ def telemetry_collector(directory):
     binary = Path(directory) / 'subyard-telemetry'
     subprocess.run(['go', 'build', '-o', str(binary), './config/profiles/telemetry/cmd/telemetry'], cwd=ROOT, check=True)
     return str(binary)
+
+
+@contextlib.contextmanager
+def descriptor_stderr():
+    """Capture writes to file descriptor 2, which the relay refusal log uses directly."""
+    saved, kept = os.dup(2), []
+    with tempfile.TemporaryFile() as capture:
+        os.dup2(capture.fileno(), 2)
+        try:
+            yield lambda: kept[0] if kept else os.pread(capture.fileno(), 1 << 20, 0).decode()
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            kept.append(os.pread(capture.fileno(), 1 << 20, 0).decode())
 
 
 class ClientBridge(unittest.TestCase):
@@ -556,6 +571,35 @@ class Leases(unittest.TestCase):
         with self.assertRaisesRegex(poolmod.PoolError, 'boot failed; runtime was stopped'):
             self.pool.allocation(token)
 
+    def test_boot_timeout_keeps_diagnostics_after_slot_reuse_until_expiry(self):
+        token = secrets.token_hex(32)
+        diagnostic = 'Android boot did not settle. Cgroup CPU PSI was 45%.'
+        with patch.object(self.runtime, 'start', side_effect=poolmod.PoolError('boot_timeout', diagnostic)):
+            with self.pool.lock:
+                failed = self.pool.reserve({}, token, self.owner)
+                worker = self.pool.workers[failed['slot_id']]
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+
+        replacement, allocation = self.acquire()
+        self.assertEqual(allocation['slot_id'], failed['slot_id'])
+        self.assertGreater(allocation['generation'], failed['generation'])
+        with self.assertRaises(poolmod.PoolError) as error:
+            self.pool.allocation(token)
+        self.assertEqual(error.exception.code, 'boot_timeout')
+        self.assertEqual(str(error.exception), diagnostic + '; runtime was stopped')
+        with self.assertRaisesRegex(poolmod.PoolError, 'credential already used'):
+            self.pool.reserve({}, token, self.owner)
+        self.pool.release(token)
+        self.assertEqual(self.pool.allocation(replacement)['state'], 'held')
+
+        self.now += poolmod.TTL
+        with self.assertRaises(poolmod.PoolError) as error:
+            self.pool.allocation(token)
+        self.assertEqual(error.exception.code, 'stale')
+        self.pool.reap()
+        self.assertFalse(self.pool.boot_failures)
+
     def test_quarantine_keeps_image_pinned_and_never_reallocates(self):
         token, allocation = self.acquire()
         self.runtime.fail_stop = True
@@ -931,6 +975,7 @@ class Leases(unittest.TestCase):
         identity.chmod(0o755)
         environment = dict(os.environ, HOME=str(root), PATH=str(commands) + ':' + os.environ['PATH'],
                            EMULATOR_GPU='software')
+        environment.pop('SUBYARD_ANDROID_E2E_SHOW_KERNEL', None)
         check = subprocess.run(['bash', str(ROOT / 'config/profiles/android/runtime.sh'), '--check-graphics'],
                                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(check.returncode, 0, check.stderr.decode())
@@ -962,8 +1007,18 @@ class Leases(unittest.TestCase):
                 self.assertEqual(arguments[arguments.index('-feature') + 1], '-Vulkan')
             else:
                 self.assertNotIn('-feature', arguments)
+            self.assertEqual(arguments[-2:], ['-logcat', '*:S'])
+            self.assertNotIn('-logcat-output', arguments)
+            self.assertNotIn('-show-kernel', arguments)
+            console_arguments = arguments + ['-show-kernel', '-logcat-output', '/dev/null']
+            for enabled, expected in (('0', arguments), ('1', console_arguments)):
+                launch = subprocess.run(['bash', str(ROOT / 'config/profiles/android/runtime.sh')],
+                                        env=dict(environment, SUBYARD_ANDROID_E2E_SHOW_KERNEL=enabled),
+                                        capture_output=True, text=True)
+                self.assertEqual(launch.returncode, 42, launch.stderr)
+                self.assertEqual(launch.stdout.splitlines(), expected)
 
-    def test_start_passes_software_mode_and_ram_floor_to_avd_and_runtime(self):
+    def test_start_uses_two_cores_and_passes_ram_floor_to_avd_and_runtime(self):
         sdk, image = self.root / 'sdk', self.root / 'image'
         image.mkdir()
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root=str(sdk), size=2,
@@ -987,15 +1042,18 @@ class Leases(unittest.TestCase):
              patch.object(poolmod.Runtime, 'nameservers', return_value=['1.1.1.1']), \
              patch.object(poolmod.pwd, 'getpwnam', return_value=account), \
              patch.object(poolmod.os, 'chown'), patch.object(poolmod, 'run', side_effect=record), \
-             patch.object(poolmod.Runtime, 'start_network'), patch.object(poolmod.Runtime, 'pid', return_value=1), \
-             patch.object(poolmod.Runtime, 'connect'), patch.object(poolmod.Runtime, 'adb_ready', return_value=(True, False)), \
-             patch.object(poolmod.Runtime, 'NETNS_ROOT', netns):
-            for slot, _ in slots:
-                runtime.start(slot, image, threading.Event())
+             patch.object(poolmod.Runtime, 'start_network'), patch.object(runtime, 'wait_for_boot') as wait_for_boot, \
+             patch.object(poolmod.Runtime, 'NETNS_ROOT', netns), patch.object(poolmod.time, 'monotonic', return_value=42):
+            for (slot, _), available in zip(slots, (2, 3), strict=True):
+                cancel = threading.Event()
+                with patch.object(poolmod.os, 'sched_getaffinity', return_value=set(range(available))):
+                    runtime.start(slot, image, cancel)
+                wait_for_boot.assert_called_with(slot, cancel, 2, 42)
         for slot, memory in slots:
             avd = runtime.root / runtime.unit(slot).removesuffix('.service') / 'home/avd/managed.avd/config.ini'
             self.assertIn('hw.gpu.mode=swiftshader\n', avd.read_text())
             self.assertIn(f'hw.ramSize={memory}\n', avd.read_text())
+            self.assertIn('hw.cpu.ncore=2\n', avd.read_text())
             if slot['request']['device'] == 'tablet':
                 self.assertIn('hw.lcd.width=800\n', avd.read_text())
                 self.assertIn('hw.lcd.height=1280\n', avd.read_text())
@@ -1003,9 +1061,102 @@ class Leases(unittest.TestCase):
             command = next(command for command in commands if '--unit' in command
                            and command[command.index('--unit') + 1] == runtime.unit(slot))
             self.assertIn('--setenv=EMULATOR_GPU=software', command)
-            self.assertIn(f'--property=MemoryMax={memory + poolmod.RUNTIME_OVERHEAD_MIB}M', command)
+            self.assertNotIn('SUBYARD_ANDROID_E2E_SHOW_KERNEL', ' '.join(command))
+            self.assertIn(f'--property=MemoryMax={memory + 1024}M', command)
             self.assertIn('--property=NetworkNamespacePath=' + str(netns / runtime.namespace_name(slot)), command)
             self.assertNotIn('--property=PrivateNetwork=yes', command)
+
+    def test_pool_boot_wait_resets_until_pressure_and_framework_stay_stable(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        ready = b'101'
+        restart = b'102'
+        cases = [
+            ([ready] * 5, [10, 70, 10, 10, 10], [0] * 5, 0, 8, False),
+            ([ready] * 5, [10, None, 10, 10, 10], [0] * 5, 0, 8, False),
+            ([ready] * 5, [10] * 5, [0, 30, 0, 0, 0], 0, 8, False),
+            ([ready] * 5, [10] * 5, [0, None, 0, 0, 0], 0, 8, False),
+            ([ready, None, ready, ready, ready], [10] * 5, [0] * 5, 0, 8, False),
+            ([ready, ready, restart, restart, restart], [10] * 5, [0] * 5, 0, 8, False),
+            # The first wakeup is at 5s. Readiness needs another 4s of passing samples.
+            ([ready] * 4, [10] * 4, [0] * 4, 3, 9, False),
+            ([None] * 5, [35] * 5, [None] * 5, 0, 10, True),
+        ]
+        for samples, cpu, memory, wakeup_delay, elapsed, failure in cases:
+            with self.subTest(samples=samples, cpu=cpu, memory=memory, wakeup_delay=wakeup_delay):
+                now = [0]
+                pressures = {'cpu': iter(cpu), 'memory': iter(memory)}
+                def advance(seconds):
+                    if now[0] == 0:
+                        seconds += wakeup_delay
+                    now[0] += seconds
+                cancel = SimpleNamespace(is_set=lambda: False, wait=advance)
+                with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now[0]), \
+                     patch.object(poolmod, 'BOOT_TIMEOUT', 10), patch.object(poolmod, 'BOOT_SETTLE_SECONDS', 4), \
+                     patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
+                     patch.object(runtime, 'adb_ready', side_effect=[(sample, False) for sample in samples]), \
+                     patch.object(runtime, 'boot_pressure', side_effect=lambda _, resource: next(pressures[resource])), \
+                     contextlib.redirect_stderr(io.StringIO()) as journal:
+                    if failure:
+                        with self.assertRaises(poolmod.PoolError) as error:
+                            runtime.wait_for_boot({}, cancel, 3, -3)
+                        self.assertEqual(error.exception.code, 'boot_timeout')
+                        self.assertIn('within 10 seconds', str(error.exception))
+                        self.assertIn('package manager probe did not pass', str(error.exception))
+                        self.assertIn('CPU PSI was 35% (limit 20%)', str(error.exception))
+                        self.assertIn('memory PSI was unavailable (limit 5%)', str(error.exception))
+                        self.assertIn('needs 4 consecutive seconds', str(error.exception))
+                    else:
+                        runtime.wait_for_boot({}, cancel, 3, -3)
+                self.assertEqual(now[0], elapsed)
+                self.assertIn(f'settled={str(not failure).lower()} boot_to_ready_seconds={elapsed + 3}.0 '
+                              f'elapsed_seconds={elapsed}.0', journal.getvalue())
+
+    def test_pool_boot_wait_accounts_for_probe_duration_and_missed_samples(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        for first_probe_seconds, next_start in ((1.1, 2), (0.1, 2), (1.1, 30)):
+            with self.subTest(first_probe_seconds=first_probe_seconds, next_start=next_start):
+                now = 0.0
+                probe_starts = []
+
+                def ready(*args, **kwargs):
+                    nonlocal now
+                    probe_starts.append(now)
+                    now += first_probe_seconds if len(probe_starts) == 1 else 1.1
+                    return b'101', False
+
+                def wait(seconds):
+                    nonlocal now
+                    now += seconds
+                    if len(probe_starts) == 1 and next_start == 30:
+                        now = next_start
+
+                cancel = SimpleNamespace(is_set=lambda: False, wait=wait)
+                with patch.object(poolmod.time, 'monotonic', side_effect=lambda: now), \
+                     patch.object(poolmod, 'BOOT_TIMEOUT', 60), \
+                     patch.object(runtime, 'pid', return_value=1), patch.object(runtime, 'connect', return_value=None), \
+                     patch.object(runtime, 'adb_ready', side_effect=ready), \
+                     patch.object(runtime, 'boot_pressure', return_value=0), contextlib.redirect_stderr(io.StringIO()):
+                    runtime.wait_for_boot({}, cancel, 2, 0)
+                expected_ready = 51.1 if next_start == 30 else 21.1
+                self.assertAlmostEqual(now, expected_ready)
+                self.assertEqual(probe_starts, [0, *range(next_start, int(expected_ready), 2)])
+
+    def test_boot_pressure_reads_emulator_unit_instead_of_broker(self):
+        runtime = poolmod.Runtime(dict(state_root=str(self.root / 'readiness'), sdk_root='/unused'))
+        runtime.PROC_ROOT, runtime.CGROUP_ROOT = self.root / 'proc', self.root / 'cgroups'
+        broker = 'system.slice/subyard-android-pool.service'
+        (runtime.PROC_ROOT / 'self').mkdir(parents=True)
+        (runtime.PROC_ROOT / 'self/cgroup').write_text(f'0::/{broker}\n')
+        for unit, cpu, memory in ((broker, '75.25', '45.50'),
+                                  ('system.slice/subyard-android-slot-007-12.service', '12.25', '1.50')):
+            cgroup = runtime.CGROUP_ROOT / unit
+            cgroup.mkdir(parents=True)
+            for resource, value in (('cpu', cpu), ('memory', memory)):
+                (cgroup / f'{resource}.pressure').write_text(f'some avg10={value} avg60=2.00 avg300=3.00 total=12\n'
+                                                           'full avg10=0.10 avg60=0.20 avg300=0.30 total=10\n')
+        slot = dict(slot_id='007', generation=12)
+        self.assertEqual(runtime.boot_pressure(slot, 'cpu'), 12.25)
+        self.assertEqual(runtime.boot_pressure(slot, 'memory'), 1.50)
 
     def test_runtime_namespace_rejects_collisions_and_cleans_only_its_name(self):
         runtime = poolmod.Runtime(dict(state_root=str(self.root / 'runtime'), sdk_root='/unused'))
@@ -1130,10 +1281,10 @@ if not request().startswith(b'shell:'):
 out.write(b'OKAY101:ready\n')
 out.flush()
 '''
-        cases = [(protocol, True, 1, 0),
-                 (protocol.replace("b'OKAY101:ready\\n'", "b'OKAY101:pending\\n'"), False, 1, 0),
-                 ('import os; os.read(0, 64)', False, 0.1, 0),
-                 ('import sys; sys.stdin.buffer.read()', False, 0.1, None)]
+        cases = [(protocol, b'101', 1, 0),
+                 (protocol.replace("b'OKAY101:ready\\n'", "b'OKAY101:pending\\n'"), None, 1, 0),
+                 ('import os; os.read(0, 64)', None, 0.1, 0),
+                 ('import sys; sys.stdin.buffer.read()', None, 0.1, None)]
         for program, expected, timeout, exit_code in cases:
             process = subprocess.Popen([sys.executable, '-c', program], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             try:
@@ -1168,7 +1319,9 @@ out.flush()
         command.write_text('#!/bin/sh\ncase "$*" in\n'
                            '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
                            '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" > "$CONNECT_CALL"; '
-                           'exit "$CONNECT_EXIT";;\n*) exit 2;;\nesac\n')
+                           'exit "$CONNECT_EXIT";;\n'
+                           '"package path android") printf "%s\\n" "$PACKAGE_REPLY"; exit "$PACKAGE_EXIT";;\n'
+                           '*) exit 2;;\nesac\n')
         command.chmod(0o755)
         protocol = r'''
 import os, subprocess
@@ -1196,17 +1349,17 @@ os.write(1, result.stdout)
         address = '    inet 10.0.2.16/24 scope global wlan0'
         cases = [
             # A configured address is ready and never creates another saved network.
-            ('1', '1', address, '0', '0', True, (True, False), False, False),
+            ('1', '1', address, '0', '0', True, (b'101', False), False, False),
             # A visible but unconfigured network asks for one connection per framework lifetime.
-            ('1', '1', '', '0', '0', True, (False, True), False, True),
+            ('1', '1', '', '0', '0', True, (None, True), False, True),
             # A failed connection does not claim either readiness or configuration.
-            ('1', '1', '', '0', '1', True, (False, False), False, True),
+            ('1', '1', '', '0', '1', True, (None, False), False, True),
             # Later polling must not reconnect repeatedly.
-            ('1', '1', '', '0', '0', False, (False, False), False, False),
+            ('1', '1', '', '0', '0', False, (None, False), False, False),
             # Wi-Fi is enabled first when Android reports it disabled.
-            ('1', '0', '', '0', '0', True, (False, True), True, True),
-            ('1', '0', address, '1', '0', True, (False, False), True, False),
-            ('0', '0', address, '0', '0', True, (False, False), False, False),
+            ('1', '0', '', '0', '0', True, (None, True), True, True),
+            ('1', '0', address, '1', '0', True, (None, False), True, False),
+            ('0', '0', address, '0', '0', True, (None, False), False, False),
         ]
         for boot, wifi, address, wifi_exit, connect_exit, configure, expected, enable, connect in cases:
             with self.subTest(boot=boot, wifi=wifi, network=bool(address), configure=configure,
@@ -1218,6 +1371,7 @@ os.write(1, result.stdout)
                            WIFI_ENABLED=wifi, WIFI_EXIT=wifi_exit, WIFI_CALL=str(wifi_call),
                            CONNECT_EXIT=connect_exit, CONNECT_CALL=str(connect_call),
                            FRAMEWORK_PID='101', WIFI_SERVICE='Service wifi: found',
+                           PACKAGE_REPLY='package:/system/framework/framework-res.apk', PACKAGE_EXIT='0',
                            ACTUAL_WIFI_STATUS='Wifi is enabled\nprivate connection details',
                            PATH=str(commands) + ':' + os.environ['PATH'])
                 process = subprocess.Popen([sys.executable, '-c', protocol], env=env,
@@ -1235,6 +1389,11 @@ os.write(1, result.stdout)
                 self.assertEqual(connect_call.exists(), connect)
                 if connect:
                     self.assertEqual(connect_call.read_text(), 'wifi connect-network AndroidWifi open\n')
+                if expected == (b'101', False):
+                    for package, package_exit in (("Can't find service: package", '0'), (env['PACKAGE_REPLY'], '1')):
+                        with subprocess.Popen([sys.executable, '-c', protocol], env=dict(env, PACKAGE_REPLY=package,
+                                              PACKAGE_EXIT=package_exit), stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
+                            self.assertEqual(poolmod.Runtime.adb_ready(process, timeout=1), (None, False))
 
     def test_wifi_submission_recovers_only_after_framework_or_service_change(self):
         commands = self.root / 'framework-readiness-bin'
@@ -1250,6 +1409,7 @@ os.write(1, result.stdout)
         command.write_text('#!/bin/sh\ncase "$*" in\n'
                            '"wifi status") printf "%s\\n" "$ACTUAL_WIFI_STATUS";;\n'
                            '"wifi connect-network AndroidWifi open") printf "%s\\n" "$*" >> "$SUBMISSIONS";;\n'
+                           '"package path android") printf "package:/system/framework/framework-res.apk\\n";;\n'
                            '*) exit 2;;\nesac\n')
         command.chmod(0o755)
         protocol = r'''
@@ -1290,29 +1450,29 @@ os.write(1, result.stdout)
 
         # Desired wifi_on=1 precedes an actually enabled radio; status is disabled
         # while Android is enabling. No accepted connection may be cached yet.
-        self.assertEqual(probe(radio='Wifi is disabled'), (False, False))
-        self.assertEqual(probe(radio='Wifi is disabled\nWifi is enabled'), (False, False))
+        self.assertEqual(probe(radio='Wifi is disabled'), (None, False))
+        self.assertEqual(probe(radio='Wifi is disabled\nWifi is enabled'), (None, False))
         self.assertEqual(state, {})
         self.assertEqual(count(), 0)
-        self.assertEqual(probe(), (False, True))
+        self.assertEqual(probe(), (None, True))
         self.assertEqual(state, {'submitted_for': '101'})
-        self.assertEqual(probe(), (False, False))
+        self.assertEqual(probe(), (None, False))
         self.assertEqual(count(), 1, 'pending DHCP must not trigger another connection')
-        self.assertEqual(probe(pid='202'), (False, True))
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202'), (None, True))
+        self.assertEqual(probe(pid='202'), (None, False))
         self.assertEqual(count(), 2, 'new framework must receive one connection')
-        self.assertEqual(probe(pid='202', address='    inet 10.0.2.16/24'), (True, False))
-        self.assertEqual(probe(pid='202', service='Service wifi: not found'), (False, False))
-        self.assertEqual(probe(pid='202'), (False, True))
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202', address='    inet 10.0.2.16/24'), (b'202', False))
+        self.assertEqual(probe(pid='202', service='Service wifi: not found'), (None, False))
+        self.assertEqual(probe(pid='202'), (None, True))
+        self.assertEqual(probe(pid='202'), (None, False))
         self.assertEqual(count(), 3, 'returning service must receive one connection')
         for pid, service in [('garbage', 'Service wifi: found'), ('0', 'Service wifi: found'),
                              ('202 303', 'Service wifi: found'),
                              ('12345678901', 'Service wifi: found'), ('202', 'unexpected')]:
             self.assertEqual(probe(pid=pid, service=service, address='    inet 10.0.2.16/24'),
-                             (False, False))
+                             (None, False))
         self.assertEqual(count(), 3, 'malformed identity must not submit a connection')
-        self.assertEqual(probe(pid='202'), (False, False))
+        self.assertEqual(probe(pid='202'), (None, False))
 
     def test_viewer_relay_selects_scrcpy_forward_and_fences_clients(self):
         endpoint = str(self.root / 'viewer-adb.sock')
@@ -1755,28 +1915,38 @@ os.write(1, result.stdout)
         self.assertEqual(client.proc_address('0100007F:1F90'), ('127.0.0.1', 8080))
         self.assertEqual(client.proc_address('0000000000000000FFFF00000100007F:0035'), ('127.0.0.1', 53))
         table = self.root / 'tcp'
-        class Stream:
-            def getsockname(self):
-                return ('127.0.0.1', 5037)
-            def getpeername(self):
-                return ('127.0.0.1', 40000)
+        local, peer = ('127.0.0.1', 5037), ('127.0.0.1', 40000)
         header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
         row = '   1: 0100007F:9C40 0100007F:13AD {state} 00000000:00000000 00:00000000 00000000  {uid}        0 {inode} 1\n'
-        cases = [([dict(state='01', uid=1234, inode=77)], 1234),
+        cases = [([dict(state='01', uid=1234, inode=77)], (1234, ['ESTABLISHED'])),
                  # Server-side and timewait rows never identify the connecting owner.
-                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)], 1234),
-                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)], None),
-                 ([], None)]
+                 ([dict(state='06', uid=0, inode=0), dict(state='01', uid=1234, inode=77)],
+                  (1234, ['TIME_WAIT/orphan', 'ESTABLISHED'])),
+                 ([dict(state='01', uid=1234, inode=77), dict(state='01', uid=0, inode=78)],
+                  (None, ['ESTABLISHED', 'ESTABLISHED'])),
+                 # A peer that closed first leaves an orphaned row with uid 0; it is never the owner.
+                 ([dict(state='05', uid=0, inode=0)], (None, ['FIN_WAIT2/orphan'])),
+                 ([dict(state='08', uid=1234, inode=77)], (None, ['CLOSE_WAIT'])),
+                 ([], (None, []))]
         for rows, expected in cases:
             table.write_text(header + ''.join(row.format(**values) for values in rows))
-            self.assertEqual(client.loopback_peer_uid(Stream(), (str(table), str(self.root / 'missing'))), expected)
-        # The real kernel table resolves this process as the owner of its loopback connection.
+            self.assertEqual(client.loopback_peer(local, peer, (str(table), str(self.root / 'missing'))), expected)
+        # The real kernel table resolves this process as the owner of its loopback connection,
+        # and reports a peer that closed before the lookup without naming an owner.
         listener = client.tcp_listener()
         try:
             own = socket.create_connection(listener.getsockname(), timeout=2)
-            accepted, _ = listener.accept()
+            accepted, address = listener.accept()
             try:
-                self.assertEqual(client.loopback_peer_uid(accepted), os.getuid())
+                self.assertEqual(client.loopback_peer(accepted.getsockname(), address),
+                                 (os.getuid(), ['ESTABLISHED']))
+                own.close()
+                for _ in range(100):
+                    owner, states = client.loopback_peer(accepted.getsockname(), address)
+                    if states == ['FIN_WAIT2/orphan']:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual((owner, states), (None, ['FIN_WAIT2/orphan']))
             finally:
                 own.close()
                 accepted.close()
@@ -1795,19 +1965,124 @@ os.write(1, result.stdout)
                     own.settimeout(2)
                     self.assertEqual(own.recv(1), b'')
                 # Another local account's connection is closed before any lease tunnel opens.
-                with patch.object(client, 'loopback_peer_uid', return_value=os.getuid() + 1), \
-                        contextlib.redirect_stderr(io.StringIO()) as output:
+                with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])), \
+                        descriptor_stderr() as output:
                     with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
                         foreign.settimeout(2)
                         peer_port = foreign.getsockname()[1]
                         self.assertEqual(foreign.recv(1), b'')
-                self.assertIn(f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()}', output.getvalue())
-                self.assertIn(f'peer_port={peer_port} relay_port={port}', output.getvalue())
+                    # The refusal log writes on its own thread.
+                    for _ in range(100):
+                        if 'refusals=1 ' in output():
+                            break
+                        time.sleep(0.01)
+                self.assertIn('refused a loopback connection owned by another account '
+                              f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()} peer_state=ESTABLISHED '
+                              f'peer_port={peer_port} relay_port={port} refusals=1 unlogged=0 ', output())
+                # A peer that resets before verification is refused as unknown, counted, and the
+                # relay keeps serving its owner.
+                accept = relay.get_request
+                def late_accept():
+                    request = accept()
+                    for _ in range(100):
+                        states = client.loopback_peer(request[0].getsockname(), request[1])[1]
+                        if not states:
+                            break
+                        time.sleep(0.01)
+                    return request
+                with patch.object(relay, 'get_request', side_effect=late_accept), \
+                        descriptor_stderr() as output:
+                    reset = socket.create_connection(('127.0.0.1', port), timeout=2)
+                    reset.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                    reset.close()
+                    for _ in range(100):
+                        if 'refusals=2 ' in output():
+                            break
+                        time.sleep(0.01)
+                self.assertIn('refused a loopback connection whose owner is unknown peer_uid=unknown '
+                              f'expected_uid={os.getuid()} peer_state=', output())
+                self.assertIn('refusals=2 ', output())
+                with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                    own.settimeout(2)
+                    self.assertEqual(own.recv(1), b'')
+                # A stderr pipe nobody drains drops and counts refusal records; the relay keeps
+                # accepting, serves its owner and shuts down promptly.
+                read_end, write_end = os.pipe()
+                os.set_blocking(write_end, False)
+                with contextlib.suppress(BlockingIOError):
+                    while True:
+                        os.write(write_end, b'x' * 65536)
+                os.set_blocking(write_end, True)
+                saved = os.dup(2)
+                os.dup2(write_end, 2)
+                try:
+                    with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])):
+                        for _ in range(relay.refusal_log.records.maxsize + 20):
+                            with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
+                                foreign.settimeout(2)
+                                self.assertEqual(foreign.recv(1), b'')
+                    self.assertGreaterEqual(relay.refusal_log.dropped, 19)
+                    self.assertEqual(relay.refusals, 2 + relay.refusal_log.records.maxsize + 20)
+                    with socket.create_connection(('127.0.0.1', port), timeout=2) as own:
+                        own.settimeout(2)
+                        self.assertEqual(own.recv(1), b'')
+                    started = time.monotonic()
+                    relay.shutdown()
+                    self.assertLess(time.monotonic() - started, 2)
+                finally:
+                    # The logger stays blocked in its write; closing the reader releases it.
+                    os.dup2(saved, 2)
+                    os.close(saved)
+                    os.close(write_end)
+                    os.close(read_end)
             finally:
                 relay.shutdown()
                 relay.server_close()
-        self.assertEqual(tunnels, ['tunnel'])
+        self.assertEqual(tunnels, ['tunnel', 'tunnel', 'tunnel'])
         self.assertTrue(self.refused(port))
+
+    def test_refusal_log_on_a_full_stderr_pipe_never_blocks_exit(self):
+        # The logger thread may still be writing a refusal when the interpreter exits.
+        child = '''
+import importlib.util, os, socket, sys, time
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('client', sys.argv[1])
+client = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(client)
+relay = client.start_tcp_relay('a' * 64, client.tcp_listener())
+with patch.object(client, 'loopback_peer', return_value=(os.getuid() + 1, ['ESTABLISHED'])):
+    with socket.create_connection(relay.server_address, timeout=2) as foreign:
+        foreign.settimeout(2)
+        assert foreign.recv(1) == b''
+while relay.refusal_log.records.qsize():
+    time.sleep(0.01)
+time.sleep(0.2)
+relay.shutdown()
+relay.server_close()
+print('exiting', flush=True)
+'''
+        read_end, write_end = os.pipe()
+        os.set_blocking(write_end, False)
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                os.write(write_end, b'x' * 65536)
+        os.set_blocking(write_end, True)
+        try:
+            process = subprocess.Popen([sys.executable, '-I', '-c', child, str(ROOT / 'config/profiles/android/client.py')],
+                                       stdout=subprocess.PIPE, stderr=write_end)
+            os.close(write_end)
+            write_end = None
+            try:
+                output, _ = process.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                self.fail('the client did not exit with a full stderr pipe')
+            self.assertEqual((process.returncode, output), (0, b'exiting\n'))
+        finally:
+            os.close(read_end)
+            if write_end is not None:
+                os.close(write_end)
 
     def test_acquire_retains_tcp_relay_until_release(self):
         self.serve_control()

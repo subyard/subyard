@@ -3,6 +3,8 @@
 # through the broker, the project builds against it and runs connected tests through a lease.
 set -euo pipefail
 [ "$#" -eq 0 ] || { printf 'usage: android-gradle.sh\n' >&2; exit 2; }
+# The runtime delivers android-gradle-watch.py with this script.
+[ -n "${android_gradle_watch_source:-}" ] || { printf 'android-gradle: missing watcher source\n' >&2; exit 2; }
 [ "$(id -u)" = 1000 ] || { printf 'android-gradle: requires the fixture developer\n' >&2; exit 1; }
 # shellcheck source=/dev/null
 . /etc/profile.d/subyard-android.sh
@@ -24,6 +26,14 @@ work="$(mktemp -d /tmp/subyard-android-gradle.XXXXXX)"
 chmod 0700 "$work"
 printf '%s\n' subyard-android-gradle-v1 > "$work/.marker"
 stage='setup'
+# Relay refusals are reported on success and failure: the logged total, the first 50 and the last.
+relay_refusals() {
+  local pattern='^Android ADB relay: refused a loopback connection' count
+  count="$(grep -c "$pattern" "$work/connected.log" || true)"
+  printf 'android-gradle: relay refusal records=%s\n' "${count:-0}"
+  grep "$pattern" "$work/connected.log" | awk 'NR <= 50 { print; next } { last = $0 } END { if (last != "") print last }' \
+    | sed 's/^/android-gradle: relay refusal: /' || true
+}
 cleanup() {
   local result=$?
   trap - EXIT
@@ -33,8 +43,7 @@ cleanup() {
       cat "$work/emulator-evidence.log" >&2 || true
     fi
     if [ -f "$work/connected.log" ]; then
-      sed -n '/^Android ADB relay: refused a loopback connection/{s/^/android-gradle: relay refusal: /p;q}' \
-        "$work/connected.log" >&2 || true
+      relay_refusals >&2 || true
     fi
     for log in assemble-37.2.log assemble-35.log assemble-missing.log sdk-install.log assemble-36.1.log connected.log; do
       if [ -f "$work/$log" ]; then
@@ -200,11 +209,40 @@ PY
 printf 'android gradle: sdk install outside defaults, repeat and list=PASS\n'
 assemble 36.1 -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1
 stage='connected'
+# Bounded watchers keep the newest device records of the leased stage (android-gradle-watch.py):
+# a wedged device no longer answers captures taken after the failure.
+printf '%s\n' "$android_gradle_watch_source" > "$work/watch.py"
+# Runs in the leased child before Gradle; failures here never change the stage result.
+connected_watch() {
+  local adb="$ANDROID_SDK_ROOT/platform-tools/adb" watch="$ANDROID_GRADLE_WORK/watch"
+  local watcher="$ANDROID_GRADLE_WORK/watch.py"
+  mkdir -p "$watch"
+  # -D marks every change of buffer, which the crash section follows.
+  python3 "$watcher" stream "$watch/logcat.log" 2097152 -- \
+    "$adb" logcat -D -b main -b system -b crash -v threadtime < /dev/null &
+  ANDROID_GRADLE_WATCHERS="$!"
+  # The events buffer records lmkd kills, process deaths, crashes and ANRs.
+  python3 "$watcher" stream "$watch/events.log" 1048576 -- \
+    "$adb" logcat -b events -v threadtime < /dev/null &
+  ANDROID_GRADLE_WATCHERS+=" $!"
+  # dmesg is not permitted to the shell user; the kernel log buffer may be.
+  python3 "$watcher" stream "$watch/kernel.log" 1048576 -- \
+    "$adb" logcat -b kernel -v threadtime < /dev/null &
+  ANDROID_GRADLE_WATCHERS+=" $!"
+  python3 "$watcher" sample "$watch/memory.log" 1048576 20 -- \
+    "$adb" shell 'cat /proc/loadavg /proc/meminfo; for p in cpu memory io; do printf "pressure %s\n" "$p"; cat "/proc/pressure/$p"; done; grep -E "^(oom_kill|allocstall|pgmajfault|pswp|workingset_refault)" /proc/vmstat' \
+    < /dev/null &
+  ANDROID_GRADLE_WATCHERS+=" $!"
+  # The broker has granted a settled device. Finish the bounded snapshot before starting Gradle.
+  {
+    printf 'android-gradle evidence: before connected meminfo\n' >&2
+    android_capture_evidence --foreground "$adb" shell dumpsys meminfo || true
+  } 2> "$watch/before.log"
+}
 # No --no-daemon: run's GRADLE_OPTS guard keeps Gradle inside the lease.
 # The child's EXIT trap runs while run still owns the emulator and ADB relay.
 connected() {
-  local result=$? section
-  local -a command
+  local result=$? section file watch="$ANDROID_GRADLE_WORK/watch" pid
   # Only reports relay health; the captures below keep run's ADB_SERVER_SOCKET.
   local relay_probe='
 import socket, sys
@@ -220,31 +258,39 @@ print("relay=" + ("healthy" if healthy else "unhealthy") + " reply=" + repr(repl
 raise SystemExit(0 if healthy else 1)
 '
   trap - EXIT
+  for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in ${ANDROID_GRADLE_WATCHERS:-}; do
+    wait "$pid" 2>/dev/null || true
+  done
   if [ "$result" -ne 0 ]; then
+    cat "$watch/before.log" >&2 2>/dev/null || true
     printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
     android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true
-    for section in logcat meminfo lowmemory; do
+    # Each section keeps the newest whole records; the capture helper redacts and bounds them.
+    for section in logcat-notable logcat-crash logcat events-notable kernel memory; do
       printf 'android-gradle evidence: %s\n' "$section" >&2
       case "$section" in
-        logcat) command=("$ANDROID_SDK_ROOT/platform-tools/adb" logcat -b main -b system -b crash -d -t 512 -v threadtime) ;;
-        meminfo) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell dumpsys meminfo) ;;
-        # dmesg may be forbidden on Google APIs images; retain lmkd records too.
-        lowmemory) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
+        logcat*) file=logcat.log ;;
+        events*) file=events.log ;;
+        *) file="$section.log" ;;
       esac
-      android_capture_evidence "${command[@]}" || true
+      android_capture_evidence python3 "$ANDROID_GRADLE_WORK/watch.py" section "$section" "$watch/$file" || true
     done
   fi
   exit "$result"
 }
-export -f connected android_capture_evidence
-export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log"
+export -f connected connected_watch android_capture_evidence
+export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log" ANDROID_GRADLE_WORK="$work"
 # The child shell expands the exported evidence path and command arguments.
 # shellcheck disable=SC2016
 android-broker run --device phone --api 36 --wait 900 --purpose android-gradle -- \
-  bash -c 'trap "connected 2> \"$ANDROID_GRADLE_EVIDENCE\"" EXIT; "$@"' _ \
+  bash -c 'trap "connected 2> \"$ANDROID_GRADLE_EVIDENCE\"" EXIT; connected_watch; "$@"' _ \
   "${gradle[@]}" -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1 :app:connectedDebugAndroidTest \
   > "$work/connected.log" 2>&1 < /dev/null
 not_writable "$work/connected.log"
+relay_refusals
 if pgrep -u "$(id -u)" -f 'org.gradle.launcher.daemon.bootstrap.GradleDaemon' >/dev/null; then
   printf 'android-gradle: a Gradle daemon outlived the lease\n' >&2
   exit 1

@@ -126,6 +126,11 @@ read-only physical-owner meminfo bind. Virtualized LXCFS counters require that p
 missing or unsafe evidence blocks allocation. Status reports these bounds, the limiting source,
 a 512 MiB reserve and pending startup promises. Concurrent provisioning reserves the full preset
 budget until readiness or confirmed cleanup; held emulators are already reflected in available RAM.
+The pool grants a lease after boot completion, guest network readiness and a responsive package
+manager. The same Android framework must pass those checks while the emulator cgroup's CPU and
+memory pressure (`some avg10`) stay at or below 20% and 5%, respectively, for 20 seconds. The boot
+readiness wait is bounded at 20 minutes after network setup; a timeout reports the last guest probe
+and cgroup pressure readings.
 Swap does not increase allocation headroom. The pool service has its own 2 GiB RAM and 2 GiB swap
 ceilings, verified against ancestor RAM limits. Runtime services use separate cgroups and their
 existing per-device memory ceilings. Initial image installation requires at least
@@ -448,7 +453,10 @@ against it and runs `connectedDebugAndroidTest` through `run` without `--no-daem
 Gradle daemon survives. It checks that the relay port refuses another local account and that
 repeated provisioning keeps the added package. It downloads the pinned Gradle distribution, and Maven
 dependencies from Google and Google's Maven Central mirror, because Maven Central answers shared CI
-addresses with HTTP 429.
+addresses with HTTP 429. It reports the number of relay refusal records with the first 50 and the last;
+each record carries the relay's running total. During the connected stage it keeps the newest logcat
+(main, system, crash, events and kernel) and guest memory samples in bounded files and, on failure,
+prints redacted, bounded sections of them with a meminfo snapshot taken as Gradle starts.
 
 ```sh
 bash config/profiles/android/tests/e2e/acceptance.sh --slot "$slot" --lane gradle
