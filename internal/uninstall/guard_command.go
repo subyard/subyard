@@ -107,7 +107,9 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout io.Write
 		if err != nil {
 			return err
 		}
-		return printJSON(stdout, artifacts)
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		return encoder.Encode(artifacts)
 	case "capture-artifact":
 		var item struct{ Path string }
 		if err := readGuardJSON(stdin, 65536, "oversized artifact capture request", &item); err != nil {
@@ -204,21 +206,7 @@ func guardMode(mode string, arguments []string, stdin io.Reader, stdout io.Write
 		return guardSelected(approved, path, before)
 	case "guard-all":
 		project, _ := argument(arguments, 0)
-		resources, err := inventory()
-		var refusals []error
-		if err != nil {
-			refusals = append(refusals, guardContext("inventory", err))
-		}
-		if project == "" || project == "default" {
-			refusals = append(refusals, guardRefusal("teardown requires a dedicated project"))
-		} else {
-			for index, resource := range resources {
-				if err := guardResource(resource, project); err != nil {
-					refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
-				}
-			}
-		}
-		return domain.CollectRefusals(refusals...)
+		return guardAll(project)
 	}
 	resources, err := inventory()
 	if err != nil {
@@ -514,6 +502,8 @@ func inventoryText(fields map[string]json.RawMessage, key string, nullable bool)
 	return value, nil
 }
 
+// inventory keeps valid records at their original ordinals even if another
+// record fails to decode, so guard-all can finish its local field checks.
 func inventory() ([]ports.TeardownResource, error) {
 	value := os.Getenv("SUBYARD_TEARDOWN_INVENTORY")
 	if len(value) > 65536 {
@@ -528,48 +518,59 @@ func inventory() ([]ports.TeardownResource, error) {
 	}
 	resources := make([]ports.TeardownResource, len(raw))
 	seen := map[[3]string]bool{}
+	var refusals []error
 	for index, body := range raw {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
-			return nil, guardRefusal("teardown resource is not an object")
-		}
-		for key := range fields {
-			if !slices.Contains(resourceFields, key) {
-				return nil, guardRefusal("invalid teardown resource fields")
-			}
-		}
-		if kind, err := inventoryText(fields, "kind", true); err != nil || !slices.Contains(resourceKinds, kind) {
-			return nil, guardRefusal("invalid teardown resource kind")
-		}
-		name, err := inventoryText(fields, "name", false)
+		resource, err := decodeInventoryResource(body)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
-		pool, err := inventoryText(fields, "pool", true)
-		if err != nil {
-			return nil, err
-		}
-		if !resourceIdentity.MatchString(name) || pool != "" && !resourceIdentity.MatchString(pool) {
-			return nil, guardRefusal("invalid teardown resource identity")
-		}
-		binding, err := inventoryText(fields, "binding", false)
-		if err != nil {
-			return nil, err
-		}
-		if !hexDigest(binding) {
-			return nil, guardRefusal("invalid teardown binding")
-		}
-		resource := &resources[index]
-		if err := json.Unmarshal(body, resource); err != nil {
-			return nil, err
-		}
+		resources[index] = resource
 		key := [3]string{resource.Kind, resource.Pool, resource.Name}
 		if seen[key] {
-			return nil, guardRefusal("duplicate teardown resource")
+			refusals = append(refusals, guardRefusal("duplicate teardown resource"))
 		}
 		seen[key] = true
 	}
-	return resources, nil
+	return resources, domain.CollectRefusals(refusals...)
+}
+
+func decodeInventoryResource(body json.RawMessage) (ports.TeardownResource, error) {
+	var resource ports.TeardownResource
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return resource, guardRefusal("teardown resource is not an object")
+	}
+	for key := range fields {
+		if !slices.Contains(resourceFields, key) {
+			return resource, guardRefusal("invalid teardown resource fields")
+		}
+	}
+	if kind, err := inventoryText(fields, "kind", true); err != nil || !slices.Contains(resourceKinds, kind) {
+		return resource, guardRefusal("invalid teardown resource kind")
+	}
+	name, err := inventoryText(fields, "name", false)
+	if err != nil {
+		return resource, err
+	}
+	pool, err := inventoryText(fields, "pool", true)
+	if err != nil {
+		return resource, err
+	}
+	if !resourceIdentity.MatchString(name) || pool != "" && !resourceIdentity.MatchString(pool) {
+		return resource, guardRefusal("invalid teardown resource identity")
+	}
+	binding, err := inventoryText(fields, "binding", false)
+	if err != nil {
+		return resource, err
+	}
+	if !hexDigest(binding) {
+		return resource, guardRefusal("invalid teardown binding")
+	}
+	if err := json.Unmarshal(body, &resource); err != nil {
+		return resource, err
+	}
+	return resource, nil
 }
 
 // incusQuery and incusCall are the only native Incus boundaries of the guard.
@@ -613,7 +614,53 @@ func presentIn(path, name string) (bool, error) {
 
 var fractionPattern = regexp.MustCompile(`\.(\d+)`)
 
+func guardAll(project string) error {
+	resources, err := inventory()
+	var refusals []error
+	if err != nil {
+		refusals = append(refusals, guardContext("inventory", err))
+	}
+	if project == "" || project == "default" {
+		refusals = append(refusals, guardRefusal("teardown requires a dedicated project"))
+	}
+	for index, resource := range resources {
+		if err := guardResourceFields(resource); err != nil {
+			refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
+	}
+	for index, resource := range resources {
+		if err := guardResourceBinding(resource, project); err != nil {
+			refusals = append(refusals, guardContext(fmt.Sprintf("%s resource %d", resource.Kind, index+1), err))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+func guardResourceFields(resource ports.TeardownResource) error {
+	switch resource.Kind {
+	case "volume":
+		if resource.Pool == "" {
+			return ports.TeardownMissingField("pool")
+		}
+	case "host-profile":
+		if len(resource.Bindings) > 3 || slices.ContainsFunc(resource.Bindings, func(value string) bool { return !hexDigest(value) }) {
+			return guardRefusal("invalid full default-profile retry bindings")
+		}
+	}
+	return nil
+}
+
 func guardResource(resource ports.TeardownResource, project string) error {
+	if err := guardResourceFields(resource); err != nil {
+		return err
+	}
+	return guardResourceBinding(resource, project)
+}
+
+func guardResourceBinding(resource ports.TeardownResource, project string) error {
 	kind, name := resource.Kind, resource.Name
 	path := ""
 	switch kind {
@@ -625,9 +672,6 @@ func guardResource(resource ports.TeardownResource, project string) error {
 			project = "default"
 		}
 	case "volume":
-		if resource.Pool == "" {
-			return ports.TeardownMissingField("pool")
-		}
 		path = "/1.0/storage-pools/" + resource.Pool + "/volumes/custom/" + name
 	case "project":
 		path, project = "/1.0/projects/"+name, "default"
@@ -689,14 +733,7 @@ func guardResource(resource ports.TeardownResource, project string) error {
 	if err != nil {
 		return err
 	}
-	variants := []string{}
-	if kind == "host-profile" {
-		variants = resource.Bindings
-	}
-	if len(variants) > 3 || slices.ContainsFunc(variants, func(value string) bool { return !hexDigest(value) }) {
-		return guardRefusal("invalid full default-profile retry bindings")
-	}
-	if current != resource.Binding && !slices.Contains(variants, current) {
+	if current != resource.Binding && (kind != "host-profile" || !slices.Contains(resource.Bindings, current)) {
 		return guardRefusal("teardown resource changed after confirmation")
 	}
 	return nil

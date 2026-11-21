@@ -295,6 +295,92 @@ func TestGuardAllReportsOnlyStructuralDetails(t *testing.T) {
 	}
 }
 
+func TestGuardAllReportsPreflightRefusalsBeforeQuery(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	resources := []ports.TeardownResource{
+		{Kind: "instance", Name: "yard", Binding: binding},
+		{Kind: "volume", Name: "data", Binding: binding},
+		{Kind: "host-profile", Name: "default", Binding: binding, Bindings: []string{"bad-digest"}},
+		{Kind: "unknown", Name: "invalid", Binding: binding},
+	}
+	payload, err := json.Marshal(resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUBYARD_TEARDOWN_INVENTORY", string(payload))
+	t.Cleanup(func() { incusQuery = queryIncus })
+	incusQuery = func(_, _ string, _ any) error {
+		t.Fatal("queried Incus before local preflight passed")
+		return nil
+	}
+	var stderr bytes.Buffer
+	if code := RunGuard([]string{"guard-all", "default"}, nil, io.Discard, &stderr); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	expected := "plan_stale: host-profile resource 3: invalid full default-profile retry bindings; " +
+		"inventory: invalid teardown resource kind; teardown requires a dedicated project; " +
+		"volume resource 2: missing teardown resource field pool\n"
+	if stderr.String() != expected {
+		t.Fatalf("diagnostic %q, want %q", stderr.String(), expected)
+	}
+}
+
+func TestProducerArtifactEnvelopeFitsGuardTransport(t *testing.T) {
+	directory := testkit.TempDir(t)
+	for range 18 {
+		directory = filepath.Join(directory, strings.Repeat("&", 210))
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var artifacts []ports.TeardownArtifact
+	for _, name := range []string{"first", "second", "third"} {
+		path := filepath.Join(directory, name)
+		testkit.WriteFile(t, path, []byte("producer artifact"), 0600)
+		artifact, err := CaptureArtifact(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	services, err := json.Marshal([]RecoveryService{{Scope: "user", Units: []string{"fixture.service"}, Artifacts: artifacts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUBYARD_TEARDOWN_PLAN", "")
+	t.Setenv("SUBYARD_TEARDOWN_SERVICES", string(services))
+	payload, code := runGuard(t, "producer-artifacts-json")
+	if code != 0 || len(payload) >= 65536 {
+		t.Fatalf("producer envelope exit %d, length %d", code, len(payload))
+	}
+	t.Setenv("SUBYARD_TEARDOWN_ARTIFACTS", strings.TrimSuffix(payload, "\n"))
+	if _, code := runGuard(t, "guard-artifacts"); code != 0 {
+		t.Fatalf("producer envelope refused by guard: exit %d", code)
+	}
+}
+
+func TestCaptureArtifactDisappearanceDiscardsPartialFacts(t *testing.T) {
+	path := filepath.Join(testkit.TempDir(t), "artifact")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(path, "child"), nil, 0600)
+	statAt = func(fd int, name, relative string) (Entry, error) {
+		if relative == "child" {
+			if err := os.Rename(path, path+"-moved"); err != nil {
+				t.Fatal(err)
+			}
+			return Entry{}, os.ErrNotExist
+		}
+		return factAt(fd, name, relative)
+	}
+	t.Cleanup(func() { statAt = factAt })
+	artifact, err := CaptureArtifact(path)
+	if err != nil || artifact.Path != path || artifact.Binding != "" || artifact.Entries == nil || len(artifact.Entries) != 0 {
+		t.Fatalf("vanished path must yield empty facts and binding: %+v, %v", artifact, err)
+	}
+}
+
 func TestFullFileRemoverRequiresAnActualPoolCollection(t *testing.T) {
 	for _, pools := range []string{"null", "{}", `["/1.0/storage-pools/backing"]`, "[]"} {
 		t.Run(pools, func(t *testing.T) {

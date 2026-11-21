@@ -422,16 +422,18 @@ func CaptureArtifact(path string) (ports.TeardownArtifact, error) {
 }
 
 func captureArtifact(path string) (ports.TeardownArtifact, error) {
-	entries := []Entry{}
+	artifact := ports.TeardownArtifact{Path: path, Entries: []Entry{}}
 	err := withParent(path, "teardown artifact changed during observation", func(parent int, name string) error {
-		var err error
-		entries, err = walkEntries(parent, name, artifactLimit, nil, nil, false, nil)
+		entries, err := walkEntries(parent, name, artifactLimit, nil, nil, false, nil)
+		if err == nil {
+			artifact.Entries = entries
+		}
 		return err
 	})
-	if err != nil {
-		return ports.TeardownArtifact{}, err
+	if err == nil {
+		artifact.Binding, err = digest(artifact.Entries)
 	}
-	return artifactFromEntries(path, entries)
+	return artifact, err
 }
 
 // RemoveArtifact deletes one approved selected-teardown artifact by binding.
