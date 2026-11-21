@@ -20,26 +20,22 @@ import (
 )
 
 func TestRepositoryQueriesUseGoManifest(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	var stdout bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t), Program: "yard", Arguments: []string{"--command-effect", "status"},
+	program := fixture.New(Options{
+		Arguments:   []string{"--command-effect", "status"},
 		Environment: []string{"HOME=" + t.TempDir(), "SUBYARD_NO_AUDIT=1"}, Stdout: &stdout,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 || stdout.String() != "read\n" {
 		t.Fatalf("manifest query failed: code=%d output=%q", code, stdout.String())
 	}
 }
 
 func TestHeadlessReportingReaderProbe(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	var stdout bytes.Buffer
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Arguments: []string{"--command-effect", "_vm-start-policy"},
+	program := fixture.New(Options{Arguments: []string{"--command-effect", "_vm-start-policy"},
 		Environment: []string{"HOME=" + testkit.TempDir(t), "SUBYARD_NO_AUDIT=1"}, Stdout: &stdout})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 || stdout.String() != "mutate\n" {
 		t.Fatalf("headless reader probe: code=%d output=%q", code, stdout.String())
 	}
@@ -52,15 +48,13 @@ func TestVMStartPolicyRejectsGlobalOptionsBeforeAdmission(t *testing.T) {
 		{"--yes", "-Y", "remote/yard", "_vm-start-policy", "p", "i"},
 	} {
 		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 			home := testkit.TempDir(t)
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: repositoryRoot(t), Arguments: arguments,
+			program := fixture.New(Options{
+				Arguments:   arguments,
 				Environment: []string{"HOME=" + home}, Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 2 || stdout.Len() != 0 ||
 				stderr.String() != "yard: _vm-start-policy must be invoked directly without global options\n" {
 				t.Fatalf("internal invocation: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -252,14 +246,12 @@ printf '%s|%s|%s\n' "$SUBYARD_CONFIG_LOADED" "$SSH_HOST" "$HOST_BASE"
 }
 
 func TestUnknownCommandIsDiagnosticOnly(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t), Program: "yard", Arguments: []string{"not-a-command"},
+	program := fixture.New(Options{
+		Arguments:   []string{"not-a-command"},
 		Environment: []string{"HOME=" + t.TempDir(), "SUBYARD_NO_AUDIT=1"}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("unexpected diagnostic: code=%d stderr=%q", code, stderr.String())
 	}
@@ -435,6 +427,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 }
 
 func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig())
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
 	dataHome := filepath.Join(home, ".subyard")
@@ -445,8 +438,7 @@ func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t), Program: "yard",
+	program := fixture.New(Options{
 		Arguments: []string{"_migrate", "paths"},
 		Environment: []string{
 			"HOME=" + home, "SUBYARD_OPERATOR_HOME=" + home,
@@ -455,9 +447,6 @@ func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
 		},
 		WorkingDir: home, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("migration paths failed: code=%d stderr=%q", code, stderr.String())
 	}

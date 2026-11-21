@@ -21,8 +21,8 @@ func TestStatusAdoptsTrustedOwnerRename(t *testing.T) {
 	for _, cacheState := range []string{"expired", "missing"} {
 		for _, view := range []string{"summary", "detail"} {
 			t.Run(cacheState+"/"+view, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
-				environment = append(environment, "SUBYARD_HOST_ID=local-owner")
+				fixture := newFixture(t, withEnv("SUBYARD_HOST_ID=local-owner"))
+				environment := fixture.Environment
 				inventory := inventoryResult("new-owner", "default", "Remote").inventory
 				_, trust := hostAddSSHFixture(t, inventory)
 				writeStatusOwnerResponses(t, inventory)
@@ -55,13 +55,9 @@ func TestStatusAdoptsTrustedOwnerRename(t *testing.T) {
 				for attempt := 0; attempt < 2; attempt++ {
 					var stdout, stderr bytes.Buffer
 					prompt := &testkit.Prompt{}
-					program, err := New(Options{
-						RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment,
-						WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{},
+					program := fixture.New(Options{
+						Arguments: arguments, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{},
 					})
-					if err != nil {
-						t.Fatal(err)
-					}
 					if code := program.Run(context.Background()); code != 0 {
 						t.Fatalf("status attempt %d: code=%d stderr=%q stdout=%q", attempt, code, stderr.String(), stdout.String())
 					}
@@ -98,7 +94,8 @@ func TestStatusAdoptsTrustedOwnerRename(t *testing.T) {
 func TestStatusRecoversInterruptedOwnerRename(t *testing.T) {
 	for _, view := range []string{"summary", "detail"} {
 		t.Run(view, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			environment := fixture.Environment
 			inventory := inventoryResult("new-owner", "default", "Remote").inventory
 			_, trust := hostAddSSHFixture(t, inventory)
 			writeStatusOwnerResponses(t, inventory)
@@ -144,10 +141,7 @@ func TestStatusRecoversInterruptedOwnerRename(t *testing.T) {
 			for attempt := 0; attempt < 2; attempt++ {
 				var stdout, stderr bytes.Buffer
 				prompt := &testkit.Prompt{}
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Arguments: arguments, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
 				if attempt == 0 {
 					loaded, err := program.loadContext("default")
 					if err != nil {
@@ -201,10 +195,10 @@ func TestStatusRecoversInterruptedOwnerRename(t *testing.T) {
 func TestStatusOwnerRenameRefusalsPreserveState(t *testing.T) {
 	for _, scenario := range []string{"changed-key", "collision", "untrusted", "offline", "fresh", "strict-read"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
 			inventory := inventoryResult("new-owner", "default", "Remote").inventory
 			bin, trust := hostAddSSHFixture(t, inventory)
-			environment = append(environment, "SSH_ASSESS_LINE="+trust.KnownHostsLine, "SSH_RPC_RESPONSE="+os.Getenv("SSH_RPC_RESPONSE"))
+			environment := append(fixture.Environment, "SSH_ASSESS_LINE="+trust.KnownHostsLine, "SSH_RPC_RESPONSE="+os.Getenv("SSH_RPC_RESPONSE"))
 			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
 			store := ownerinventory.Connections{Root: ownerRoot}
 			connection := ownerinventory.Connection{HostID: "old-owner", Destination: "owner-alias", Trust: &trust}
@@ -254,10 +248,7 @@ func TestStatusOwnerRenameRefusalsPreserveState(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			prompt := &testkit.Prompt{}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"status"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"status"}, Environment: environment, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
 			if scenario == "strict-read" {
 				loaded, err := program.loadContext("default")
 				if err != nil {
@@ -290,10 +281,7 @@ func TestStatusOwnerRenameRefusalsPreserveState(t *testing.T) {
 				if scenario == "changed-key" || scenario == "untrusted" {
 					stdout.Reset()
 					stderr.Reset()
-					program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "old-owner/default", "status"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
-					if err != nil {
-						t.Fatal(err)
-					}
+					program := fixture.New(Options{Arguments: []string{"-Y", "old-owner/default", "status"}, Environment: environment, Stdout: &stdout, Stderr: &stderr, Prompt: prompt, Incus: &testkit.Incus{}})
 					if code := program.Run(context.Background()); code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "integrity violation") || !strings.Contains(stderr.String(), "yard host repair") {
 						t.Fatalf("detail ignored integrity failure: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 					}
@@ -315,8 +303,9 @@ func TestStatusOwnerRenameRefusalsPreserveState(t *testing.T) {
 }
 
 func TestHostRepairConfirmsLegacyTrustAndOwnerRename(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, filepath.Join(configHome, "host-id"), "local-owner\n", 0o600)
+	fixture := newFixture(t, withCheckoutConfig())
+	home := fixture.Home
+	fixture.Write(filepath.Join(fixture.ConfigHome, "host-id"), "local-owner\n")
 	inventory := inventoryResult("new-owner", "default", "Remote").inventory
 	_, trust := hostAddSSHFixture(t, inventory)
 	ownerRoot := filepath.Join(home, ".subyard", "owner-inventory")
@@ -334,10 +323,7 @@ func TestHostRepairConfirmsLegacyTrustAndOwnerRename(t *testing.T) {
 	for _, consent := range []bool{false, true} {
 		prompt := &testkit.Prompt{Answers: []bool{consent}}
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "repair", "old-owner"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: []string{"host", "repair", "old-owner"}, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 		wantCode := 1
 		if consent {
 			wantCode = 0
@@ -403,7 +389,8 @@ func writeStatusOwnerResponses(t *testing.T, inventory domain.OwnerInventory, re
 }
 
 func TestActiveOwnerQueryAdoptsRenameAndPreservesEndpointAndRoute(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	environment := fixture.Environment
 	inventory := inventoryResult("new-owner", "default", "Remote").inventory
 	_, trust := hostAddSSHFixture(t, inventory)
 	writeStatusOwnerResponses(t, inventory)
@@ -414,10 +401,7 @@ func TestActiveOwnerQueryAdoptsRenameAndPreservesEndpointAndRoute(t *testing.T) 
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"yards"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: &testkit.Incus{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"yards"}, Stdout: &stdout, Stderr: &stderr, Incus: &testkit.Incus{}})
 	if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "new-owner/default") {
 		t.Fatalf("query code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
