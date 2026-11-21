@@ -1042,7 +1042,9 @@ host value, a fixed reason or a short digest is rendered. Installed configuratio
 shape-validated, so `yard config status` may show them. A suggested
 `yard -Y <yard> config status` remains read-only during recovery and preserves this source context.
 Post-apply observation failure retains its adapter diagnostic; invalid observation requires
-operator action, while valid remaining drift stays recoverable.
+operator action, while valid remaining drift stays recoverable. This holds also when a failed
+apply left the owner in another valid state: resume binds only the desired scope and reconciles
+from fresh facts.
 Failed update summaries render the validated execution outcome immediately; they do not
 run another inspection or claim that final readiness was verified.
 Stage adapters may implement `VerifyStageWithDiagnostic` for post-apply validation.
