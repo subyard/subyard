@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/Subyard/Subyard/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit/interrupt"
 )
 
 func TestHostRenameRefusesHistoricalUnmigratedSSHPortsWithoutMutation(t *testing.T) {
@@ -234,65 +236,218 @@ func TestRegisteredHostRenameRefusesDirtyCollisionAndStaleLocal(t *testing.T) {
 	}
 }
 
-// Crash-fidelity gap: ApplyHostIDRename rolls back through a deferred
-// recoverHostIDRenameLocked on any error, so an injected error there tests failure and
-// rollback, not a crash and resume. The interrupted states are therefore built by hand.
-func TestRegisteredHostRenameResumesAfterEachPublicationBoundary(t *testing.T) {
-	for _, boundary := range []string{"journal", "move", "head", "index", "manifest", "identity", "local-edit"} {
-		t.Run(boundary, func(t *testing.T) {
-			fixture := renameSourceFixture(t)
-			plan, err := PrepareHostIDRenameWithSource(fixture.options(false), "owner-b", "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := finalizeSourceRename(&plan); err != nil {
-				t.Fatal(err)
-			}
-			journal := hostIDRenameJournal{SchemaVersion: 2, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID, HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest, ManifestWasPresent: plan.manifestWasPresent, ManifestBefore: plan.manifestBefore, ManifestAfter: plan.manifestAfter, Source: plan.source}
-			if err := writeHostIDRenameJournal(fixture.configHome, journal); err != nil {
-				t.Fatal(err)
-			}
-			stages := map[string]int{"journal": 0, "move": 1, "head": 2, "index": 3, "manifest": 4, "identity": 5, "local-edit": 2}
-			stage := stages[boundary]
-			if stage >= 1 {
-				if err := os.Rename(filepath.Join(fixture.source, "hosts/owner-a"), filepath.Join(fixture.source, "hosts/owner-b")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if stage >= 2 {
-				if _, err := gitOutput(fixture.source, "update-ref", "HEAD", plan.source.AfterCommit, plan.source.BeforeCommit); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if stage >= 3 {
-				if _, err := gitOutput(fixture.source, "read-tree", plan.source.AfterTree); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if stage >= 4 {
-				writeSyncTestFile(t, ManifestPath(fixture.configHome), string(plan.manifestAfter), 0o600)
-			}
-			if stage >= 5 {
-				writeSyncTestFile(t, HostIDPath(fixture.configHome), "owner-b\n", 0o600)
-			}
-			if boundary == "local-edit" {
-				writeSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
-			}
-			if err := RecoverHostIDRename(fixture.configHome); err != nil {
-				t.Fatal(err)
-			}
-			if err := RecoverHostIDRename(fixture.configHome); err != nil {
-				t.Fatal(err)
-			}
-			next, err := BuildPlan(fixture.options(false))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if next.NeedsApply() {
-				t.Fatal("recovered configuration is not converged")
-			}
-		})
+// sourceRenameRecovery is a source rename whose journal is durable and whose recovery has
+// not started yet, the state a crash right after the journal write leaves.
+type sourceRenameRecovery struct {
+	fixture   *syncFixture
+	source    *hostSourceRename
+	normalize *strings.Replacer
+}
+
+func newSourceRenameRecovery(t *testing.T) sourceRenameRecovery {
+	t.Helper()
+	fixture := renameSourceFixture(t)
+	plan, err := PrepareHostIDRenameWithSource(fixture.options(false), "owner-b", "")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := finalizeSourceRename(&plan); err != nil {
+		t.Fatal(err)
+	}
+	journal := hostIDRenameJournal{SchemaVersion: 2, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID, HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest, ManifestWasPresent: plan.manifestWasPresent, ManifestBefore: plan.manifestBefore, ManifestAfter: plan.manifestAfter, Source: plan.source}
+	if err := writeHostIDRenameJournal(fixture.configHome, journal); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readManifest(fixture.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fixture paths, the source identity derived from them and commit IDs differ between
+	// fixtures; everything else in the signature must match byte for byte.
+	normalize := strings.NewReplacer(
+		filepath.Dir(fixture.source), "$BASE", plan.source.BeforeCommit, "$BEFORE-COMMIT",
+		plan.source.AfterCommit, "$AFTER-COMMIT", plan.source.RecordDigest, "$RECORD-DIGEST",
+		manifest.SourceID, "$SOURCE-ID",
+	)
+	return sourceRenameRecovery{fixture: fixture, source: plan.source, normalize: normalize}
+}
+
+type sourceRenameSignature struct {
+	Config, Worktree, Git map[string]string
+	Head, Status          string
+}
+
+func (s sourceRenameRecovery) signature(t *testing.T) sourceRenameSignature {
+	t.Helper()
+	tree := func(root string, ignore ...string) map[string]string {
+		result := map[string]string{}
+		for path, entry := range interrupt.Tree(t, root, ignore...) {
+			result[s.normalize.Replace(path)] = entry
+		}
+		return result
+	}
+	// These records name fixture paths or commits; their normalized content replaces the digest.
+	home := tree(s.fixture.configHome)
+	for _, path := range []string{".sync/manifest.json", ".sync/source.json", ".sync/host-id-rename-complete.json"} {
+		if entry, ok := home[path]; ok {
+			content, err := os.ReadFile(filepath.Join(s.fixture.configHome, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			home[path] = strings.Join(strings.Fields(entry)[:2], " ") + " " + s.normalize.Replace(string(content))
+		}
+	}
+	git := tree(s.source.GitDir, "objects", "logs", "refs")
+	head, err := gitOutput(s.fixture.source, "rev-parse", "HEAD", "HEAD^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := gitOutput(s.fixture.source, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sourceRenameSignature{
+		Config: home, Worktree: tree(s.fixture.source, ".git"), Git: git,
+		Head: s.normalize.Replace(head), Status: status,
+	}
+}
+
+// recover runs recovery of the pending journal under the configuration lock, as
+// RecoverHostIDRename does, with a checkpoint.
+func (s sourceRenameRecovery) recover(t *testing.T, checkpoint func(string) error) error {
+	t.Helper()
+	unlock, err := config.LockRoot(s.fixture.configHome, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	journal, pending, err := readHostIDRenameJournal(s.fixture.configHome)
+	if err != nil || !pending {
+		t.Fatalf("journal pending=%v: %v", pending, err)
+	}
+	return recoverHostSourceRenameAtCheckpoint(s.fixture.configHome, journal, checkpoint)
+}
+
+// recoverUntil fails recovery at the named checkpoint.
+func (s sourceRenameRecovery) recoverUntil(t *testing.T, name string) error {
+	t.Helper()
+	return s.recover(t, func(checkpoint string) error {
+		if checkpoint == name {
+			return interrupt.ErrInjected
+		}
+		return nil
+	})
+}
+
+// assertConverged checks what the operator relies on after recovery: the new owner, the
+// source commit that only moves the subtree, no pending journal or Git lock, and a sync
+// that needs no further change.
+func (s sourceRenameRecovery) assertConverged(t *testing.T) {
+	t.Helper()
+	assertSyncTestFile(t, HostIDPath(s.fixture.configHome), "owner-b\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(s.fixture.source, "hosts/owner-b/yards/demo/config.env"), "SSH_PORT=2234\n", 0o600)
+	if _, err := os.Lstat(filepath.Join(s.fixture.source, "hosts/owner-a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old owner subtree survived recovery: %v", err)
+	}
+	if head, _ := gitOutput(s.fixture.source, "rev-parse", "HEAD"); strings.TrimSpace(head) != s.source.AfterCommit {
+		t.Fatalf("HEAD = %s, want the prepared rename commit", head)
+	}
+	for _, file := range s.source.Cache {
+		assertSyncTestFile(t, filepath.Join(s.fixture.configHome, file.Path), string(file.Content), os.FileMode(file.Mode))
+	}
+	if _, pending, err := AssessHostIDRenameRecovery(s.fixture.configHome); err != nil || pending {
+		t.Fatalf("recovery still pending=%v: %v", pending, err)
+	}
+	for _, path := range []string{filepath.Join(s.source.GitDir, "index.lock"), renameIndexImage(s.source)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("recovery left %s: %v", path, err)
+		}
+	}
+	next, err := BuildPlan(s.fixture.options(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.NeedsApply() {
+		t.Fatalf("recovered configuration is not converged: %+v", next)
+	}
+}
+
+// The sweep cuts explicit recovery from a durable journal, not ApplyHostIDRename. Apply runs
+// recoverHostIDRenameLocked again in a defer on any error, so an injected error there tests
+// failure handling rather than a crash and resume; that limitation remains.
+//
+// Recovery's error path only releases its own index.lock, which a real crash would leave as
+// a hard link to the index image. Interrupted restores that link for every cut taken while
+// the lock was held, so resume must adopt it as after a crash.
+//
+// Known gap, left out of the sweep: recovery removes the journal before the index image, so
+// a crash between the two leaves .git/subyard-host-rename-<commit>.index behind with nothing
+// left to remove it. Recovery has no checkpoint there, so the sweep ends at journal-cleanup.
+func TestRegisteredHostRenameRecoveryResumesAtEveryInterruption(t *testing.T) {
+	interrupt.Sweep(t, interrupt.Case[sourceRenameRecovery]{
+		Setup: newSourceRenameRecovery,
+		Run: func(t *testing.T, s sourceRenameRecovery, in *interrupt.Injector) interrupt.Outcome {
+			return interrupt.Outcome{Err: s.recover(t, in.Hook("source-rename"))}
+		},
+		Resume: func(t *testing.T, s sourceRenameRecovery) interrupt.Outcome {
+			return interrupt.Outcome{Err: RecoverHostIDRename(s.fixture.configHome)}
+		},
+		Signature: func(t *testing.T, s sourceRenameRecovery) any { return s.signature(t) },
+		Completed: func(t *testing.T, s sourceRenameRecovery, o interrupt.Outcome) {
+			if o.Err != nil {
+				t.Fatal(o.Err)
+			}
+			s.assertConverged(t)
+		},
+		Interrupted: func(t *testing.T, s sourceRenameRecovery, p interrupt.Point, o interrupt.Outcome) {
+			if !errors.Is(o.Err, interrupt.ErrInjected) {
+				t.Fatalf("recovery error = %v, want the injected interruption at %s", o.Err, p)
+			}
+			assessed, pending, err := AssessHostIDRenameRecovery(s.fixture.configHome)
+			if err != nil || !pending || assessed.Target != "owner-b" || !assessed.Source {
+				t.Fatalf("after %s recovery assessment=%+v pending=%v: %v", p, assessed, pending, err)
+			}
+			if p.Name != "index-lock" {
+				if err := os.Link(renameIndexImage(s.source), filepath.Join(s.source.GitDir, "index.lock")); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+		Resumed: func(t *testing.T, s sourceRenameRecovery, p interrupt.Point, o interrupt.Outcome) {
+			if o.Err != nil {
+				t.Fatalf("recovery after %s: %v", p, o.Err)
+			}
+			s.assertConverged(t)
+		},
+		Repeated: func(t *testing.T, _ sourceRenameRecovery, p interrupt.Point, o interrupt.Outcome) {
+			if o.Err != nil {
+				t.Fatalf("second recovery after %s: %v", p, o.Err)
+			}
+		},
+		MinPoints: 12,
+		Require: []string{"index-lock", "subtree-move", "head-update", "index-publication", "cache-write",
+			"manifest-publication", "identity-publication", "receipt-publication", "journal-cleanup"},
+	})
+}
+
+// A local override edited after the source commit point stays as edited, and recovery
+// still completes the rename around it.
+func TestRegisteredHostRenameRecoveryKeepsLocalEditAfterSourceCommit(t *testing.T) {
+	s := newSourceRenameRecovery(t)
+	if err := s.recoverUntil(t, "index-publication"); !errors.Is(err, interrupt.ErrInjected) {
+		t.Fatalf("recovery=%v", err)
+	}
+	if head, _ := gitOutput(s.fixture.source, "rev-parse", "HEAD"); strings.TrimSpace(head) != s.source.AfterCommit {
+		t.Fatal("the cut did not land after the source commit point")
+	}
+	writeSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
+	for range 2 {
+		if err := RecoverHostIDRename(s.fixture.configHome); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
+	s.assertConverged(t)
 }
 
 func TestHostRenameIndexLockExcludesGitAndPreservesForeignReplacement(t *testing.T) {
@@ -389,54 +544,42 @@ func TestRegisteredHostRenameMissingGitIdentityChangesNothing(t *testing.T) {
 }
 
 func TestHostRenameRecoveryPreservesLocalEditBeforeSourceCommit(t *testing.T) {
-	fixture := renameSourceFixture(t)
-	plan, err := PrepareHostIDRenameWithSource(fixture.options(false), "owner-b", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := finalizeSourceRename(&plan); err != nil {
-		t.Fatal(err)
-	}
-	journal := hostIDRenameJournal{SchemaVersion: 2, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID, HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest, ManifestWasPresent: plan.manifestWasPresent, ManifestBefore: plan.manifestBefore, ManifestAfter: plan.manifestAfter, Source: plan.source}
-	if err := writeHostIDRenameJournal(fixture.configHome, journal); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(fixture.source, "hosts/owner-a"), filepath.Join(fixture.source, "hosts/owner-b")); err != nil {
-		t.Fatal(err)
-	}
-	writeSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
-	if err := RecoverHostIDRename(fixture.configHome); !errors.Is(err, ErrPlanStale) {
+	s := newSourceRenameRecovery(t)
+	// Cut after the subtree move and before HEAD, the source commit point.
+	if err := s.recoverUntil(t, "head-update"); !errors.Is(err, interrupt.ErrInjected) {
 		t.Fatalf("recovery=%v", err)
 	}
-	assertSyncTestFile(t, HostIDPath(fixture.configHome), "owner-a\n", 0o600)
-	assertSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
-	if _, err := BuildPlan(fixture.options(false)); err != nil {
+	writeSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
+	if err := RecoverHostIDRename(s.fixture.configHome); !errors.Is(err, ErrPlanStale) {
+		t.Fatalf("recovery=%v", err)
+	}
+	assertSyncTestFile(t, HostIDPath(s.fixture.configHome), "owner-a\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(s.fixture.configHome, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(s.fixture.source, "hosts/owner-a/config.env"), "SSH_PORT=2233\n", 0o600)
+	if head, _ := gitOutput(s.fixture.source, "rev-parse", "HEAD"); strings.TrimSpace(head) != s.source.BeforeCommit {
+		t.Fatal("rollback moved HEAD")
+	}
+	for _, path := range []string{HostIDRenameTransactionPath(s.fixture.configHome), filepath.Join(s.source.GitDir, "index.lock"), renameIndexImage(s.source)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rollback left %s: %v", path, err)
+		}
+	}
+	if _, err := BuildPlan(s.fixture.options(false)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestHostRenameIndexPublicationRefusesForeignReplacement(t *testing.T) {
-	fixture := renameSourceFixture(t)
-	plan, err := PrepareHostIDRenameWithSource(fixture.options(false), "owner-b", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := finalizeSourceRename(&plan); err != nil {
-		t.Fatal(err)
-	}
-	journal := hostIDRenameJournal{SchemaVersion: 2, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID, HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest, ManifestWasPresent: plan.manifestWasPresent, ManifestBefore: plan.manifestBefore, ManifestAfter: plan.manifestAfter, Source: plan.source}
-	if err := writeHostIDRenameJournal(fixture.configHome, journal); err != nil {
-		t.Fatal(err)
-	}
-	indexPath := filepath.Join(plan.source.GitDir, "index")
+	s := newSourceRenameRecovery(t)
+	indexPath := filepath.Join(s.source.GitDir, "index")
 	before, err := os.ReadFile(indexPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockPath := filepath.Join(plan.source.GitDir, "index.lock")
-	err = recoverHostSourceRenameAtCheckpoint(fixture.configHome, journal, func(checkpoint string) error {
+	lockPath := filepath.Join(s.source.GitDir, "index.lock")
+	err = s.recover(t, func(checkpoint string) error {
 		if checkpoint != "index-publication" {
-			t.Fatal("unexpected checkpoint")
+			return nil
 		}
 		if err := os.Remove(lockPath); err != nil {
 			return err
@@ -455,21 +598,18 @@ func TestHostRenameIndexPublicationRefusesForeignReplacement(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("foreign replacement was published into index")
 	}
-	assertSyncTestFile(t, HostIDPath(fixture.configHome), "owner-a\n", 0o600)
-	if err := RecoverHostIDRename(fixture.configHome); err == nil {
+	assertSyncTestFile(t, HostIDPath(s.fixture.configHome), "owner-a\n", 0o600)
+	if err := RecoverHostIDRename(s.fixture.configHome); err == nil {
 		t.Fatal("foreign replacement did not block native recovery")
 	}
 	assertSyncTestFile(t, lockPath, "foreign replacement\n", 0o600)
 	if err := os.Remove(lockPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := RecoverHostIDRename(fixture.configHome); err != nil {
+	if err := RecoverHostIDRename(s.fixture.configHome); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, HostIDPath(fixture.configHome), "owner-b\n", 0o600)
-	if _, err := os.Lstat(lockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("owned index lock survived complete recovery: %v", err)
-	}
+	s.assertConverged(t)
 }
 
 func TestHostRenameExactRecoveryRefusesJournalSubstitution(t *testing.T) {
