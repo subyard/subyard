@@ -172,3 +172,146 @@ internal/cli/ssh_agent_test.go	^TestSSHAgentRejectsInvalidKeyBeforeGuestPreparat
 internal/cli/ssh_agent_test.go	^TestSSHAgentRevocationRemainsAvailableDuringReleaseRecovery$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
 # ssh_agent: setup errors
 internal/cli/ssh_agent_test.go	^TestSSHAgentEnvironmentIncludesDeselectedProfileHooksAndStopsOnFailure$	internal/cli/ssh_agent_test.go	fixture.Write(filepath.Join(directory, "profile.json")	fixture.Write("config/commands.registry/profile.json"
+
+# S4: CLI fixture migration
+
+# writer_retirement: product behavior
+internal/cli/writer_retirement_test.go	^TestProjectStateUsesInheritedOwnerBarrier$	internal/uninstall/owner_lock.go	if !os.SameFile(current, inheritedInfo) {	if false && !os.SameFile(current, inheritedInfo) {
+internal/cli/writer_retirement_test.go	^TestSSHUnlockCannotRecreateRetiredSigningNamespace$	internal/uninstall/owner_lock.go	if current != epoch {	if current != epoch && false {
+internal/cli/writer_retirement_test.go	^TestInitProjectInventoryAssessmentDoesNotCreateState$	internal/cli/project_commands.go	store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\trecords, err := store.List(ctx)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tseen	store, err := openProjectStore(ctx, loaded.Context.Paths.StateDir)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\trecords, err := store.List(ctx)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tseen
+internal/cli/writer_retirement_test.go	^TestDirectStateRetainsItsOwnFirstAuditPublication$	internal/cli/audit_admission.go	if root.Path == home {	if root.Path != home {
+# writer_retirement: constructor errors
+internal/cli/writer_retirement_test.go	^TestInitProjectInventoryAssessmentDoesNotCreateState$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestUnpreparedWritersRetainOriginalInstallation$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestAuditFirstQueriesRetainOriginalInstallation$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestRemoteSelectedHostMutationCannotRecreateRetiredController$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestSSHUnlockCannotRecreateRetiredSigningNamespace$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestStartupRecoveryQueuesBeforeAnyControllerWrite$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestDirectStateRetainsItsOwnFirstAuditPublication$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/writer_retirement_test.go	^TestProjectStateUsesInheritedOwnerBarrier$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# writer_retirement: setup errors
+internal/cli/writer_retirement_test.go	^TestRemoteSelectedHostMutationCannotRecreateRetiredController$	internal/cli/writer_retirement_test.go	withEnv("ACCESS_KIND=remote",	withEnv("ACCESS_KIND=local",
+internal/cli/writer_retirement_test.go	^TestRemoteSelectedHostMutationCannotRecreateRetiredController$	internal/cli/writer_retirement_test.go	fixture.Write(configsync.HostIDPath(fixture.ConfigHome),	fixture.Write(configsync.HostIDPath(filepath.Join(fixture.Root, "config", "commands.registry")),
+
+# remote_commands: product behavior
+internal/cli/remote_commands_test.go	^TestRPCRemotePlanContainsPreparedFingerprintBeforeApply$	internal/application/remotes.go	lines = append(lines, label+": "+key.Fingerprint)	lines = append(lines, label+": "+key.Material)
+internal/cli/remote_commands_test.go	^TestRPCOperationPlanMapsActionPolicyInvalid$	internal/cli/cli.go	code = rpc.CodeActionPolicyInvalid	code = fallback
+internal/cli/remote_commands_test.go	^TestRPCOperationExecuteRejectsForgedPlanConfirmation$	internal/cli/cli.go	if errors.Is(err, domain.ErrPlanStale) {\n\t\tcode = rpc.CodePlanStale	if errors.Is(err, domain.ErrPlanStale) && false {\n\t\tcode = rpc.CodePlanStale
+internal/cli/remote_commands_test.go	^TestDirectAndRPCRemoteAddUseEquivalentOwnerActionPlans$	internal/application/remotes.go	return "remote.add", domain.ActionDelta{Changed: true,	return "remote.add", domain.ActionDelta{Changed: false,
+# remote_commands: constructor errors
+internal/cli/remote_commands_test.go	^TestRPCRemotePlanContainsPreparedFingerprintBeforeApply$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/remote_commands_test.go	^TestDirectAndRPCRemoteAddUseEquivalentOwnerActionPlans$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/remote_commands_test.go	^TestRPCOperationPlanMapsActionPolicyInvalid$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/remote_commands_test.go	^TestRPCOperationExecuteRejectsForgedPlanConfirmation$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# remote_commands: setup errors
+internal/cli/remote_commands_test.go	^TestRemoteAddAuditedOwnerAfterSlowAdmission$	internal/cli/remote_commands_test.go	fixture := newFixture(t, withAudit())	fixture := newFixture(t)
+
+# status_owner_rename: product behavior
+internal/cli/status_owner_rename_test.go	^TestStatusOwnerRenameRefusalsPreserveState$/^collision$	internal/ownerinventory/migration.go	if connection.HostID == proof.ObservedHostID {	if connection.HostID == proof.ObservedHostID+"-never" {
+internal/cli/status_owner_rename_test.go	^TestStatusAdoptsTrustedOwnerRename$	internal/ownerinventory/migration.go	if journal.RoutingWasPresent {	if false && journal.RoutingWasPresent {
+internal/cli/status_owner_rename_test.go	^TestStatusRecoversInterruptedOwnerRename$	internal/ownerinventory/migration.go	\tdefer release()\n\treturn store.applyHostIDAdoptionLocked(journal)\n}	\tdefer release()\n\treturn nil\n}
+internal/cli/status_owner_rename_test.go	^TestHostRepairConfirmsLegacyTrustAndOwnerRename$	internal/ownerinventory/repair.go	oldFingerprint := "unmanaged"	oldFingerprint := "none"
+# status_owner_rename: constructor errors
+internal/cli/status_owner_rename_test.go	^TestStatusAdoptsTrustedOwnerRename$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/status_owner_rename_test.go	^TestStatusRecoversInterruptedOwnerRename$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/status_owner_rename_test.go	^TestStatusOwnerRenameRefusalsPreserveState$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/status_owner_rename_test.go	^TestHostRepairConfirmsLegacyTrustAndOwnerRename$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/status_owner_rename_test.go	^TestActiveOwnerQueryAdoptsRenameAndPreservesEndpointAndRoute$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# status_owner_rename: setup errors
+internal/cli/status_owner_rename_test.go	^TestStatusAdoptsTrustedOwnerRename$/^expired/summary$	internal/cli/status_owner_rename_test.go	withEnv("SUBYARD_HOST_ID=local-owner")	withEnv("SUBYARD_HOST_ID=other-owner")
+internal/cli/status_owner_rename_test.go	^TestHostRepairConfirmsLegacyTrustAndOwnerRename$	internal/cli/status_owner_rename_test.go	fixture.Write(filepath.Join(fixture.ConfigHome, "host-id"),	fixture.Write(filepath.Join(fixture.Root, "config", "commands.registry", "host-id"),
+
+# config_git_authoring: product behavior
+internal/cli/config_git_authoring_test.go	^TestConfigLocalSaveRequiresMigrationEvenForAnIdenticalLegacyValue$	internal/config/local_settings.go	\t\tif len(manifest.Files) != 0 {\n\t\t\treturn ErrLegacyGitSettingsMigration	\t\tif len(manifest.Files) == 0 {\n\t\t\treturn ErrLegacyGitSettingsMigration
+internal/cli/config_git_authoring_test.go	^TestConfigSyncSharedDevSudoCacheReplacement$	internal/cli/config_command.go	fmt.Fprintln(cli.options.Stdout, "  next command: effective automatically")	fmt.Fprintln(cli.options.Stdout, "  next command: unchanged")
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringSharedDevSudoWithdrawal$	internal/cli/config_command.go	fmt.Fprintf(cli.options.Stdout, "  yard init: %s init\\n", cli.options.Program)	fmt.Fprintf(cli.options.Stdout, "  yard init: %s init --all\\n", cli.options.Program)
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringSharedDevSudo$	internal/cli/config_command.go	fmt.Fprintf(output, "syncable: %s\\n", yesNo(definition.Syncable))	fmt.Fprintf(output, "syncable: %s\\n", yesNo(!definition.Syncable))
+# config_git_authoring: constructor errors
+internal/cli/config_git_authoring_test.go	^TestConfigAuthoringStorageChoiceAndNoSource$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigLocalSaveRequiresMigrationEvenForAnIdenticalLegacyValue$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# config_git_authoring: setup errors
+internal/cli/config_git_authoring_test.go	^TestConfigLocalSaveRequiresMigrationEvenForAnIdenticalLegacyValue$	internal/cli/config_git_authoring_test.go	path := fixture.Write(filepath.Join(fixture.ConfigHome, "config.env"),	path := fixture.Write(filepath.Join(fixture.Root, "config", "commands.registry", "config.env"),
+
+# update_history: product behavior
+internal/cli/update_history_test.go	^TestHostLogViewersWorkWithoutYardConfigOrIncus$/^updates$	internal/cli/host_logs.go	record.Direction, record.Status, record.Phase,	record.Direction, "done", record.Phase,
+internal/cli/update_history_test.go	^TestHostLogViewersWorkWithoutYardConfigOrIncus$/^audit$	internal/cli/host_logs.go	for _, line := range lines {\n\t\t\tfmt.Fprintln(cli.options.Stdout, line)	for range lines {\n\t\t\tfmt.Fprintln(cli.options.Stdout)
+internal/cli/update_history_test.go	^TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory$	internal/cli/host_logs.go	home := cli.env["SUBYARD_HOME"]	home := cli.env["SUBYARD_HOME_UNSET"]
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/admission.go	if !explicit && hostLogInvocation(arguments) {	if hostLogInvocation(arguments) {
+# update_history: constructor errors
+internal/cli/update_history_test.go	^TestHostLogViewersWorkWithoutYardConfigOrIncus$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/update_history_test.go	^TestExplicitLocalOwnerUpdateLogViewerUsesHostHistory$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# update_history: setup errors
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/update_history_test.go	withYards("remote")	withYards("remote/inner")
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/update_history_test.go	fixture.Write(filepath.Join(fixture.ConfigHome, "yards", "remote", "config.env"),	fixture.Write(filepath.Join(fixture.Root, "config", "commands.registry", "config.env"),
+
+# resource_prepared: product behavior
+internal/cli/resource_prepared_test.go	^TestResourceExactRejectsDriftBeforeApply$/^--binding-drift$	internal/cli/resource_prepared.go	fresh.Assessment.Action != execution.approved.Assessment.Action || fresh.Binding != execution.approved.Binding {	fresh.Assessment.Action != execution.approved.Assessment.Action {
+internal/cli/resource_prepared_test.go	^TestResourceExactKeepsHandlerStreamsSeparate$	internal/cli/resource_commands.go	\t\tcommand.Stdout = runner.cli.options.Stdout\n\t\tcommand.Stderr = runner.cli.options.Stderr	\t\tcommand.Stdout = runner.cli.options.Stderr\n\t\tcommand.Stderr = runner.cli.options.Stderr
+internal/cli/resource_prepared_test.go	^TestResourceExactConsentStopsAtArgumentSeparator$	internal/cli/resource_commands.go	if beforeSeparator && (argument == "-y" || argument == "--yes") {	if argument == "-y" || argument == "--yes" {
+# resource_prepared: constructor errors
+internal/cli/resource_prepared_test.go	^TestResourceExactNestedReaderRetainsAuditAndOwnerBarrier$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceOwnerBarrierUsesOnlyCurrentAdmission$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactDirectAllowsPartialConvergence$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceShutdownAddressesInstalledAccountUntilInitAppliesRename$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactKeepsHandlerStreamsSeparate$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactRejectsDriftBeforeApply$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactRequiresNativePostconditionVerification$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactInitialNoOpRechecksAndVerifiesWithoutPrompt$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactRPCUsesNativePlanAndSeparateDiagnosticStream$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactRPCRefusesV1Mutation$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_prepared_test.go	^TestResourceExactConsentStopsAtArgumentSeparator$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# resource_prepared: setup errors
+internal/cli/resource_prepared_test.go	^TestResourceExactKeepsHandlerStreamsSeparate$	internal/cli/resource_prepared_test.go	fixture.Write("config/profiles/fixture/resources/demo/handler.sh", handler, 0o700)	fixture.Write("config/commands.registry/handler.sh", handler, 0o700)
+internal/cli/resource_prepared_test.go	^TestResourceExactInitialNoOpRechecksAndVerifiesWithoutPrompt$	internal/cli/resource_prepared_test.go	fixture.Write("unit-"+unit, "running")	fixture.Write("config/commands.registry/unit-"+unit, "running")
+
+# resource_tty_linux: product behavior
+internal/cli/resource_tty_linux_test.go	^TestResourceMutationCancellationReapsProcessGroup$	internal/cli/resource_commands.go	return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)\n\t}\n\tcommand.WaitDelay	return command.Process.Kill()\n\t}\n\tcommand.WaitDelay
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionNormalExitReapsOnlyItsProcessGroup$	internal/cli/resource_terminal_linux.go	if observeErr == nil {\n\t\tcleanupErr = unix.Kill(	if observeErr != nil {\n\t\tcleanupErr = unix.Kill(
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionStartFailureRestoresForeground$	internal/cli/resource_terminal_linux.go	restoreErr := unix.IoctlSetPointerInt(fd, unix.TIOCSPGRP, processGroup)	restoreErr := error(nil)
+internal/cli/resource_tty_linux_test.go	^TestResourceNonterminalActionsOwnOnlySessionProcessGroup$	internal/cli/resource_commands.go	if runner.effect == domain.ActionSession {\n\t\t\trunErr = runResourceSession(command, time.Minute)	if false {\n\t\t\trunErr = runResourceSession(command, time.Minute)
+# resource_tty_linux: constructor errors
+internal/cli/resource_tty_linux_test.go	^TestResourceMutationDoesNotReadFromOperatorTerminal$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionPreservesOperatorInput$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceMutationCancellationReapsProcessGroup$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionCancellationRestoresTerminalAndReapsGroup$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionTerminalInterruptReapsProcessGroup$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionNormalExitReapsOnlyItsProcessGroup$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceNonterminalActionsOwnOnlySessionProcessGroup$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceSessionStartFailureRestoresForeground$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/resource_tty_linux_test.go	^TestResourceExactTerminalConsentAndRetainedData$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+
+# cli: product behavior
+internal/cli/cli_test.go	^TestRepositoryQueriesUseGoManifest$	internal/cli/cli.go	fmt.Fprintln(cli.options.Stdout, definition.Effect)	fmt.Fprintln(cli.options.Stdout, definition.Name)
+internal/cli/cli_test.go	^TestUnknownCommandIsDiagnosticOnly$	internal/cli/cli.go	cli.errorf("unknown command %q\\nTry %q.", name, cli.options.Program+" --help")\n\t\treturn 2	cli.errorf("unknown command %q\\nTry %q.", name, cli.options.Program+" --help")\n\t\treturn 1
+internal/cli/cli_test.go	^TestVMStartPolicyRejectsGlobalOptionsBeforeAdmission$	internal/cli/cli.go	if name == "_vm-start-policy" {	if name == "_vm-start-policy-never" {
+internal/cli/cli_test.go	^TestMigrationPathsLoadExplicitMachineContext$	internal/cli/cli.go	if explicit := environment["SUBYARD_STATE_DIR"]; explicit != "" {	if explicit := environment["SUBYARD_STATE_DIR"]; explicit == "-" {
+# cli: constructor errors
+internal/cli/cli_test.go	^TestRepositoryQueriesUseGoManifest$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/cli_test.go	^TestHeadlessReportingReaderProbe$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/cli_test.go	^TestVMStartPolicyRejectsGlobalOptionsBeforeAdmission$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/cli_test.go	^TestUnknownCommandIsDiagnosticOnly$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/cli_test.go	^TestMigrationPathsLoadExplicitMachineContext$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# cli: setup errors
+internal/cli/cli_test.go	^TestUnknownCommandIsDiagnosticOnly$	internal/cli/fixture_test.go	filepath.Join(filepath.Dir(source), "..", "..")	filepath.Join(filepath.Dir(source), "..", "..", "missing")
+
+# S4 review: ExecFake ssh and ssh-add, author-side config Git fixture
+# update_history: SSH fake rules
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/update_history_test.go	On(testkit.Match{Tool: "ssh"}, testkit.Reply{})	On(testkit.Match{Tool: "ssh"}, testkit.Reply{Exit: 255})
+internal/cli/update_history_test.go	^TestExplicitRemoteUpdateLogViewerUsesForwardRoute$	internal/cli/update_history_test.go	testkit.Reply{Script: trustedSSHMock(t)}	testkit.Reply{}
+# writer_retirement: ssh-add fake rule
+internal/cli/writer_retirement_test.go	^TestAdmittedSSHInputWaitSerializesBeforeFullRemoval$	internal/cli/writer_retirement_test.go	testkit.Reply{Script: ": > \\"$TEST_SSH_INPUT_WAIT\\"\\nexec /bin/sleep 30"}	testkit.Reply{Script: "exec /bin/sleep 30"}
+# config_git_authoring: author constructor errors
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringSharedDevSudo$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringSharedDevSudoWithdrawal$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigSyncSharedDevSudoCacheReplacement$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringPreservesLocalOverridesAndUnrelatedSourceRecords$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitFileAuthoringKeepsLocalFileAndCachesFallback$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitScalarAuthoringRefusesUnrelatedCacheChanges$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringRetriesRejectedPushThroughSyncPush$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringRejectsSourceSymlinksBeforeWriting$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigGitAuthoringRejectsUnpinnedPushURLs$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigSyncPushDoesNotRequireCommitIdentity$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+internal/cli/config_git_authoring_test.go	^TestConfigSyncPullSkipsEffectiveChecksForRefusedUpstreamYard$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
+# config_git_authoring: author setup errors
+internal/cli/config_git_authoring_test.go	^TestConfigGitFileAuthoringKeepsLocalFileAndCachesFallback$	internal/cli/config_git_authoring_test.go	fixture := newFixture(t, withCheckoutConfig())\n\troot, home, configHome, environment :=	fixture := newFixture(t, withCheckoutConfig(), withEnv("HOME=/nonexistent"))\n\troot, home, configHome, environment :=

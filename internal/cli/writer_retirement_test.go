@@ -49,11 +49,8 @@ func retireWriterInstallation(t *testing.T, loaded config.Loaded, configRoot boo
 }
 
 func TestInitProjectInventoryAssessmentDoesNotCreateState(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withWorkingDir(""))
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -70,12 +67,10 @@ func TestUnpreparedWritersRetainOriginalInstallation(t *testing.T) {
 	for _, actor := range []string{"state", "query", "status"} {
 		for _, replacement := range []bool{false, true} {
 			t.Run(actor+map[bool]string{false: "/removed", true: "/replacement"}[replacement], func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
+				environment := fixture.Environment
 				var stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: lifecycleIncus(), Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Incus: lifecycleIncus(), Stderr: &stderr})
 				loaded, err := program.loadContext("default")
 				if err != nil {
 					t.Fatal(err)
@@ -113,11 +108,9 @@ func TestUnpreparedWritersRetainOriginalInstallation(t *testing.T) {
 func TestAuditFirstQueriesRetainOriginalInstallation(t *testing.T) {
 	for _, status := range []bool{false, true} {
 		t.Run(map[bool]string{false: "query", true: "status"}[status], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: lifecycleIncus()})
-			if err != nil {
-				t.Fatal(err)
-			}
+			fixture := newFixture(t, withWorkingDir(""))
+			environment := fixture.Environment
+			program := fixture.New(Options{Incus: lifecycleIncus()})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -142,14 +135,11 @@ func TestAuditFirstQueriesRetainOriginalInstallation(t *testing.T) {
 }
 
 func TestRemoteSelectedHostMutationCannotRecreateRetiredController(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
-	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0600)
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""),
+		withEnv("ACCESS_KIND=remote", "OWNER_ENDPOINT=owner.example", "OWNER_YARD_NAME=default"))
+	fixture.Write(configsync.HostIDPath(fixture.ConfigHome), "local-owner\n")
 	hostAddSSHFixture(t, inventoryResult("remote-owner", "default", "").inventory)
-	environment = append(environment, "ACCESS_KIND=remote", "OWNER_ENDPOINT=owner.example", "OWNER_YARD_NAME=default")
-	program, err := New(Options{RepositoryRoot: root, Arguments: []string{"host", "add", "owner-alias"}, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"host", "add", "owner-alias"}})
 	loaded, err := program.loadContext("default")
 	if err != nil || loaded.Context.AccessKind != domain.AccessRemote {
 		t.Fatal("fixture did not select remote yard", err)
@@ -170,15 +160,13 @@ func (p retireWriterPrompt) Confirm(context.Context, domain.ConfirmationRequest)
 	return true, nil
 }
 
-func writerUnlockFixture(t *testing.T) (*CLI, config.Loaded, string, string) {
+func writerUnlockFixture(t *testing.T, options ...fixtureOption) (*cliFixture, *CLI, config.Loaded, string, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, append([]fixtureOption{withWorkingDir("")}, options...)...)
+	root, environment := fixture.Root, fixture.Environment
 	var stderr bytes.Buffer
 	executor := &sshAgentDispatchExecutor{}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: lifecycleIncus(), Executor: executor, Stderr: &stderr, DispatcherPath: filepath.Join(root, "missing-worker")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: lifecycleIncus(), Executor: executor, Stderr: &stderr, DispatcherPath: filepath.Join(root, "missing-worker")})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -221,11 +209,11 @@ func writerUnlockFixture(t *testing.T) (*CLI, config.Loaded, string, string) {
 	directory := sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName)
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	program.operatorTerminal = func() bool { return true }
-	return program, loaded, key, directory
+	return fixture, program, loaded, key, directory
 }
 
 func TestSSHUnlockCannotRecreateRetiredSigningNamespace(t *testing.T) {
-	program, loaded, key, directory := writerUnlockFixture(t)
+	_, program, loaded, key, directory := writerUnlockFixture(t)
 	stderr := program.options.Stderr.(*bytes.Buffer)
 	// Configuration/source roots remain valid (e.g. preserved Git); the native
 	// grant must still be denied after the installation epoch is retired.
@@ -258,7 +246,8 @@ func (ctx *writerBarrierWait) Done() <-chan struct{} {
 }
 
 func TestStartupRecoveryQueuesBeforeAnyControllerWrite(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	environment := fixture.Environment
 	nativeInstallationFixture(t, environment)
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	inventory := filepath.Join(dataHome, "owner-inventory")
@@ -266,10 +255,7 @@ func TestStartupRecoveryQueuesBeforeAnyControllerWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"_state", "upsert-yard", "sample", "sample", "sync", "yard", "yard"}, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"_state", "upsert-yard", "sample", "sample", "sync", "yard", "yard"}, Stderr: &stderr})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -319,24 +305,17 @@ func TestStartupRecoveryQueuesBeforeAnyControllerWrite(t *testing.T) {
 }
 
 func TestDirectStateRetainsItsOwnFirstAuditPublication(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	for i, value := range environment {
-		if strings.HasPrefix(value, "SUBYARD_NO_AUDIT=") {
-			environment[i] = "SUBYARD_NO_AUDIT="
-		}
-	}
+	fixture := newFixture(t, withWorkingDir(""), withAudit())
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"_state", "upsert-yard", "sample", "sample", "sync", "yard", "yard"}, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Arguments: []string{"_state", "upsert-yard", "sample", "sample", "sync", "yard", "yard"}, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("initial audit invalidated its own state operation: %d %s", code, stderr.String())
 	}
 }
 
 func TestProjectStateUsesInheritedOwnerBarrier(t *testing.T) {
-	root, environment, stateDir := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment, stateDir := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	nativeInstallationFixture(t, environment)
 	home := environmentValue(environment, "SUBYARD_HOME")
 	_, release, err := uninstall.OwnerLock(context.Background(), home, nil)
@@ -366,10 +345,7 @@ func TestProjectStateUsesInheritedOwnerBarrier(t *testing.T) {
 	}{{"nested", borrowed}, {"foreign", foreign}} {
 		t.Setenv("SUBYARD_OWNER_LOCK_FD", strconv.Itoa(int(test.fd.Fd())))
 		var stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"_state", "upsert-yard", test.name, test.name, "sync", "yard", "yard"}, Stderr: &stderr})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: []string{"_state", "upsert-yard", test.name, test.name, "sync", "yard", "yard"}, Stderr: &stderr})
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		code := program.Run(ctx)
 		cancel()
@@ -407,7 +383,7 @@ func TestWriterUnlockDaemon(t *testing.T) {
 }
 
 func TestAdmittedSSHInputWaitSerializesBeforeFullRemoval(t *testing.T) {
-	program, loaded, key, directory := writerUnlockFixture(t)
+	fixture, program, loaded, key, directory := writerUnlockFixture(t, withCommands("ssh-add"))
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -415,13 +391,9 @@ func TestAdmittedSSHInputWaitSerializesBeforeFullRemoval(t *testing.T) {
 	worker := filepath.Join(program.options.RepositoryRoot, "native-worker")
 	testkit.WriteFile(t, worker, []byte(fmt.Sprintf("#!/bin/sh\nexec '%s' -test.run=^TestWriterUnlockDaemon$ -- \"$2\"\n", strings.ReplaceAll(binary, "'", "'\\''"))), 0700)
 	program.options.DispatcherPath = worker
-	tools := filepath.Join(program.options.RepositoryRoot, "tools")
-	if err = os.Mkdir(tools, 0700); err != nil {
-		t.Fatal(err)
-	}
 	waiting := filepath.Join(program.options.RepositoryRoot, "input-wait")
-	testkit.WriteFile(t, filepath.Join(tools, "ssh-add"), []byte("#!/bin/sh\n: > \"$TEST_SSH_INPUT_WAIT\"\nexec /bin/sleep 30\n"), 0700)
-	t.Setenv("PATH", tools+":/usr/bin:/bin")
+	// ssh-add marks the native input boundary, then blocks until cancellation.
+	fixture.Exec().On(testkit.Match{Tool: "ssh-add"}, testkit.Reply{Script: ": > \"$TEST_SSH_INPUT_WAIT\"\nexec /bin/sleep 30"})
 	program.env["TEST_SSH_INPUT_WAIT"] = waiting
 	program.options.Prompt = &testkit.Prompt{Answers: []bool{true}}
 	definition, _ := program.manifest.Lookup("ssh-agent")
