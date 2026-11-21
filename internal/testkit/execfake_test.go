@@ -307,6 +307,32 @@ func TestExecFakeRecordsWithShellBuiltinsOnly(t *testing.T) {
 	}
 }
 
+func TestExecFakeFailsAWriteOnceAndLeavesItsClaim(t *testing.T) {
+	for _, wrapper := range []string{`ulimit -f 0; exec "$@"`, `ulimit -f 0; trap '' XFSZ; exec "$@"`} {
+		recorder := &cleanupRecorder{TB: t}
+		bin := TempDir(t)
+		fake := NewExecFake(recorder, bin, "tool")
+		fake.On(Match{}, Reply{Stdout: "answered\n"})
+		var stdout, stderr bytes.Buffer
+		command := exec.Command("/bin/sh", "-c", wrapper, "sh", filepath.Join(bin, "tool"), "large")
+		command.Stdout, command.Stderr = &stdout, &stderr
+		err := command.Run()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 126 || stdout.String() != "" ||
+			!strings.Contains(stderr.String(), "cannot record a call to tool") {
+			t.Fatalf("%s: write failure: %v stdout=%q stderr=%q", wrapper, err, stdout.String(), stderr.String())
+		}
+		entries, err := os.ReadDir(filepath.Join(fake.state, "records"))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("%s: records after one failed write: %v %v", wrapper, entries, err)
+		}
+		recorder.runCleanups()
+		if len(recorder.failures) != 1 || !strings.Contains(recorder.failures[0], "execfake: call 0: record does not end with NUL") {
+			t.Fatalf("%s: cleanup failures: %q", wrapper, recorder.failures)
+		}
+	}
+}
+
 func TestExecFakeCopiesRulesAndRefusesNUL(t *testing.T) {
 	recorder := &cleanupRecorder{TB: t}
 	bin := TempDir(t)

@@ -297,17 +297,20 @@ func (fake *ExecFake) render(name string) {
 	}
 	script.Write(chain.Bytes())
 	records := shellquote.Word(filepath.Join(fake.state, "records"))
-	// Builtins only: counting existing records gives a starting number, and
-	// writing the record under set -C is the exclusive claim of its number. A
-	// failed write that left no file is a real failure; one that left a file
-	// lost the race or left a truncated record, which records() reports; the
-	// retries are bounded so a write that keeps failing cannot loop forever.
+	// Builtins only: counting existing records gives a starting number, an
+	// empty create under set -C claims it exclusively, and the record is then
+	// appended to the claimed file. A create that fails without leaving a file,
+	// or too many collisions, is a claim failure; a failed write exits at once
+	// and leaves the bad record for records() to report. SIGXFSZ is ignored
+	// around the write so a file-size limit yields 126 rather than a signal.
+	// The create uses true, a regular builtin, because a failed redirection of
+	// the special builtin : would exit the shell.
 	fmt.Fprintf(&script, `execfake_call=0 execfake_tries=0
 for execfake_record in %[1]s/*; do
   [ -e "$execfake_record" ] && execfake_call=$((execfake_call + 1))
 done
 set -C
-until { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >%[1]s/"$execfake_call"; } 2>/dev/null; do
+until { true >%[1]s/"$execfake_call"; } 2>/dev/null; do
   execfake_tries=$((execfake_tries + 1))
   if [ ! -e %[1]s/"$execfake_call" ] || [ "$execfake_tries" -ge 4096 ]; then
     printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
@@ -316,6 +319,12 @@ until { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >%[1]s/"$execfake_call
   execfake_call=$((execfake_call + 1))
 done
 set +C
+trap '' XFSZ
+if ! { printf '%%s\000' %[2]s "$execfake_rule" "$#" "$@" >>%[1]s/"$execfake_call"; } 2>/dev/null; then
+  printf 'execfake: cannot record a call to %%s\n' %[2]s >&2
+  exit 126
+fi
+trap - XFSZ
 `, records, shellquote.Word(name))
 	script.WriteString("case $execfake_rule in\n")
 	script.Write(replies.Bytes())
