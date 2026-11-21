@@ -94,6 +94,15 @@ class SliceCheckTest(unittest.TestCase):
         early = self.write("early.json", "fork/exec /tmp/cli.test: permission denied\n" + json.dumps({"Action": "fail"}) + "\n")
         self.assertEqual(tool.failed_selected(early, "^TestA$"), set())
 
+    def test_a_kill_is_matched_per_subtest_level(self):
+        events = [{"Action": "fail", "Test": "TestA/sub"}, {"Action": "fail", "Test": "TestA"},
+                  {"Action": "fail", "Test": "TestA/other"}, {"Action": "fail", "Test": "TestAB/sub"}]
+        run = self.write("mutant.json", "\n".join(json.dumps(event) for event in events) + "\n")
+        self.assertEqual(tool.failed_selected(run, "^TestA$/^sub$"), {"TestA/sub", "TestA"})
+        self.assertEqual(tool.failed_selected(run, "^TestA$/^(sub|x/y)$"), {"TestA/sub", "TestA"})
+        self.assertEqual(tool.failed_selected(run, "^TestA$/^[/]$"), {"TestA"})
+        self.assertEqual(tool.failed_selected(run, "^TestC$/^sub$"), set())
+
     def test_mutant_text_must_occur_once_and_honours_escapes(self):
         target = self.write("a.go", "first\nsecond\nsecond\n")
         tool.apply(target, "first\\n", "changed\\t")

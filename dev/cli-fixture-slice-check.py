@@ -35,13 +35,43 @@ def passed_names(*paths):
     return names
 
 
+def split_run_pattern(pattern):
+    """Split a -run pattern on the slashes go test splits on: outside brackets,
+    parentheses and escapes."""
+    elements, current, depth, in_class, escaped = [], "", 0, False, False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "/" and depth == 0:
+            elements.append(current)
+            current = ""
+            continue
+        current += char
+    return [re.compile(element) for element in elements + [current]]
+
+
+def selected(name, patterns):
+    """Report whether go test selects name: each element of its slash-separated
+    name matches the pattern element at the same level, where one exists."""
+    return all(pattern.search(element) for pattern, element in zip(patterns, name.split("/")))
+
+
 def failed_selected(path, pattern):
     """Return the selected tests that a go test -json run reports as failed.
 
-    A selected test is one whose top-level name matches the -run pattern; a
-    failure before any test ran, such as a fork/exec error, names none.
+    A failure before any test ran, such as a fork/exec error, names none.
     """
-    selected = re.compile(pattern)
+    patterns = split_run_pattern(pattern)
     names = set()
     for line in Path(path).read_text().splitlines():
         try:
@@ -49,7 +79,7 @@ def failed_selected(path, pattern):
         except ValueError:
             continue
         test = event.get("Test")
-        if test and event.get("Action") == "fail" and selected.search(test.split("/")[0]):
+        if test and event.get("Action") == "fail" and selected(test, patterns):
             names.add(test)
     return names
 
