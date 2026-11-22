@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "tier": "system-container",
+  "tier": "vm",
   "needs": []
 }
