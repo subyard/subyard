@@ -42,6 +42,9 @@ base_prepare_nested_host() {
   systemctl daemon-reload
   # Retain only the public image bytes. Each new Incus daemon owns its database and keys.
   local variant source fingerprint
+  # The builder removes this recipe tree before publishing the base.
+  local INCUS_CONF="$recipe_root/image-client"
+  export INCUS_CONF
   for variant in minimal cloud; do
     source=debian/13
     [ "$variant" != cloud ] || source=debian/13/cloud

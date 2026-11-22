@@ -74,6 +74,9 @@ func TestSystemContainerPool(t *testing.T) {
 		t.Fatal("expired allocation survived cleanup")
 	}
 	ready := f.incus.projects[child.preparedRuntime().Config.Project]
+	if ready.devices["eth0"] || !ready.devices["root"] || !project.devices["eth0"] {
+		t.Fatal("only the leased instance may claim the slot bridge DNS name")
+	}
 	template := ready.instances[cfg.vm(1)]
 	if len(ready.instances) != 1 || template.status != "STOPPED" || len(template.agentKeyWrites) != 0 ||
 		template.config["user.subyard.lease-epoch"] != "" || template.config["volatile.base_image"] != grant.BaseFingerprint {

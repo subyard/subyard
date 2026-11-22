@@ -541,7 +541,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		"size", cfg.Disk, "--project", cfg.Project); err != nil {
 		return err
 	}
-	if !linePresent(devices, "eth0") {
+	if cfg.Network != "" && !linePresent(devices, "eth0") {
 		if _, err := runtime.incus(ctx, "profile", "device", "add", "default", "eth0",
 			"nic", "network="+cfg.Network, "name=eth0", "--project", cfg.Project); err != nil {
 			return err

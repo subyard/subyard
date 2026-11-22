@@ -17,6 +17,8 @@ const preparedFor = "user.subyard.prepared-for"
 func (runtime *Runtime) preparedRuntime() *Runtime {
 	ready := *runtime
 	ready.Config.Project += "-prepared"
+	// A stopped NIC still reserves its instance name in Incus bridge DNS.
+	ready.Config.Network = ""
 	ready.Config = ready.Config.withEnvironment(EnvironmentSpec{Name: EnvironmentContainer, Count: 1, CPU: runtime.Config.CPU})
 	ready.Config.AgentPublicKey = ""
 	ready.allocation = nil
