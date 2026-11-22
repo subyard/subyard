@@ -101,10 +101,9 @@ def plan(root=ROOT, image=IMAGES[0]):
     for lane, (check_id,) in split_checks.items():
         declarations["p0:" + lane] = declarations[check_id]
     include = [check for check in include if [check["id"]] not in split_checks.values()]
-    # The workflow's pool gate already runs boundary. The cleanup lane verifies a previous
-    # lane's leftovers, and a fresh runner has none.
+    # Cleanup verifies an earlier lane's leftovers. Every matrix job starts fresh.
     include += [{"id": "p0:" + lane, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, *SLOT]}
-                for lane in full[0] if lane not in ("boundary", "cleanup")]
+                for lane in full[0] if lane != "cleanup"]
     # The release catalog upgrades a few baselines with agents; the rest keep an agent-free run here.
     baselines = (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
     for line in baselines:

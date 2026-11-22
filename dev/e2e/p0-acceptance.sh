@@ -619,8 +619,8 @@ capacity_cache_snapshot() {
     bytes() {
       if [ -e "$1" ]; then du -sx -B1 "$1" | awk "{print \$1}"; else printf "0\n"; fi
     }
-    build="$(env -u GOCACHE go env GOCACHE)"
-    modules="$(env -u GOMODCACHE go env GOMODCACHE)"
+    build="$(env -u GOCACHE GOTOOLCHAIN=local go env GOCACHE)"
+    modules="$(env -u GOMODCACHE GOTOOLCHAIN=local go env GOMODCACHE)"
     printf "%s\t%s\n" "$(bytes "$build")" "$(bytes "$modules")"
   '
 }

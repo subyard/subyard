@@ -4455,6 +4455,17 @@ BOOTSTRAP_INSTALLER
       || fail 'Incus bootstrap changed persistent parent contents or permissions'
   done
   [ "$(wc -l < "$BOOTSTRAP_CALL_LOG")" = 2 ] || fail 'Incus bootstrap skipped the installer'
+  # A frozen candidate uses its verified dispatcher even when a source builder exists.
+  install -d "$ROOT/.subyard-acceptance"
+  touch "$ROOT/.subyard-acceptance/candidate.json"
+  cat > "$ROOT/tests/helpers/release-candidate.sh" <<'FROZEN_DISPATCHER'
+release_candidate_prepare() { [ "$1" = "$ROOT" ] && printf '%s\n' "$ROOT/frozen/yard-engine"; }
+FROZEN_DISPATCHER
+  . "$ROOT/tests/helpers/test-context.sh"
+  prepare_test_incus_dispatcher "$ROOT"
+  [ "$SUBYARD_DISPATCHER_PATH" = "$ROOT/frozen/yard-engine" ] || fail 'frozen dispatcher was rebuilt'
+  printf 'release_candidate_prepare() { return 2; }\n' > "$ROOT/tests/helpers/release-candidate.sh"
+  if prepare_test_incus_dispatcher "$ROOT"; then fail 'invalid candidate triggered a source rebuild'; fi
   [ "$(cat "$ROOT/.build/yard")" = 'lane engine' ] || fail 'Incus bootstrap changed the lane engine'
   chmod 0755 "$P0_CAPACITY_PLATFORM_ROOT/incus"
 )

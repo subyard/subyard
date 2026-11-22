@@ -1684,7 +1684,7 @@ dependency_verify() {
     command -v "$command" >/dev/null || die "dependency baseline misses $command"
   done
   printf 'ok: VM%s dependency baseline revision=%s go=%s shellcheck=%s\n' \
-    "$SUBYARD_E2E_VM" "$revision" "$(go env GOVERSION)" "$(shellcheck --version | awk 'NR == 2 {print $2}')"
+    "$SUBYARD_E2E_VM" "$revision" "$(GOTOOLCHAIN=local go env GOVERSION)" "$(shellcheck --version | awk 'NR == 2 {print $2}')"
 }
 
 dependency_bootstrap() (

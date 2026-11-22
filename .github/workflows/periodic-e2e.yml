@@ -330,10 +330,9 @@ jobs:
       - name: Install the pool and hold one lease
         timeout-minutes: 110
         run: >-
-          bash dev/ci/periodic-e2e.sh check pool-boundary
+          bash dev/ci/periodic-e2e.sh pool
           "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"
           --image "$LEASE_IMAGE"
-          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1
       - name: Snapshot hosted check diagnostics
         continue-on-error: true
         if: always()
