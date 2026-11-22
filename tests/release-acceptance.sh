@@ -185,6 +185,23 @@ class TestAcceptance(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(m, "broker_slots", return_value={1: "available", 2: "available"}))
 
+    def test_every_grant_must_meet_the_check_minimum(self):
+        grants = {}
+        for kind, tier in m.GRANT_TIERS.items():
+            grants[tier] = m.grant_environments([(kind, 1, "b" * 64, "ubuntu-24.04", "arm64")])[0]
+        for tier in m.TIERS:
+            for actual in m.TIERS:
+                with self.subTest(tier=tier, actual=actual):
+                    self.assertEqual(m.placement_issue("profile:sample", [grants["vm"], grants[actual]], tier) is None,
+                                     m.TIERS.index(actual) >= m.TIERS.index(tier))
+        legacy = m.grant_environments([("subyard-pair", 1, "b" * 64)])[0]
+        self.assertTrue(m.valid_environment(legacy))
+        self.assertIsNotNone(m.placement_issue("vm:fixture", [legacy], "vm"))
+        for changes in ({"type": "invented"}, {"arch": "unknown"}, {"tier": "runner"}, {"image": "ubuntu-99"}):
+            self.assertFalse(m.valid_environment(grants["vm"] | changes))
+        self.assertFalse(m.valid_environment(grants["runner"] | {"vm_count": 2}))
+        self.assertFalse(m.valid_environment(grants["runner"] | {"image": "debian-13"}))
+
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -3447,12 +3464,13 @@ while True: time.sleep(1)
             checkout = Path(temporary)
             (checkout / "dev/e2e").mkdir(parents=True)
             shutil.copy2(root / "dev/e2e/release-vm-check.sh", checkout / "dev/e2e/release-vm-check.sh")
+            shutil.copy2(root / "dev/release-acceptance.py", checkout / "dev/release-acceptance.py")
             record = checkout / "argv"
             for name in ("dev/agent-e2e.sh", "dev/e2e/fixture.sh"):
                 (checkout / name).write_text('#!/bin/bash\nprintf "%s\\n" "$0" "$@" >> "$RECORD"\n')
                 (checkout / name).chmod(0o755)
             (checkout / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
-                {"id": "own", "timeout_seconds": 60, "command": ["bash", "dev/e2e/fixture.sh", "--lane", "x"]},
+                {"id": "own", "tier": "system-container", "timeout_seconds": 60, "command": ["bash", "dev/e2e/fixture.sh", "--lane", "x"]},
                 {"id": "group/leased", "lease": {}, "timeout_seconds": 90, "command": ["bash", "dev/e2e/fixture.sh", "run", "@TOKEN@"]},
                 {"id": "typed", "lease": {"type": "android-test"}, "timeout_seconds": 120, "command": ["bash", "dev/e2e/fixture.sh"]}]}))
             def run(*arguments):
@@ -3460,6 +3478,8 @@ while True: time.sleep(1)
                 result = subprocess.run(["bash", str(checkout / "dev/e2e/release-vm-check.sh"), *arguments],
                                         env={**os.environ, "RECORD": str(record)}, capture_output=True, text=True)
                 return result.returncode, record.read_text().splitlines() if record.exists() else [], result.stderr
+            fixture = checkout / "dev/e2e/fixture.sh"
+            fixture.write_text(fixture.read_text() + '[ "$SUBYARD_E2E_TIER" = system-container ]\n')
             code, argv, _ = run("own", "--slot", "7")
             self.assertEqual((code, argv[1:]), (0, ["--lane", "x", "--slot", "7"]))
             code, argv, _ = run("group/leased", "--slot", "2")

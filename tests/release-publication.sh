@@ -65,12 +65,12 @@ def clean_lease(run="0f1c7e00", staged=(1, 2), base="b" * 64, middle=""):
 
 
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
-            manifest_sources=False, split_catalog=False):
+            manifest_sources=False, split_catalog=False, tiered=False):
     root = directory / "source"
-    if split_catalog:
+    if split_catalog or tiered:
         # A split-covered full check that requires one sibling check of the same candidate.
         (root / "dev/e2e").mkdir(parents=True)
-        (root / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
+        (root / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 2 if tiered else 1, "checks": [
             {"id": "p0-full", "command": ["bash", "dev/e2e/release-vm-check.sh", "--split-covered"],
              "requires": ["p0-split"], "timeout_seconds": 60},
             {"id": "p0-split", "command": ["bash", "dev/e2e/release-vm-check.sh"], "timeout_seconds": 60}]}))
@@ -89,6 +89,11 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
     (profile / "acceptance.sh").write_text(LANE_CONTROLLER)
+    if tiered:
+        (profile / "acceptance.sh").write_text(LANE_CONTROLLER.replace("record grant type=subyard-pair",
+            'if [ "$SUBYARD_E2E_TIER" = vm ]; then kind=subyard-pair; else kind=system-container; fi\n'
+            'record grant type=$kind').replace('base="$(printf %064d 0)"', 'base="$(printf %064d 0)" image=debian-13 arch=arm64'))
+        (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "tier": "system-container"}))
     if lanes:
         (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
             {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
@@ -155,6 +160,13 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
                 "execution_environment": receipt["environment"]}
             if m.a.is_live(name):
                 receipt["checks"][name].update(slot=1, environments=[{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}])
+                if m.a.tiered_catalog(root):
+                    kind = "system-container" if name == "profile:sample" else "subyard-pair"
+                    image = m.a.SMOKE_IMAGES.get(name, "debian-13")
+                    log.write_text(LANE_LOG.replace("type=subyard-pair", "type=" + kind).replace(
+                        "b" * 64, "b" * 64 + f" image={image} arch=arm64"))
+                    receipt["checks"][name].update(log_sha256=m.a.digest(log),
+                        environments=m.a.grant_environments([(kind, 2, "b" * 64, image, "arm64")]))
     if external_passed:
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
@@ -604,6 +616,47 @@ class Contracts(unittest.TestCase):
         _, prepared, identity = fixture(directory, optional_vms=True, split_catalog=True)
         output, root, _ = accepted(directory, prepared, identity, with_vms=with_vms)
         return output, root, identity
+
+    def test_tiered_release_requires_every_check_and_each_smoke_image(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory, tiered=True)
+            output, root, document = accepted(directory, prepared, identity)
+            self.assertEqual(document["release_level"], "ordinary")
+            self.assertIsNone(m.validate_attestation(document, identity, root))
+            profile = document["checks"]["profile:sample"]["environments"]
+            self.assertEqual((profile[0]["tier"], profile[0]["arch"]), ("system-container", "arm64"))
+            for name, image in m.a.SMOKE_IMAGES.items():
+                self.assertEqual(document["checks"][name]["environments"][0]["image"], image)
+            invalid = copy.deepcopy(document)
+            invalid["release_level"] = "full"
+            invalid["checks"]["vm:p0-release-smoke/ubuntu-26.04"]["environments"][0]["image"] = "ubuntu-24.04"
+            invalid["checks"]["vm:p0-split"] = {"status": "pending"}
+            with self.assertRaises(ValueError) as rejected:
+                m.validate_attestation(invalid, identity, root)
+            for refusal in ("profile:sample requires at least the vm tier", "requires a VM on ubuntu-26.04",
+                            "vm:p0-split lacks complete tier, image and architecture evidence"):
+                self.assertIn(refusal, str(rejected.exception))
+            _, receipt = m.a.load_bound(output)
+            receipt["checks"]["profile:sample"]["environments"][0]["arch"] = "amd64"
+            m.a.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, "receipt environments differ"):
+                m.a.load_bound(output)
+            receipt["checks"]["profile:sample"]["environments"][0]["arch"] = "arm64"
+            receipt["release_level"] = {**ORDINARY_LEVEL, "level": "full"}
+            m.a.save(output, receipt)
+            _, full = m.a.load_bound(output)
+            self.assertEqual(full["checks"]["profile:sample"]["status"], "failed")
+            self.assertEqual(full["checks"]["p0-release-smoke"]["status"], "passed")
+            with self.assertRaisesRegex(ValueError, "profile:sample"):
+                m.attestation(output, identity)
+
+            with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+                    patch.object(m.a, "broker_slots", return_value={1: "available"}):
+                self.assertEqual(m.a.run_checks(output, [1], ["profile:sample"], False), 0)
+            document = m.attestation(output, identity)
+            self.assertEqual(document["release_level"], "full")
+            self.assertEqual(document["checks"]["profile:sample"]["environments"][0]["tier"], "vm")
 
     def test_split_requirement_refuses_unrun_required_check_in_attestation(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

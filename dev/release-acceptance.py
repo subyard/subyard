@@ -284,7 +284,7 @@ def source_fingerprint(root):
 def clean_environment():
     env = os.environ.copy()
     for key in ("SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256",
-                "SUBYARD_E2E_LOCAL_EVIDENCE", "SUBYARD_E2E_LANE",
+                "SUBYARD_E2E_LOCAL_EVIDENCE", "SUBYARD_E2E_LANE", "SUBYARD_E2E_TIER",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE",
                 "SUBYARD_REPOSITORY_ROOT", "YARD_ENGINE_PATH"):
         env.pop(key, None)
@@ -490,6 +490,8 @@ CI_HOSTED_POLICIES = frozenset({
     "bf7eea8d8a2ddc4073a7fe7d4be8a6ce6475a13e",
     # actions/setup-go pinned to v7.1.0; commands unchanged.
     "dcccabd1926c795ef9749c89e770a89875eeaf50",
+    # Hosted VM jobs explicitly select the VM tier.
+    "db009feebe6cca65e065ad05f8c1f7a7deeeca56",
 })
 
 
@@ -564,7 +566,7 @@ OPTIONAL_VM_NOT_RUN = {"status": "not-run", "reason": "optional VM check; run ex
 def vm_checks_optional(root):
     # Read the declaration from pinned source; historical candidates keep their policy.
     path = root / "dev/release-acceptance.py"
-    if not path.is_file():
+    if tiered_catalog(root) or not path.is_file():
         return False
     for node in ast.parse(path.read_text()).body:
         if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "OPTIONAL_VM_NOT_RUN" for target in node.targets):
@@ -576,8 +578,18 @@ def optional_vm_not_run(name, result):
     return name.startswith(("profile:", "vm:")) and result == OPTIONAL_VM_NOT_RUN
 
 
+SMOKE_IMAGES = {"p0-release-smoke": "debian-13", "vm:p0-release-smoke/ubuntu-24.04": "ubuntu-24.04",
+                "vm:p0-release-smoke/ubuntu-26.04": "ubuntu-26.04"}
+GRANT_TIERS = {"subyard-pair": "vm", "android-test": "vm", "system-container": "system-container", "runner": "runner"}
+
 CORE_VM_CATALOG = "dev/e2e/release-vm-checks.json"
 CORE_VM_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}(?:/[a-z0-9][a-z0-9.-]{0,63})?")
+
+
+def tiered_catalog(root):
+    path = root / CORE_VM_CATALOG
+    document = json.loads(path.read_text()) if path.is_file() else {}
+    return isinstance(document, dict) and document.get("schema_version") == 2
 
 
 def required_vm_checks(results, requirements):
@@ -622,7 +634,7 @@ def core_vm_catalog(root):
         return []
     document = json.loads(path.read_text())
     entries = document.get("checks") if isinstance(document, dict) else None
-    if not isinstance(document, dict) or set(document) != {"schema_version", "checks"} or document["schema_version"] != 1 \
+    if not isinstance(document, dict) or set(document) != {"schema_version", "checks"} or document["schema_version"] not in (1, 2) \
             or not isinstance(entries, list) or not entries:
         raise ValueError("invalid core VM check catalog")
     refusals = []
@@ -725,6 +737,9 @@ def commands(root, version, inventory, periodic=False):
         "compatibility": ["python3", "dev/verify-release-upgrades.py", "--release-dir", str(release), "--version", version],
         "p0-release-smoke": ["bash", "dev/e2e/p0-acceptance.sh"],
     }
+    if tiered_catalog(root) and not periodic:
+        for name, image in SMOKE_IMAGES.items():
+            result[name] = ["bash", "dev/e2e/p0-acceptance.sh", "--image", image]
     for check in core_vm_checks(root):
         result["vm:" + check] = ["bash", "dev/e2e/release-vm-check.sh", check]
     for name, entry in inventory.items():
@@ -956,10 +971,9 @@ def execute(name, command, root, output, env, slot=None):
         result["failure_class"] = ("environment" if blocked else "timeout" if code == 124
                                    else phases.get("failure_class", "unknown"))
     # Only the lane's own grants are its environments; nested guest clients lease their own.
-    environments = list(dict.fromkeys(evidence.environments)) if evidence else []
     if slot:
-        result["environments"] = [{"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
-                                  for kind, count, fingerprint in environments]
+        environments = grant_environments(evidence.environments) if evidence else []
+        result["environments"] = environments
         result["environment_evidence"] = "recorded" if environments else "unknown"
     if reason and not interrupted:
         result["reason"] = reason
@@ -1030,8 +1044,8 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
                     phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
                     if release[1] == b"end":
                         phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
-            environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-            if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
+            environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|system-container|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
+            if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"system-container", b"1"), (b"system-container", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
                 if key not in seen:
                     seen.add(key)
@@ -1041,13 +1055,13 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
 
 LANE_ID = re.compile(r"[0-9a-f]{32}")
 LANE_HEADER = re.compile(rb"E2E_LANE id=([0-9a-f]{32})\n")
-LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,100})\n")
+LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,160})\n")
 LANE_EVENTS = {event: re.compile(fields) for event, fields in (
-    (b"request", rb""), (b"grant", rb" type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})"),
+    (b"request", rb""), (b"grant", rb" type=(subyard-pair|system-container|android-test|runner) vms=([12]) base=([0-9a-f]{64})(?: image=(debian-13|ubuntu-24\.04|ubuntu-26\.04) arch=(amd64|arm64))?"),
     (b"refused", rb" resource=(memory|disk|slot)(?: state=(provisioning|held|draining|recovering))?"), (b"work", rb" vm=([12])"),
     (b"cleaned", rb" vm=([12]) exit_code=([0-9]{1,3})"), (b"release", rb" exit_code=([0-9]{1,3})"))}
 # The longest well-formed record line, from its `E2E_LEASE lane=ID ` prefix to the newline.
-LANE_RECORD_BYTES = 200
+LANE_RECORD_BYTES = 260
 LaneEvidence = namedtuple("LaneEvidence", "issue refusal environments cleaned completed")
 
 
@@ -1090,7 +1104,7 @@ def lane_evidence(log, slot, declared=None):
             event = record and record[3].decode()
             if (not fields or event in ("cleaned", "release") and int(fields.groups()[-1]) > 255
                     or event == "refused" and (fields[1] == b"slot") != (fields[2] is not None)
-                    or event == "grant" and fields[1] == b"android-test" and fields[2] != b"1"):
+                    or event == "grant" and fields[1] in (b"android-test", b"runner") and fields[2] != b"1"):
                 issue = issue or "malformed lane lease record"
                 continue
             run, state = record[1], runs.get(record[1])
@@ -1107,7 +1121,10 @@ def lane_evidence(log, slot, declared=None):
                     state["state"] = "refused"
                 else:
                     runs[run] = {"state": "granted", "staged": set(), "vms": int(fields[2])}
-                    environments.append((fields[1].decode(), int(fields[2]), fields[3].decode()))
+                    environment = (fields[1].decode(), int(fields[2]), fields[3].decode())
+                    if fields[4]:
+                        environment += (fields[4].decode(), fields[5].decode())
+                    environments.append(environment)
             elif not state or state["state"] != "granted":
                 found = f"lease {event} outside a held lease"
             elif event in ("work", "cleaned") and int(fields[1]) > state["vms"]:
@@ -1177,6 +1194,50 @@ def launcher_lane(argv):
     return values[0] if len(values) == 1 and LANE_ID.fullmatch(values[0]) else None
 
 
+def grant_environments(grants):
+    environments = []
+    for kind, count, fingerprint, *placement in dict.fromkeys(grants):
+        item = {"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
+        if placement:
+            item.update(tier=GRANT_TIERS[kind], image=placement[0], arch=placement[1])
+        environments.append(item)
+    return environments
+
+
+def valid_environment(item):
+    keys = {"type", "vm_count", "base_fingerprint"}
+    if (not isinstance(item, dict) or not keys <= item.keys() or not isinstance(item["type"], str)
+        or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
+        or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not is_sha(item["base_fingerprint"])):
+        return False
+    if item.keys() == keys:
+        return True  # Historical grant.
+    return (item.keys() == keys | {"tier", "image", "arch"} and item["type"] in GRANT_TIERS
+            and item["tier"] == GRANT_TIERS[item["type"]] and item["image"] in SMOKE_IMAGES.values()
+            and item["arch"] in ("amd64", "arm64") and item["vm_count"] in (1, 2)
+            and (item["type"] not in ("android-test", "runner") or item["vm_count"] == 1)
+            and (item["type"] != "runner" or item["image"] == "ubuntu-24.04"))
+
+
+def placement_issue(name, environments, tier):
+    if not isinstance(environments, list) or not environments or any(not valid_environment(item) or "tier" not in item for item in environments):
+        return f"{name} lacks complete tier, image and architecture evidence"
+    if any(TIERS.index(item["tier"]) < TIERS.index(tier) for item in environments):
+        return f"{name} requires at least the {tier} tier"
+    if name in SMOKE_IMAGES and any(item["tier"] != "vm" or item["image"] != SMOKE_IMAGES[name] for item in environments):
+        return f"{name} requires a VM on {SMOKE_IMAGES[name]}"
+    return None
+
+
+def require_target_placement(root, receipt, name, environments):
+    if is_live(name) and tiered_catalog(root):
+        declarations = check_declarations(root, receipt["profiles"])
+        tier = resolve_tier(declarations.get(name, {}), receipt.get("release_level", {}).get("level", "ordinary"))
+        issue = placement_issue(name, environments, tier)
+        if issue:
+            raise ValueError(issue)
+
+
 def pass_counts(directory, name, result, declared=None):
     """Whether a recorded PASS still counts under lane_status: (counts, reason when not, the typed
     grants' environments of a slot lane or None). declared is a retained launcher's lane ID."""
@@ -1187,8 +1248,7 @@ def pass_counts(directory, name, result, declared=None):
         except (OSError, ValueError, KeyError, TypeError):
             return False, "lane evidence is unreadable", None
     status, reason = lane_status(result, evidence)
-    environments = evidence and [{"type": kind, "vm_count": count, "base_fingerprint": base}
-                                 for kind, count, base in dict.fromkeys(evidence.environments)]
+    environments = evidence and grant_environments(evidence.environments)
     return status == "passed", reason or "lane evidence is not a complete PASS", environments
 
 
@@ -1351,6 +1411,8 @@ def load_bound(output, entries=None, context=None):
     release = root / ".subyard-acceptance/release"
     if {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()} != receipt["release_files"]:
         raise ValueError("candidate release assets changed")
+    declarations = check_declarations(root, receipt["profiles"]) if tiered_catalog(root) else None
+    level = receipt.get("release_level", {}).get("level", "ordinary")
     optional_vms = vm_checks_optional(root)
     validate_optional_vm_history(output, {name for name, result in receipt["checks"].items() if optional_vm_not_run(name, result)})
     for name, result in receipt["checks"].items():
@@ -1385,6 +1447,12 @@ def load_bound(output, entries=None, context=None):
                     launch = read_transfer_json(output / files["launch"])
                     declared = launcher_lane(launch.get("argv") if isinstance(launch, dict) else None) or ""
             counts, reason, environments = pass_counts(output, name, result, declared)
+            if counts and declarations is not None and is_live(name):
+                issue = placement_issue(name, environments, resolve_tier(declarations.get(name, {}), level))
+                if environments != result.get("environments"):
+                    raise ValueError(f"{name}: receipt environments differ from its lane log")
+                if issue:
+                    counts, reason = False, issue
             if not counts:
                 # An earlier collector counted this PASS under a weaker rule: rerun it.
                 receipt["checks"][name] = downgraded(result, reason)
@@ -1477,11 +1545,13 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                 if command and optional_vm_not_run(name, OPTIONAL_VM_NOT_RUN):
                     receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
-    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    all_physical = with_vms or tiered_catalog(root)
+    selected = select_checks(checks, only) if only else {name for name in checks if all_physical or not is_live(name)}
     selected |= selected_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
-    if "p0-release-smoke" in excluded:
-        raise ValueError("p0-release-smoke is required and cannot be excluded")
+    for smoke in SMOKE_IMAGES:
+        if smoke in excluded:
+            raise ValueError(f"{smoke} is required and cannot be excluded")
     required = with_requirements(receipt, selected)
     readiness = {}
     if external_readiness:
@@ -1579,7 +1649,7 @@ def public_broker_status(path):
             if re.fullmatch(r"slot-[0-9]{1,3}", identifier) and slot.get("state") in states:
                 public_slot = {"id": identifier, "state": slot["state"]}
                 kind = (slot.get("environment") or {}).get("type")
-                if kind in ("subyard-pair", "android-test"):
+                if kind in ("subyard-pair", "android-test", "system-container"):
                     public_slot["type"] = kind
                 result["slots"].append(public_slot)
         resources = value.get("resources", {})
@@ -1783,7 +1853,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     if measured_environment != receipt.get("environment", measured_environment):
         raise ValueError("execution environment changed since candidate preparation")
     checks = commands(root, receipt["version"], receipt["profiles"])
-    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    tiered = tiered_catalog(root)
+    declarations = check_declarations(root, receipt["profiles"]) if tiered else {}
+    level = receipt.get("release_level", {}).get("level", "ordinary")
+    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or tiered or not is_live(name)}
     prioritized = select_checks(checks, first)
     selected |= prioritized
     # A selected check also runs what it requires, such as vm:p0-full its split checks; a
@@ -1792,8 +1865,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     selected |= dependencies
     requested = with_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
-    if "p0-release-smoke" in excluded:
-        raise ValueError("p0-release-smoke is required and cannot be excluded")
+    for smoke in SMOKE_IMAGES:
+        if smoke in excluded:
+            raise ValueError(f"{smoke} is required and cannot be excluded")
     selected -= excluded
     # Full runs select every preflight. Targeted lanes retain their exact selection
     # for hosted receipt consumers and run their own owning prerequisites.
@@ -1846,7 +1920,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                 receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
                 save(output, receipt)  # Invalidate a previous PASS before any child can start.
             check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
+            if slot and tiered:
+                required_tier = resolve_tier(declarations.get(name, {}), level)
+                # Local brokers can satisfy a runner minimum with a VM. Hosted
+                # release jobs explicitly choose their physical tier.
+                tier = "vm" if required_tier == "runner" or os.environ.get("SUBYARD_CI_VM_TIER") == "1" else required_tier
+                check_env = dict(check_env, SUBYARD_E2E_TIER=tier)
             result = execute(name, checks[name], root, output, check_env, slot) if slot else execute(name, checks[name], root, output, check_env)
+            if slot and tiered and result["status"] == "passed":
+                issue = placement_issue(name, result.get("environments"), required_tier)
+                if issue:
+                    result.update(status="failed", reason=issue)
             result["execution_environment"] = measured_environment
             result["original_attempt"] = completed_attempt(output, root, receipt, name, result)
             return result
@@ -2068,9 +2152,7 @@ def validate_attempt(record, manifest, name, command, log_sha256=None):
         or not isinstance(facts["environments"], list)):
         raise ValueError("invalid completed attempt result")
     for item in facts["environments"]:
-        if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
-            or not isinstance(item["type"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
-            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not is_sha(item["base_fingerprint"])):
+        if not valid_environment(item):
             raise ValueError("invalid attempt physical environment")
     for key, allowed in (("capture_status", (None, "recorded", "failed")),
                          ("environment_evidence", (None, "recorded", "unknown")),
@@ -2275,7 +2357,7 @@ def migration_paths(paths):
     """Product (non-test, non-Markdown) paths of migrations, release transitions or the update contract."""
     return sorted(path for path in paths if not path.endswith(".md") and not TEST_PATH.search(path)
                   and (MIGRATION_PATH.search(path) or UPDATE_CONTRACT_PATH.search(path)))
-FINAL_BYTES_CHECKS = ("verify", "p0-release-smoke")
+FINAL_BYTES_CHECKS = ("verify", *SMOKE_IMAGES)
 
 
 def transfer_scope_refusals(name, tested_fingerprint, target_fingerprint, tested_entries=None, target_entries=None):
@@ -2436,6 +2518,7 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
             binding["scope"] = "other-profile-tests-only"
         else:
             binding["scope"] = "exact-source"
+        require_target_placement(root, receipt, name, result.get("environments"))
         incoming.append((name, result, binding))
     # Validate the entire requested import before copying evidence or updating state.
     for name, result, binding in incoming:
@@ -2575,9 +2658,7 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
     if not isinstance(environments, list) or (is_live(name) and not environments):
         raise ValueError("transferred physical environment missing")
     for item in environments:
-        if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
-            or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item.get("type", ""))
-            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not is_sha(item["base_fingerprint"])):
+        if not valid_environment(item):
             raise ValueError("invalid transferred physical environment")
     duration = document["duration_seconds"]
     if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
@@ -2708,8 +2789,7 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
-            "execution_environment": None, "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base}
-                for kind, count, base in environments]}
+            "execution_environment": None, "environments": grant_environments(environments)}
 
 
 def transfer_artifacts(output, result):
@@ -3212,6 +3292,7 @@ def reuse_isolated_tests(output, sources):
                 if original.get("status") != "passed":
                     continue  # Nothing to reuse; not a diagnostic.
                 try:
+                    require_target_placement(target.root, receipt, name, original.get("environments"))
                     command, _ = batch_guard(target.root, receipt, source.root, source.receipt, name, target.context, source.context)
                     refusals = transfer_scope_refusals(name, source.receipt["source_fingerprint"], receipt["source_fingerprint"],
                                                        source.entries, target.entries)
@@ -3288,9 +3369,12 @@ def apply_transfers(target, prepared, batch_id=None, verify_inputs=None):
                 copied[role] = copied_cache[key]
             result = transfer_result(transfer, copied, batch_id)
             validate_transferred_result(staging, receipt, name, result, command, root)
-            counts, reason, _ = pass_counts(staging, name, result)
+            counts, reason, environments = pass_counts(staging, name, result)
             if not counts:
                 raise ValueError(f"{name}: transferred evidence is not a complete PASS: {reason}")
+            require_target_placement(root, receipt, name, environments)
+            if tiered_catalog(root) and environments != result.get("environments") and is_live(name):
+                raise ValueError(f"{name}: transferred environments differ from its lane log")
             incoming["checks"][name] = result
         if verify_inputs is not None:
             verify_inputs()
@@ -3344,6 +3428,8 @@ def supersede(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
+    placement = sub.add_parser("placement", help="resolve a core catalog check's local lease tier")
+    placement.add_argument("check")
     prep = sub.add_parser("prepare", help="retain an immutable source/artifact candidate")
     prep.add_argument("--version", required=True)
     prep.add_argument("--output", type=Path, required=True)
@@ -3396,6 +3482,13 @@ def main():
     deferred.add_argument("--reason", required=True, help="public reason for deferring these external checks")
     deferred.add_argument("--authorization-reference", required=True, help="public reference to explicit operator authorization")
     args = parser.parse_args()
+    if args.action == "placement":
+        declarations = check_declarations(ROOT, {})
+        if args.check not in declarations:
+            parser.error("unknown core check")
+        tier = resolve_tier(declarations[args.check])
+        print("vm" if tier == "runner" else tier)
+        return 0
     if args.action == "preflight":
         report = preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
                            args.broker_status, args.external_readiness, selected_slots(args), args.types, args.with_vms)

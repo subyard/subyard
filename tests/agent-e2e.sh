@@ -3266,6 +3266,7 @@ status_without_v2='{"schema_version":1,"status":"ok","pool":{"schema_version":1,
 grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-002","resource_generation":1,"lease_id":"aabbccdd","lease_epoch":2,"capability":"eeff0011","data_user":"subyard-e2e-slot-2","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.2.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.2.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
 wrong_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":1,"lease_id":"badc0ffe","lease_epoch":3,"capability":"facefeed","data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"YWJjZA=="}]}}'
 case "$command" in
+  *dpkg*--print-architecture*) printf 'image=debian-13 arch=amd64'; exit 0 ;;
   status)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
     if [ "$FAKE_SCENARIO" = status-without-v2 ]; then
@@ -3804,7 +3805,7 @@ done
 # With the collector's lane ID, the lane's own client and runner record each lease event.
 lane_id=0123456789abcdef0123456789abcdef
 lane_records() { sed -n "s/^E2E_LEASE lane=$lane_id run=[0-9a-f]\{8\} slot=slot-002 event=//p" "$1"; }
-lane_grant="grant type=subyard-pair vms=2 base=$(printf 'a%.0s' {1..64})"
+lane_grant="grant type=subyard-pair vms=2 base=$(printf 'a%.0s' {1..64}) image=debian-13 arch=amd64"
 for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s busy:--ssh:1 busy:--wait:1s; do
   IFS=: read -r lane_scenario lane_mode lane_value <<<"$lane_case"
   new_runner_fixture "lane-$lane_scenario-$lane_mode"

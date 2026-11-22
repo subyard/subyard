@@ -854,6 +854,13 @@ capacity_refusal_snapshot() {
 }
 
 acquire_lease() {
+  case "${SUBYARD_E2E_TIER:-}" in
+    system-container)
+      case "$ENVIRONMENT_TYPE" in subyard-pair|system-container) ENVIRONMENT_TYPE=system-container ;; *) die "unsupported environment on container tier" ;; esac ;;
+    vm) [ "$ENVIRONMENT_TYPE" != system-container ] || die "VM tier requires a VM environment" ;;
+    '') ;;
+    *) die "unsupported local lease tier" ;;
+  esac
   resolve_vm_count
   local client fingerprint type blob response code reason state started last_report request
   local status_response workspace_context elapsed sleep_seconds capacity_wait attempt=0 last_state='' last_reason=''
@@ -969,7 +976,17 @@ acquire_lease() {
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
       printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
       # The typed grant carries the lane's environment; untagged lease lines never count.
-      lane_record "$LEASE_SLOT" grant "type=$ENVIRONMENT_TYPE" "vms=$VM_COUNT" "base=$BASE_FINGERPRINT"
+      if [[ "${SUBYARD_E2E_LANE:-}" =~ ^[0-9a-f]{32}$ ]]; then
+        local measured facts='' selector
+        for ((selector=1; selector<=VM_COUNT; selector++)); do
+          measured="$(E2E_GUEST_TIMEOUT=30 guest "$selector" sh -ec '. /etc/os-release; printf "image=%s-%s arch=%s" "$ID" "$VERSION_ID" "$(dpkg --print-architecture)"' </dev/null)" \
+            || die "could not identify the leased guest"
+          [[ "$measured" =~ ^image=(debian-13|ubuntu-24\.04|ubuntu-26\.04)' arch='(amd64|arm64)$ ]] \
+            && { [ -z "$facts" ] || [ "$facts" = "$measured" ]; } || die "unsupported or inconsistent leased guest identity"
+          facts="$measured"
+        done
+        lane_record "$LEASE_SLOT" grant "type=$ENVIRONMENT_TYPE" "vms=$VM_COUNT" "base=$BASE_FINGERPRINT" "$facts"
+      fi
       return 0
     fi
     if [ -n "$LEASE_ACQUIRE_PID" ]; then

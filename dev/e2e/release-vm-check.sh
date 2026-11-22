@@ -21,6 +21,10 @@ token="$(date -u +%s)$slot"
 argv=("${argv[@]//@TOKEN@/$token}")
 
 cd "$ROOT"
+if [ -z "${SUBYARD_E2E_TIER:-}" ]; then
+  SUBYARD_E2E_TIER="$(python3 -B dev/release-acceptance.py placement "vm:$id")"
+  export SUBYARD_E2E_TIER
+fi
 if jq -e 'has("lease")' <<<"$entry" >/dev/null; then
   type="$(jq -r '.lease.type // empty' <<<"$entry")"
   lease=(--vm-count 1 --vm 1)

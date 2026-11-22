@@ -64,6 +64,7 @@ jobs:
         env:
           CHECK: ${{ matrix.check }}
           VERSION: ${{ inputs.version }}
+          SUBYARD_CI_VM_TIER: "1"
         run: |
           bash dev/ci/periodic-e2e.sh acceptance "$CHECK" "$RUNNER_TEMP/prepared" "$RUNNER_TEMP/acceptance" "$VERSION"
       - name: Preserve native evidence and verify terminal selection

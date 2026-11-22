@@ -562,9 +562,7 @@ def validate_operator_acceptance(document, name, command, identity):
         raise ValueError("operator acceptance physical environment missing")
     counts = set()
     for item in environments:
-        if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
-            or not isinstance(item["type"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
-            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
+        if not a.valid_environment(item):
             raise ValueError("invalid operator acceptance physical environment")
         counts.add(item["vm_count"])
     # Guest cleanup lists the VMs that were cleaned; a VM without a staged run directory needs none.
@@ -658,7 +656,7 @@ def operator_acceptances(paths, identity, root, receipt):
                   "decision": declaration["decision"], "artifacts": hashes, "source_status": original["checks"][name]["status"],
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
-                  "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
+                  "environments": a.grant_environments(sorted(environments)),
                   "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in evidence.cleaned],
                               "release_exit_code": 0, "lease_released": True}}
         validate_operator_acceptance(public, name, command, identity)
@@ -719,6 +717,18 @@ def profile_deferrals(output, names, reason, authorization_reference, identity, 
     return deferred
 
 
+def validate_placements(root, inventory, commands, checks, level):
+    declarations = a.check_declarations(root, inventory)
+    refusals = []
+    for name in sorted(commands):
+        if commands[name] and a.is_live(name):
+            tier = a.resolve_tier(declarations.get(name, {}), level)
+            issue = a.placement_issue(name, checks[name].get("environments"), tier)
+            if issue:
+                refusals.append(issue)
+    refuse(refusals)
+
+
 def attestation(output, identity, operator_acceptance_paths=(), profile_deferral_checks=(),
                 deferral_reason=None, deferral_authorization_reference=None):
     root, receipt = a.load_bound(output)
@@ -728,6 +738,12 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                                          deferral_authorization_reference, identity, root, receipt)
     if set(accepted) & set(deferred_profiles):
         raise ValueError("a profile check cannot have both failure acceptance and deferral")
+    if a.tiered_catalog(root):
+        if receipt.get("release_level", {}).get("level") not in ("ordinary", "full"):
+            raise ValueError("missing or invalid release level in candidate receipt")
+        checks = receipt["checks"] | accepted
+        validate_placements(root, receipt["profiles"], a.commands(root, receipt["version"], receipt["profiles"]),
+                            checks, receipt["release_level"]["level"])
     if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
@@ -799,6 +815,8 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
             **({"operator_acceptances": sorted(accepted)} if accepted or deferred_profiles or manifests else {}),
             **({"profile_deferrals": sorted(deferred_profiles)} if deferred_profiles or manifests else {}),
             **({"manifests": manifests} if manifests else {})}
+    if a.tiered_catalog(root):
+        document["release_level"] = receipt.get("release_level", {}).get("level", "ordinary")
     if manifests and supports_manifest_sources(root):
         # The candidate's own publisher validates publication; earlier candidates accept only v5.
         document.update(zip(("manifests", "manifest_sources"), compact_manifests(manifests)), schema_version=6)
@@ -812,6 +830,11 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
 def validate_attestation(document, identity, root):
     version = document.get("schema_version")
     keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
+    tiered = a.tiered_catalog(root)
+    if tiered:
+        keys.add("release_level")
+        if document.get("release_level") not in ("ordinary", "full"):
+            raise ValueError("missing or invalid attested release level")
     if version in (2, 3, 4, 5, 6):
         keys.add("reviewed_transfers")
     if version in (3, 4, 5, 6):
@@ -866,6 +889,8 @@ def validate_attestation(document, identity, root):
     required["package"] = ["ci-prepared"]
     if set(document["checks"]) != set(required):
         raise ValueError("acceptance attestation check inventory mismatch")
+    if tiered:
+        validate_placements(root, inventory, required, document["checks"], document["release_level"])
     optional_vms = a.vm_checks_optional(root)
     # The ordinary-release gate even when failure acceptance or profile deferral bypasses the aggregate.
     required_vms = a.required_vm_checks(document["checks"], a.core_vm_requirements(root))
@@ -960,10 +985,7 @@ def validate_attestation(document, identity, root):
                 if not isinstance(environments, list) or not environments:
                     raise ValueError("physical acceptance environment missing")
                 for item in environments:
-                    if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
-                        or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
-                        or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100
-                        or not re.fullmatch(r"[0-9a-f]{64}", item["base_fingerprint"])):
+                    if not a.valid_environment(item):
                         raise ValueError("invalid physical acceptance environment")
     if set(manifests) != referenced:
         raise ValueError("extra or dangling attestation manifest references")
@@ -1625,6 +1647,11 @@ def collect_ci(github, directory, identity):
             counts, reason, environments = a.pass_counts(cached, name, result)
             if not counts:
                 raise ValueError("hosted evidence is not a complete PASS: " + reason)
+            if a.tiered_catalog(root):
+                declarations = a.check_declarations(root, receipt["profiles"])
+                tier = a.resolve_tier(declarations.get(name, {}), receipt.get("release_level", {}).get("level", "ordinary"))
+                if environments != result.get("environments") or a.placement_issue(name, environments, tier):
+                    raise ValueError(f"{name}: hosted environment evidence differs or does not satisfy {tier}")
             result["environments"] = environments
             # Persist the immutable original evidence before publishing the result reference.
             for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):
@@ -1951,7 +1978,7 @@ def main():
             previous = earlier_candidates(state_dir, directory, identity)
             a.reuse_isolated_tests(output, previous)
             result = accept_checks(github, directory, identity, a.selected_slots(args), args.only,
-                                   args.with_vms or level["level"] == "full", previous, args.ci_wait_seconds)
+                                   args.with_vms or level["level"] == "full" or a.tiered_catalog(output / "source"), previous, args.ci_wait_seconds)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result

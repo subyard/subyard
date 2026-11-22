@@ -103,11 +103,20 @@ Periodic E2E artifact names and interruption caveats.
 
 ### Release levels
 
-| Level | When | Checks | Typical time |
-| --- | --- | --- | --- |
-| Continuous | Pull requests, pushes to `master` and `release/**`, and scheduled lanes | `verify` and the GitHub-hosted matrix and lanes | Background |
-| Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation counted by `accept`; `p0-release-smoke` on the final bytes; the released-caller matrix; eligible hosted VM results counted; remaining VM checks stay `not-run` unless requested | About 2 hours |
-| Full release | Product migration or update-contract changes, or an operator request | Ordinary checks plus every VM profile check and every core VM check (`vm:<id>` from `dev/e2e/release-vm-checks.json`) | Up to 8 hours |
+| Level | When | Checks |
+| --- | --- | --- |
+| Continuous | Pull requests, pushes to `master` and `release/**`, and scheduled lanes | `verify` and the GitHub-hosted matrix and lanes |
+| Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation, released-caller compatibility, every core and shipped-profile release check at its declared tier or stronger, and release smoke on all three VM images |
+| Full release | Product migration or update-contract changes, or an operator request | The same inventory, with every physical check required on a VM |
+
+The frozen candidate's core catalog selects this policy starting with schema version 2.
+Older candidates keep their original inventory and optional-VM policy. A physical
+check's minimum tier is `system-container`, `runner` or `vm`, in ascending order.
+Each lane-owned grant records the granted type, base fingerprint, guest count,
+OS image and guest architecture. The collector checks those facts against its
+lane log when loading or transferring a result. Publication checks every physical
+result against the attested level. The three mandatory smoke results cover
+Debian 13, Ubuntu 24.04 and Ubuntu 26.04 on the final candidate bytes.
 
 `accept --level ordinary|full [--level-reason TEXT]` records the level, its reason, the baseline tag and
 the changed migration paths as `release_level` in the receipt; later runs keep the recorded level unless
@@ -118,15 +127,14 @@ contains. Changed product paths use the transfer rule in
 [reviewed evidence transfers](#reviewed-evidence-transfers). Ordinary is refused while
 such paths exist; when the baseline or diff is unavailable locally it needs an explicit
 `--level-reason`, and a recorded change list still applies. Full requires a reason unless migration
-changes supply it, runs every VM check, and its attestation refuses an untouched `not-run` VM profile
-or core VM check; only an explicit `--defer-profile` operator deferral can leave a profile check unrun, and publication prints
-it. The level is a local receipt record: the publication workflow does not recheck it. Before a full release, fix a red continuous
+changes supply it. A release check needs physical evidence satisfying the frozen tier policy.
+Before a full release, fix a red continuous
 run before freezing the candidate. Release branch pushes provide core CI for standalone candidates.
 `dev/release.sh prepare` runs its own candidate checks through the dispatched release workflow.
 Optional unsupported-source VM checks listed in
 [Periodic E2E](../testing.md#periodic-e2e-on-hosted-runners) are excluded from this requirement
 and never gate a release or PR.
-Local long VM smoke and shipped-profile VM checks run on explicit request:
+Use an exact selection to retry an individual physical check. For example,
 
 ```sh
 dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slot-count 3
@@ -447,16 +455,11 @@ never substitute current branch HEAD.
 Agents preparing a release apply the
 [development workflow](../../.agents/skills/subyard-dev-flow/SKILL.md) together with these rules.
 
-- Runtime releases default to the existing host-free/CI checks, local adapters and full
-  released-caller compatibility check in [Development](../development.md).
-  Request long VM smoke and shipped-profile VM checks using `accept --with-vms` or collector
-  `run --only CHECK`. Use `--slot-count` to cap the default dynamic use of slots 1–4, and
-  `--slots` for an exact set only on the operator's request.
-  Core `p0-release-smoke` is mandatory and cannot be excluded or waived as optional. Local-only
-  acceptance remains incomplete until it passes. Unrequested shipped-profile VM checks remain `not-run`,
-  never passed; requested incomplete or failed checks block acceptance/publication.
-  Optional external checks follow [external checks](#external-checks).
-  Existing CI/merge checks and risk-based development validation are unchanged.
+- Runtime releases include host-free and CI checks, local adapters, the released-caller
+  compatibility check, core release lanes, and shipped-profile release lanes.
+  Use `run --only CHECK` for targeted continuation and `--slot-count` to cap
+  concurrency. All required smoke image results count toward completion.
+  External checks follow [external checks](#external-checks).
 - Release acceptance always has priority on local slots and CI. While a release `accept` or Release VM
   checks run is active, agents start no new non-release physical lanes or long hosted dispatches such as
   Periodic E2E; non-release lanes on slots the release needs stop at their next safe point.
@@ -498,8 +501,8 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots slot-1` for one check. Local VM execution uses slots 1–4
+Tiered candidates select all release lanes by default. For older candidates,
+`--with-vms` requests the optional VM lanes. Use `run --only p0-release-smoke --slots slot-1` for one check. Local VM execution uses slots 1–4
 by default. Select an exact set with `--slots slot-2,slot-4` or the first N slots with
 `--slot-count N` (1–4).
 Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
@@ -561,12 +564,12 @@ and ordered `lanes` entries containing `id` and runner `arguments`. A lane marke
 `"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
 acceptance neither runs nor requires it. A schema-version-1
 `acceptance-lanes.json` may declare nonempty `lanes`, a host-free `preflight` command array, or both.
+A profile can also declare `tier` and a list of physical `needs`, with individual lane overrides.
 A preflight-only declaration preserves the unsplit profile acceptance check. Full collector runs
 execute declared preflights after successful local gates and collect results in profile-name order
 before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
-remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
-every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
+remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Tiered catalogs select every runnable release lane by default. `--only profile:NAME/ID` requests one release lane and refuses a
 periodic-only lane as an unknown check. The collector starts work on the selected slots concurrently
 and assigns queued checks as slots finish. Controllers use their own `SUBYARD_E2E_CAPACITY_WAIT`
 (default `120m`). After an unclean result, the collector polls broker status and reuses that slot
@@ -644,7 +647,7 @@ Only one mutating collector may use an output directory at a time.
 The collector gives each slot lane a random 32-hex ID: the log's first line is `E2E_LANE id=ID`,
 and the lane process gets `SUBYARD_E2E_LANE=ID`, which guests never receive. The lane's own client
 and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`,
-`grant type=TYPE vms=N base=FINGERPRINT`, `refused resource=memory|disk` or
+`grant type=TYPE vms=N base=FINGERPRINT image=IMAGE arch=ARCH`, `refused resource=memory|disk` or
 `refused resource=slot state=provisioning|held|draining|recovering`, `work vm=N` (a run
 directory was staged), `cleaned vm=N exit_code=N` and `release exit_code=N`. Records go to stderr as
 single complete lines; a controller must not discard or redirect its stderr away from the lane log.
@@ -713,7 +716,7 @@ path changed; otherwise rerun the check. Such paths name a migration or transiti
 `internal/cli/release_*.go` and `internal/adapters/releaseruntime/`. Markdown, `tests/`, `testkit/`,
 `testdata/`, `e2e/`, `*_test.go` and `*-test.py`/`.sh` files never count. Validation of legacy
 schema-1 transfers has no source inventories, so this rule applies to them only when they are made. `verify` and
-`p0-release-smoke` transfer only between identical sources, so they always describe the final bytes.
+the release smoke checks transfer only between identical sources, so they always describe the final bytes.
 Every refusal that applies is reported together. Publication prints each inherited check with its
 authorization and reason.
 For a new original attempt, `REVIEW.json` has exactly `schema_version: 2`, `check`,
