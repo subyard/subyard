@@ -1430,6 +1430,10 @@ full_final_verify() {
 [ "${P0_SPLIT_COVERED:-0}" = 0 ] || split_covered_by_collector \
   || die '--split-covered runs only under the release collector, whose receipt for this candidate bundle declares the split lane checks'
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+if [ -z "${SUBYARD_E2E_TIER:-}" ]; then
+  SUBYARD_E2E_TIER="$(python3 -B "$ROOT/dev/release-acceptance.py" placement "p0:$P0_LANE")"
+  export SUBYARD_E2E_TIER
+fi
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test
 [ "$P0_LANE" != full ] || LEASE_PURPOSE=p0-acceptance

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "tier": "vm",
-  "needs": [],
+  "needs": ["reboot"],
   "preflight": ["bash", "config/profiles/github/tests/run.sh", "--preflight"]
 }

@@ -499,12 +499,13 @@ print("ok: periodic schedule tracks commit coverage and supersedes retries per l
 for image in images:
     selected = json.loads(subprocess.check_output(planner + ["--image", image], cwd=root, text=True))
     assert selected == {
-        kind: {"include": [entry | {"command": ["--image", image, *entry["command"][2:]]}
+        kind: {"include": [entry | {"command": ["--image", ubuntu if entry["tier"] == "runner" else image, *entry["command"][2:]]}
                            for entry in group["include"]]}
         for kind, group in default_plan.items()
     }
 for group in default_plan.values():
-    assert all(entry["command"][:2] == ["--image", "debian-13"] for entry in group["include"])
+    assert all(entry["command"][:2] == ["--image", ubuntu if entry["tier"] == "runner" else debian]
+               for entry in group["include"])
 # Run the hosted dispatch and controller environment with VM provisioning stubbed.
 with tempfile.TemporaryDirectory(dir="/tmp") as directory:
     bundle = Path(directory) / "bundle"
@@ -524,7 +525,7 @@ entries = {entry["id"]: entry["command"][2:] for group in default_plan.values() 
 plan = {kind: {"include": [entry | {"command": entries[entry["id"]]} for entry in group["include"]]}
         for kind, group in default_plan.items()}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
-config_sync = {"id": "periodic:config-sync", "tier": "vm",
+config_sync = {"id": "periodic:config-sync", "tier": "system-container",
                "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                            "bash", "dev/e2e/config-sync-acceptance.sh", "--slot", "1"]}
 assert plan["checks"]["include"].count(config_sync) == 1
@@ -549,7 +550,7 @@ for name, duration, guest_env in (
     ("zabbly-download-smoke", "15m", []),
 ):
     check_id = "periodic:" + name
-    optional_vm[check_id] = {"id": check_id, "tier": "vm", "optional": True, "command": [
+    optional_vm[check_id] = {"id": check_id, "tier": "runner" if name == "cleanup-acceptance" else "vm", "optional": True, "command": [
         "timeout", "--signal=TERM", "--kill-after=600s", duration,
         "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
         "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh",
@@ -618,6 +619,15 @@ for lane in ("power-systemd", "legacy-continuation"):
 import subprocess
 from unittest.mock import patch
 declared = a.check_declarations(root, a.profile_inventory(root))
+actual_tiers = {item["id"]: item["tier"] for matrix in default_plan.values() for item in matrix["include"]}
+assert {item["id"] for item in default_plan["nested"]["include"]} == p.NESTED
+assert all(actual_tiers[name] == "vm" for name in p.NESTED)
+for name, entry in declared.items():
+    if name in actual_tiers:
+        assert a.TIERS.index(actual_tiers[name]) >= a.TIERS.index(a.resolve_tier(entry))
+        assert a.resolve_tier(entry, "full", hosted_singleton=True) == "vm"
+assert actual_tiers["vm:integration-selection/default"] == "runner"
+assert actual_tiers["p0:peer"] == actual_tiers["periodic:config-sync"] == "system-container"
 declared["vm:p0-legacy-continuation"] = {"tier": "runner", "needs": ["kvm"]}
 with patch.object(p, "collector", return_value=a), patch.object(a, "check_declarations", return_value=declared):
     tiers = {item["id"]: item["tier"] for matrix in p.plan(root).values() for item in matrix["include"]}

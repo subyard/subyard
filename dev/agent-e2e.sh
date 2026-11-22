@@ -12,6 +12,11 @@ E2E_PROGRAM=agent-e2e
 # shellcheck source=config/profiles/test-vms-client/skills/subyard-test-vms/client.sh
 . "$REPO_ROOT/config/profiles/test-vms-client/skills/subyard-test-vms/client.sh"
 
+if [ "${SUBYARD_E2E_TIER:-}" = runner ]; then
+  # shellcheck source=dev/ci/runner-lease.sh
+  . "$REPO_ROOT/dev/ci/runner-lease.sh"
+fi
+
 PREPARED_DIRECTORY=""
 E2E_ACTIVE_PHASE=""
 E2E_PHASE_STARTED=0

@@ -27,6 +27,7 @@ for command in git rg tar sha256sum ssh ssh-keygen jq; do
 done
 
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
+export SUBYARD_E2E_TIER="${SUBYARD_E2E_TIER:-system-container}"
 LEASE_PURPOSE=config-sync-acceptance
 STATE=/var/lib/subyard-config-sync-e2e
 REMOTE_ROOT=/srv/subyard-config-sync-e2e

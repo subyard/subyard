@@ -20,7 +20,12 @@ if [ "$delegated" = 0 ]; then
   case "${SUBYARD_E2E_MEMORY_PER_VM:-}" in
     4GiB) fixture_memory=3G ;;
     8GiB) fixture_memory=6G ;;
-    *) printf 'unsupported telemetry fixture memory grant\n' >&2; exit 2 ;;
+    *)
+      if [ "${SUBYARD_E2E_TYPE:-}" = runner ] && [[ "${SUBYARD_E2E_MEMORY_PER_VM:-}" =~ ^([1-9][0-9]{0,3})GiB$ ]] && (( BASH_REMATCH[1] >= 8 )); then
+        fixture_memory=6G
+      else
+        printf 'unsupported telemetry fixture memory grant\n' >&2; exit 2
+      fi ;;
   esac
   [[ "${SUBYARD_E2E_RUN_ID:-}" =~ ^[a-f0-9]{8}$ ]] || exit 2
   fixture_seconds=4200

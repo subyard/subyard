@@ -10,9 +10,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 cd "$ROOT"
-[ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "${SUBYARD_E2E_TYPE:-}" = android-test ] \
+[ "${SUBYARD_E2E_VM:-}" = 1 ] && [[ "${SUBYARD_E2E_TYPE:-}" =~ ^(android-test|runner)$ ]] \
   && sudo -n test -f /run/subyard-e2e-lease.json \
-  || { echo 'staging-reliability: requires allocated Android VM1' >&2; exit 2; }
+  || { echo 'staging-reliability: requires an allocated Android VM or hosted runner' >&2; exit 2; }
 readonly -a OUTER_E2E_CONTEXT=("${SUBYARD_E2E_PROJECT:-}" \
   "${SUBYARD_E2E_RUN_ID:-}" "${SUBYARD_E2E_SLOT:-}" "${SUBYARD_E2E_PURPOSE:-}")
 TOKEN=''

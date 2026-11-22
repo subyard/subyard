@@ -10,13 +10,17 @@ base_update_distro() {
   apt-get -o Dpkg::Options::=--force-confold -y -qq upgrade
 }
 
+base_prepare_platform() {
+  install -d -o dev -g dev /home/dev/.cache /home/dev/.cache/subyard-e2e-platform
+  printf '%s\n' subyard-e2e-platform-v1 > /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
+  chown dev:dev /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
+}
+
 base_finalize_image() {
   # The runtime validates a new boot, then scrubs regenerated daemon state before publish.
   getent group kvm >/dev/null || groupadd --system kvm
   usermod -aG kvm dev
-  install -d -o dev -g dev /home/dev/.cache /home/dev/.cache/subyard-e2e-platform
-  printf '%s\n' subyard-e2e-platform-v1 > /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
-  chown dev:dev /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
+  base_prepare_platform
   # Leased guests must not update themselves: a timer-started unattended upgrade changes the
   # system under test and holds guest shutdown past the broker's release stop. A mask also
   # survives the preset pass of a published image's first boot.
@@ -53,14 +57,8 @@ base_prepare_nested_host() {
   (cd /var/lib/subyard/product-image && sha256sum */yard* */fingerprint > SHA256SUMS)
 }
 
-base_main() {
-  [ "$(id -u)" -eq 0 ] || { echo 'base recipe requires root' >&2; exit 1; }
-  case "${SUBYARD_BASE_ENVIRONMENT:-}" in
-    subyard-pair | android-test | system-container) ;;
-    *) echo 'unknown base environment' >&2; exit 2 ;;
-  esac
-  base_update_distro
-  recipe_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+base_install_incus() (
+  local recipe_root="$1"
   export SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 ASSUME_YES=1
   export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME=/home/dev
   export SUBYARD_CONFIG_DIR=/etc/subyard SUBYARD_CONFIG_HOME=/etc/subyard
@@ -71,6 +69,17 @@ base_main() {
   SUBYARD_DISPATCHER_PATH="$recipe_root/bin/yard-engine" MIN_INCUS_VER=6.0.7 \
     bash "$recipe_root/scripts/01-install-incus.sh" --upgrade-only --yes --zabbly
   incus --version >/dev/null
+)
+
+base_main() {
+  [ "$(id -u)" -eq 0 ] || { echo 'base recipe requires root' >&2; exit 1; }
+  case "${SUBYARD_BASE_ENVIRONMENT:-}" in
+    subyard-pair | android-test | system-container) ;;
+    *) echo 'unknown base environment' >&2; exit 2 ;;
+  esac
+  base_update_distro
+  recipe_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  base_install_incus "$recipe_root"
   if [ "$SUBYARD_BASE_ENVIRONMENT" = system-container ]; then base_prepare_nested_host; fi
   base_finalize_image
 }

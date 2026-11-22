@@ -45,7 +45,8 @@ bash() { printf '%s\\0' "$@"; }
                     '--purpose', 'telemetry-acceptance', '--vm', '1',
                     *(['--disk', '50GiB'] if mode in ('all', '--resources') else []), '--', 'timeout', '--signal=TERM',
                     '--kill-after=120s', timeout, 'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', mode]]
-        for memory, limit in (('4GiB', '3G'), ('8GiB', '6G')):
+        for tier, memory, limit in (('runner', '15GiB', '6G'), ('android-test', '4GiB', '3G'), ('android-test', '8GiB', '6G')):
+            environment['SUBYARD_E2E_TYPE'] = tier
             environment['SUBYARD_E2E_MEMORY_PER_VM'] = memory
             probe = 'set -eu; delegated=0; mode="$1"; ROOT=/fixture\n'
             result = subprocess.run(['bash', '-c', probe+delegation, 'probe', mode],
