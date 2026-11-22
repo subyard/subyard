@@ -357,7 +357,7 @@ func (definition *Definition) validateExtensions() error {
 			}
 			scopes[scope] = true
 		}
-		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" && setting.Type != "version" && setting.Type != "image-reference" && setting.Type != "sha256" && setting.Type != "absolute-path" {
+		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" && setting.Type != "version" && setting.Type != "image-reference" && setting.Type != "sha256" && setting.Type != "absolute-path" && setting.Type != "url-list" {
 			return errors.New("unsupported profile setting type")
 		}
 		if len(setting.Enum) != 0 {
@@ -465,6 +465,8 @@ func (setting Setting) validateDefault(value string) error {
 		valid = domain.SafeName(value)
 	case "absolute-path":
 		valid = filepath.IsAbs(value) && filepath.Clean(value) == value
+	case "url-list":
+		valid = domain.ValidateURLList(value) == nil
 	}
 	if len(setting.Enum) != 0 {
 		match := false

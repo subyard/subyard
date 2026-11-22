@@ -688,3 +688,44 @@ func TestRemovedProfileEnableRefusesBeforeEffects(t *testing.T) {
 		})
 	}
 }
+
+type sourcePendingRuntime struct {
+	profileRuntimeSelection
+	verified *int
+}
+
+func (runtime sourcePendingRuntime) ApplyProfileService(_ context.Context, name string, _ []ports.TeardownArtifact) error {
+	runtime.fixture.applied = append(runtime.fixture.applied, name)
+	return nil
+}
+
+// The fixture never converges: only the post-apply verifier accepts the
+// remaining source-access reason.
+func (runtime sourcePendingRuntime) ProfileServiceConverged(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (runtime sourcePendingRuntime) VerifyAppliedProfileService(context.Context, string) (bool, error) {
+	*runtime.verified++
+	return true, nil
+}
+
+func TestScopedProfileEnableAcceptsSourceAccessAfterApply(t *testing.T) {
+	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor'\n")
+	verified := 0
+	cli.options.ProfileRuntime = func(loaded config.Loaded) ProfileServiceRuntime {
+		return sourcePendingRuntime{profileRuntimeSelection{runtime, true}, &verified}
+	}
+	prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 {
+		t.Fatalf("enable exit=%d: %s", code, output)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "ENVIRONMENT_PROFILES='neighbor fixture'\n" || verified != 1 || strings.Join(runtime.applied, " ") != "fixture" || strings.Join(runtime.recorded, " ") != "fixture=true" {
+		t.Fatalf("selection=%q verified=%d applied=%v recorded=%v", data, verified, runtime.applied, runtime.recorded)
+	}
+}

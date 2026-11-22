@@ -34,10 +34,22 @@ func (failure *ServiceCheckError) Error() string {
 }
 func (failure *ServiceCheckError) Unwrap() error { return failure.cause }
 
+// SourceUnavailable reports that a profile applied everything it can while an
+// external source it reads stays unreachable until the operator grants access.
+const SourceUnavailable = "source-unavailable"
+
+// SourceUnavailableHint is the generic remediation shown when an apply ends with
+// SourceUnavailable as its only remaining reason.
+const SourceUnavailableHint = "authorize access to the source (yard ssh-agent unlock --key PATH --ttl DURATION, or the yard's git credentials) or use a public URL, then run yard init"
+
+// ServiceReadinessAcceptedAfterApply reports whether a post-apply check may end
+// with this reason. Pre-apply checks stay strict, so the next init retries.
+func ServiceReadinessAcceptedAfterApply(reason string) bool { return reason == SourceUnavailable }
+
 // ValidServiceReadinessReason admits only public, secret-free readiness facts.
 func ValidServiceReadinessReason(reason string) bool {
 	switch reason {
-	case "boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable":
+	case "boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable", SourceUnavailable:
 		return true
 	}
 	return false
@@ -167,6 +179,9 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		}
 		return nil
 	}
+	// A check that only waits for source access does not hide later owners: a
+	// later failure with another reason wins, otherwise the first such result returns.
+	var deferred error
 	for _, definition := range definitions {
 		if definition.OwnerService == "" {
 			continue
@@ -179,7 +194,15 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		if action == "--pause" {
 			output = &captured
 		}
-		if err := run(definition, action, output); err != nil {
+		err := run(definition, action, output)
+		var failure *ServiceCheckError
+		if action == "--check" && errors.As(err, &failure) && failure.NativeExit == 1 && ServiceReadinessAcceptedAfterApply(failure.Reason) {
+			if deferred == nil {
+				deferred = err
+			}
+			continue
+		}
+		if err != nil {
 			// A failed pause must not strand earlier services; the caller receives no
 			// usable pause list on failure and cannot restore those itself.
 			for _, previous := range paused {
@@ -206,5 +229,5 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 			fmt.Fprintln(stdout, definition.Name)
 		}
 	}
-	return nil
+	return deferred
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -108,5 +109,37 @@ func TestAdvisoryDeclarationsAreClosed(t *testing.T) {
 	metadata, err := Decode("sample", []byte(`{"schema_version":1,"owner_service":"owner.sh","advisories":{"storage-capacity":"run cleanup"}}`))
 	if err != nil || metadata.definition().Advisories["storage-capacity"] != "run cleanup" {
 		t.Fatalf("valid advisory declaration: %v", err)
+	}
+}
+
+func TestServiceCheckContinuesPastSourceUnavailable(t *testing.T) {
+	const pending = "#!/bin/bash\n[ \"$1\" = --check ] || exit 0\necho 'subyard-profile-readiness-v1 " + SourceUnavailable + "' >&2\nexit 1\n"
+	env := map[string]string{"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1", "SUBYARD_PROFILE_DIAGNOSTICS": "1"}
+	for _, test := range []struct {
+		name, later, want string
+	}{
+		{"only source access", "#!/bin/bash\nexit 0\n", "profile service check owner=alpha native-exit=1 reason=source-unavailable"},
+		{"later drift wins", "#!/bin/bash\necho 'subyard-profile-readiness-v1 unit-inactive' >&2\nexit 1\n", "profile service check owner=beta native-exit=1 reason=unit-inactive"},
+		{"later failure wins", "#!/bin/bash\nexit 7\n", "profile service check owner=beta native-exit=7"},
+		{"two pending", pending, "profile service check owner=alpha native-exit=1 reason=source-unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			fixture(t, root, "alpha", pending, Definition{})
+			fixture(t, root, "beta", test.later, Definition{})
+			err := RunServices(context.Background(), root, []string{"--check"}, env, io.Discard, io.Discard)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("got %v, want %s", err, test.want)
+			}
+		})
+	}
+	root := testkit.TempDir(t)
+	fixture(t, root, "alpha", pending, Definition{})
+	fixture(t, root, "beta", "#!/bin/bash\nexit 0\n", Definition{})
+	if err := RunServices(context.Background(), root, []string{"--yes"}, env, io.Discard, io.Discard); err != nil {
+		t.Fatalf("apply must not be affected: %v", err)
+	}
+	if !ServiceReadinessAcceptedAfterApply(SourceUnavailable) || ServiceReadinessAcceptedAfterApply("unit-inactive") || !ValidServiceReadinessReason(SourceUnavailable) {
+		t.Fatal("source-unavailable acceptance changed")
 	}
 }

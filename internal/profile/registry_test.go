@@ -80,6 +80,7 @@ func TestProfileExtensionsLoadAndValidate(t *testing.T) {
 		Settings: []Setting{
 			{Name: "SAMPLE_HOST_PORT", Type: "port", Scopes: []string{"host", "yard", "command"}, Application: "next-command", Optional: true, Minimum: 1, Maximum: 65535, HostListener: true},
 			{Name: "SAMPLE_CACHE_SIZE", Type: "size", Scopes: []string{"shipped", "yard"}, Application: "yard-init", Default: stringPointer("1GiB")},
+			{Name: "SAMPLE_SOURCES", Type: "url-list", Scopes: []string{"shipped", "yard"}, Application: "yard-init", Default: stringPointer("https://example.org/a git@example.org:b")},
 		},
 		Runtime:          &RuntimeHook{ActivationID: "fixture-runtime", Handler: "runtime.sh"},
 		GuestEnvironment: &GuestEnvironmentHook{Handler: "guest.sh"},
@@ -105,6 +106,7 @@ func TestProfileExtensionRejectsInvalidAndDuplicateDeclarations(t *testing.T) {
 		{Name: "BAD", Type: "port", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 0, Maximum: 65536},
 		{Name: "BAD", Type: "integer", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 2, Maximum: 4, Default: stringPointer("5")},
 		{Name: "BAD", Type: "string", Scopes: []string{"yard"}, Application: "yard-init", Enum: []string{"x", "x"}},
+		{Name: "BAD", Type: "url-list", Scopes: []string{"yard"}, Application: "yard-init", Default: stringPointer("https://user@example.org/a")},
 	}
 	for i, setting := range invalid {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {

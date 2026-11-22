@@ -77,7 +77,7 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		if observation.Converged || observation.Owner != "sample" || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
 			t.Fatalf("native disposition lost: %#v %v", observation, observedErr)
 		}
-		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable"} {
+		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable", "source-unavailable"} {
 			withReason := strings.TrimSuffix(output, "\n") + " reason=" + reason + "\n"
 			observation, observedErr := profileServiceObservation(withReason, false, err)
 			if observation.Reason != reason || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
@@ -2641,5 +2641,27 @@ exit "$INCUS_RC"
 	runtime.Environment[len(runtime.Environment)-1] = "INCUS_RC=1"
 	if _, err := runtime.StageEngineChanged(context.Background(), ports.ReconcileStageTestVMs); err == nil {
 		t.Fatal("an unreadable broker engine was treated as observed")
+	}
+}
+
+func TestAppliedProfileServicesAcceptOnlySourceUnavailable(t *testing.T) {
+	var stderr bytes.Buffer
+	runtime := Runtime{Stderr: &stderr}
+	pending := ports.ReconcileStageObservation{Owner: "sample", NativeExit: 1, Reason: "source-unavailable"}
+	if ready, err := runtime.acceptAppliedProfileServices(pending, nil); !ready || err != nil || !strings.Contains(stderr.String(), "profile sample cannot reach a source yet: authorize access") {
+		t.Fatalf("source access not accepted after apply: %v %v %q", ready, err, stderr.String())
+	}
+	stderr.Reset()
+	for _, observation := range []ports.ReconcileStageObservation{
+		{Owner: "sample", NativeExit: 1, Reason: "unit-inactive"},
+		{Owner: "sample", NativeExit: 1},
+	} {
+		if ready, err := runtime.acceptAppliedProfileServices(observation, nil); ready || err != nil || stderr.Len() != 0 {
+			t.Fatalf("other drift accepted: %#v %v %v", observation, ready, err)
+		}
+	}
+	failure := errors.New("profile service check failed")
+	if ready, err := runtime.acceptAppliedProfileServices(pending, failure); ready || err != failure {
+		t.Fatalf("check failure accepted: %v %v", ready, err)
 	}
 }

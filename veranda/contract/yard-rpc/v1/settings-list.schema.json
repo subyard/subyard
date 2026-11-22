@@ -34,6 +34,7 @@
               "size",
               "name",
               "name-list",
+              "url-list",
               "absolute-path",
               "relative-path",
               "image-reference",

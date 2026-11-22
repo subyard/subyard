@@ -2776,7 +2776,12 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
   write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
   `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,
-  `boot-dependency-unloaded`, `unit-inactive`, or `transport-unavailable`. The dispatcher
+  `boot-dependency-unloaded`, `unit-inactive`, `transport-unavailable`, or
+  `source-unavailable`. `source-unavailable` means the hook applied everything it can while an
+  external source stays unreachable until the operator grants access. The pre-apply check stays
+  strict, so every init retries; the post-apply verification of init and of scoped
+  `profile enable` accepts a failure whose only reason is this code and prints a generic access
+  hint. With diagnostics, `--check` continues past such an owner and a later failure wins. The dispatcher
   captures at most 128 bytes and discards malformed, duplicate, oversized or arbitrary
   output. Adapters opt in with `SUBYARD_PROFILE_DIAGNOSTICS=1` to receive a validated
   `reason=CODE` after the existing owner/native-exit check record; callers without the

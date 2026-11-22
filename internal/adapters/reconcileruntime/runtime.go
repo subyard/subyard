@@ -394,6 +394,10 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 // VerifyStageWithDiagnostic is used at the post-apply boundary, where remaining
 // drift is a failure and its observed reason must reach the operator.
 func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
+	if stage == ports.ReconcileStageProfileServices {
+		observation, err := runtime.observeProfileServices(ctx)
+		return runtime.acceptAppliedProfileServices(observation, err)
+	}
 	if stage == ports.ReconcileStageTestVMs {
 		return runtime.testVMsReadiness(ctx, true)
 	}
@@ -2651,6 +2655,24 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 		}
 	}
 	return observation, errors.New("profile service check unavailable")
+}
+
+// acceptAppliedProfileServices lets an apply finish when the only remaining
+// reason is source access the operator must grant; it names the remediation.
+func (runtime Runtime) acceptAppliedProfileServices(observation ports.ReconcileStageObservation, err error) (bool, error) {
+	if err != nil || observation.Converged || !profile.ServiceReadinessAcceptedAfterApply(observation.Reason) {
+		return observation.Converged, err
+	}
+	if runtime.Stderr != nil {
+		fmt.Fprintf(runtime.Stderr, "profile %s cannot reach a source yet: %s\n", observation.Owner, profile.SourceUnavailableHint)
+	}
+	return true, nil
+}
+
+// VerifyAppliedProfileService is the scoped post-apply boundary with the same
+// acceptance as init's profile-services verification.
+func (runtime Runtime) VerifyAppliedProfileService(ctx context.Context, name string) (bool, error) {
+	return runtime.acceptAppliedProfileServices(runtime.ProfileServiceObservation(ctx, name))
 }
 
 // Scoped profile operations never enter the general init reconciler.

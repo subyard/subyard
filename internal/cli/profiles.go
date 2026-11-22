@@ -40,6 +40,12 @@ type profileServiceObserver interface {
 	ProfileServiceObservation(context.Context, string) (ports.ReconcileStageObservation, error)
 }
 
+// profileServiceApplyVerifier accepts an apply whose only remaining reason is
+// source access the operator must grant; pre-apply checks stay strict.
+type profileServiceApplyVerifier interface {
+	VerifyAppliedProfileService(context.Context, string) (bool, error)
+}
+
 type profileRequest struct {
 	verb, id string
 	json     bool
@@ -545,7 +551,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if runtime != nil {
-			ready, err := runtime.ProfileServiceConverged(ctx, request.id)
+			verify := runtime.ProfileServiceConverged
+			if verifier, ok := runtime.(profileServiceApplyVerifier); ok && request.verb == "enable" {
+				verify = verifier.VerifyAppliedProfileService
+			}
+			ready, err := verify(ctx, request.id)
 			if err != nil {
 				return result, err
 			}

@@ -332,3 +332,16 @@ func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
 		t.Fatal("core catalog aliases caller")
 	}
 }
+
+func TestURLListSettingValues(t *testing.T) {
+	definition := SettingDefinition{Name: "SAMPLE_SOURCES", Kind: SettingScalar, Type: SettingURLList}
+	if err := validateSettingValue(definition, "https://example.org/a ssh://git@example.org/b dev@localhost:/srv/c"); err != nil {
+		t.Fatalf("valid list: %v", err)
+	}
+	if err := validateSettingValue(definition, "https://token@example.org/a"); err == nil || strings.Contains(err.Error(), "token") {
+		t.Fatalf("credential refusal: %v", err)
+	}
+	if got := settingValueReason(definition); got != "invalid URL list" {
+		t.Fatalf("summary: %q", got)
+	}
+}

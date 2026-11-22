@@ -301,6 +301,8 @@ func settingValueReason(definition SettingDefinition) string {
 		return "invalid size value"
 	case SettingName, SettingNameList:
 		return "invalid name value"
+	case SettingURLList:
+		return "invalid URL list"
 	case SettingAbsolutePath, SettingRelativePath, SettingRegularFilePath:
 		return "invalid path value"
 	case SettingIPv4:
