@@ -9,7 +9,7 @@ stage() { printf 'herdr-lifecycle: %s\n' "$*"; }
 fail() { stage "$*" >&2; exit 1; }
 [[ "$run_id" =~ ^[a-f0-9]+$ ]] && [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "$(id -un)" = dev ] ||
   fail 'run on VM1 through dev/agent-e2e.sh'
-for command in curl git incus ip jq python3 sg ssh ssh-keygen ssh-keyscan sudo tar timeout; do
+for command in curl dpkg git incus ip jq python3 sg ssh ssh-keygen ssh-keyscan sudo tar timeout; do
   command -v "$command" >/dev/null || fail "required VM tool is missing: $command"
 done
 sudo -n true || fail 'passwordless sudo is required on the disposable VM'
@@ -263,11 +263,18 @@ downgrade() {
   [ "$(core_version)" = "$older" ] || fail "Core did not hand over to $older"
   client live
 }
+pin="$(. "$root/config/profiles/herdr/release.env"; printf '%s' "$HERDR_VERSION")"
+# Usage: verify_handover PREVIOUS_PID pinned|selected
 verify_handover() {
-  local previous="$1" pid
+  local previous="$1" expected="$pin" pid installed
   pid="$(core_pid)"
-  [ "$(core_version)" = "$(. "$root/config/profiles/herdr/release.env"; printf '%s' "$HERDR_VERSION")" ] ||
-    fail 'Core does not run the pinned release'
+  if [ "$2" = selected ]; then
+    # Unforced update selects upstream latest, which may be newer than the pin.
+    installed="$(guest_dev /home/dev/.local/bin/herdr-core --version | sed -nE 's/^hc ([0-9.]+)$/\1/p')"
+    dpkg --compare-versions "$installed" ge "$pin" || fail "update selected $installed below the pin"
+    expected="$installed"
+  fi
+  [ "$(core_version)" = "$expected" ] || fail "Core does not run the selected release $expected"
   [ -n "$pid" ] && [ "$pid" != "$previous" ] || fail 'Core did not hand over'
   client live
   guest_dev kill -0 "$terminal_pid"
@@ -280,17 +287,17 @@ guest_dev cp /home/dev/.local/bin/herdr-core /tmp/herdr-core-pin
 downgrade
 current="$(core_pid)"
 yard herdr up --yes > "$state/up-repair.log" 2>&1
-verify_handover "$current"
+verify_handover "$current" pinned
 downgrade
 current="$(core_pid)"
 yard herdr update --yes > "$state/update-older.log" 2>&1
-verify_handover "$current"
+verify_handover "$current" selected
 # The disk already holds the pin but Core still runs the older binary: update must hand over.
 downgrade
 guest_dev install -m 0755 /tmp/herdr-core-pin /home/dev/.local/bin/herdr-core
 current="$(core_pid)"
 yard herdr update --force --yes > "$state/update-lagging.log" 2>&1
-verify_handover "$current"
+verify_handover "$current" pinned
 
 stage 'verify no-op updates and restart with a live terminal'
 yard herdr update --yes > "$state/update.log" 2>&1
