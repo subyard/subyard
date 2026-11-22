@@ -58,8 +58,12 @@ case "$1" in
             cat >/dev/null
             printf 'core release %s\n' "$7" >> "$HERDR_TEST_CALLS"
             if [ "$7" = minimum ]; then printf 'upstream Core update completed\n'; fi
+            if [ "$7" = installed ]; then printf '0.1.21\n'; fi
             if [ "$7" = latest ] || [ "$7" = force ]; then
-              if [ "${HERDR_TEST_STICK_PID:-no}" = no ]; then printf '43\n' > "$HERDR_TEST_PID_PATH"; fi
+              printf '%s\n' "${HERDR_TEST_SWAP:-true}"
+              if [ "${HERDR_TEST_SWAP:-true}:${HERDR_TEST_STICK_PID:-no}" = true:no ]; then
+                printf '43\n' > "$HERDR_TEST_PID_PATH"
+              fi
             fi ;;
           */herdr-login:server)
             [ "$*" = '/usr/local/libexec/subyard/herdr-login server restart --fresh' ]
@@ -67,7 +71,7 @@ case "$1" in
           */herdr-profile:observe)
             if [ "${HERDR_TEST_CORE:-up}" = down ]; then exit 1; fi
             if [ "${HERDR_TEST_CORE:-up}" = stopped ]; then printf 'null\n'; exit 0; fi
-            printf '{"PID":%s,"Live":2}\n' "$(cat "$HERDR_TEST_PID_PATH")" ;;
+            printf '{"PID":%s,"Live":2,"Version":"%s"}\n' "$(cat "$HERDR_TEST_PID_PATH")" "${HERDR_TEST_VERSION:-0.1.21}" ;;
           */herdr-profile:stop)
             printf 'stop Core\n' >> "$HERDR_TEST_CALLS"
             [ "${HERDR_TEST_CORE:-up}" = stopped ] ;;
@@ -141,20 +145,34 @@ SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=logs SUBYARD_OPERATION_ID=fi
 printf '%s\n' journalctl --no-pager -n 100 _SYSTEMD_UNIT=subyard-herdr-core.service + _UID=1000 _COMM=herdr-core --follow |
   cmp - "$test_root/journal-argv"
 
-for action in update restart; do
-  printf '42\n' > "$HERDR_TEST_PID_PATH"
-  steps=$("$handler" "$action" | jq -ce 'select(.changed) | .steps | select(.[0].desired == "running-after:42" and .[0].decision == "apply")')
-  SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" "$action" |
-    jq -e '.changed and .steps[0].observed == "running:42"' >/dev/null
-  (
-    export SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$action" SUBYARD_OPERATION_ID=fixture
-    if result=$(HERDR_TEST_STICK_PID=yes "$handler" "$action" 2>&1); then exit 1; fi
-    [[ "$result" == *'new PID after 42'* ]]
-    "$handler" "$action"
-  )
-  SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" "$action" |
-    jq -e '.changed == false and .steps[0].observed == "running-after:42"' >/dev/null
-done
+(
+  export HERDR_TEST_SWAP=false HERDR_TEST_STICK_PID=yes SUBYARD_RESOURCE_MODE=apply
+  export SUBYARD_RESOURCE_ACTION=update SUBYARD_OPERATION_ID=fixture
+  "$handler" update
+  "$handler" update --force
+  [ "$(cat "$HERDR_TEST_PID_PATH")" = 42 ]
+)
+SUBYARD_RESOURCE_MODE=verify "$handler" update | jq -e '.changed == false' >/dev/null
+HERDR_TEST_VERSION=0.1.20 SUBYARD_RESOURCE_MODE=verify "$handler" update | jq -e '.changed' >/dev/null
+(
+  export SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=update SUBYARD_OPERATION_ID=fixture
+  if result=$(HERDR_TEST_STICK_PID=yes "$handler" update 2>&1); then exit 1; fi
+  [[ "$result" == *'new PID after 42'* ]]
+  "$handler" update
+  [ "$(cat "$HERDR_TEST_PID_PATH")" = 43 ]
+)
+printf '42\n' > "$HERDR_TEST_PID_PATH"
+steps=$("$handler" restart | jq -ce 'select(.changed) | .steps | select(.[0].desired == "running-after:42" and .[0].decision == "apply")')
+SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart |
+  jq -e '.changed and .steps[0].observed == "running:42"' >/dev/null
+(
+  export SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=restart SUBYARD_OPERATION_ID=fixture
+  if result=$(HERDR_TEST_STICK_PID=yes "$handler" restart 2>&1); then exit 1; fi
+  [[ "$result" == *'new PID after 42'* ]]
+  "$handler" restart
+)
+SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart |
+  jq -e '.changed == false and .steps[0].observed == "running-after:42"' >/dev/null
 
 (
   export HERDR_TEST_DROPIN=missing SUBYARD_RESOURCE_MODE=apply SUBYARD_OPERATION_ID=fixture

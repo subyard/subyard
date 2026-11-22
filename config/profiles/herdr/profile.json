@@ -8,7 +8,6 @@
   "runtime": {
     "activation_id": "herdr-runtime",
     "handler": "runtime.sh",
-    "failure_scope": "yard",
     "projects_changed_hooks": ["/usr/local/libexec/subyard/projects-changed.d/herdr"]
   },
   "native": [{"package": "cmd/herdr-profile", "path": "bin/herdr-profile"}]

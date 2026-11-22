@@ -38,6 +38,10 @@ if [ "$mode" = check ]; then
   [ -n "$installed" ] && [ -L "$bin/hc" ] && dpkg --compare-versions "$installed" ge "$minimum"
   exit
 fi
+if [ "$mode" = installed ]; then
+  [ -n "$installed" ] && printf '%s\n' "$installed"
+  exit
+fi
 
 target="$minimum"
 curl_https() {
@@ -57,6 +61,7 @@ if [ "$mode" = latest ]; then
   fi
 fi
 
+changed=false
 if [ -z "$installed" ] || dpkg --compare-versions "$installed" lt "$target" || \
    { [ "$mode" = force ] && dpkg --compare-versions "$installed" gt "$target"; }; then
   mkdir -p "$bin"
@@ -70,11 +75,11 @@ if [ -z "$installed" ] || dpkg --compare-versions "$installed" lt "$target" || \
   if [ -z "$installed" ]; then
     mv -T -- "$stage/herdr-core" "$binary"
   elif [ "$mode" = force ]; then
-    "$login" update --from "$stage/herdr-core" --force
+    "$login" update --from "$stage/herdr-core" --force >&2
   else
-    "$login" update --from "$stage/herdr-core"
+    "$login" update --from "$stage/herdr-core" >&2
   fi
-elif [ "$mode" = latest ] || [ "$mode" = force ]; then
-  "$login" server restart
+  changed=true
 fi
 [ -L "$bin/hc" ] || ln -s herdr-core "$bin/hc"
+case "$mode" in latest|force) printf '%s\n' "$changed" ;; esac

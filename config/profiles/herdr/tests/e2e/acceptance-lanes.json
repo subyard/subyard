@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "preflight": ["--preflight"],
+  "lanes": [
+    {"id": "lifecycle", "arguments": ["--lane", "lifecycle"]}
+  ]
+}

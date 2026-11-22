@@ -192,7 +192,7 @@ else
 fi
 
 assessment() {
-  local mode="$1" ready=false consequence desired target old result count observed=unknown
+  local mode="$1" ready=false consequence desired target old result count observed=unknown installed version
   target="incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/herdr"
   case "$action" in
     status|is-up|logs)
@@ -209,7 +209,22 @@ assessment() {
       if yard_running && route_ready && up_ready; then ready=true; fi
       desired='core ready, kick enabled and proxy published'
       consequence='install or refresh Herdr Core and publish its tailnet proxy with password and keyboard-interactive SSH disabled' ;;
-    update|restart)
+    update)
+      allowed
+      svc_require_yard_running
+      running || die "Herdr Core is stopped; run '${PROG:-yard} herdr up'"
+      desired='core is running the installed release'
+      if [ "$mode" = verify ]; then
+        installed=$(core_release installed)
+        version=$(observe | jq -er '.Version')
+        if [ "$installed" = "$version" ]; then ready=true; fi
+      fi
+      if [ "$#" -eq 2 ]; then
+        consequence='restore the pinned Herdr Core release, keeping its terminals'
+      else
+        consequence='update to the latest compatible Herdr Core, keeping its terminals'
+      fi ;;
+    restart)
       allowed
       svc_require_yard_running
       result=$(core_pid) || die "Herdr Core is stopped or its PID is unavailable; run '${PROG:-yard} herdr up'"
@@ -221,13 +236,7 @@ assessment() {
       if [ "$mode" = verify ] && [ "$result" != "$old" ]; then ready=true; fi
       desired="running-after:$old"
       observed="running:$result"
-      if [ "$action" = restart ]; then
-        consequence='restart Herdr Core in a clean login environment, keeping its terminals'
-      elif [ "$#" -eq 2 ]; then
-        consequence='restore the pinned Herdr Core release, keeping its terminals'
-      else
-        consequence='update to the latest compatible Herdr Core, keeping its terminals'
-      fi ;;
+      consequence='restart Herdr Core in a clean login environment, keeping its terminals' ;;
     down)
       svc_require_yard_running
       result=$(observe) || result=unknown
@@ -279,8 +288,12 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       update)
         allowed
         old=$(core_pid) || die 'Herdr Core must be running to update'
-        if [ "$#" -eq 1 ]; then core_release force; else core_release latest; fi
-        wait_core "$old" ;;
+        if [ "$#" -eq 1 ]; then changed=$(core_release force); else changed=$(core_release latest); fi
+        case "$changed" in
+          true) wait_core "$old" ;;
+          false) ;;
+          *) die 'Herdr Core update did not report whether it replaced the release' ;;
+        esac ;;
       restart)
         allowed
         old=$(core_pid) || die 'Herdr Core must be running to restart'

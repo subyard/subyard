@@ -92,7 +92,9 @@ func observe(socket string, human bool) error {
 				fmt.Printf("Old holder: PID %d, %d live terminals\n", holder.PID, holder.Terminals)
 			}
 		}
-		if core.CleanStart != "yes" {
+		if core.CleanStart == "yes" {
+			fmt.Println("Clean startup marker: yes")
+		} else {
 			fmt.Printf("Clean startup marker: %s. Use yard herdr restart to refresh the login environment.\n", core.CleanStart)
 		}
 	}
