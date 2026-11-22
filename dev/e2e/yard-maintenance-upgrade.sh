@@ -135,7 +135,8 @@ sudo -n kill -0 "$session_pid" && [ "$probe" = active ] \
   || die "live SSH session did not connect: probe=$probe ssh=$(tr '\n' ' ' < "$STATE_ROOT/live-ssh.log")"
 update_candidate --offline --version "$CANDIDATE_VERSION" --yes > "$STATE_ROOT/update.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/update.log" >&2; exit "$rc"; }
 cat "$STATE_ROOT/update.log"
-grep -Fq "interrupting the SSH and VS Code Remote-SSH sessions still connected to 'yard-z-last'" "$STATE_ROOT/update.log" || die 'approved restart did not report the interrupted session'
+# The active candidate runtime runs this restart guard and prints its wording.
+grep -Fq "interrupting active SSH connections to 'yard-z-last'" "$STATE_ROOT/update.log" || die 'approved restart did not report the interrupted session'
 for _ in {1..60}; do sudo -n kill -0 "$session_pid" 2>/dev/null || break; sleep 0.5; done
 ! sudo -n kill -0 "$session_pid" 2>/dev/null || die 'approved restart left the live SSH session connected'
 wait "$session_pid" 2>/dev/null || true
