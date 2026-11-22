@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "tier": "vm",
+  "tier": "runner",
   "needs": ["kvm"],
   "lanes": [
     {"id": "full", "arguments": ["--lane", "full"]},
