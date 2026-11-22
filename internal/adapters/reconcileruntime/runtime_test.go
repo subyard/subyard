@@ -2077,7 +2077,7 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 		"type": "disk", "source": "/dev/null",
 		"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
 	}
-	assertStageConverged(t, runtime, false, "legacy device-node mask needs migration")
+	assertStageConverged(t, runtime, true, "running yard with the legacy device-node mask")
 	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"]["source"] = filepath.Join(deviceRoot, "docker-apparmor-disabled")
 	assertStageConverged(t, runtime, false, "missing mask source")
 	testkit.WriteFile(t, filepath.Join(deviceRoot, "docker-apparmor-disabled"), nil, 0644)
