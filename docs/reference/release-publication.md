@@ -556,7 +556,7 @@ bound to that identity and are retained; capacity alone does not require another
 This is a separate continuation run: retry the blocked check after conditions change, retaining
 its original attempt logs/events and applicable PASS results from the same candidate.
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
-`capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
+`capacity_memory`, `capacity_disk` or `capacity_slot`. These leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
 `"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
@@ -574,8 +574,8 @@ and assigns queued checks as slots finish. Controllers use their own `SUBYARD_E2
 once the broker reports it available. When all slots are idle and unavailable, the collector waits
 up to the same configured duration for a slot to return, then leaves undispatched checks pending.
 
-A typed `blocked/capacity_memory` or `blocked/capacity_disk` result permits one relaunch once
-first-pass work has drained. Queued retries use slots as they become available. Both attempts
+A typed `blocked/capacity_memory`, `blocked/capacity_disk` or `blocked/capacity_slot` result permits
+one relaunch once first-pass work has drained. Queued retries use slots as they become available. Both attempts
 retain their logs and immutable records. A second capacity block leaves the candidate incomplete.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
@@ -645,7 +645,8 @@ Only one mutating collector may use an output directory at a time.
 The collector gives each slot lane a random 32-hex ID: the log's first line is `E2E_LANE id=ID`,
 and the lane process gets `SUBYARD_E2E_LANE=ID`, which guests never receive. The lane's own client
 and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`,
-`grant type=TYPE vms=N base=FINGERPRINT`, `refused resource=memory|disk`, `work vm=N` (a run
+`grant type=TYPE vms=N base=FINGERPRINT`, `refused resource=memory|disk` or
+`refused resource=slot state=provisioning|held|draining|recovering`, `work vm=N` (a run
 directory was staged), `cleaned vm=N exit_code=N` and `release exit_code=N`. Records go to stderr as
 single complete lines; a controller must not discard or redirect its stderr away from the lane log.
 One rule (`lane_status`) decides PASS and capacity blocks for collection, reuse of a recorded PASS,
@@ -659,7 +660,7 @@ change the verdict, and environments come only from typed grants. A slot lane pa
   again before then (`--ssh` and raw guest commands stage nothing);
 - at least one lease completed and the final record is not a refusal.
 
-Exit 4 with a final typed refusal and no other issue is `blocked/capacity_memory|disk`; otherwise
+Exit 4 with a final typed refusal and no other issue is `blocked/capacity_memory|disk|slot`; otherwise
 the result is `failed` with the rule's reason. A log without the `E2E_LANE` header, or whose
 header differs from a declared launcher ID, never counts:
 a recorded PASS from an earlier collector reads as `failed` and runs again (its immutable attempt
