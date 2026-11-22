@@ -1109,6 +1109,16 @@ holder_failure() {
       /^ssh:/ { print "holder SSH transport failed"; next }
       /: unbound variable$/ { print "holder shell variable was unset" }
     ' >&2
+    if tail -n 240 "$STATE_PARENT/$client.log" | grep -E '^agent-e2e: retryable capacity refusal for slot-[0-9][0-9][0-9]: resource=memory; retry after resources become available$' >/dev/null; then
+      {
+        timeout --kill-after=1s 5s "$SUBYARD_HOME/runtime/current/bin/yard" -Y test-yard test-vms status --json 2>/dev/null \
+          | jq -c '.resources.memory_admission.headroom_bytes | select(type == "number" and . >= 0) |
+              {check: "holder-memory-refusal", admission_headroom_bytes: .}'
+        awk '/^Mem(Total|Available):[[:space:]]+[0-9]+[[:space:]]+kB$/ {
+          printf "%s%s_kib=%s", sep, substr($1,1,length($1)-1), $2; sep=" "
+        } END {print ""}' /proc/meminfo
+      } >&2 || true
+    fi
   fi
   die "$1"
 }
@@ -1132,7 +1142,7 @@ ensure_owner_base_image
 OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
 # Telemetry needs two observed guests whose combined RAM exceeds the broker's
 # 2GiB process ceiling, with startup headroom inside its 8GiB controller.
-if [ "$TELEMETRY_ONLY" = 1 ] && [ "$HELD_DIAGNOSTIC" = 0 ] && [ "$LEASE_EXPIRY" = 0 ]; then
+if [ "$TELEMETRY_ONLY" = 1 ] && [ "$LEASE_EXPIRY" = 0 ]; then
   OWNER_DIAGNOSTIC_VM_MEMORY=1536MiB
 fi
 install_owner_runtime
