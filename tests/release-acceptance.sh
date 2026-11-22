@@ -2300,6 +2300,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             # A later acquire of a multi-lease lane blocks on capacity after a clean release.
             clean = "record 0123abcd request\nrecord 0123abcd '" + GRANT + "'\nrecord 0123abcd 'release exit_code=0'\n"
             for following, expected in (("record 0123abce request\nrecord 0123abce 'refused resource=disk'\n", ("blocked", "capacity_disk")),
+                                        ("record 0123abce request\nrecord 0123abce 'refused resource=slot state=provisioning'\n", ("blocked", "capacity_slot")),
                                         ("record 0123abce request\nrecord 0123abce 'refused resource=disk'\nrecord 0123abcf request\n",
                                          ("failed", "lease request ended without a grant or typed refusal")),
                                         ("", ("failed", "the lane completed no lease"))):
@@ -2362,6 +2363,11 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             # r3: a cleanup end without its VM is malformed, never a clean or ignored end.
             ("cleanup record without a VM", lease().replace("cleaned vm=1 exit_code=0", "cleaned exit_code=3"), "malformed lane lease record", None),
             ("unknown refusal resource", record("request") + record("refused resource=cpu"), "malformed lane lease record", None),
+            *(("transient slot refusal: " + state, record("request") + record("refused resource=slot state=" + state), None, "slot")
+              for state in ("provisioning", "held", "draining", "recovering")),
+            *(("invalid slot refusal: " + fields, record("request") + record("refused " + fields), "malformed lane lease record", None)
+              for fields in ("resource=slot", "resource=slot state=quarantined", "resource=slot state=unavailable",
+                             "resource=memory state=held", "resource=disk state=provisioning")),
             ("exit code out of range", lease().replace("release exit_code=0", "release exit_code=256"), "malformed lane lease record", None),
             # The typed grant names a valid environment; an all-decimal fingerprint is still one.
             ("untyped grant", lease().replace(GRANT, "grant"), "malformed lane lease record", None),
@@ -2905,15 +2911,15 @@ while True: time.sleep(1)
                                      [json.dumps(item, sort_keys=True) for item in events])
 
     def test_capacity_retry_waits_for_active_checks_and_records_both_attempts(self):
-        for slow_exit in (0, 23):
-            with self.subTest(slow_exit=slow_exit), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        for slow_exit, resource in ((0, "memory"), (23, "memory"), (0, "slot"), (23, "slot")):
+            with self.subTest(slow_exit=slow_exit, resource=resource), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
                 source, receipt = prepare_fixture(fixture_checkout(directory), directory / "acceptance")
                 output = directory / "acceptance"
                 blocked, slow, following = "profile:sample/one", "profile:sample/two", "profile:peer"
                 marker = output / "capacity-retried"
                 command = ["bash", "-c", LANE_RECORD + 'record request\nif test -f "$1"; then record grant type=subyard-pair vms=2 base=$(printf %064d 0); record release exit_code=0; exit 0; fi\n'
-                    'touch "$1"\nrecord refused resource=memory\nexit 4', "controller", str(marker)]
+                    f'touch "$1"\nrecord refused resource={resource}' + (' state=held' if resource == 'slot' else '') + '\nexit 4', "controller", str(marker)]
                 slow_lane = LANE_CONTROLLER + "exit " + str(slow_exit) + "\n"
                 checks = {blocked: command, slow: ["bash", "-c", slow_lane, "lane"], following: CLEAN_LANE}
                 # Local gate behavior is covered separately; use real execution and immutable records here.

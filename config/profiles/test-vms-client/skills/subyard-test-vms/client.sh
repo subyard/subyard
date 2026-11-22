@@ -706,9 +706,9 @@ validate_exact_busy_response() {
 }
 
 report_exact_slot_wait() {
-  local started="$1" state="$2" reason="$3" owner_summary="$4" elapsed remaining
+  local started="$1" state="$2" reason="$3" owner_summary="$4" budget="$5" elapsed remaining
   elapsed=$((SECONDS - started))
-  remaining=$((WAIT_SECONDS - elapsed))
+  remaining=$((budget - elapsed))
   [ "$remaining" -ge 0 ] || remaining=0
   printf '%s: requested slot %s unavailable: state=%s reason=%s; waited %s, deadline in %s\n' "$E2E_PROGRAM" \
     "$LEASE_REQUESTED_SLOT" "$state" "$reason" \
@@ -891,8 +891,8 @@ acquire_lease() {
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
     LEASE_ACQUIRE_PROTOCOL=acquire-v4
   fi
-  # --wait bounds both busy and capacity retries. Without it, a collector may bound
-  # capacity retries alone; a busy slot still fails at once.
+  # Slot contention and resource shortages share one deadline: another allocator
+  # can reserve the exact slot while this caller waits for memory or disk.
   capacity_wait=$WAIT_SECONDS
   if [ "$capacity_wait" -eq 0 ] && [ -n "${SUBYARD_E2E_CAPACITY_WAIT:-}" ]; then
     [[ "$SUBYARD_E2E_CAPACITY_WAIT" =~ ^([0-9]{1,6})([sm])$ ]] || die 'SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s'
@@ -904,10 +904,11 @@ acquire_lease() {
   last_report=-30
   while true; do
     elapsed=$((SECONDS - started))
-    if [ "$attempt" -gt 0 ] && [ "$last_state" != capacity ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+    if [ "$attempt" -gt 0 ] && [ "$last_state" != capacity ] && [ "$elapsed" -ge "$capacity_wait" ]; then
       printf '%s: timed out waiting for %s: state=%s reason=%s\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
       [ -z "$last_owner_summary" ] || printf '%s: %s\n' "$E2E_PROGRAM" "$last_owner_summary" >&2
+      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot" "state=$last_state"
       return 4
     fi
     attempt=$((attempt + 1))
@@ -926,7 +927,7 @@ acquire_lease() {
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
       elapsed=$((SECONDS - started))
-      if [ "$WAIT_SECONDS" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+      if [ "$capacity_wait" -gt 0 ] && [ "$elapsed" -ge "$capacity_wait" ]; then
         printf '%s: deadline elapsed before the lease grant arrived; releasing %s without guest access\n' "$E2E_PROGRAM" \
           "$LEASE_REQUESTED_SLOT" >&2
         release_lease \
@@ -1007,6 +1008,10 @@ acquire_lease() {
     fi
     validate_exact_busy_response "$response" \
       || die_acquire_unknown invalid-busy-refusal
+    case "$state" in
+      provisioning|held|draining|recovering) ;;
+      *) die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason; operator action required" ;;
+    esac
     owner_summary=''
     if [ "$state" = held ]; then
       owner_acquired_epoch="$(date -u -d "$(jq -r '.owner.acquired_at' <<<"$response")" +%s 2>/dev/null)" \
@@ -1020,17 +1025,20 @@ acquire_lease() {
     last_state="$state"
     last_reason="$reason"
     last_owner_summary="$owner_summary"
-    if [ "$WAIT_SECONDS" -eq 0 ]; then
-      die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason${owner_summary:+; $owner_summary}"
+    if [ "$capacity_wait" -eq 0 ]; then
+      printf '%s: requested E2E slot %s is unavailable: state=%s reason=%s%s\n' "$E2E_PROGRAM" \
+        "$LEASE_REQUESTED_SLOT" "$state" "$reason" "${owner_summary:+; $owner_summary}" >&2
+      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot" "state=$state"
+      return 4
     fi
     elapsed=$((SECONDS - started))
     # The loop head reports an elapsed deadline with this refusal.
-    [ "$elapsed" -lt "$WAIT_SECONDS" ] || continue
+    [ "$elapsed" -lt "$capacity_wait" ] || continue
     if [ "$((SECONDS - last_report))" -ge 30 ]; then
-      report_exact_slot_wait "$started" "$state" "$reason" "$owner_summary"
+      report_exact_slot_wait "$started" "$state" "$reason" "$owner_summary" "$capacity_wait"
       last_report=$SECONDS
     fi
-    sleep_seconds=$((WAIT_SECONDS - elapsed))
+    sleep_seconds=$((capacity_wait - elapsed))
     [ "$sleep_seconds" -le 5 ] || sleep_seconds=5
     sleep "$sleep_seconds"
   done
