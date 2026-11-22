@@ -182,19 +182,24 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 		if err != nil {
 			return grant, err
 		}
-		if err := rt.checkCacheBudget(ctx); err != nil {
-			return grant, err
-		}
-		if err := rt.reserveEnvironment(ctx, store, grant); err != nil {
-			return grant, err
-		}
-		image, source, err := selected.upstreamImage(ctx, "container")
-		if err != nil {
-			return grant, err
-		}
-		grant.BaseFingerprint = image.Fingerprint
-		child.Config.Image = source
-		return grant, store.pinBase(grant)
+		// Share admission with VM builders, whose peak reservation lasts
+		// through the build while they hold this lock.
+		err = imageBuildLock(ctx, rt.imageRegistryPath()+".lock", func() error {
+			if err := rt.checkCacheBudget(ctx); err != nil {
+				return err
+			}
+			if err := rt.reserveEnvironment(ctx, store, grant); err != nil {
+				return err
+			}
+			image, source, err := selected.upstreamImage(ctx, "container")
+			if err != nil {
+				return err
+			}
+			grant.BaseFingerprint = image.Fingerprint
+			child.Config.Image = source
+			return store.pinBase(grant)
+		})
+		return grant, err
 	}
 	pinned, err := rt.pinnedRecipeRuntime()
 	if err != nil {
