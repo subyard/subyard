@@ -872,7 +872,7 @@ pregrant_client() {
   export SUBYARD_E2E_YARD=test-yard
   # shellcheck source=dev/agent-e2e.sh
   . "$RUNNER"
-  LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
+  LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
   LEASE_REQUESTED_SLOT='slot-001'
   LEASE_PURPOSE=pregrant-cancellation
   printf '%s\n' "$BASHPID" > "$STATE_PARENT/$client.pid"

@@ -2,7 +2,7 @@
 # Optional correlation and observer calls preserve native controller boundaries.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-tmp="$(mktemp -d /tmp/subyard-telemetry-controller.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-telemetry-controller.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"

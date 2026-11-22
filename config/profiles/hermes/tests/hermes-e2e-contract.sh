@@ -21,7 +21,7 @@ fi
 
 
 # Execute the owning setup with native effects replaced at their boundary.
-fixture="$(mktemp -d /tmp/subyard-hermes-bootstrap.XXXXXX)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/subyard-hermes-bootstrap.XXXXXX")"
 trap 'find "$fixture" -depth -delete' EXIT
 bootstrap="$(sed -n '/^# Keep the synthetic owner endpoint stable/,/^printf .*provisioning only/p' "$E2E")"
 fault="$(sed -n '/^cat >.*faultbin\/timeout/,/^rm -f -- .*faultbin\/timeout/p' "$E2E")"

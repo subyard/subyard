@@ -26,7 +26,7 @@ IMAGE_REQUESTED=debian-13
 if (allocation_option --image ubuntu-24.04) >/dev/null 2>&1; then fail 'duplicate image accepted'; fi
 printf 'ok: image allowlist and compatible lease request forwarding\n'
 
-fixture="$(mktemp -d /tmp/subyard-image-selection.XXXXXX)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/subyard-image-selection.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
 # Exercise real capability negotiation and grant validation with a fake facade.

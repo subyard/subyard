@@ -2,7 +2,7 @@
 # Host-free check of the E2E lanes' failure-output redaction at truncation boundaries.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-tmp="$(mktemp -d /tmp/orca-lane-output.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/orca-lane-output.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=config/profiles/orca/tests/e2e/orca-lane-output.bash

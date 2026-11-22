@@ -6,7 +6,7 @@ PAYLOAD="$ROOT/config/profiles/openclaw/resources/staging-gateway/staging-lease.
 if [ "${1:-}" = --ownership ]; then
   exec unshare -Ur --map-auto bash "$0" --ownership-inside
 fi
-tmp="$(mktemp -d /tmp/subyard-staging-lease.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-staging-lease.XXXXXX")"
 gateway="" heartbeat=""
 cleanup() {
   [ -z "$heartbeat" ] || { kill "$heartbeat" 2>/dev/null || true; wait "$heartbeat" 2>/dev/null || true; }

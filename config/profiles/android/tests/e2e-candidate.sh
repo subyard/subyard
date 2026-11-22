@@ -2,7 +2,7 @@
 # Candidate preparation must fail closed before Android lifecycle actions.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-tmp="$(mktemp -d /tmp/subyard-android-candidate.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-android-candidate.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 . "$ROOT/config/profiles/android/tests/e2e/android-candidate.sh"
 root="$tmp/root"

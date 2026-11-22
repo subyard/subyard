@@ -11,7 +11,7 @@ platform="$sdk/platforms/android-35/android.jar"
 [ ! -w "$sdk" ] && [ -s "$platform" ]
 [ "$(readlink -f "$sdk")" = "$sdk" ] && [ "$(findmnt -n -o TARGET -T "$sdk")" = /srv ]
 for tool in aapt2 d8 dexdump zipalign apksigner; do test -x "$tools/$tool"; done
-work="$(mktemp -d /tmp/subyard-android-sdk-build.XXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-android-sdk-build.XXXXXX")"
 chmod 0700 "$work"
 printf '%s\n' subyard-android-sdk-build-v1 > "$work/.marker"
 stage=build

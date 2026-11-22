@@ -21,7 +21,7 @@ done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
 # These process/fixture and production filesystem checks never acquire a lease.
 bash "$ROOT/config/profiles/github/tests/run.sh" --preflight
-LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
+LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 fixture_path=config/profiles/github/tests/e2e/connection-sync-guest.sh
 fixture() {
   local vm="$1" started=$SECONDS rc=0 mode="$2" budget=1800; shift

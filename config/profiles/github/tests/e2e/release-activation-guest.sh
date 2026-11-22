@@ -103,7 +103,7 @@ for command in curl git go jq openssl python3 sha256sum shellcheck sudo timeout;
 done
 [ "$MODE" = --local-probe ] || sudo -n true || die 'disposable VM passwordless sudo unavailable'
 # Keep disposable source/Git fixtures outside managed workspaces, even with TMPDIR set.
-STATE="$(mktemp -d /tmp/subyard-release-activation.XXXXXX)"
+STATE="$(mktemp -d "${TMPDIR:-/tmp}/subyard-release-activation.XXXXXX")"
 chmod 0711 "$STATE"
 MARKER=subyard-release-activation-v1
 printf '%s\n' "$MARKER" > "$STATE/.marker"
@@ -572,7 +572,7 @@ SH
   done
   printf 'ok: cached-image probe cleanup accepts exact ownership and preserves foreign or unavailable state\n'
   # Exercise cleanup itself against a pre-existing managed-looking foreign unit.
-  PROBE_UNITS="$(mktemp -d /tmp/subyard-activation-unit-probe.XXXXXX)"
+  PROBE_UNITS="$(mktemp -d "${TMPDIR:-/tmp}/subyard-activation-unit-probe.XXXXXX")"
   UNIT_DIR="$PROBE_UNITS"
   printf '# Managed by Subyard GitHub broker\nExecStart=/foreign/operator/broker\n' > "$UNIT_DIR/$UNIT"
   foreign_before="$(hash "$UNIT_DIR/$UNIT")"

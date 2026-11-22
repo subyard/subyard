@@ -129,7 +129,7 @@ PY_RECORD
 case "$mode" in
   sink-lifecycle) sink_lifecycle ;;
   early-init)
-    scratch="$(mktemp -d /tmp/subyard-cleanup-init.XXXXXX)"
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cleanup-init.XXXXXX")"
     trap 'find "$scratch" -depth -delete' EXIT
     install -d "$scratch/dev/e2e" "$scratch/.build"
     ln -s "$ROOT/scripts" "$scratch/scripts"

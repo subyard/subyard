@@ -3,7 +3,7 @@
 set -euo pipefail
 PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLIENT="$PROFILE/skills/subyard-test-vms/client.sh"
-TMP="$(mktemp -d /tmp/subyard-test-vms-client.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-vms-client.XXXXXX")"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 stop_keepers() {
   local ready

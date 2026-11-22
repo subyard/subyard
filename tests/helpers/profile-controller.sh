@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sourced host-free fixture for acceptance-controller dispatch tests.
 setup_profile_controller() { # <repository root> <controller path>
-  tmp="$(mktemp -d /tmp/subyard-profile-controller.XXXXXX)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-profile-controller.XXXXXX")"
   trap 'rm -rf -- "$tmp"' EXIT
   controller="$2"
   mkdir -p "$tmp/$(dirname "$controller")" "$tmp/dev"

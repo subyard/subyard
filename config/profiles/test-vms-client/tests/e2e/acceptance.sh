@@ -33,7 +33,7 @@ fi
 bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-yard --vm 1 -- \
   timeout --signal=TERM --kill-after=120 3600 bash config/profiles/test-vms-client/tests/e2e/hermes-yard.sh
 
-work="$(mktemp -d /tmp/subyard-test-vms-client.XXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-vms-client.XXXXXX")"
 handle=''
 finish() {
   local rc=$?
