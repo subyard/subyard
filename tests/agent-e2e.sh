@@ -742,10 +742,11 @@ for contract in subyard-pair:2 subyard-pair:1 android-test:1 system-container:1;
     GRANT_MEMORY_PER_VM=8GiB GRANT_DISK_PER_VM=40GiB
   fi
   write_guest_command 1 "$TMP" true > "$TMP/count-command.sh"
+  remote="$(ssh() { printf '%s' "${!#}"; }; guest 1 runuser -u dev -- env)"
   if [ "$ENVIRONMENT_TYPE" = system-container ]; then
-    grep -Fxq 'export SHIFT_MODE=acl' "$TMP/count-command.sh" || fail 'container fixture needs ACL mounts'
+    [ "$remote" = 'env SHIFT_MODE=acl runuser -u dev -- env' ] || fail 'container fixture needs ACL mounts'
   else
-    ! grep -q '^export SHIFT_MODE=' "$TMP/count-command.sh" || fail 'VM mount mode overridden'
+    [ "$remote" = 'runuser -u dev -- env' ] || fail 'VM mount mode overridden'
   fi
   sed -n '/^export SUBYARD_E2E_/p' "$TMP/count-command.sh" > "$TMP/resource-exports.sh"
   chmod 0600 "$TMP/count-command.sh" "$TMP/resource-exports.sh"
