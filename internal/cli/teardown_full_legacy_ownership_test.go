@@ -25,8 +25,7 @@ func TestLegacyFullRegistrationUsesProtectedDefaultRoot(t *testing.T) {
 		{"unprotected default root", "default", 0o666, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			cliFixture := newFixture(t)
-			configHome := cliFixture.Root
+			configHome := testkit.TempDir(t)
 			testkit.WriteFile(t, filepath.Join(configHome, "config.env"), []byte("INCUS_PROJECT=old-project\n"), scenario.mode)
 			if err := readLegacyFullRegistration(configHome, scenario.yard); (err == nil) != scenario.allowed {
 				t.Fatalf("registration allowed=%t: %v", scenario.allowed, err)

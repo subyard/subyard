@@ -1470,9 +1470,8 @@ func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) 
 }
 
 func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
-	cliFixture := newFixture(t, withWorkingDir(""))
+	cliFixture := newFixture(t, withWorkingDir(""), withCommands("incus"))
 	root, environment := cliFixture.Root, cliFixture.Environment
-	installCanonicalOwnerInventory(t, cliFixture)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
@@ -2063,9 +2062,8 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 }
 
 func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *testing.T) {
-	cliFixture := newFixture(t, withWorkingDir(""))
+	cliFixture := newFixture(t, withWorkingDir(""), withCommands("incus"))
 	root, environment := cliFixture.Root, cliFixture.Environment
-	installCanonicalOwnerInventory(t, cliFixture)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	// This fixture authors its selection in subyard.env below.
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
@@ -2728,13 +2726,13 @@ func TestBrokerActivationLeavesDeferredBrokerYard(t *testing.T) {
 // activeBrokerProgram runs a CLI whose registered test-yard broker is active,
 // over a fake Incus that answers only the broker observation.
 func activeBrokerProgram(t *testing.T) (*CLI, string) {
-	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	t.Helper()
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""), withCommands("incus"))
 	repositoryRoot := cliFixture.Root
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
 	bin := cliFixture.Bin
-	installCanonicalOwnerInventory(t, cliFixture)
+	t.Setenv("PATH", bin)
 	writeReleaseTransitionTestFile(
 		t,
 		filepath.Join(configHome, "yards", "test-yard", "config.env"),
@@ -2973,12 +2971,6 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	}
 	// Fixture acceptance and sanitized diagnostics have a distinct runnable
 	// contract in tests/agent-e2e.sh; native Ready owns pending-work semantics.
-}
-
-func installCanonicalOwnerInventory(t *testing.T, cliFixture *cliFixture) {
-	t.Helper()
-	withCommands("incus").apply(cliFixture)
-
 }
 
 // runningBrokerIncus answers the broker runtime observation for test-yard.

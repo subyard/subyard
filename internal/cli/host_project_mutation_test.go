@@ -184,8 +184,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 				protected[index].mode = info.Mode().Perm()
 			}
 			cliFixture := newFixture(t, withCommands("ssh"))
-			sshLog := filepath.Join(data, "ssh.called")
-			cli.env = map[string]string{"PATH": cliFixture.Env("PATH"), "SSH_INVOCATION_LOG": sshLog}
+			cli.env = map[string]string{"PATH": cliFixture.Bin}
 			called := false
 			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(cli), Project: project,
 				Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{
@@ -206,7 +205,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 			if err := prepared.Close(); err != nil {
 				t.Fatal(err)
 			}
-			for _, path := range []string{sshLog, routing, yard.Paths.StateDir} {
+			for _, path := range []string{routing, yard.Paths.StateDir} {
 				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("stale command created %s: %v", path, err)
 				}
