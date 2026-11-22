@@ -1,0 +1,40 @@
+{
+  "comment": "Shared remote URL vectors: domain.NormalizeRemoteURL and the user-skills sync helper both read this file.",
+  "normalized": {
+    "https://GitHub.com/Owner/dev-flow.git/": "https://github.com/Owner/dev-flow",
+    "https://github.com:443/owner/repo": "https://github.com/owner/repo",
+    "https://github.com:0443/owner/repo": "https://github.com/owner/repo",
+    "https://git.example:8443/owner/repo": "https://git.example:8443/owner/repo",
+    "https://git.example:08443/owner/repo": "https://git.example:8443/owner/repo",
+    "https://git.example:65535/owner/repo": "https://git.example:65535/owner/repo",
+    "ssh://git@Example.org:22/srv/repo.git": "ssh://git@example.org/srv/repo",
+    "ssh://example.org:2222/srv/repo": "ssh://example.org:2222/srv/repo",
+    "git@GitHub.com:owner/repo.git": "git@github.com:owner/repo",
+    "dev@localhost:/srv/repo/": "dev@localhost:/srv/repo",
+    "ssh://g%41@Host/r%2Fx": "ssh://g%41@host/r%2Fx"
+  },
+  "refused": {
+    "https://user:secret@github.com/o/r": "contains credentials",
+    "https://token@github.com/o/r": "contains credentials",
+    "ssh://u:p@host/r": "contains credentials",
+    "ssh://@host/r": "contains credentials",
+    "https://github.com/o/r?x=1": "has a query or fragment",
+    "https://github.com/o/r#main": "has a query or fragment",
+    "http://github.com/o/r": "uses an unsupported scheme",
+    "file:///srv/repo": "uses an unsupported scheme",
+    "/srv/repo": "is not an https, ssh or user@host:path URL",
+    "./repo": "is not an https, ssh or user@host:path URL",
+    "-uhttps://x/y": "starts with '-'",
+    "https://github.com/": "has no repository path",
+    "https://github.com/o/r\u0001": "contains unsupported characters",
+    "https://github.com:/o/r": "has an invalid port",
+    "https://github.com:0/o/r": "has an invalid port",
+    "https://github.com:65536/o/r": "has an invalid port",
+    "https://github.com:+443/o/r": "has an invalid port",
+    "https://github.com:99999999999999999999/o/r": "has an invalid port",
+    "https://h/o/r%zz": "has an invalid percent escape",
+    "https://h/o/r%4": "has an invalid percent escape",
+    "https://h%41/o/r": "has an invalid host",
+    "ssh://h:22": "has no repository path"
+  }
+}

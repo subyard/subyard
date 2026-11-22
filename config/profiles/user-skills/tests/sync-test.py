@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import stat
 import subprocess
@@ -89,29 +90,12 @@ class Fixture(unittest.TestCase):
 
 class Naming(unittest.TestCase):
     def test_normalization_matches_the_setting_type(self):
-        # The same vectors as internal/domain TestNormalizeRemoteURL.
-        for url, normalized in {
-            'https://GitHub.com/Owner/dev-flow.git/': 'https://github.com/Owner/dev-flow',
-            'https://github.com:443/owner/repo': 'https://github.com/owner/repo',
-            'https://git.example:8443/owner/repo': 'https://git.example:8443/owner/repo',
-            'ssh://git@Example.org:22/srv/repo.git': 'ssh://git@example.org/srv/repo',
-            'ssh://example.org:2222/srv/repo': 'ssh://example.org:2222/srv/repo',
-            'git@GitHub.com:owner/repo.git': 'git@github.com:owner/repo',
-            'dev@localhost:/srv/repo/': 'dev@localhost:/srv/repo',
-        }.items():
+        # domain.NormalizeRemoteURL reads the same vectors.
+        vectors = json.loads((ROOT / 'internal/domain/testdata/remote-urls.json').read_text())
+        self.assertTrue(vectors['normalized'] and vectors['refused'])
+        for url, normalized in vectors['normalized'].items():
             self.assertEqual(sync.normalize(url), normalized, url)
-        for url, reason in {
-            'https://user:secret@github.com/o/r': 'contains credentials',
-            'https://token@github.com/o/r': 'contains credentials',
-            'ssh://u:p@host/r': 'contains credentials',
-            'https://github.com/o/r?x=1': 'has a query or fragment',
-            'http://github.com/o/r': 'uses an unsupported scheme',
-            'file:///srv/repo': 'uses an unsupported scheme',
-            '/srv/repo': 'is not an https, ssh or user@host:path URL',
-            '-uhttps://x/y': "starts with '-'",
-            'https://github.com/': 'has no repository path',
-            'https://github.com/o/r\x01': 'contains unsupported characters',
-        }.items():
+        for url, reason in vectors['refused'].items():
             with self.assertRaises(ValueError) as refused:
                 sync.normalize(url)
             self.assertEqual(str(refused.exception), reason, url)
@@ -220,6 +204,85 @@ class Sync(Fixture):
         self.assertEqual(set(self.links('beta').values()), {None})
         self.assertTrue((self.root / sync.source_name(sync.normalize(second)) / '.git').is_dir())
 
+    def test_selected_empty_list_is_exactly_unlink(self):
+        self.assertEqual(self.run_helper('apply')[0], 0)
+        self.assertFalse(os.path.lexists(self.root), 'an empty list creates nothing')
+        self.assertEqual(self.run_helper('check'), (0, 'current\n'))
+        url = self.repository('one', {'alpha': {'SKILL.md': 's'}})
+        self.assertEqual(self.run_helper('apply', url)[0], 0)
+        self.assertEqual(self.run_helper('check'), (0, 'work\n'))
+        with mock.patch.object(sync, 'unlink_owned', wraps=sync.unlink_owned) as unlink, \
+                mock.patch.object(sync, 'write_sources', side_effect=AssertionError('no sources.json')):
+            code, output = self.run_helper('apply')
+        self.assertEqual((code, unlink.call_count), (0, 1))
+        self.assertIn('removed link', output)
+        self.assertFalse(os.path.lexists(self.root / 'sources.json'))
+        self.assertEqual(set(self.links('alpha').values()), {None})
+        self.assertEqual(self.run_helper('check'), (0, 'current\n'))
+        self.assertTrue((self.root / sync.source_name(sync.normalize(url)) / '.git').is_dir(), 'clones stay')
+
+    def test_sources_json_urls_must_be_strings(self):
+        self.assertEqual(self.run_helper('apply', self.repository('one', {'alpha': {'SKILL.md': 's'}}))[0], 0)
+        for content in ('[{"url": 7}]', '[{"url": ["https://h/r"]}]', '{"url": "https://h/r"}', '[7]'):
+            (self.root / 'sources.json').write_text(content)
+            self.assertEqual(self.run_helper('sync')[0], 2, content)
+            self.assertEqual(self.run_helper('list')[0], 2, content)
+
+    def test_sync_removes_interrupted_sources_writes(self):
+        url = self.repository('one', {'alpha': {'SKILL.md': 's'}})
+        self.assertEqual(self.run_helper('apply', url)[0], 0)
+        leftover = self.root / '.sources-interrupted'
+        leftover.write_text('[]')
+        self.assertEqual(self.run_helper('sync')[0], 0)
+        self.assertEqual(list(self.root.glob('.sources-*')), [])
+
+    def test_terminated_helper_kills_its_git_process_group(self):
+        fake = self.base / 'fake-bin'
+        fake.mkdir()
+        marker = self.base / 'grandchild.pid'
+        direct = self.base / 'git.pid'
+        (fake / 'git').write_text(f'#!/bin/bash\necho $$ > {direct}\nsleep 300 &\necho $! > {marker}\nwait\n')
+        (fake / 'git').chmod(0o755)
+        driver = (
+            'import importlib.util, sys\n'
+            'spec = importlib.util.spec_from_file_location("sync", sys.argv[1])\n'
+            'sync = importlib.util.module_from_spec(spec)\n'
+            'spec.loader.exec_module(sync)\n'
+            'sync.ALLOW_LOCAL, sync.SAFE_PATH = True, sys.argv[2]\n'
+            'sync.entry(["apply", sys.argv[3]])\n')
+        def gone(pid):
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.1)
+            return False
+
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGKILL):
+            marker.unlink(missing_ok=True)
+            helper = subprocess.Popen(
+                [sys.executable, '-B', '-c', driver, str(SKILL / 'sync.py'), f'{fake}:/usr/bin:/bin',
+                 str(self.base / 'remotes/any.git')],
+                env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin'}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(100):
+                if marker.exists() and marker.read_text().strip():
+                    break
+                time.sleep(0.05)
+            else:
+                helper.kill()
+                self.fail('fake git never started')
+            helper.send_signal(signum)
+            grandchild = int(marker.read_text())
+            if signum == signal.SIGKILL:
+                # PR_SET_PDEATHSIG: git itself dies with an unhandled kill of the helper.
+                self.assertEqual(helper.wait(timeout=10), -signal.SIGKILL)
+                self.addCleanup(lambda pid=grandchild: os.path.exists(f'/proc/{pid}') and os.kill(pid, signal.SIGKILL))
+                self.assertTrue(gone(int(direct.read_text())), 'git survived a killed helper')
+                continue
+            self.assertEqual(helper.wait(timeout=10), 128 + signum)
+            self.assertTrue(gone(grandchild), f'git grandchild survived signal {signum}')
+
     def test_agent_sync_reads_sources_and_repairs_links(self):
         url = self.repository('one', {'alpha': {'SKILL.md': 's'}})
         self.assertEqual(self.run_helper('apply', url)[0], 0)
@@ -325,8 +388,9 @@ class Sync(Fixture):
         url = self.repository('one', {'alpha': {'SKILL.md': 's'}})
         self.assertEqual(self.run_helper('apply', url)[0], 0)
         before = (self.root / 'sources.json').read_bytes()
+        other = str(self.base / 'remotes/other.git')
         with mock.patch.object(sync.os, 'fsync', side_effect=OSError(5, 'injected')):
-            self.assertEqual(self.run_helper('apply')[0], 2)
+            self.assertEqual(self.run_helper('apply', other)[0], 2)
         self.assertEqual((self.root / 'sources.json').read_bytes(), before)
         self.assertEqual(list(self.root.glob('.sources-*')), [])
 

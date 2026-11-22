@@ -32,7 +32,8 @@ if [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && [ "$removal" = 1 ]; then
 fi
 sources=()
 if [ "$selected" = 1 ]; then
-  read -r -a sources <<<"${USER_SKILL_SOURCES:-}"
+  # The list is whitespace-separated and may span lines; read -a never globs.
+  IFS=$' \t\n' read -r -d '' -a sources <<<"${USER_SKILL_SOURCES:-}" || :
 fi
 # A check's stderr may carry only the readiness record; apply keeps diagnostics.
 guest_stderr=/dev/stderr

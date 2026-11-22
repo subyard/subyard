@@ -7,7 +7,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 owner="$root/config/profiles/user-skills/owner.sh"
 state="$(mktemp -d /tmp/subyard-user-skills-owner.XXXXXX)"
 trap 'chmod -R u+rwX -- "$state" 2>/dev/null || :; rm -rf -- "$state"' EXIT
-mkdir -p "$state/bin" "$state/guest-bin" "$state/home"
+mkdir -p "$state/bin" "$state/guest-bin" "$state/git-bin" "$state/home"
 cat > "$state/bin/incus" <<'PY'
 #!/usr/bin/env python3
 import io, json, os, subprocess, sys, tarfile
@@ -33,6 +33,7 @@ with tarfile.open(fileobj=source, mode='r:') as archive, tarfile.open(fileobj=pa
                     'sys.exit(int(os.environ.get("FIXTURE_SKILLS_"+sys.argv[1].replace("-","_").upper(),"0")))\n').encode()
         if member.name.endswith('sync.py'):
             data = data.replace(b'LOCK_WAIT = 330', b'LOCK_WAIT = 1')
+            data = data.replace(b"SAFE_PATH = '/usr/local/sbin:", ("SAFE_PATH = '" + state + "/git-bin:").encode())
         if data is not None:
             member.size = len(data)
         output.addfile(member, io.BytesIO(data) if data is not None else None)
@@ -60,6 +61,14 @@ cat > "$state/guest-bin/id" <<'SH'
 exec /usr/bin/id "$1"
 SH
 chmod 755 "$state/guest-bin/id"
+# The sync helper's Git: the source answers only once access is granted.
+cat > "$state/git-bin/git" <<SH
+#!/bin/bash
+[ "\$1 \$2" = "clone --" ] && [ -e "$state/access" ] && [ "\${3%skills.git}" != "\$3" ] || exit 128
+mkdir -p "\$4/skills/alpha"
+printf -- '---\nname: alpha\ndescription: a\n---\n' > "\$4/skills/alpha/SKILL.md"
+SH
+chmod 755 "$state/git-bin/git"
 export FIXTURE_STATE="$state" FIXTURE_GUEST_PATH="$state/guest-bin:$PATH"
 export PATH="$state/bin:$PATH"
 export SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1
@@ -90,12 +99,13 @@ expect 0 '' -- --yes
 python3 -c 'import json,sys; assert [s["name"][:7] for s in json.load(open(sys.argv[1]))] == ["skills-"]' "$skills_root/sources.json"
 grep -Fq 127.0.0.1 "$state/calls" || fail 'sources were not passed to the guest'
 expect 1 "$record" -- --check
-# The source becomes reachable: a local clone stands in for the remote.
+# Access appears: a check still reports the missing clone; the next init-side apply clones it.
 clone="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["dir"])' "$skills_root/sources.json")"
-mkdir -p "$clone/skills/alpha"
-printf -- '---\nname: alpha\ndescription: a\n---\n' > "$clone/skills/alpha/SKILL.md"
-expect 1 '' -- --check
+touch "$state/access"
+expect 1 "$record" -- --check
+[ ! -e "$clone" ] || fail 'a check cloned'
 expect 0 '' -- --yes
+[ -f "$clone/skills/alpha/SKILL.md" ] || fail 'apply did not clone once access appeared'
 [ "$(readlink "$state/home/.claude/skills/alpha")" = "$clone/skills/alpha" ] || fail 'skill link missing'
 expect 0 '' -- --check
 # A registered-skill failure is a transport failure, never drift.
@@ -112,6 +122,22 @@ SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --yes
 [ ! -e "$skills_root/sources.json" ] && [ ! -L "$state/home/.claude/skills/alpha" ] || fail 'deselection left links'
 [ -f "$clone/skills/alpha/SKILL.md" ] || fail 'deselection removed the clone'
 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
+# A multi-line value (one URL per line) passes every URL and never globs.
+two=$'https://127.0.0.1:9/example/skills.git\n\thttps://127.0.0.1:9/example/other.git\n'
+USER_SKILL_SOURCES="$two" expect 0 '' -- --yes
+tail -n 1 "$state/calls" | grep -Fxq '["apply", "1", "dev", "https://127.0.0.1:9/example/skills.git", "https://127.0.0.1:9/example/other.git"]' \
+  || fail "multi-line arguments: $(tail -n 1 "$state/calls")"
+python3 -c 'import json,sys; assert len(json.load(open(sys.argv[1]))) == 2' "$skills_root/sources.json"
+[ -L "$state/home/.claude/skills/alpha" ] || fail 'multi-line apply left no link'
+(cd "$state" && USER_SKILL_SOURCES='*' expect 2 '' -- --check)
+tail -n 1 "$state/calls" | grep -Fxq '["check", "1", "dev", "*"]' || fail "glob arguments: $(tail -n 1 "$state/calls")"
+# A selected empty list converges like a deselection: no sources.json, no links, clones kept.
+USER_SKILL_SOURCES='' expect 1 '' -- --check
+USER_SKILL_SOURCES='' expect 0 '' -- --yes
+tail -n 1 "$state/calls" | grep -Fxq '["apply", "1", "dev"]' || fail "empty-list arguments: $(tail -n 1 "$state/calls")"
+[ ! -e "$skills_root/sources.json" ] && [ ! -L "$state/home/.claude/skills/alpha" ] || fail 'empty list left links'
+[ -f "$clone/skills/alpha/SKILL.md" ] || fail 'empty list removed the clone'
+USER_SKILL_SOURCES='' expect 0 '' -- --check
 expect 0 '' -- --remove
 tail -n 1 "$state/calls" | grep -Fxq '["apply", "0", "dev"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
 # Without the developer account a deselected profile is current; a selected one is work.

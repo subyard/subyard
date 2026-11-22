@@ -60,9 +60,11 @@ anonymous access or existing Git credentials; a `github.com` source is retried t
 `subyard-github` when the GitHub profile is installed. Each attempt is bounded to 60 seconds and
 one sync to 300 seconds.
 
-When a source cannot be reached, init still succeeds and delivers the profile skill;
-`yard profile status user-skills` reports `diagnostic: source-unavailable`. After access is
-granted, an agent runs `sync.py sync`, or the next `yard init` clones the source.
+When a source cannot be reached, init still succeeds and delivers the profile skill; its summary
+and `yard profile status user-skills` report `source-unavailable` with an access hint (`code`
+and `hint` in `--json`). An empty source list removes the profile's links and `sources.json`,
+like a deselection. After access is granted, an agent runs `sync.py sync`, or the next
+`yard init` clones the source.
 
 ## Disable
 

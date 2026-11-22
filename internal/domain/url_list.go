@@ -3,8 +3,8 @@ package domain
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +15,8 @@ var (
 	urlListCharacters = regexp.MustCompile(`^[A-Za-z0-9._~:/@%+-]+$`)
 	scpLikeURL        = regexp.MustCompile(`^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):([^/:][^:]*|/[^:]+)$`)
 	urlHost           = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+	// Go regexp has no lookahead: a '%' followed by fewer than two hex digits.
+	invalidPercentEscape = regexp.MustCompile(`%([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|[0-9A-Fa-f]?$)`)
 )
 
 // ValidateURLList checks a whitespace-separated list of remote Git URLs:
@@ -64,39 +66,55 @@ func NormalizeRemoteURL(item string) (string, error) {
 		}
 		return match[1] + "@" + strings.ToLower(match[2]) + ":" + path, nil
 	}
-	parsed, err := url.Parse(item)
-	if err != nil || !strings.Contains(item, "://") {
+	scheme, rest, found := strings.Cut(item, "://")
+	if !found {
 		return "", errors.New("is not an https, ssh or user@host:path URL")
 	}
-	scheme := strings.ToLower(parsed.Scheme)
-	defaultPort := map[string]string{"https": "443", "ssh": "22"}[scheme]
-	if defaultPort == "" {
+	scheme = strings.ToLower(scheme)
+	defaultPort, supported := map[string]int{"https": 443, "ssh": 22}[scheme]
+	if !supported {
 		return "", errors.New("uses an unsupported scheme")
 	}
-	if parsed.User != nil {
-		if _, hasPassword := parsed.User.Password(); hasPassword || scheme == "https" || parsed.User.Username() == "" {
+	// The authority is parsed by hand, exactly as the guest sync helper does:
+	// no unescaping, so a percent-encoded user or host is never reinterpreted.
+	authority, path := rest, ""
+	if slash := strings.Index(rest, "/"); slash >= 0 {
+		authority, path = rest[:slash], rest[slash:]
+	}
+	user, hostPort, hasUser := "", authority, false
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		user, hostPort, hasUser = authority[:at], authority[at+1:], true
+		if user == "" || strings.Contains(user, ":") || scheme == "https" {
 			return "", errors.New("contains credentials")
 		}
 	}
-	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
+	host, rawPort, hasPort := strings.Cut(hostPort, ":")
+	host = strings.ToLower(host)
 	if !urlHost.MatchString(host) {
 		return "", errors.New("has an invalid host")
 	}
-	if strings.HasSuffix(parsed.Host, ":") {
-		return "", errors.New("has an invalid port")
+	port := defaultPort
+	if hasPort {
+		number, err := strconv.Atoi(rawPort)
+		if rawPort == "" || strings.Trim(rawPort, "0123456789") != "" || err != nil || number < 1 || number > 65535 {
+			return "", errors.New("has an invalid port")
+		}
+		port = number
 	}
-	path := trimRepositoryPath(parsed.EscapedPath())
+	if invalidPercentEscape.MatchString(path) {
+		return "", errors.New("has an invalid percent escape")
+	}
+	path = trimRepositoryPath(path)
 	if path == "" || path == "/" {
 		return "", errors.New("has no repository path")
 	}
-	authority := host
-	if port != "" && port != defaultPort {
-		authority += ":" + port
+	if port != defaultPort {
+		host += ":" + strconv.Itoa(port)
 	}
-	if parsed.User != nil {
-		authority = parsed.User.Username() + "@" + authority
+	if hasUser {
+		host = user + "@" + host
 	}
-	return scheme + "://" + authority + path, nil
+	return scheme + "://" + host + path, nil
 }
 
 func trimRepositoryPath(path string) string {

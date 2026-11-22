@@ -23,7 +23,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 # Harness directories of core skill delivery (config/skills/deliver.py).
 ADAPTERS = ('.agents/skills', '.claude/skills', '.config/opencode/skills')
@@ -45,6 +44,7 @@ URL_CHARACTERS = re.compile(r'[A-Za-z0-9._~:/@%+-]+')
 SCP_LIKE = re.compile(r'([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):([^/:][^:]*|/[^:]+)')
 HOST = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?')
 DEFAULT_PORTS = {'https': 443, 'ssh': 22}
+INVALID_ESCAPE = re.compile(r'%(?![0-9A-Fa-f]{2})')
 
 
 class Unsafe(Exception):
@@ -77,33 +77,36 @@ def normalize(url):
         if path in ('', '/'):
             raise ValueError('has no repository path')
         return match[1] + '@' + match[2].lower() + ':' + path
-    if '://' not in url:
+    scheme, found, rest = url.partition('://')
+    if not found:
         raise ValueError('is not an https, ssh or user@host:path URL')
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
+    scheme = scheme.lower()
     if scheme not in DEFAULT_PORTS:
         raise ValueError('uses an unsupported scheme')
-    user = None
-    if '@' in parts.netloc:
-        if parts.password is not None or scheme == 'https' or not parts.username:
-            raise ValueError('contains credentials')
-        user = parts.username
-    host = (parts.hostname or '').lower()
+    authority, slash, path = rest.partition('/')
+    path = slash + path
+    user, at, host_port = authority.rpartition('@')
+    if at and (not user or ':' in user or scheme == 'https'):
+        raise ValueError('contains credentials')
+    host, colon, raw_port = host_port.partition(':')
+    host = host.lower()
     if not HOST.fullmatch(host):
         raise ValueError('has an invalid host')
-    if parts.netloc.endswith(':'):
-        raise ValueError('has an invalid port')
-    try:
-        port = parts.port
-    except ValueError:
-        raise ValueError('has an invalid port') from None
-    path = _trim(parts.path)
+    port = DEFAULT_PORTS[scheme]
+    if colon:
+        if not (raw_port.isascii() and raw_port.isdigit() and 1 <= int(raw_port) <= 65535):
+            raise ValueError('has an invalid port')
+        port = int(raw_port)
+    if INVALID_ESCAPE.search(path):
+        raise ValueError('has an invalid percent escape')
+    path = _trim(path)
     if path in ('', '/'):
         raise ValueError('has no repository path')
-    authority = host if port in (None, DEFAULT_PORTS[scheme]) else f'{host}:{port}'
-    if user is not None:
-        authority = user + '@' + authority
-    return f'{scheme}://{authority}{path}'
+    if port != DEFAULT_PORTS[scheme]:
+        host += f':{port}'
+    if at:
+        host = user + '@' + host
+    return f'{scheme}://{host}{path}'
 
 
 def source_name(normalized):
@@ -179,6 +182,8 @@ def read_sources(root):
         urls = [record['url'] for record in records]
     except (ValueError, TypeError, KeyError) as error:
         raise Unsafe('sources.json is invalid') from error
+    if not isinstance(records, list) or not all(isinstance(url, str) for url in urls):
+        raise Unsafe('sources.json is invalid')
     return sources_for(urls, root)
 
 
@@ -280,11 +285,22 @@ def inspect(home, root, sources):
     return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped}
 
 
+def _die_with_parent():
+    # PR_SET_PDEATHSIG: a killed helper takes its Git child with it.
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(1, signal.SIGKILL, 0, 0, 0)
+
+
+def _exit_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
 def run_bounded(command, home, cwd, timeout):
     """Run one git command in its own process group; the group never outlives it."""
     process = subprocess.Popen(command, cwd=cwd, env={'HOME': str(home), 'PATH': SAFE_PATH},
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=True)
+                               stderr=subprocess.DEVNULL, start_new_session=True,
+                               preexec_fn=_die_with_parent)
     try:
         return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -373,6 +389,10 @@ def synchronize(home, root, sources, out):
     for leftover in sorted(root.glob('.tmp-*')):
         if os.path.isdir(leftover) and not os.path.islink(leftover):
             remove_tree(leftover, report)
+    # Only an interrupted write leaves a temporary sources file; this sync holds the lock.
+    for leftover in sorted(root.glob('.sources-*')):
+        if os.path.isfile(leftover) and not os.path.islink(leftover):
+            leftover.unlink()
     deadline = time.monotonic() + SYNC_BUDGET
     unavailable = []
     for source in inspect(home, root, sources)['missing']:
@@ -450,21 +470,23 @@ def main(argv=None, out=sys.stdout):
     args = parser.parse_args(argv)
     if args.urls and args.command not in ('apply', 'check'):
         parser.error('only apply and check take source URLs')
+    # A selected empty list converges exactly like a deselection: no sources.json, no links.
+    command = 'unlink' if args.command == 'apply' and not args.urls else args.command
     try:
         home = home_directory()
-        if args.command == 'check':
+        if command == 'check':
             return check(home, skill_root(home, False), args.urls, out)
-        if args.command == 'list':
+        if command == 'list':
             return list_sources(home, skill_root(home, False), out)
-        if args.command == 'unlink' and not os.path.lexists(skill_root(home, False)):
+        if command == 'unlink' and not os.path.lexists(skill_root(home, False)):
             return unlink_owned(home, home / ROOT, out)
         root = skill_root(home, True)
         with Lock(root):
-            if args.command == 'apply':
+            if command == 'apply':
                 sources = sources_for(args.urls, root)
                 write_sources(root, sources)
                 return synchronize(home, root, sources, out)
-            if args.command == 'sync':
+            if command == 'sync':
                 return synchronize(home, root, read_sources(root), out)
             return unlink_owned(home, root, out)
     except Busy as error:
@@ -475,5 +497,12 @@ def main(argv=None, out=sys.stdout):
         return 2
 
 
+def entry(argv=None):
+    # A terminated helper unwinds, so run_bounded kills its Git process group.
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGHUP, _exit_on_signal)
+    raise SystemExit(main(argv))
+
+
 if __name__ == '__main__':
-    raise SystemExit(main())
+    entry()

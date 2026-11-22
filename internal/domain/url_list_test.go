@@ -1,23 +1,34 @@
 package domain
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
 
+// The user-skills guest sync helper reads the same vectors.
 func TestNormalizeRemoteURL(t *testing.T) {
-	for input, want := range map[string]string{
-		"https://GitHub.com/Owner/dev-flow.git/": "https://github.com/Owner/dev-flow",
-		"https://github.com:443/owner/repo":      "https://github.com/owner/repo",
-		"https://git.example:8443/owner/repo":    "https://git.example:8443/owner/repo",
-		"ssh://git@Example.org:22/srv/repo.git":  "ssh://git@example.org/srv/repo",
-		"ssh://example.org:2222/srv/repo":        "ssh://example.org:2222/srv/repo",
-		"git@GitHub.com:owner/repo.git":          "git@github.com:owner/repo",
-		"dev@localhost:/srv/repo/":               "dev@localhost:/srv/repo",
-	} {
+	data, err := os.ReadFile("testdata/remote-urls.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Normalized map[string]string `json:"normalized"`
+		Refused    map[string]string `json:"refused"`
+	}
+	if err := json.Unmarshal(data, &vectors); err != nil || len(vectors.Normalized) == 0 || len(vectors.Refused) == 0 {
+		t.Fatalf("vectors: %v", err)
+	}
+	for input, want := range vectors.Normalized {
 		got, err := NormalizeRemoteURL(input)
 		if err != nil || got != want {
-			t.Errorf("%s: got %q, %v; want %q", input, got, err, want)
+			t.Errorf("%q: got %q, %v; want %q", input, got, err, want)
+		}
+	}
+	for input, want := range vectors.Refused {
+		if _, err := NormalizeRemoteURL(input); err == nil || err.Error() != want {
+			t.Errorf("%q: got %v, want %s", input, err, want)
 		}
 	}
 }
