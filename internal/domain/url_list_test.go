@@ -46,7 +46,11 @@ func TestValidateURLListRefusals(t *testing.T) {
 		"./repo":                             "URL 1 is not an https, ssh or user@host:path URL",
 		"-uhttps://x/y":                      "URL 1 starts with '-'",
 		"https://github.com/":                "URL 1 has no repository path",
-		"https://github.com/o/r\x01":         "URL 1 contains unsupported characters",
+		"https://github.com/o/r\x01":         "URL 1 contains unsupported characters; value contains a control or space character other than space, tab or newline",
+		"https://a/b\rhttps://c/d":           "value contains a control or space character other than space, tab or newline",
+		"https://a/b\vhttps://c/d":           "value contains a control or space character other than space, tab or newline",
+		"https://a/b\fhttps://c/d":           "value contains a control or space character other than space, tab or newline",
+		"https://a/b\u00a0https://c/d":       "value contains a control or space character other than space, tab or newline",
 		"https://a/b https://A/b.git":        "URL 2 repeats URL 1",
 	} {
 		err := ValidateURLList(input)
@@ -56,6 +60,9 @@ func TestValidateURLListRefusals(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "secret") {
 			t.Errorf("%q: refusal echoes the value", input)
 		}
+	}
+	if err := ValidateURLList("https://a/b\n\thttps://c/d \n"); err != nil {
+		t.Fatalf("space, tab and newline separate URLs: %v", err)
 	}
 	if err := ValidateURLList(strings.Repeat("https://h/r ", 0)); err != nil {
 		t.Fatalf("empty list: %v", err)

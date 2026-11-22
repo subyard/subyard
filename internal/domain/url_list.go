@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // MaxURLListItems bounds a url-list setting.
@@ -19,12 +20,19 @@ var (
 	invalidPercentEscape = regexp.MustCompile(`%([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|[0-9A-Fa-f]?$)`)
 )
 
-// ValidateURLList checks a whitespace-separated list of remote Git URLs:
+// ValidateURLList checks a space-, tab- or newline-separated list of remote Git URLs:
 // https://host/path, ssh://[user@]host[:port]/path or user@host:path. Refusals
 // name items by position only, so a refused value with credentials is never echoed.
 func ValidateURLList(value string) error {
 	items := strings.Fields(value)
 	causes := []error{}
+	// The yard splits the list on space, tab and newline only; any other
+	// separator Fields would accept is refused, so both sides see the same items.
+	if strings.IndexFunc(value, func(r rune) bool {
+		return (unicode.IsSpace(r) || unicode.IsControl(r)) && !strings.ContainsRune(" \t\n", r)
+	}) >= 0 {
+		causes = append(causes, errors.New("value contains a control or space character other than space, tab or newline"))
+	}
 	if len(items) > MaxURLListItems {
 		causes = append(causes, fmt.Errorf("has more than %d URLs", MaxURLListItems))
 	}

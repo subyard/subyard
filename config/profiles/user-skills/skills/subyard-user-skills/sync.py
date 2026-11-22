@@ -11,6 +11,7 @@ import argparse
 import ctypes
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -285,13 +286,19 @@ def inspect(home, root, sources):
     return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped}
 
 
-def _die_with_parent():
-    # PR_SET_PDEATHSIG: a killed helper takes its Git child with it.
+def _die_with_parent(parent):
+    # PR_SET_PDEATHSIG: a killed helper takes its Git child with it. A helper that
+    # died before prctl took effect leaves a reparented child, which exits at once.
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl(1, signal.SIGKILL, 0, 0, 0)
+    if os.getppid() != parent:
+        os._exit(1)
 
 
 def _exit_on_signal(signum, _frame):
+    # A repeated signal must not interrupt the unwinding that kills the Git group.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
@@ -300,7 +307,7 @@ def run_bounded(command, home, cwd, timeout):
     process = subprocess.Popen(command, cwd=cwd, env={'HOME': str(home), 'PATH': SAFE_PATH},
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, start_new_session=True,
-                               preexec_fn=_die_with_parent)
+                               preexec_fn=functools.partial(_die_with_parent, os.getpid()))
     try:
         return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:

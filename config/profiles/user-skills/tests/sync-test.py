@@ -236,6 +236,15 @@ class Sync(Fixture):
         self.assertEqual(self.run_helper('sync')[0], 0)
         self.assertEqual(list(self.root.glob('.sources-*')), [])
 
+    def test_signal_handler_ignores_repeated_signals_while_unwinding(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            self.addCleanup(signal.signal, signum, signal.getsignal(signum))
+        with self.assertRaises(SystemExit) as stopped:
+            sync._exit_on_signal(signal.SIGTERM, None)
+        self.assertEqual(stopped.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual((signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)),
+                         (signal.SIG_IGN, signal.SIG_IGN))
+
     def test_terminated_helper_kills_its_git_process_group(self):
         fake = self.base / 'fake-bin'
         fake.mkdir()
