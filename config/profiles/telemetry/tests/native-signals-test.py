@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import pty
 import queue
 import shlex
 import signal
@@ -36,6 +37,78 @@ from spool_fixture import prepare
 
 
 class NativeSignalsTest(unittest.TestCase):
+    def test_terminal_quit_waits_for_exit_flush_and_rejects_timeout_or_failure(self):
+        terminal = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_quit_fixture').Terminal
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            flushed = Path(directory)/'flushed'
+            for mode in ('flush', 'timeout', 'failure', 'signal'):
+                with self.subTest(mode=mode):
+                    client = terminal.__new__(terminal)
+                    client.pid, client.fd = pty.fork()
+                    if client.pid == 0:
+                        code = '''import os,pathlib,signal,sys,time,tty
+print('Fixture complete.', flush=True)
+assert input().strip() == '/quit'
+tty.setraw(sys.stdin.fileno())
+os.write(sys.stdout.fileno(), b'\x1b[6n\x1b[c')
+responses = b''
+while b'\x1b[1;1R' not in responses or b'\x1b[?1;2c' not in responses:
+    responses += os.read(sys.stdin.fileno(), 64)
+print('shutdown diagnostic: '+sys.argv[1], flush=True)
+if sys.argv[1] == 'timeout':
+    time.sleep(60)
+if sys.argv[1] == 'failure':
+    sys.exit(7)
+if sys.argv[1] == 'signal':
+    os.kill(os.getpid(), signal.SIGTERM)
+time.sleep(.15)
+# More than a PTY buffer: shutdown must keep draining terminal output.
+print('x'*200000, flush=True)
+pathlib.Path(sys.argv[2]).write_text('export acknowledged')
+'''
+                        os.execl(sys.executable, sys.executable, '-c', code, mode, str(flushed))
+                    client.buffer = ''
+                    try:
+                        client.wait('Fixture complete.')
+                        self.assertFalse(flushed.exists())
+                        if mode == 'flush':
+                            fixture.quit_codex_terminal(client, timeout=5)
+                            self.assertEqual(flushed.read_text(), 'export acknowledged')
+                            flushed.unlink()
+                        else:
+                            message = 'graceful exit timed out' if mode == 'timeout' else 'did not exit cleanly'
+                            with self.assertRaisesRegex(AssertionError, message) as error:
+                                fixture.quit_codex_terminal(client, timeout=.2 if mode == 'timeout' else 5)
+                            facts = json.loads(str(error.exception).split(': ', 1)[1])
+                            self.assertIn('shutdown diagnostic: '+mode, facts['terminal_tail'])
+                            self.assertEqual(facts['exit_code'], 7 if mode == 'failure' else None)
+                            self.assertEqual(facts['signal'], signal.SIGTERM if mode == 'signal' else None)
+                    finally:
+                        client.close()
+
+    def test_failed_attribution_turn_still_reports_missing_receipts(self):
+        class FailedTerminal:
+            def wait(self, *args):
+                raise AssertionError('fixture turn failed')
+
+            def close(self):
+                pass
+
+        provider = SimpleNamespace(Provider=http.server.BaseHTTPRequestHandler, Terminal=FailedTerminal)
+        native = SimpleNamespace(desired=lambda *args: {'otel': {}}, publish=lambda *args: None, snapshot=lambda *args: None)
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory, \
+                patch('pty.fork', return_value=(1, 2)), patch('fcntl.ioctl'), \
+                patch.object(fixture.subprocess, 'run'), patch.object(fixture, 'query', return_value=[]), \
+                redirect_stdout(output):
+            with self.assertRaisesRegex(AssertionError, 'fixture turn failed'):
+                fixture.assert_run_attribution(Path(directory), Path(directory)/'bin', provider, native,
+                    SimpleNamespace(dumps=lambda value: ''), {}, 'http://127.0.0.1:1', '', Path(directory), False)
+        line, = output.getvalue().splitlines()
+        self.assertTrue(line.startswith('run-attribution plain: '))
+        self.assertEqual(json.loads(line.split(': ', 1)[1]),
+            dict(new=[], tool_run='', tool_exe='', traces_grew_for=[]))
+
     def test_native_agent_delivery_uses_verified_fixture_archives(self):
         def package(files):
             archive = io.BytesIO()

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import select
 import shutil
 import shlex
 import sqlite3
@@ -767,6 +768,48 @@ def exercise(args):
     print('ok: native Codex and Claude tools acquired distinct '+args.kind+' allocations with explicit exported session bindings')
 
 
+def quit_codex_terminal(client, timeout=60):
+    """Wait for normal exit, which drains Codex's embedded server and exporters.
+
+    Leave the child waitable for Terminal.close() to reap during cleanup.
+    """
+    client.settle()
+    client.send('/quit')
+    client.settle()
+    client.send('\r')
+    deadline = time.monotonic()+timeout
+    readable = True
+
+    def read_output(seconds):
+        nonlocal readable
+        try:
+            client.read(seconds)
+        except RuntimeError as error:
+            if not str(error).startswith('Codex terminal closed:'):
+                raise
+            readable = False
+
+    def diagnostic(exited=None):
+        return json.dumps(dict(
+            exit_code=exited.si_status if exited is not None and exited.si_code == os.CLD_EXITED else None,
+            signal=exited.si_status if exited is not None and exited.si_code != os.CLD_EXITED else None,
+            terminal_tail=client.text()[-1800:]), sort_keys=True)
+
+    while True:
+        exited = os.waitid(os.P_PID, client.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if exited is not None:
+            while readable and select.select([client.fd], [], [], 0)[0]:
+                read_output(0)
+            assert exited.si_code == os.CLD_EXITED and exited.si_status == 0, 'Codex did not exit cleanly: '+diagnostic(exited)
+            return
+        remaining = deadline-time.monotonic()
+        assert remaining > 0, 'Codex graceful exit timed out before exporter flush completed: '+diagnostic()
+        if readable:
+            read_output(min(.1, remaining))
+        else:
+            time.sleep(min(.05, remaining))
+
+
 def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
     """A running shared daemon must not take a managed run's tools or their identity."""
     import fcntl, pty, struct, termios
@@ -812,20 +855,22 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
         try:
             client.wait('Fixture complete.', provider)
-            tool_run = (project/(name+'.run')).read_text().strip()
-            # The response can appear before the SDK exports the completed
-            # span. The terminal fixture's close() sends SIGTERM, so keep
-            # servicing the PTY until the collector observes the span.
-            deadline = time.monotonic()+30
-            while tool_run and traces(tool_run) <= counts.get(tool_run, 0) and time.monotonic() < deadline:
-                client.read(0.5)
+            # Rendering the answer is not an exporter completion signal. Quit
+            # normally so Codex drains its embedded server and flushes OTLP;
+            # close() alone sends SIGTERM and can discard pending spans.
+            quit_codex_terminal(client)
         finally:
-            client.close()
-        time.sleep(4)
-        new = runs()-known
-        grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
-        result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
-        print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
+            try:
+                client.close()
+            finally:
+                new = runs()-known
+                grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
+                def receipt(suffix):
+                    path = project/(name+suffix)
+                    return path.read_text().strip() if path.exists() else ''
+                result = dict(new=sorted(new), tool_run=receipt('.run'), tool_exe=receipt('.exe'), traces_grew_for=sorted(grown))
+                print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
+        assert (project/(name+'.run')).is_file() and (project/(name+'.exe')).is_file(), name+': tool receipts missing'
         return result
 
     telemetry = ['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--project-id', 'attribution', '--']
