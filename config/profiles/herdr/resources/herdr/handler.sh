@@ -291,7 +291,12 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         if [ "$#" -eq 1 ]; then changed=$(core_release force); else changed=$(core_release latest); fi
         case "$changed" in
           true) wait_core "$old" ;;
-          false) ;;
+          false)
+            # A Core still running an older binary than the installed release needs the handover.
+            if [ "$(observe | jq -er '.Version')" != "$(core_release installed)" ]; then
+              as_dev "$login" server restart
+              wait_core "$old"
+            fi ;;
           *) die 'Herdr Core update did not report whether it replaced the release' ;;
         esac ;;
       restart)

@@ -66,7 +66,12 @@ case "$1" in
               fi
             fi ;;
           */herdr-login:server)
-            [ "$*" = '/usr/local/libexec/subyard/herdr-login server restart --fresh' ]
+            login_call="$*"
+            login_call="${login_call#/usr/local/libexec/subyard/herdr-login }"
+            case "$login_call" in
+              'server restart --fresh'|'server restart') printf '%s\n' "$login_call" >> "$HERDR_TEST_CALLS" ;;
+              *) exit 83 ;;
+            esac
             if [ "${HERDR_TEST_STICK_PID:-no}" = no ]; then printf '43\n' > "$HERDR_TEST_PID_PATH"; fi ;;
           */herdr-profile:observe)
             if [ "${HERDR_TEST_CORE:-up}" = down ]; then exit 1; fi
@@ -148,10 +153,28 @@ printf '%s\n' journalctl --no-pager -n 100 _SYSTEMD_UNIT=subyard-herdr-core.serv
 (
   export HERDR_TEST_SWAP=false HERDR_TEST_STICK_PID=yes SUBYARD_RESOURCE_MODE=apply
   export SUBYARD_RESOURCE_ACTION=update SUBYARD_OPERATION_ID=fixture
+  : > "$HERDR_TEST_CALLS"
   "$handler" update
   "$handler" update --force
   [ "$(cat "$HERDR_TEST_PID_PATH")" = 42 ]
+  if grep -q '^server restart' "$HERDR_TEST_CALLS"; then exit 1; fi
 )
+(
+  # The installed release is current but Core still runs the older binary: a retry hands over.
+  export HERDR_TEST_SWAP=false HERDR_TEST_VERSION=0.1.20 SUBYARD_RESOURCE_MODE=apply
+  export SUBYARD_RESOURCE_ACTION=update SUBYARD_OPERATION_ID=fixture
+  for argument in '' --force; do
+    printf '42\n' > "$HERDR_TEST_PID_PATH"
+    : > "$HERDR_TEST_CALLS"
+    "$handler" update ${argument:+"$argument"}
+    grep -Fxq 'server restart' "$HERDR_TEST_CALLS"
+    [ "$(cat "$HERDR_TEST_PID_PATH")" = 43 ]
+  done
+  printf '42\n' > "$HERDR_TEST_PID_PATH"
+  if result=$(HERDR_TEST_STICK_PID=yes "$handler" update 2>&1); then exit 1; fi
+  [[ "$result" == *'new PID after 42'* ]]
+)
+printf '42\n' > "$HERDR_TEST_PID_PATH"
 SUBYARD_RESOURCE_MODE=verify "$handler" update | jq -e '.changed == false' >/dev/null
 HERDR_TEST_VERSION=0.1.20 SUBYARD_RESOURCE_MODE=verify "$handler" update | jq -e '.changed' >/dev/null
 (
