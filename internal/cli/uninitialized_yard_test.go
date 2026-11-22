@@ -167,10 +167,7 @@ func TestReleaseRepairSkipsUninitializedYard(t *testing.T) {
 func TestUninitializedYardDecisionOnlyNarrows(t *testing.T) {
 	scenario := newYardFailureScenario(t, false, false, "default", "named")
 	markYard(t, scenario.fixture, "named", "false")
-	program, err := New(scenario.fixture.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, scenario.fixture.cli.options)
 	operation := program.releaseActivationOperation(scenario.request)
 	loaded, err := operation.resolveReleaseTransitionContext(context.Background(), "named", scenario.request.ConfigHome)
 	if err != nil {
@@ -193,10 +190,7 @@ func TestUninitializedYardDecisionOnlyNarrows(t *testing.T) {
 	if kept, uninitialized, failures := keyTools.splitUninitialized(context.Background(), operation, []configTarget{target}); len(kept) != 1 || len(uninitialized) != 0 || len(failures) != 0 {
 		t.Fatalf("key tools deferred a yard: kept=%d uninitialized=%v failures=%v", len(kept), uninitialized, failures)
 	}
-	fresh, err := New(scenario.fixture.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fresh := mustNew(t, scenario.fixture.cli.options)
 	if left, err := fresh.releaseActivationOperation(scenario.request).releaseYardUninitialized(context.Background(), target); err != nil || left {
 		t.Fatalf("a fresh process kept an initialized yard out: left=%t err=%v", left, err)
 	}
@@ -232,10 +226,7 @@ func TestStartRefusesNeverInitializedYardBeforePower(t *testing.T) {
 			native.Instances[key] = instance
 			runner := &testkit.ScriptedAdapter{}
 			options.AdapterRunner = runner
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := mustNew(t, options)
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -313,10 +304,7 @@ func TestReleaseRepairDefersUninitializedYardBeforeContextResolution(t *testing.
 	path := filepath.Join(scenario.request.ConfigHome, "yards", "named", "config.env")
 	testkit.WriteFile(t, path, append(mustReadConfigFixture(t, path), []byte("AGENT_codex_PROVISION="+filepath.Join(scenario.fixture.cli.options.RepositoryRoot, "missing-provision")+"\n")...), 0o600)
 
-	program, err := New(scenario.fixture.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, scenario.fixture.cli.options)
 	operation := program.releaseActivationOperation(scenario.request)
 	if !operation.activation.repair {
 		t.Fatal("fixture is not an active release repair")
@@ -355,10 +343,7 @@ func TestKeyToolsRecoveryBesideUninitializedYardIsNotStale(t *testing.T) {
 	scenario := newYardFailureScenario(t, false, false, "default", "named")
 	markYard(t, scenario.fixture, "default", "true")
 	markYard(t, scenario.fixture, "named", "false")
-	program, err := New(scenario.fixture.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, scenario.fixture.cli.options)
 	keyTools := program.profileActivationReconciler(scenario.request, "key-tools-runtime").(*profileRuntimeActivationReconciler)
 	releases := releasetransition.ReleasePair{Target: scenario.request.Target}
 	if _, err := keyTools.PrepareActivationRecovery(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil {

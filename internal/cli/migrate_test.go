@@ -35,7 +35,7 @@ func TestMigrationGateDirectsInstalledTargetToMigrate(t *testing.T) {
 }
 
 func TestMigrateRPCBypassesOrdinaryRecoveryGate(t *testing.T) {
-	root, environment, marker := migrateCLIFixture(t, true)
+	cliFixture, root, environment, marker := newMigrateCLIFixture(t, true)
 	installUnfinishedMutationGateFixture(t, root, environment, filepath.Join(root, "runtime"))
 	current := filepath.Join(root, "runtime", "current")
 	if err := os.Remove(current); err != nil {
@@ -47,10 +47,7 @@ func TestMigrateRPCBypassesOrdinaryRecoveryGate(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "runtime", "previous")); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	loaded, err := program.currentMigrationContext()
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +77,10 @@ func TestMigrateRPCBypassesOrdinaryRecoveryGate(t *testing.T) {
 }
 
 func TestMigrateRejectsExplicitYardSelection(t *testing.T) {
-	root, environment, marker := migrateCLIFixture(t, true)
+	cliFixture, root, environment, marker := newMigrateCLIFixture(t, true)
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments: []string{"-Y", "other", "migrate", "--yes"}, Environment: environment, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "without a yard selector") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -96,31 +90,25 @@ func TestMigrateRejectsExplicitYardSelection(t *testing.T) {
 }
 
 func TestMigrateHelpDoesNotRequireYardConfiguration(t *testing.T) {
-	root, environment, _ := migrateCLIFixture(t, false)
+	cliFixture, root, environment, _ := newMigrateCLIFixture(t, false)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), "invalid configuration\n", 0600)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments: []string{"migrate", "--help"}, Environment: environment,
 		Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "--check") {
 		t.Fatalf("migrate help: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
 func TestMigrateCheckReadsInstalledRuntimeWithoutLoadingYardConfiguration(t *testing.T) {
-	root, environment, marker := migrateCLIFixture(t, false)
+	cliFixture, root, environment, marker := newMigrateCLIFixture(t, false)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), "invalid configuration\n", 0600)
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments: []string{"migrate", "--check", "--json"}, Environment: environment,
 		Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("migrate check: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -152,15 +140,13 @@ func TestMigrateAppliesOnlyAfterConfirmationAndSkipsReadyWork(t *testing.T) {
 		{"ready", false, false, 0, 0, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, marker := migrateCLIFixture(t, test.pending)
+			cliFixture, root, environment, marker := newMigrateCLIFixture(t, test.pending)
 			var stdout, stderr bytes.Buffer
 			prompt := &testkit.Prompt{Answers: []bool{test.consent}}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard",
+			var err error
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard",
 				Arguments: []string{"migrate"}, Environment: environment,
 				Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != test.wantCode {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
@@ -178,9 +164,10 @@ func TestMigrateAppliesOnlyAfterConfirmationAndSkipsReadyWork(t *testing.T) {
 	}
 }
 
-func migrateCLIFixture(t *testing.T, pending bool) (string, []string, string) {
+func newMigrateCLIFixture(t *testing.T, pending bool) (*cliFixture, string, []string, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifest, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
@@ -236,5 +223,5 @@ esac
 	if pending {
 		flag = "1"
 	}
-	return root, append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "MIGRATE_MARKER="+marker, "MIGRATE_PENDING="+flag), marker
+	return cliFixture, root, append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "MIGRATE_MARKER="+marker, "MIGRATE_PENDING="+flag), marker
 }

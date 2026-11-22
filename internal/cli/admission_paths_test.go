@@ -47,10 +47,7 @@ func blockedGateAdmissionFixture(t *testing.T, extra ...string) configApplyRepai
 // operationSession is an RPC session of the default yard of fixture.
 func operationSession(t *testing.T, fixture configApplyRepairFixture) *rpcHandler {
 	t.Helper()
-	program, err := New(fixture.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, fixture.cli.options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -108,10 +105,7 @@ func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			options.Arguments, options.Stdout, options.Stderr = test.arguments, &stdout, &stderr
 			options.Prompt = &testkit.Prompt{}
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := mustNew(t, options)
 			program.releaseTransitionChild = test.child
 			code := program.Run(context.Background())
 			want := strings.ReplaceAll(test.stderr, "ROOT", options.RepositoryRoot)
@@ -294,15 +288,12 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 		t.Helper()
 		prompt = &testkit.Prompt{Answers: []bool{false}}
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := mustNew(t, Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: append(append([]string(nil), environment...), extra...), WorkingDir: root,
 			Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
 			Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}, Prompt: prompt,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		code := program.Run(ctx)
@@ -316,15 +307,12 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	// The direct resume entrypoint is exempt like teardown --full: its prepared
 	// command must not reach execution without an admission.
 	var discard bytes.Buffer
-	resumed, err := New(Options{
+	resumed := mustNew(t, Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", pending},
 		Environment: append(append([]string(nil), environment...), "SUBYARD_HOME="+home), WorkingDir: root,
 		Stdin: strings.NewReader(""), Stdout: &discard, Stderr: &discard,
 		Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}, Prompt: &testkit.Prompt{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	resumed.Run(context.Background())
 	if resumed.gateAdmitted == nil || resumed.gateAdmitted.kind != admissionExempt {
 		t.Fatalf("resume admission=%+v, want exempt", resumed.gateAdmitted)
@@ -407,16 +395,6 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 // lets host rename handle the invocation before the gate.
 func TestRunAdmissionSelectorPaths(t *testing.T) {
 	t.Run("logs", func(t *testing.T) {
-		root, environment, _ := resourceCommandFixture(t)
-		shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
-		environment = append(environment,
-			"YARD_RUNTIME_ROOT=relative-admission-probe",
-			"SUBYARD_YARD=admission-missing",
-		)
 		for _, test := range []struct {
 			arguments []string
 			code      int
@@ -431,16 +409,24 @@ func TestRunAdmissionSelectorPaths(t *testing.T) {
 			{[]string{"host", "rename", "next"}, 1, "yard: inspect release transition: mutation gate runtime root"},
 		} {
 			t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
+				cliFixture, _ := newResourceCommandFixture(t)
+				root, environment := cliFixture.Root, cliFixture.Environment
+				shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
+				environment = append(environment,
+					"YARD_RUNTIME_ROOT=relative-admission-probe",
+					"SUBYARD_YARD=admission-missing",
+				)
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{
+				program := cliFixture.New(Options{
 					RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 					Environment: environment, WorkingDir: root,
 					Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
 					Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{},
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				code := program.Run(context.Background())
 				got := stderr.String()
 				if strings.HasSuffix(test.stderr, "\n") && got != test.stderr || !strings.HasPrefix(got, test.stderr) || code != test.code || stdout.Len() != 0 {
@@ -450,7 +436,6 @@ func TestRunAdmissionSelectorPaths(t *testing.T) {
 		}
 	})
 	t.Run("host-rename", func(t *testing.T) {
-		program, _, _, _, environment := pendingSourceRenameFixture(t, false)
 		for _, test := range []struct {
 			arguments      []string
 			code           int
@@ -462,12 +447,10 @@ func TestRunAdmissionSelectorPaths(t *testing.T) {
 				"Usage: yard host add <owner-endpoint> | list | rename <new-host-id> [--source-host-id <old-host-id>] | remove <host-id> | repair <host-id> [--yes]\n", ""},
 		} {
 			t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
+				program, _, _, _, environment := pendingSourceRenameFixture(t, false)
 				var stdout, stderr bytes.Buffer
-				retry, err := New(Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: test.arguments,
+				retry := mustNew(t, Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: test.arguments,
 					Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: &testkit.Prompt{}})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if code := retry.Run(context.Background()); code != test.code || stdout.String() != test.stdout || stderr.String() != test.stderr {
 					t.Fatalf("exit=%d want %d stdout=%q stderr=%q", code, test.code, stdout.String(), stderr.String())
 				}

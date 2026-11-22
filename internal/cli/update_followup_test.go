@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -97,9 +99,9 @@ func (yard *updateFollowupYard) Reconcile(context.Context, releasetransition.Rel
 	return os.WriteFile(filepath.Join(yard.home, "converged-"+yard.name), []byte("ready"), 0o600)
 }
 
-func updateFollowupFixture(t *testing.T) (string, []string, string) {
+func newUpdateFollowupFixture(t *testing.T) (*cliFixture, string, []string, string) {
 	t.Helper()
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	// The protected store never creates the config home root itself (it opens it
 	// with O_NOFOLLOW and treats ENOENT as fatal when writing); an installed yard
 	// always has it. Model that precondition with an exact private mode.
@@ -136,7 +138,7 @@ install -m 0600 "$UPDATE_FOLLOWUP_REPOSITORY/config/release-transition.json" "$d
 printf 'releases/1.2.3-f16d05ec6b29\n'
 `
 	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"), installer, 0o700)
-	return root, append(environment, "UPDATE_FOLLOWUP_BINARY="+binary, "UPDATE_FOLLOWUP_REPOSITORY="+root), runtimeRoot
+	return cliFixture, root, append(environment, "UPDATE_FOLLOWUP_BINARY="+binary, "UPDATE_FOLLOWUP_REPOSITORY="+root), runtimeRoot
 }
 
 func TestUpdateCompletesFreshActivationRepairInOneCommand(t *testing.T) {
@@ -150,7 +152,7 @@ func TestUpdateCompletesFreshActivationRepairInOneCommand(t *testing.T) {
 				checkRemoteUpdateConsent(t, scenario == "remote-automation")
 				return
 			}
-			root, environment, runtimeRoot := updateFollowupFixture(t)
+			cliFixture, root, environment, runtimeRoot := newUpdateFollowupFixture(t)
 			environment = append(environment, "UPDATE_FOLLOWUP_SCENARIO="+scenario)
 			arguments := []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot}
 			prompt := &testkit.Prompt{Answers: []bool{true, scenario != "decline"}}
@@ -158,11 +160,8 @@ func TestUpdateCompletesFreshActivationRepairInOneCommand(t *testing.T) {
 				arguments = append(arguments, "--yes")
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: arguments,
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Arguments: arguments,
 				WorkingDir: root, Stdin: strings.NewReader(""), Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			// Approve only the first plan; the actual prompt boundary must reject
 			// the next plan on EOF or a non-terminal without explicit consent.
 			if scenario == "EOF" || scenario == "non-TTY" {
@@ -222,11 +221,8 @@ func TestUpdateCompletesFreshActivationRepairInOneCommand(t *testing.T) {
 			if scenario == "decline" {
 				// A process stopping between the phases has exactly this durable
 				// state: completed source history and an unrepaired second yard.
-				resume, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
+				resume := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
 					Arguments: []string{"update", "--runtime-root", runtimeRoot, "--yes"}, Incus: &testkit.Incus{}, Stdout: &stdout, Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if code := resume.Run(context.Background()); code != 0 {
 					t.Fatalf("plain update did not recover between phases: code=%d %s %s", code, stdout.String(), stderr.String())
 				}
@@ -236,11 +232,8 @@ func TestUpdateCompletesFreshActivationRepairInOneCommand(t *testing.T) {
 }
 
 func TestUpdateExactRPCPlanDoesNotAuthorizeFollowup(t *testing.T) {
-	root, environment, runtimeRoot := updateFollowupFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, runtimeRoot := newUpdateFollowupFixture(t)
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -266,33 +259,37 @@ func TestUpdateExactRPCPlanDoesNotAuthorizeFollowup(t *testing.T) {
 
 func checkRemoteUpdateConsent(t *testing.T, yes bool) {
 	t.Helper()
-	root, environment, state := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""), withCommands("ssh"), withEnv("SUBYARD_OPERATION_ID=update-consent-fixture"))
+	root, environment, state := cliFixture.Root, cliFixture.Environment, filepath.Join(cliFixture.ConfigHome, "projects")
 	remote := filepath.Join(filepath.Dir(state), "yards", "remote")
 	if err := os.MkdirAll(remote, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(remote, "config.env"),
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
-	bin, capture := filepath.Join(root, "fake-bin"), filepath.Join(root, "forwarded")
-	if err := os.MkdirAll(bin, 0o700); err != nil {
-		t.Fatal(err)
+	capture := filepath.Join(root, "forwarded")
+	knownHosts := cliFixture.Write("known_hosts", "owner.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture\n")
+	cliFixture.Exec().On(testkit.Match{Tool: "ssh", Args: []string{"-G", "owner.example"}},
+		testkit.Reply{Stdout: "hostname owner.example\nport 22\nuserknownhostsfile " + knownHosts + "\n"})
+	environment = append(environment, "SUBYARD_TEST_SSH_LOG="+capture)
+	remoteLine := "SUBYARD_OPERATION_ID='update-consent-fixture' 'yard' '-Y' 'inner' 'update' '--version' '1.2.3'"
+	if yes {
+		remoteLine += " '--yes'"
 	}
-	writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"\nprintf '%s\\n' \"$@\" >\"$SUBYARD_TEST_SSH_LOG\"\n", 0o700)
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	environment = append(environment, "PATH="+os.Getenv("PATH"), "SUBYARD_TEST_SSH_LOG="+capture)
+	sshArgs := []string{"-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-t", "owner.example", "--", "bash", "-lc", shellquote.Word(remoteLine)}
+	cliFixture.Exec().On(testkit.Match{Tool: "ssh", Args: sshArgs},
+		testkit.Reply{Script: "printf '%s\\n' \"$@\" >\"$SUBYARD_TEST_SSH_LOG\""})
 	arguments := []string{"-Y", "remote", "update", "--version", "1.2.3"}
 	if yes {
 		arguments = append(arguments, "--yes")
 	}
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: arguments, WorkingDir: root, Prompt: prompt, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Arguments: arguments, WorkingDir: root, Prompt: prompt, Stderr: &stderr})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote code=%d stderr=%s", code, stderr.String())
 	}
+	cliFixture.Exec().AssertCalls(testkit.Call{Tool: "ssh", Args: []string{"-G", "owner.example"}}, testkit.Call{Tool: "ssh", Args: sshArgs})
 	payload, err := os.ReadFile(capture)
 	if err != nil || strings.Contains(string(payload), "--yes") != yes || len(prompt.Requests) != 0 {
 		t.Fatalf("controller altered owner consent: %s prompts=%v err=%v", payload, prompt.Requests, err)
@@ -346,12 +343,9 @@ func (prompt *firstUpdatePrompt) Confirm(ctx context.Context, request domain.Con
 func TestUpdateDiskTmpRetryPrecedesFreshFinalCheck(t *testing.T) {
 	for _, runtimeDrift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("boot-restored-runtime-drift=%t", runtimeDrift), func(t *testing.T) {
-			root, environment, runtimeRoot := updateFollowupFixture(t)
+			cliFixture, root, environment, runtimeRoot := newUpdateFollowupFixture(t)
 			var output bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -381,4 +375,27 @@ func TestUpdateDiskTmpRetryPrecedesFreshFinalCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newUpdateReleaseFixture(t *testing.T, options ...fixtureOption) (*cliFixture, string, []string, string) {
+	t.Helper()
+	cliFixture := newFixture(t, append([]fixtureOption{withWorkingDir("")}, options...)...)
+	root, environment := cliFixture.Root, cliFixture.Environment
+	assets := filepath.Join(root, "release")
+	cache := filepath.Join(root, "cache")
+	runtimeRoot := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(assets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := "subyard-1.2.3-linux-" + runtime.GOARCH + ".tar.gz"
+	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
+		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
+	}
+	writeCLIUpdateInstaller(t, root)
+	prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
+	return cliFixture, root, append(environment,
+		"YARD_RELEASE_BASE_URL=file://"+assets,
+		"YARD_RELEASE_CACHE="+cache,
+		"MIGRATION_FINALIZE_CAPTURE="+filepath.Join(root, "migration-finalize.log"),
+	), runtimeRoot
 }

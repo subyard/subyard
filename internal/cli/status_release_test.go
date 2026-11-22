@@ -21,7 +21,7 @@ func TestStatusReportsInstalledReleaseReadiness(t *testing.T) {
 	for _, view := range []string{"summary", "detail"} {
 		for _, state := range []string{"ready", "drift", "unavailable"} {
 			t.Run(view+"/"+state, func(t *testing.T) {
-				root, environment, marker := migrateCLIFixture(t, state == "drift")
+				cliFixture, root, environment, marker := newMigrateCLIFixture(t, state == "drift")
 				if state == "unavailable" {
 					path := filepath.Join(environmentValue(environment, "YARD_RUNTIME_ROOT"), "current", "bin", "yard-engine")
 					testkit.WriteFile(t, path, []byte("private inspection failure\n"), 0o700)
@@ -33,14 +33,11 @@ func TestStatusReportsInstalledReleaseReadiness(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				prompt := &testkit.Prompt{}
 				incus := lifecycleIncus()
-				program, err := New(Options{
+				program := cliFixture.New(Options{
 					RepositoryRoot: root, Program: "yard", Arguments: arguments,
 					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 					Incus: incus, Executor: incus, StatusFacts: statusFactsStub{}, Prompt: prompt,
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 				}
@@ -70,7 +67,8 @@ func TestStatusReportsInstalledReleaseReadiness(t *testing.T) {
 }
 
 func TestStatusReleaseReadinessPreservesUnfinishedTransition(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
 	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -79,11 +77,8 @@ func TestStatusReleaseReadinessPreservesUnfinishedTransition(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"status"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"status"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "release  NOT OK") {
 		t.Fatalf("recovery status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -94,11 +89,8 @@ func TestStatusReleaseReadinessPreservesUnfinishedTransition(t *testing.T) {
 }
 
 func TestReleaseReadinessRPCAndCancellation(t *testing.T) {
-	root, environment, _ := migrateCLIFixture(t, false)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newMigrateCLIFixture(t, false)
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	handler := &rpcHandler{cli: program}
 	result, err := handler.Handle(context.Background(), rpc.Call{Method: "release.readiness", Params: json.RawMessage(`{}`)}, nil)
 	if err != nil || result.(*domain.ReleaseReadiness).Status != string(releasetransition.StatusReady) {
@@ -115,7 +107,7 @@ func TestStatusReportsRemoteReleaseReadinessSeparatelyFromCachedInventory(t *tes
 	for _, view := range []string{"summary", "detail"} {
 		for _, state := range []string{"recovering", "old-owner"} {
 			t.Run(view+"/"+state, func(t *testing.T) {
-				root, environment, _ := migrateCLIFixture(t, false)
+				cliFixture, root, environment, _ := newMigrateCLIFixture(t, false)
 				environment = append(environment, "SUBYARD_HOST_ID=local-owner")
 				inventory := inventoryResult("remote-owner", "default", "Remote").inventory
 				_, trust := hostAddSSHFixture(t, inventory)
@@ -136,11 +128,8 @@ func TestStatusReportsRemoteReleaseReadinessSeparatelyFromCachedInventory(t *tes
 					arguments = []string{"-Y", "remote-owner/default", "status"}
 				}
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
 					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus()})
-				if err != nil {
-					t.Fatal(err)
-				}
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("remote status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 				}

@@ -89,21 +89,18 @@ func TestPreparedProjectExecutionOwnsReservationAndCommitLifecycle(t *testing.T)
 		{name: "success commits", commits: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, stateDirectory := preparationParityFixture(t)
+			cliFixture, root, environment, stateDirectory := newPreparationParityFixture(t)
 			projectPath := filepath.Join(root, "Project")
 			if err := os.MkdirAll(projectPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_OPERATION_ID=project-lifecycle"),
 				WorkingDir: root, Incus: lifecycleIncus(), Stdout: io.Discard, Stderr: io.Discard,
 				ProjectData: projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 					return ports.InstanceExecResult{}, nil
 				}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -156,11 +153,8 @@ func TestPreparedProjectExecutionOwnsReservationAndCommitLifecycle(t *testing.T)
 }
 
 func TestCoreCommandResolverIsCompleteAndRejectsUnknownInternalHandler(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newPreparationParityFixture(t)
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 	for _, definition := range program.manifest.Commands() {
 		behavior, err := resolveCoreCommand(definition)
 		if err != nil {

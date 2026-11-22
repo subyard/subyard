@@ -116,7 +116,8 @@ func serviceRecreationFixture(t *testing.T) (*CLI, *testkit.Incus, *serviceSelec
 
 func serviceRecreationFixtureFor(t *testing.T, activation string) (*CLI, *testkit.Incus, *serviceSelection, *activationStageReconciler, *serviceRecreationCalls) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	if err := os.MkdirAll(filepath.Join(home, "yards/fixture-runtime"), 0o700); err != nil {
 		t.Fatal(err)
@@ -124,10 +125,7 @@ func serviceRecreationFixtureFor(t *testing.T, activation string) (*CLI, *testki
 	testkit.WriteFile(t, filepath.Join(home, "yards/fixture-runtime/config.env"), []byte("SSH_PORT=3333\nYARD_KIND=container\n"), 0o600)
 	instance := ports.InstanceInfo{Name: "yard-fixture-runtime", Project: "subyard-fixture-runtime", Status: "Running", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.name": "fixture-runtime", "user.subyard.initialized": "true", "user.subyard.desired_power": "running", "user.subyard.bridge": "incusbr0"}}
 	incus := &recreationIncus{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{instance.Project + "/" + instance.Name: instance}}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
 	selection := infrastructureYardFixture(t, program, incus.Incus, "fixture-service", "fixture-runtime")
 	path := filepath.Join(root, "config/profiles/synthetic-service/profile.json")
 	body, err := os.ReadFile(path)
@@ -137,9 +135,7 @@ func serviceRecreationFixtureFor(t *testing.T, activation string) (*CLI, *testki
 	testkit.WriteFile(t, path, []byte(strings.Replace(string(body), `"id":"fixture-service"`, `"id":"fixture-service","registration_activation":"`+activation+`"`, 1)), 0o644)
 	platform := newInitPlatformFixture()
 	platform.converged[ports.ReconcileStageTestVMs] = false
-	if program, err = New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
-		t.Fatal(err)
-	}
+	program = cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
 	seedOwnerHostID(t, home)
 	definition, declared := program.activationService(activation)
 	if !declared {
@@ -513,14 +509,12 @@ func TestServiceStageApplicabilityLeavesAbsentAndUnfinishedRuntimes(t *testing.T
 }
 
 func TestLegacyTestYardInitNamesRecreation(t *testing.T) {
-	root, env, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, env := cliFixture.Root, cliFixture.Environment
 	home := environmentValue(env, "SUBYARD_CONFIG_HOME")
 	path := filepath.Join(home, "yards", legacyTestYardName, "config.env")
 	writeConfigCommandFile(t, path, "SSH_PORT=2240\n")
-	program, err := New(Options{RepositoryRoot: root, Environment: env})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: env})
 	loaded, err := program.loadContext(legacyTestYardName)
 	if err != nil {
 		t.Fatal(err)

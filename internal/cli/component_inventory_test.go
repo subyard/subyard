@@ -20,7 +20,7 @@ import (
 func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testing.T) {
 	for _, selection := range []string{"absent", "empty", "explicit", "removed"} {
 		t.Run(selection, func(t *testing.T) {
-			handler, runner, incus := ownerQueryFixture(t)
+			cliFixture, handler, runner, incus := newOwnerQueryFixture(t)
 			root := handler.cli.options.RepositoryRoot
 			writeCLIFile(t, filepath.Join(root, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile"}]}`, 0644)
 			manifest := filepath.Join(root, "config/commands.registry")
@@ -44,10 +44,7 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 				if structured {
 					arguments = append(arguments, "--json")
 				}
-				program, err := New(Options{RepositoryRoot: root, Environment: handler.cli.options.Environment, Arguments: arguments, Incus: incus, AdapterRunner: runner, Stdout: &stdout, Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(Options{RepositoryRoot: root, Environment: handler.cli.options.Environment, Arguments: arguments, Incus: incus, AdapterRunner: runner, Stdout: &stdout, Stderr: &stderr})
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("CLI list: %d %s", code, stderr.String())
 				}
@@ -96,10 +93,7 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 					t.Fatal("winning/overridden provenance missing")
 				}
 				if selection == "empty" {
-					fresh, err := New(Options{RepositoryRoot: root, Environment: handler.cli.options.Environment, Incus: incus, AdapterRunner: runner})
-					if err != nil {
-						t.Fatal(err)
-					}
+					fresh := cliFixture.New(Options{RepositoryRoot: root, Environment: handler.cli.options.Environment, Incus: incus, AdapterRunner: runner})
 					loaded, err := fresh.loadContext("default")
 					if err != nil {
 						t.Fatal(err)
@@ -123,7 +117,7 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 func TestIntegrationStatusCLIUsesDependencyRoleAndCommandSourceSnapshot(t *testing.T) {
 	for _, scenario := range []string{"local", "command", "role"} {
 		t.Run(scenario, func(t *testing.T) {
-			fixture, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
+			cliFixture, fixture, _, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
 			root := fixture.options.RepositoryRoot
 			testkit.WriteFile(t, filepath.Join(root, "config/agents.env"), []byte("AGENT_sample_COMMAND=sample\nAGENT_sample_DEPENDS=base\nAGENT_base_COMMAND=base\nAGENT_other_COMMAND=other\n"), 0o600)
 			gitPath := filepath.Join(root, "state", config.GitSettingsRelativePath, "config.env")
@@ -157,10 +151,7 @@ func TestIntegrationStatusCLIUsesDependencyRoleAndCommandSourceSnapshot(t *testi
 					options.Arguments = append(options.Arguments, "--json")
 				}
 				options.Stdout, options.Stderr = &stdout, &stderr
-				program, err := New(options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(options)
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("CLI status code=%d %s", code, stderr.String())
 				}
@@ -245,7 +236,8 @@ func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T
 }
 
 func TestProfileCompletionUsesNativePackagesBeforeOwnerObservation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	for _, name := range []string{"declared", "descriptorless", "resource-only"} {
 		if err := os.MkdirAll(filepath.Join(root, "config/profiles", name), 0o700); err != nil {
 			t.Fatal(err)
@@ -254,10 +246,7 @@ func TestProfileCompletionUsesNativePackagesBeforeOwnerObservation(t *testing.T)
 	testkit.WriteFile(t, filepath.Join(root, "config/profiles/declared/profile.json"), []byte(`{"schema_version":1}`), 0o644)
 	testkit.WriteFile(t, filepath.Join(root, "config/profiles/descriptorless/profile.conf"), nil, 0o644)
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"-Y", "unregistered-owner/unregistered-yard", "list", "--complete-profiles"}, Stdout: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"-Y", "unregistered-owner/unregistered-yard", "list", "--complete-profiles"}, Stdout: &output})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("completion code=%d", code)
 	}

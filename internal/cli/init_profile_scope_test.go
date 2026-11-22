@@ -23,7 +23,8 @@ import (
 func TestInitProfileRuntimePreparationObservesOnceAndRetainsFreshGuard(t *testing.T) {
 	for _, scenario := range []string{"current", "stale", "absent", "deferred", "pending", "reset", "failed", "reordered"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, _, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root := cliFixture.Root
 			writeRuntimeProfileFixture(t, root)
 			state, calls := filepath.Join(root, "runtime-state"), filepath.Join(root, "runtime-calls")
 			current := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, strings.Repeat("a", 64), strings.Repeat("a", 64))

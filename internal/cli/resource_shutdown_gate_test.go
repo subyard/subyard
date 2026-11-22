@@ -217,10 +217,7 @@ esac
 	var output bytes.Buffer
 	options := program.options
 	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "private", "relay", "down", "--yes"}, &output, &output
-	program, err = New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = mustNew(t, options)
 	loaded, err := program.loadContext("private")
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +347,8 @@ func TestResourceShutdownRepairRejectsUnsafeAdmission(t *testing.T) {
 func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t *testing.T) {
 	for _, selected := range []bool{false, true} {
 		t.Run(map[bool]string{false: "deselected", true: "selected"}[selected], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			writeRuntimeProfileFixture(t, root)
 			home := filepath.Join(root, "state")
 			seedCurrentReleaseLedger(t, root, home)
@@ -363,10 +361,7 @@ func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t 
 			handler := filepath.Join(root, "config", "profiles", "sample", "runtime.sh")
 			writeCLIFile(t, handler, "#!/bin/sh\nprintf '%s\n' called >> \"$SUBYARD_CONFIG_HOME/observed\"\nexit 9\n", 0700)
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}}}
-			program, err := New(Options{RepositoryRoot: root, Environment: append(environment, "PATH="+os.Getenv("PATH")), Incus: fake, Executor: fake})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: append(environment, "PATH="+os.Getenv("PATH")), Incus: fake, Executor: fake})
 			reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
 			observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 			if err == nil || observation.Converged || !strings.Contains(err.Error(), "profile sample-runtime observation failed (native-exit-9)") {

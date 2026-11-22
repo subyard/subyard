@@ -417,9 +417,15 @@ func (fixture *cliFixture) New(options Options) *CLI {
 	if options.WorkingDir == "" {
 		options.WorkingDir = fixture.WorkingDir
 	}
+	return mustNew(fixture.t, options)
+}
+
+// mustNew builds the CLI without supplying fixture defaults.
+func mustNew(t *testing.T, options Options) *CLI {
+	t.Helper()
 	program, err := New(options)
 	if err != nil {
-		fixture.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return program
 }

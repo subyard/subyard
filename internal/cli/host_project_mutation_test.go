@@ -27,7 +27,8 @@ func (prompt hostMutationPrompt) Confirm(ctx context.Context, request domain.Con
 }
 
 func TestHostRemoveRefreshesInventoryAfterConfirmation(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, configHome, environment := cliFixture.Root, cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
 	empty := inventoryResult("owner-a", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, empty)
@@ -43,11 +44,8 @@ func TestHostRemoveRefreshesInventoryAfterConfirmation(t *testing.T) {
 		return true, nil
 	})
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"},
 		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || prompts != 1 || !strings.Contains(stderr.String(), "project reference") {
 		t.Fatalf("removal used pre-confirmation inventory: code=%d prompts=%d stderr=%s", code, prompts, stderr.String())
 	}
@@ -185,11 +183,8 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 				}
 				protected[index].mode = info.Mode().Perm()
 			}
-			fakeBin := testkit.TempDir(t)
-			sshLog := filepath.Join(data, "ssh.called")
-			testkit.WriteFile(t, filepath.Join(fakeBin, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_INVOCATION_LOG\"\nexit 99\n"), 0o700)
-			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			cli.env = map[string]string{"PATH": fakeBin, "SSH_INVOCATION_LOG": sshLog}
+			cliFixture := newFixture(t, withCommands("ssh"))
+			cli.env = map[string]string{"PATH": cliFixture.Bin}
 			called := false
 			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(cli), Project: project,
 				Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{
@@ -210,7 +205,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 			if err := prepared.Close(); err != nil {
 				t.Fatal(err)
 			}
-			for _, path := range []string{sshLog, routing, yard.Paths.StateDir} {
+			for _, path := range []string{routing, yard.Paths.StateDir} {
 				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("stale command created %s: %v", path, err)
 				}
@@ -233,7 +228,8 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 }
 
 func TestHostRemoveIdentityChangeDoesNotAdoptBeforeConsent(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, configHome, environment := cliFixture.Root, cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "local-owner\n", 0o600)
 	inventory := inventoryResult("owner-a", "default", "").inventory
 	_, trust := hostAddSSHFixture(t, inventory)
@@ -254,11 +250,8 @@ func TestHostRemoveIdentityChangeDoesNotAdoptBeforeConsent(t *testing.T) {
 	writeHostRPCFixture(t, os.Getenv("SSH_RPC_RESPONSE"), inventoryResult("owner-b", "default", "").inventory)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "remove", "owner-a"},
 		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "identity changed") {
 		t.Fatalf("identity drift reached consent: code=%d requests=%#v stderr=%s", code, prompt.Requests, stderr.String())
 	}

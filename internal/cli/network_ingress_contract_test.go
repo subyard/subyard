@@ -15,7 +15,8 @@ import (
 )
 
 func TestNetworkServiceResolvesPublicIngressForSavedNeighborBinding(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	for name, contents := range map[string]string{
 		"work": "YARD_KIND=vm\nENVIRONMENT_PROFILES=\n",
 		"vpn":  "YARD_KIND=vm\nENVIRONMENT_PROFILES=sample\n",
@@ -27,11 +28,8 @@ func TestNetworkServiceResolvesPublicIngressForSavedNeighborBinding(t *testing.T
 		writeCLIFile(t, path, contents, 0o600)
 	}
 	writeNetworkIngressFixture(t, root)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
 		NetworkPolicy: &yardnetwork.Service{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	work, err := program.loadContext("work")
 	if err != nil {
 		t.Fatal(err)
@@ -102,10 +100,7 @@ func TestRegisteredMigrationRetainsCurrentNetworkInventoryWithoutPowerScope(t *t
 	options := program.options
 	options.InitPlatform, options.Incus = nil, native
 	options.NetworkPolicy = &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}
-	program, err = New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = mustNew(t, options)
 	native.Instances = map[string]ports.InstanceInfo{execution.loaded.Context.IncusProject + "/" + execution.loaded.Context.YardInstanceName: native.Reconcile.Instance}
 	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", execution.loaded.Context.Paths.ConfigHome)
 	if err != nil {

@@ -24,7 +24,7 @@ func TestUpdateAuthorizesRootBeforePostConsentInspection(t *testing.T) {
 		{name: "broker may be unprivileged", resource: "test-vm-broker", order: "inspect\n"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t, withCommands("sudo"))
 			installer := filepath.Join(root, "scripts", "install-runtime-release.sh")
 			payload, err := os.ReadFile(installer)
 			if err != nil {
@@ -37,13 +37,7 @@ func TestUpdateAuthorizesRootBeforePostConsentInspection(t *testing.T) {
 			}
 			testkit.WriteFile(t, installer, []byte(strings.Replace(string(payload), before, after, 1)), 0o700)
 			log := filepath.Join(root, "order.log")
-			bin := filepath.Join(root, "bin")
-			if err := os.MkdirAll(bin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$UPDATE_TRANSITION_CAPTURE\"\nexit \"$UPDATE_SUDO_RC\"\n"), 0o700)
-			path := bin + ":" + os.Getenv("PATH")
-			t.Setenv("PATH", path)
+			path := cliFixture.Env("PATH")
 			prompt := &callbackPrompt{callback: func() {
 				initial, err := os.ReadFile(log)
 				if err != nil || strings.Contains(string(initial), "sudo") {
@@ -55,19 +49,28 @@ func TestUpdateAuthorizesRootBeforePostConsentInspection(t *testing.T) {
 			if scenario.refuse {
 				sudoRC, wantCode = "1", 1
 			}
+			cliFixture.Exec().On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}},
+				testkit.Reply{Script: "printf 'sudo %s\\n' \"$*\" >> \"$UPDATE_TRANSITION_CAPTURE\"\nexit \"$UPDATE_SUDO_RC\""})
+			cliFixture.Exec().On(testkit.Match{Tool: "sudo", Args: []string{"-v"}},
+				testkit.Reply{Script: "printf 'sudo %s\\n' \"$*\" >> \"$UPDATE_TRANSITION_CAPTURE\"\nexit \"$UPDATE_SUDO_RC\""})
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Program: "yard",
+			program := cliFixture.New(Options{RepositoryRoot: root, WorkingDir: root, Program: "yard",
 				Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 				Environment: append(environment, "PATH="+path, "UPDATE_TRANSITION_CAPTURE="+log, "UPDATE_SUDO_RC="+sudoRC),
 				Prompt:      prompt, Config: &recordingConfigApplier{}, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			program.effectiveUID = func() int { return 1000 }
 			program.operatorTerminal = func() bool { return true }
 			if code := program.Run(context.Background()); code != wantCode || len(prompt.requests) != 1 {
 				t.Fatalf("code=%d confirmations=%d stderr=%q", code, len(prompt.requests), stderr.String())
 			}
+			var calls []testkit.Call
+			if scenario.resource == "host-power" {
+				calls = append(calls, testkit.Call{Tool: "sudo", Args: []string{"-n", "true"}})
+				if scenario.refuse {
+					calls = append(calls, testkit.Call{Tool: "sudo", Args: []string{"-v"}})
+				}
+			}
+			cliFixture.Exec().AssertCalls(calls...)
 			order, err := os.ReadFile(log)
 			if err != nil || !strings.HasPrefix(string(order), scenario.order) {
 				t.Fatalf("unexpected post-consent order=%q err=%v", order, err)

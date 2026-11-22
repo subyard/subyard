@@ -86,26 +86,25 @@ func TestRefusedRecreationStaysRefusedOnSameReleaseGate(t *testing.T) {
 // legacyTestYardFixture registers a pre-v0.11 test yard beside a default yard.
 func legacyTestYardFixture(t *testing.T) (*CLI, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeConfigCommandFile(t, filepath.Join(home, "yards", legacyTestYardName, "config.env"), "SSH_PORT=2240\n")
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: &testkit.Incus{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: &testkit.Incus{}})
 	return program, home
 }
 
 func TestLegacyTestYardIsLeftToItsRecreation(t *testing.T) {
-	program, home := legacyTestYardFixture(t)
-	request := releasetransition.ProcessRequest{ConfigHome: home}
 	t.Run("readiness-warning", func(t *testing.T) {
+		program, home := legacyTestYardFixture(t)
+		request := releasetransition.ProcessRequest{ConfigHome: home}
 		applicability, err := program.brokerActivationWithFiles(request, nil).inspectApplicability(context.Background())
 		if err != nil || !slices.Contains(applicability.warnings, legacyTestYardWarning) {
 			t.Fatalf("legacy warning: %+v %v", applicability, err)
 		}
 	})
 	t.Run("config-targets", func(t *testing.T) {
+		program, _ := legacyTestYardFixture(t)
 		legacy, err := program.loadContext(legacyTestYardName)
 		if err != nil {
 			t.Fatal(err)
@@ -122,6 +121,8 @@ func TestLegacyTestYardIsLeftToItsRecreation(t *testing.T) {
 		}
 	})
 	t.Run("registered-yard-migration", func(t *testing.T) {
+		program, home := legacyTestYardFixture(t)
+		request := releasetransition.ProcessRequest{ConfigHome: home}
 		owner, ok := program.registeredYardMigration(request, false, legacyTestYardName).(*migration.RegisteredYardMigration)
 		if !ok {
 			t.Fatal("registered yard migration owner changed type")
@@ -216,11 +217,8 @@ func TestReleaseTransitionIngressBindsServiceRecreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: fixture.options.RepositoryRoot, Environment: fixture.options.Environment,
+	program := mustNew(t, Options{RepositoryRoot: fixture.options.RepositoryRoot, Environment: fixture.options.Environment,
 		Incus: fixture.options.Incus, Stdin: bytes.NewReader(payload), Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	executor := releaseTransitionExecutor
 	t.Cleanup(func() { releaseTransitionExecutor = executor })
 	var broker *activationStageReconciler

@@ -234,13 +234,12 @@ func credentialCLIFixture(
 	initialized bool,
 ) (*CLI, config.Loaded, command.Definition, string) {
 	t.Helper()
-	root := repositoryRoot(t)
-	temp := t.TempDir()
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
+	temp := testkit.TempDir(t)
 	keysRoot := filepath.Join(temp, "keys")
 	toolsRoot := filepath.Join(temp, "tools")
-	for _, name := range []string{"sops", "age-keygen"} {
-		writeConfigCommandFile(t, filepath.Join(toolsRoot, "bin", name), "#!/bin/sh\nexit 0\n", 0o700)
-	}
+	testkit.NewExecFake(t, filepath.Join(toolsRoot, "bin"), "sops", "age-keygen")
 	environment := []string{
 		"HOME=" + filepath.Join(temp, "home"),
 		"SUBYARD_HOME=" + filepath.Join(temp, "subyard-home"),
@@ -255,10 +254,7 @@ func credentialCLIFixture(
 	if prompt != nil {
 		options.Prompt = prompt
 	}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(options)
 	definition, ok := program.manifest.Lookup("keys")
 	if !ok {
 		t.Fatal("keys command is missing from manifest")

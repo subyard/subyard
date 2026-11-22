@@ -64,10 +64,7 @@ func TestLegacySSHSourceCleanupUsesPreparedConsentAndRejectsNewGitAuthoring(t *t
 	checkoutBefore := snapshotConfigCheckoutRaw(t, checkout)
 	remoteBefore := strings.TrimSpace(configSourceGitOutput(t, f.remote, "rev-parse", "HEAD"))
 	prompt := &testkit.Prompt{Answers: []bool{false}}
-	program, err := New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: []string{"config", "sync", "push"}, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := f.fixture.New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: []string{"config", "sync", "push"}, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
 	if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 1 {
 		t.Fatalf("source cleanup consent: %d %s", code, f.stderr.String())
 	}
@@ -119,10 +116,7 @@ func TestGitScalarEditPreservesLegacySSHSource(t *testing.T) {
 	f.stderr.Reset()
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	args := []string{"config", "set", "GIT_USER_NAME", "Janet", "--scope", "host", "--git"}
-	program, err := New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: args, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := f.fixture.New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: args, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
 	if code := program.Run(context.Background()); code != 0 || len(prompt.Requests) != 1 {
 		t.Fatalf("Git scalar edit: %d %s", code, f.stderr.String())
 	}

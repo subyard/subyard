@@ -20,7 +20,8 @@ import (
 )
 
 func TestRPCNativeLifecycleCannotReadSessionInput(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	// Incus init reads non-terminal stdin to EOF before creating an instance.
 	// Exercise the real native process runner with that same behavior.
 	testkit.WriteFile(t, filepath.Join(root, "scripts/02-create-project.sh"), []byte("#!/bin/sh\nexec /bin/cat\n"), 0o755)
@@ -34,10 +35,7 @@ func TestRPCNativeLifecycleCannotReadSessionInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdin: input, Stderr: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Stdin: input, Stderr: &output})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +61,8 @@ func TestRPCNativeLifecycleCannotReadSessionInput(t *testing.T) {
 
 func verandaBootstrapFixture(t *testing.T) (*rpcHandler, *initPlatformFixture, string, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	testkit.WriteFile(t, filepath.Join(root, "config/ports.env"), []byte("SSH_PORT=2222\n"), 0o600)
 	preset := filepath.Join(root, "config/profiles/sample-preset/yard.env")
@@ -72,10 +71,7 @@ func verandaBootstrapFixture(t *testing.T) (*rpcHandler, *initPlatformFixture, s
 	}
 	testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\nENVIRONMENT_PROFILES=\n"), 0o644)
 	platform := newInitPlatformFixture()
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +183,7 @@ func TestVerandaBootstrapRejectsCrossYardSelectionOutsideExactProfileInit(t *tes
 }
 
 func TestVerandaProfileNamedPresetIsProtectedMetadata(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	for _, name := range []string{"resource-only", "legacy"} {
 		preset := filepath.Join(handler.cli.options.RepositoryRoot, "config/profiles", name, "yard.env")
 		for _, mode := range []string{"regular", "unsafe", "symlink", "missing"} {

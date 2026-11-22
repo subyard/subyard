@@ -25,7 +25,14 @@ import (
 
 func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]string) (string, string, string, []string) {
 	t.Helper()
-	_, home, configHome, environment := configCommandFixture(t)
+	_, value0, value1, value2, value3 := newActivationSelectionRepairFixture(t, extraAssets...)
+	return value0, value1, value2, value3
+}
+
+func newActivationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]string) (*cliFixture, string, string, string, []string) {
+	t.Helper()
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	home, configHome, environment := cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "1.2.2-source"), 0o700); err != nil {
 		t.Fatal(err)
@@ -118,7 +125,7 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 	}
 	sourceFixtureManifest(t, root)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
-	return root, configHome, filepath.Join(configHome, "config.env"), environment
+	return cliFixture, root, configHome, filepath.Join(configHome, "config.env"), environment
 }
 
 func activationProfileRepairAssets() map[string]string {
@@ -162,11 +169,8 @@ func activationRepairHistory(t *testing.T, root, home string) map[string]string 
 }
 
 func TestActivationProfileSelectionRepairEmptySelectionDoesNotExpand(t *testing.T) {
-	root, _, _, environment := activationSelectionRepairFixture(t, activationProfileRepairAssets())
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, _, _, environment := newActivationSelectionRepairFixture(t, activationProfileRepairAssets())
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	before, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -185,11 +189,8 @@ func TestActivationProfileSelectionRepairEmptySelectionDoesNotExpand(t *testing.
 }
 
 func TestActivationProfileSelectionRepairRejectsNamedDescriptorOnlyExpansion(t *testing.T) {
-	root, _, _, environment := activationSelectionRepairFixture(t, activationProfileRepairAssets())
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, _, _, environment := newActivationSelectionRepairFixture(t, activationProfileRepairAssets())
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	before, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +262,7 @@ type activationSelectionRepairTest struct {
 
 func testActivationSelectionRepairConsent(t *testing.T, selection activationSelectionRepairTest, arguments []string, yard bool) {
 	t.Helper()
-	root, home, path, environment := activationSelectionRepairFixture(t, selection.assets)
+	_, root, home, path, environment := newActivationSelectionRepairFixture(t, selection.assets)
 	before := []byte("# preserve unrelated records\n" + selection.key + "='" + selection.selected + "'\nSSH_PORT=2398\n")
 	testkit.WriteFile(t, path, before, 0o640)
 	history := activationRepairHistory(t, root, home)
@@ -320,7 +321,7 @@ func testActivationSelectionRepairRejections(t *testing.T, selection activationS
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
-			root, home, path, environment := activationSelectionRepairFixture(t, selection.assets)
+			_, root, home, path, environment := newActivationSelectionRepairFixture(t, selection.assets)
 			before := []byte(selection.source)
 			testkit.WriteFile(t, path, before, selection.mode)
 			history := activationRepairHistory(t, root, home)
@@ -364,10 +365,7 @@ func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *t
 		})
 		before := []byte("CODING_TOOL_INTEGRATIONS='wrapper'\n")
 		testkit.WriteFile(t, path, before, 0o640)
-		program, err := New(Options{RepositoryRoot: root, Environment: environment})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := mustNew(t, Options{RepositoryRoot: root, Environment: environment})
 		loaded, err := program.loadSelectionRepair("default")
 		if err != nil || !slices.Equal(loaded.Integrations.Requested, []string{"wrapper"}) || !slices.Contains(loaded.Integrations.Effective, "base") {
 			t.Fatalf("dependency-only fixture: %#v %v", loaded.Integrations, err)
@@ -397,7 +395,7 @@ func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *t
 		{"config", "set", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "yard", "--yes"},
 	} {
 		t.Run(arguments[0], func(t *testing.T) {
-			root, configHome, path, environment := activationSelectionRepairFixture(t)
+			_, root, configHome, path, environment := newActivationSelectionRepairFixture(t)
 			testkit.WriteFile(t, path, []byte("CODING_TOOL_INTEGRATIONS='codex claude'\n"), 0o600)
 			journalPath := filepath.Join(configHome, "release-transition/v2/journal.json")
 			journal := mustReadConfigFixture(t, journalPath)
@@ -630,10 +628,7 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 	f.cli.options.RepositoryRoot, f.cli.options.Environment = root, env
 	platform := newInitPlatformFixture()
 	f.cli.options.InitPlatform = platform
-	program, err := New(f.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, f.cli.options)
 	return program, f.readyMarker, home
 }
 
