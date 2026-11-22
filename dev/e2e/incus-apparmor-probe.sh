@@ -283,7 +283,7 @@ assert_exact_mask() {
   [ "$(incus config device get "$INSTANCE" subyard-docker-apparmor type \
     --project "$PROJECT")" = disk ] || die 'compatibility mask type drifted'
   [ "$(incus config device get "$INSTANCE" subyard-docker-apparmor source \
-    --project "$PROJECT")" = /dev/null ] || die 'compatibility mask source drifted'
+    --project "$PROJECT")" = "$SUBYARD_HOME/docker-apparmor-disabled" ] || die 'compatibility mask source drifted'
   [ "$(incus config device get "$INSTANCE" subyard-docker-apparmor path \
     --project "$PROJECT")" = /sys/module/apparmor/parameters/enabled ] \
     || die 'compatibility mask path drifted'

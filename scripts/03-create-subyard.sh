@@ -282,11 +282,18 @@ fi
 # only the indicator in that compatibility mode; on ordinary AppArmor-enabled hosts Docker keeps
 # its normal docker-default confinement.
 docker_apparmor_device=subyard-docker-apparmor
+docker_apparmor_source="$SUBYARD_HOME/docker-apparmor-disabled"
 docker_apparmor_drift=0
 if [ "$docker_apparmor_required" = 1 ]; then
+  # An empty regular file can be bind-mounted read-only inside an unprivileged host.
+  if [ ! -e "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ]; then
+    (set -C; umask 022; : > "$docker_apparmor_source") 2>/dev/null || true
+  fi
+  [ -f "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ] && [ ! -s "$docker_apparmor_source" ] \
+    || die "invalid Docker AppArmor mask source at $docker_apparmor_source"
   device_exists "$docker_apparmor_device" \
     && [ "$(device_get "$docker_apparmor_device" type)" = disk ] \
-    && [ "$(device_get "$docker_apparmor_device" source)" = /dev/null ] \
+    && [ "$(device_get "$docker_apparmor_device" source)" = "$docker_apparmor_source" ] \
     && [ "$(device_get "$docker_apparmor_device" path)" = /sys/module/apparmor/parameters/enabled ] \
     && [ "$(device_get "$docker_apparmor_device" readonly)" = true ] \
     || docker_apparmor_drift=1
@@ -306,7 +313,7 @@ if [ "$docker_apparmor_required" = 1 ]; then
   fi
   if ! device_exists "$docker_apparmor_device"; then
     incus config device add "$YARD_INSTANCE_NAME" "$docker_apparmor_device" disk "${PROJ[@]}" \
-      source=/dev/null path=/sys/module/apparmor/parameters/enabled readonly=true >/dev/null
+      source="$docker_apparmor_source" path=/sys/module/apparmor/parameters/enabled readonly=true >/dev/null
     ok "Docker sees AppArmor as disabled with the Incus daemon"
   fi
 elif device_exists "$docker_apparmor_device"; then

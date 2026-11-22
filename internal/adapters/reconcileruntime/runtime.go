@@ -729,7 +729,7 @@ func (runtime Runtime) instanceConverged(ctx context.Context, diagnostics *[]str
 	if appArmorDisabled {
 		if !dockerAppArmorPresent ||
 			dockerAppArmor["type"] != "disk" ||
-			dockerAppArmor["source"] != "/dev/null" ||
+			dockerAppArmor["source"] != filepath.Join(runtime.Yard.Paths.DataHome, "docker-apparmor-disabled") ||
 			dockerAppArmor["path"] != "/sys/module/apparmor/parameters/enabled" ||
 			dockerAppArmor["readonly"] != "true" {
 			return false, nil

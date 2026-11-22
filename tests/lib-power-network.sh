@@ -1166,6 +1166,16 @@ done
 for device in incusbr0 veth1234 tap1234abcd; do
   power_route_device_unsafe "$device" incusbr0 || fail "$device was accepted as a route device"
 done
+(
+  ip() { printf ' veth '; }
+  systemd-detect-virt() { printf '%s' "$kind"; }
+  kind=lxc
+  if power_route_device_unsafe eth0 incusbr0; then fail 'container uplink rejected'; fi
+  power_route_device_unsafe eth0 eth0 || fail 'managed bridge accepted'
+  power_route_device_unsafe eth1 incusbr0 || fail 'secondary veth accepted'
+  kind=none
+  power_route_device_unsafe eth0 incusbr0 || fail 'host veth accepted'
+)
 no_reload 'the guard suite'
 
 if grep -Fq 'incus launch' "$ROOT/scripts/03-create-subyard.sh"; then

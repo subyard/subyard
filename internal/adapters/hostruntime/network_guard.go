@@ -172,6 +172,14 @@ func (guard NetworkGuard) routesSafe(ctx context.Context, bridges []string) erro
 			return fmt.Errorf("parse route device %q: %w", route.Device, err)
 		}
 		if len(links) != 0 && links[0].LinkInfo.Kind == "veth" {
+			if route.Device == "eth0" {
+				if detect, ok := guard.lookup("systemd-detect-virt"); ok {
+					kind, err := guard.run(ctx, detect, "--container")
+					if err == nil && strings.TrimSpace(string(kind)) == "lxc" {
+						continue
+					}
+				}
+			}
 			return fmt.Errorf("unsafe host default route uses veth %q", route.Device)
 		}
 	}

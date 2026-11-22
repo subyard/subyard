@@ -2077,6 +2077,8 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 		"type": "disk", "source": "/dev/null",
 		"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
 	}
+	assertStageConverged(t, runtime, false, "legacy device-node mask needs migration")
+	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"]["source"] = "/data/docker-apparmor-disabled"
 	assertStageConverged(t, runtime, true, "disabled-Incus AppArmor mask")
 	runtime.Environment[1] = "INCUS_SERVICE_ENV="
 	assertStageConverged(t, runtime, false, "stale restored-Incus AppArmor mask")

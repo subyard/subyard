@@ -216,10 +216,11 @@ MOCK_INCUS_APPARMOR_ENV='INCUS_SECURITY_APPARMOR=false'
 MOCK_INCUS_DEVICES=''
 run_create
 grep -Fxq \
-  'config device add yard subyard-docker-apparmor disk --project subyard source=/dev/null path=/sys/module/apparmor/parameters/enabled readonly=true' \
+  "config device add yard subyard-docker-apparmor disk --project subyard source=$SUBYARD_HOME/docker-apparmor-disabled path=/sys/module/apparmor/parameters/enabled readonly=true" \
   "$MOCK_INCUS_LOG" \
   || fail 'yard did not hide the unavailable AppArmor indicator from Docker'
 
+[ -f "$SUBYARD_HOME/docker-apparmor-disabled" ] && [ ! -s "$SUBYARD_HOME/docker-apparmor-disabled" ] || fail 'mask must be an empty regular file'
 MOCK_INCUS_APPARMOR_ENV=''
 MOCK_INCUS_DEVICES='subyard-docker-apparmor'
 run_create

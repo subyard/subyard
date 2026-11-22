@@ -138,6 +138,29 @@ func TestNetworkGuardRejectsUnsafeDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestSystemContainerUplink(t *testing.T) {
+	for _, tc := range []struct {
+		dev, kind string
+		safe      bool
+	}{
+		{"eth0", "lxc", true}, {"eth1", "lxc", false}, {"eth0", "none", false}, {"incusbr0", "lxc", false},
+	} {
+		guard := testNetworkGuard(map[string]bool{"ip": true, "systemd-detect-virt": true}, func(name string, args ...string) ([]byte, error) {
+			if name == "systemd-detect-virt" {
+				return []byte(tc.kind), nil
+			}
+			if args[1] == "-4" {
+				return []byte(`[{"dev":"` + tc.dev + `"}]`), nil
+			}
+			return []byte(`[{"linkinfo":{"info_kind":"veth"}}]`), nil
+		})
+		err := guard.routesSafe(context.Background(), []string{"incusbr0"})
+		if (err == nil) != tc.safe {
+			t.Errorf("%s/%s: %v", tc.kind, tc.dev, err)
+		}
+	}
+}
+
 func TestNetworkGuardFailsClosedWhenNetworkManagerStateIsUnknown(t *testing.T) {
 	guard := testNetworkGuard(map[string]bool{"NetworkManager": true, "ip": true},
 		func(string, ...string) ([]byte, error) { return nil, nil })
