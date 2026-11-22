@@ -26,6 +26,7 @@ release-publication.sh
 provision-profile-check.sh
 proxy-address-boot-controller.sh
 ssh-agent-environment.sh
+ssh-client-alive.sh
 test-runner.sh
 test-vms.sh
 workflow-real-adapter-gate.sh

@@ -40,8 +40,10 @@ yard_running() {
     [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]
 }
 allowed() {
-  [ "$YARD_KIND" = container ] || die 'Herdr supports container yards only'
-  [ "$NESTED_E2E_VMS" != 1 ] || die 'Herdr is unavailable in nested E2E mode'
+  local -a refusals=()
+  [ "$YARD_KIND" = container ] || refusals+=('Herdr supports container yards only')
+  [ "$NESTED_E2E_VMS" != 1 ] || refusals+=('Herdr is unavailable in nested E2E mode')
+  [ "${#refusals[@]}" -eq 0 ] || die "$(printf '%s\n' "${refusals[@]}")"
 }
 observe() {
   if yexec test -x "$helper"; then
@@ -68,7 +70,8 @@ core_release() {
 }
 digest() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
-  sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" "$here/projects-changed.sh" "$profile/release.env" |
+  sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" \
+    "$here/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" |
     awk '{print $1}' | sha256sum | cut -d ' ' -f1
 }
 guest_file() {
@@ -107,13 +110,16 @@ EOF
   yexec systemctl daemon-reload
 }
 wait_core() {
-  local old="${1:-0}" result attempt
+  local old="${1:-0}" pid attempt
   for ((attempt=0; attempt<20; attempt++)); do
-    result=$(observe) || result=null
-    if jq -e --argjson old "$old" '. != null and .PID != $old' <<< "$result" >/dev/null; then return 0; fi
+    if pid=$(core_pid) && [ "$pid" != "$old" ]; then return 0; fi
     sleep 0.5
   done
-  die 'Herdr Core did not become ready'
+  if [ "$old" = 0 ]; then die 'Herdr Core did not become ready'; fi
+  die "Herdr Core did not become ready with a new PID after $old"
+}
+core_pid() {
+  observe | jq -er '.PID | select(type == "number" and . > 0 and . == floor)'
 }
 up() {
   install_assets
@@ -143,21 +149,15 @@ runtime() {
       desired=$(digest)
       actual=$(yexec cat "$helper.sha256" 2>/dev/null) || actual=$(printf '' | sha256sum | cut -d ' ' -f1)
       state=stale
-      if [ "$actual" = "$desired" ]; then
-        if ! enabled || core_release check; then state=current; fi
-      fi
+      if [ "$actual" = "$desired" ]; then state=current; fi
     fi
   elif [ "$YARD_KIND" = container ] && [ "$NESTED_E2E_VMS" != 1 ]; then
     state=deferred
   fi
   if [ "$mode" = apply ]; then
     [ "$#" -eq 3 ] && [ "$installed" = true ] && [ "$actual" = "$2" ] && [ "$desired" = "$3" ] || die 'Herdr runtime plan is stale'
-    if enabled; then
-      up >&2
-    else
-      install_assets >&2
-      printf '%s\n' "$desired" | guest_file "$helper.sha256" 0644
-    fi
+    install_assets >&2
+    printf '%s\n' "$desired" | guest_file "$helper.sha256" 0644 >&2
     actual="$desired"
     state=current
   elif [ "$mode" != observe ] || [ "$#" -ne 0 ]; then
@@ -192,7 +192,7 @@ else
 fi
 
 assessment() {
-  local mode="$1" ready=false consequence desired target old result count
+  local mode="$1" ready=false consequence desired target old result count observed=unknown
   target="incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/herdr"
   case "$action" in
     status|is-up|logs)
@@ -212,9 +212,15 @@ assessment() {
     update|restart)
       allowed
       svc_require_yard_running
-      running || die "Herdr Core is stopped; run '${PROG:-yard} herdr up'"
-      if [ "$mode" = verify ]; then ready=true; fi
-      desired='core ready'
+      result=$(core_pid) || die "Herdr Core is stopped or its PID is unavailable; run '${PROG:-yard} herdr up'"
+      old="$result"
+      if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
+        old=$(jq -er '.[0].desired | capture("^running-after:(?<pid>[1-9][0-9]*)$").pid' <<< "$SUBYARD_RESOURCE_STEPS") ||
+          die 'Herdr approved Core PID is unavailable'
+      fi
+      if [ "$mode" = verify ] && [ "$result" != "$old" ]; then ready=true; fi
+      desired="running-after:$old"
+      observed="running:$result"
       if [ "$action" = restart ]; then
         consequence='restart Herdr Core in a clean login environment, keeping its terminals'
       elif [ "$#" -eq 2 ]; then
@@ -236,11 +242,11 @@ assessment() {
       fi ;;
   esac
   jq -cn --arg action "$action" --arg target "$target" --arg desired "$desired" \
-    --arg consequence "$consequence" --argjson ready "$ready" '
+    --arg consequence "$consequence" --arg observed "$observed" --argjson ready "$ready" '
     {schema:"yard.resource-action-assessment.v2",action:$action,changed:($ready|not),
      consequences:(if $ready then [] else [$consequence] end),steps:[{id:"core",target:$target,
-     observed:(if $ready then $desired else "unknown" end),desired:$desired,
-     decision:(if $ready then "skip" else "conditional" end),
+     observed:(if $ready then $desired else $observed end),desired:$desired,
+     decision:(if $ready then "skip" elif $observed == "unknown" then "conditional" else "apply" end),
      preconditions:["selected yard and Herdr runtime"],verify:$desired,consequence:$consequence}]}'
 }
 
@@ -269,15 +275,15 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         fi
         as_dev env "SUBYARD_HERDR_MINIMUM=$HERDR_VERSION" "$helper" status ;;
       sync) allowed; svc_require_yard_running; as_dev "$helper" sync "$@" ;;
-      logs) svc_require_yard_running; yexec journalctl --no-pager -n 100 -u "$unit" + "_UID=$DEV_UID" "_COMM=herdr-core" "$@" ;;
+      logs) svc_require_yard_running; yexec journalctl --no-pager -n 100 "_SYSTEMD_UNIT=$unit" + "_UID=$DEV_UID" "_COMM=herdr-core" "$@" ;;
       update)
         allowed
-        running || die 'Herdr Core must be running to update'
+        old=$(core_pid) || die 'Herdr Core must be running to update'
         if [ "$#" -eq 1 ]; then core_release force; else core_release latest; fi
-        wait_core ;;
+        wait_core "$old" ;;
       restart)
         allowed
-        old=$(observe | jq -er '.PID')
+        old=$(core_pid) || die 'Herdr Core must be running to restart'
         as_dev "$login" server restart --fresh
         wait_core "$old" ;;
       down)

@@ -113,20 +113,12 @@ func loadRegistrations(dir string) (map[string]registration, error) {
 	if err != nil {
 		return nil, err
 	}
-	var persisted map[string]struct {
-		registration
-		Creating json.RawMessage `json:"creating"`
-	}
-	if json.Unmarshal(data, &persisted) != nil || persisted == nil {
+	if json.Unmarshal(data, &state) != nil || state == nil {
 		return nil, errors.New("invalid Herdr registration state")
 	}
-	for id, entry := range persisted {
+	for id, entry := range state {
 		if !domain.SafeID(id) || entry.ID != spaceID(id) {
 			return nil, errors.New("invalid Herdr registration identity")
-		}
-		// An older writer could save an intent even if the CAS never succeeded.
-		if len(entry.Creating) == 0 || string(entry.Creating) == "null" {
-			state[id] = entry.registration
 		}
 	}
 	return state, nil
@@ -192,7 +184,7 @@ func (entry space) owned() bool {
 }
 
 func (entry space) pristine() bool {
-	return len(entry.fields) == 5 && entry.Tabs != nil && len(entry.Tabs) == 0 &&
+	return entry.Tabs != nil && len(entry.Tabs) == 0 &&
 		entry.Name == entry.Subyard.Name && entry.Folder == entry.Subyard.Folder
 }
 

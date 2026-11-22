@@ -37,6 +37,7 @@ func TestRenameAndRemovalPreserveLayout(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			row := projectSpace(id, projectRow)
 			row["tabs"] = json.RawMessage(test.tabs)
+			row["future"] = json.RawMessage(`{"revision":1}`)
 			value := jsonValue(map[string]any{"spaces": []any{row}})
 			_, spaces, err := loadLayout(value)
 			if err != nil {
@@ -45,7 +46,8 @@ func TestRenameAndRemovalPreserveLayout(t *testing.T) {
 			state := map[string]registration{}
 			projects := map[string]project{id: {Name: "after", Folder: projectRow.Folder}}
 			rows, changed, err := planSpaces(spaces, projects, state, nil, false)
-			if err != nil || !changed || len(rows) != 1 || string(rows[0]["name"]) != `"after"` || string(rows[0]["tabs"]) != test.tabs {
+			if err != nil || !changed || len(rows) != 1 || string(rows[0]["name"]) != `"after"` ||
+				string(rows[0]["tabs"]) != test.tabs || string(rows[0]["future"]) != `{"revision":1}` {
 				t.Fatalf("rename: %v %v %v", rows, changed, err)
 			}
 			_, spaces, err = loadLayout(jsonValue(map[string]any{"spaces": rows}))

@@ -3,13 +3,21 @@
 set -eu
 
 policy=/etc/ssh/sshd_config.d/00-subyard-herdr.conf
-body='PasswordAuthentication no
+marker='# Managed by the Subyard Herdr profile'
+original='PasswordAuthentication no
 KbdInteractiveAuthentication no'
+body="$marker
+PasswordAuthentication no
+KbdInteractiveAuthentication no"
 
 absent() { [ ! -e "$policy" ] && [ ! -L "$policy" ]; }
-matches() {
-    [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u:%a' "$policy")" = 0:644 ] &&
-        printf '%s\n' "$body" | cmp -s - "$policy"
+regular_policy() {
+    [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u:%a' "$policy")" = 0:644 ]
+}
+matches() { regular_policy && printf '%s\n' "$body" | cmp -s - "$policy"; }
+owned() {
+    regular_policy &&
+        { [ "$(head -n 1 "$policy")" = "$marker" ] || printf '%s\n' "$original" | cmp -s - "$policy"; }
 }
 refuse() { printf 'Herdr: %s\n' "$*" >&2; exit 1; }
 
@@ -32,19 +40,29 @@ case "${1:-}" in
     absent) absent; exit ;;
     ensure)
         if matches; then effective; exit; fi
-        absent || refuse "SSH drop-in differs from the owned policy: $policy"
         stage=$(mktemp "${policy}.XXXXXX")
         trap 'rm -f -- "$stage"' EXIT
+        previous=
+        if ! absent; then
+            owned || refuse "SSH drop-in differs from the owned policy: $policy"
+            previous=$(mktemp "${policy}.XXXXXX")
+            cp -p -- "$policy" "$previous"
+        fi
         printf '%s\n' "$body" > "$stage"
         chmod 0644 "$stage"
         mv -T -- "$stage" "$policy"
         if ! reload_guest_sshd effective; then
-            rm -f -- "$policy"
+            if [ -n "$previous" ]; then
+                mv -T -- "$previous" "$policy"
+            else
+                rm -f -- "$policy"
+            fi
             refuse 'could not activate the Herdr SSH drop-in'
-        fi ;;
+        fi
+        if [ -n "$previous" ]; then rm -f -- "$previous"; fi ;;
     remove)
         if absent; then exit 0; fi
-        matches || refuse "refusing to remove a changed SSH drop-in: $policy"
+        owned || refuse "refusing to remove an unowned SSH drop-in: $policy"
         previous=$(mktemp "${policy}.XXXXXX")
         mv -T -- "$policy" "$previous"
         if ! reload_guest_sshd :; then

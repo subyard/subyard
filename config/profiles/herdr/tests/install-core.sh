@@ -26,9 +26,13 @@ login="$test_root/bin/login"
 cat > "$login" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-[ "$1" = update ] && [ "$2" = --from ] && [ "$#" -eq 3 ]
-printf 'swap\n' >> "$HERDR_FIXTURE_CALLS"
-mv -T "$3" "$HOME/.local/bin/herdr-core"
+case "$*" in
+  'server restart') printf 'restart\n' >> "$HERDR_FIXTURE_CALLS" ;;
+  *)
+    [ "$1" = update ] && [ "$2" = --from ] && [ "$#" -eq 3 ]
+    printf 'swap\n' >> "$HERDR_FIXTURE_CALLS"
+    mv -T "$3" "$HOME/.local/bin/herdr-core" ;;
+esac
 EOF
 chmod 0755 "$login"
 HOME="$test_root/home" bash "$payload" 0.1.21 1 "$digest" minimum "$login"
@@ -46,3 +50,5 @@ sed -i 's/hc 0.1.21/hc 0.1.20/' "$test_root/home/.local/bin/herdr-core"
 HOME="$test_root/home" bash "$payload" 0.1.21 1 "$digest" minimum "$login"
 HOME="$test_root/home" bash "$payload" 0.1.21 1 "$digest" check "$login"
 grep -qx swap "$HERDR_FIXTURE_CALLS"
+HOME="$test_root/home" bash "$payload" 0.1.21 1 "$digest" force "$login"
+printf 'download\ndownload\ndownload\nswap\nrestart\n' | cmp - "$HERDR_FIXTURE_CALLS"

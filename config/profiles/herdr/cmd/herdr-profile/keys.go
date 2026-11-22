@@ -167,10 +167,6 @@ func manageKeys(args []string) error {
 		return err
 	}
 	if phase == "apply" && assessment.Changed {
-		fresh, err := safefs.ReadRegular(path, options)
-		if err != nil || !bytes.Equal(fresh, contents) {
-			return errors.New("authorized_keys changed; retry pairing")
-		}
 		if err := safefs.WriteFile(path, next, safefs.Options{Mode: 0o600}); err != nil {
 			return err
 		}

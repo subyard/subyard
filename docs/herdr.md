@@ -42,7 +42,8 @@ live terminals, `yard herdr status` reports pending cleanup.
 
 Core keeps terminals alive when clients disconnect. `yard herdr update` selects
 the latest supported protocol generation release and keeps live terminals across
-handover. `yard herdr update --force` restores Subyard's pinned release. `up`
+handover. It hands over to a new Core process even if the selected version is
+already installed. `yard herdr update --force` selects Subyard's pinned release. `up`
 repairs a Core below the supported minimum. The startup marker in `status` is a
 hint. Use `yard herdr restart` to refresh Core's login environment.
 

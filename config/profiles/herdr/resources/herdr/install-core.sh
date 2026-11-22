@@ -74,5 +74,7 @@ if [ -z "$installed" ] || dpkg --compare-versions "$installed" lt "$target" || \
   else
     "$login" update --from "$stage/herdr-core"
   fi
+elif [ "$mode" = latest ] || [ "$mode" = force ]; then
+  "$login" server restart
 fi
 [ -L "$bin/hc" ] || ln -s herdr-core "$bin/hc"
