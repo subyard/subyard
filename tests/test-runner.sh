@@ -542,13 +542,17 @@ def sweep():
     subprocess.run(['bash', root / 'dev/with-test-temp.sh', 'true'], env=environment, check=True)
 
 
-for label, sig, group, expected, serial in (
-        ("int-group", signal.SIGINT, True, 130, False),
-        ("int-pid", signal.SIGINT, False, 130, False),
-        ("term-group", signal.SIGTERM, True, 143, False),
-        ("term-pid", signal.SIGTERM, False, 143, False),
-        ("serial-term", signal.SIGTERM, False, 143, True),
-        ("kill-group", signal.SIGKILL, True, -signal.SIGKILL, False)):
+for label, sig, target, expected, serial in (
+        ("int-group", signal.SIGINT, "group", 130, False),
+        ("int-pid", signal.SIGINT, "wrapper", 130, False),
+        ("int-dispatcher", signal.SIGINT, "dispatcher", 130, False),
+        ("term-group", signal.SIGTERM, "group", 143, False),
+        ("term-pid", signal.SIGTERM, "wrapper", 143, False),
+        ("term-dispatcher", signal.SIGTERM, "dispatcher", 143, False),
+        ("serial-term", signal.SIGTERM, "wrapper", 143, True),
+        ("serial-dispatcher", signal.SIGTERM, "dispatcher", 143, True),
+        ("kill-group", signal.SIGKILL, "group", -signal.SIGKILL, False),
+        ("hup-group", signal.SIGHUP, "group", -signal.SIGHUP, False)):
     marked = tmp / ("interrupt-started-" + label)
     marked.mkdir()
     output = tmp / ("profile-interrupt-" + label + ".out")
@@ -563,6 +567,9 @@ for label, sig, group, expected, serial in (
                 assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
                 time.sleep(.01)
             pids = [int(pid) for marker in marked.glob('[0-9]') for pid in marker.read_text().split()]
+            assert all(int(state(pid)[2]) == process.pid for pid in pids), (
+                'runner or child changed the caller process group'
+            )
             live_roots = roots()
             assert len(live_roots) == 1, live_roots
             live_logs = Path(next(line.removeprefix('PROFILE TESTS logs: ') for line in
@@ -575,28 +582,26 @@ for label, sig, group, expected, serial in (
             subprocess.run(retain, check=True)
             assert live_logs.exists(), 'retention removed active profile logs'
             started = time.monotonic()
-            (os.killpg if group else os.kill)(process.pid, sig)
+            if target == "group":
+                os.killpg(process.pid, sig)
+            else:
+                pid = int(state(pids[0])[1]) if target == "dispatcher" else process.pid
+                os.kill(pid, sig)
             code = process.wait(timeout=5)
             assert time.monotonic() - started < 5, label
             assert code == expected, f"profile runner returned {code} after {label}"
             assert sorted(p.name for p in marked.glob('[0-9]')) == [str(i) for i in range(wanted)], (
                 "interruption started a waiting profile"
             )
-            if sig == signal.SIGKILL:
-                assert all(alive(pid) for pid in pids), 'runner did not outlive killed wrapper group'
-                subprocess.run(retain, check=True)
-                sweep()
-                assert live_logs.exists(), 'retention deleted surviving runners logs'
-                assert roots() == live_roots, 'sweep deleted surviving runners scratch'
-                for pid in pids:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            if sig in (signal.SIGKILL, signal.SIGHUP):
                 deadline = time.monotonic() + 5
                 while any(alive(pid) for pid in pids):
-                    assert time.monotonic() < deadline, 'killed runner survived'
+                    assert time.monotonic() < deadline, f'runner survived {label}'
                     time.sleep(.01)
+                if sig == signal.SIGKILL:
+                    assert roots() == live_roots, 'KILL did not leave scratch for recovery'
+                # Bash may run EXIT cleanup on HUP; KILL always needs the next run's sweep.
+                assert not list(marked.glob('*.verdict')), 'fatal signal ran graceful cleanup'
                 sweep()
                 subprocess.run(retain, check=True)
                 assert not live_logs.exists(), 'abandoned profile logs not removed'
