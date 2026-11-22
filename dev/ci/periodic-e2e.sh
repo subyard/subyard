@@ -76,6 +76,11 @@ facts() {
   sudo -n iptables -S FORWARD 2>&1 | sed -n '1,5p' || true
   command -v incus lxc lxd 2>/dev/null || true
   stat -c '%a %U %n' "$HOME" || true
+  # Probe only: host AppArmor state and recent denials that can reach unconfined containers.
+  sudo -n aa-status 2>/dev/null | sed -n '1,3p' || true
+  sudo -n aa-status 2>/dev/null | grep -i -E 'ssh|incus|lxc' | sed -n '1,20p' || true
+  sudo -n journalctl -k --no-pager -o cat 2>/dev/null | grep -E 'apparmor="(DENIED|AUDIT)"' | tail -n 30 | cut -c1-300 || true
+  sudo -n systemctl show incus.service -p Environment 2>/dev/null | grep -o 'INCUS_SECURITY_APPARMOR=[a-z]*' || true
 }
 
 enable_kvm() {
