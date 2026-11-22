@@ -2782,14 +2782,17 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   external source stays unreachable until the operator grants access. The pre-apply check stays
   strict, so every init retries; the post-apply verification of init and of scoped
   `profile enable` accepts a failure whose only reason is this code and returns it as pending
-  readiness. The operation boundary renders it with the generic hint that `internal/profile`
-  maps to the code: init's post-apply summary, scoped enable output and status. With diagnostics, `--check` continues past such an owner and a later failure wins. The dispatcher
+  readiness. The operation boundary renders it with the generic message that `internal/profile`
+  maps to the code: init's post-apply summary, scoped enable output and status. With
+  diagnostics, `--check` continues past such an owner and a later failure wins. The dispatcher
   captures at most 128 bytes and discards malformed, duplicate, oversized or arbitrary
   output. Adapters opt in with `SUBYARD_PROFILE_DIAGNOSTICS=1` to receive a validated
   `reason=CODE` after the existing owner/native-exit check record; callers without the
   opt-in retain that original record. Scoped status displays `diagnostic: CODE` and, for a
-  mapped code, `hint: TEXT` from the same observation; status JSON adds `code` and `hint` only
-  for a validated code. Runtime observation stays unchanged.
+  mapped code, `message: TEXT` from the same observation. While the profile is not ready with a
+  validated code, status JSON carries `"diagnostic": {"code": CODE, "message": TEXT}`, with
+  `message` only for a mapped code. Machines read `diagnostic.code`; `diagnostic.message` is
+  for display only and may change. Runtime observation stays unchanged.
   A converged check (exit 0) may instead write exactly one
   `subyard-profile-advisory-v1 CODE` line, where `CODE` is `storage-capacity`; the same
   128-byte capture and opt-in apply, and the dispatcher reports it as

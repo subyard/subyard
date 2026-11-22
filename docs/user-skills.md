@@ -61,8 +61,8 @@ anonymous access or existing Git credentials; a `github.com` source is retried t
 one sync to 300 seconds.
 
 When a source cannot be reached, init still succeeds and delivers the profile skill; its summary
-and `yard profile status user-skills` report `source-unavailable` with an access hint (`code`
-and `hint` in `--json`). An empty source list removes the profile's links and `sources.json`,
+and `yard profile status user-skills` report `source-unavailable` with an access message
+(`diagnostic.code` and `diagnostic.message` in `--json`). An empty source list removes the profile's links and `sources.json`,
 like a deselection. After access is granted, an agent runs `sync.py sync`, or the next
 `yard init` clones the source.
 

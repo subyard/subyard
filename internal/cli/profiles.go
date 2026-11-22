@@ -191,18 +191,24 @@ type profileStatus struct {
 	Configured bool   `json:"configured"`
 	Runtime    string `json:"runtime"`
 	Ready      bool   `json:"ready"`
-	// Code is the readiness reason of a pending runtime; Hint is its generic remediation.
-	Code string `json:"code,omitempty"`
-	Hint string `json:"hint,omitempty"`
+	// Diagnostic is present only while the profile is not ready with a validated code.
+	Diagnostic *profileDiagnostic `json:"diagnostic,omitempty"`
 	// Warnings are advisories of a converged profile, with its declared remediation.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// profileDiagnostic names why a profile is not ready. Machines read Code;
+// Message is display-only remediation and may change.
+type profileDiagnostic struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
 }
 
 // profileReadinessSummary renders a readiness code with its generic hint.
 func profileReadinessSummary(owner, reason string) string {
 	summary := fmt.Sprintf("profile %s is pending (%s)", owner, reason)
-	if hint := profile.ServiceReadinessHint(reason); hint != "" {
-		summary += ": " + hint
+	if message := profile.ServiceReadinessMessage(reason); message != "" {
+		summary += ": " + message
 	}
 	return summary
 }
@@ -276,7 +282,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				observation, err = observer.ProfileServiceObservation(ctx, request.id)
 				converged = observation.Converged
 				if !converged && profile.ValidServiceReadinessReason(observation.Reason) {
-					status.Code, status.Hint = observation.Reason, profile.ServiceReadinessHint(observation.Reason)
+					status.Diagnostic = &profileDiagnostic{Code: observation.Reason, Message: profile.ServiceReadinessMessage(observation.Reason)}
 				}
 				for _, advisory := range observation.Advisories {
 					if hint, declared := definition.Advisories[advisory.Code]; converged && declared && advisory.Owner == request.id {
@@ -304,11 +310,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				return
 			}
 			fmt.Fprintf(cli.options.Stdout, "yard: %s\nprofile: %s\nenabled: %t\nconfigured: %t\nruntime: %s\nready: %t\n", status.Yard, status.ID, status.Enabled, status.Configured, status.Runtime, status.Ready)
-			if status.Code != "" {
-				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", status.Code)
-			}
-			if status.Hint != "" {
-				fmt.Fprintf(cli.options.Stdout, "hint: %s\n", status.Hint)
+			if status.Diagnostic != nil {
+				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", status.Diagnostic.Code)
+				if status.Diagnostic.Message != "" {
+					fmt.Fprintf(cli.options.Stdout, "message: %s\n", status.Diagnostic.Message)
+				}
 			}
 			for _, warning := range status.Warnings {
 				fmt.Fprintf(cli.options.Stdout, "warning: %s\n", warning)

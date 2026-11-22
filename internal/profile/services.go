@@ -38,14 +38,15 @@ func (failure *ServiceCheckError) Unwrap() error { return failure.cause }
 // external source it reads stays unreachable until the operator grants access.
 const SourceUnavailable = "source-unavailable"
 
-// serviceReadinessHints is the generic remediation the operation boundary
-// renders next to a readiness code; a code without a hint renders alone.
-var serviceReadinessHints = map[string]string{
+// serviceReadinessMessages is the generic remediation the operation boundary
+// renders next to a readiness code; a code without a message renders alone.
+var serviceReadinessMessages = map[string]string{
 	SourceUnavailable: "authorize access to the source (yard ssh-agent unlock --key PATH --ttl DURATION, or the yard's git credentials) or use a public URL, then run yard init",
 }
 
-// ServiceReadinessHint returns the remediation for a readiness code, or "".
-func ServiceReadinessHint(reason string) string { return serviceReadinessHints[reason] }
+// ServiceReadinessMessage returns the display-only remediation for a readiness
+// code, or "". Machines read the code; the message may change.
+func ServiceReadinessMessage(reason string) string { return serviceReadinessMessages[reason] }
 
 // ServiceReadinessAcceptedAfterApply reports whether a post-apply check may end
 // with this reason. Pre-apply checks stay strict, so the next init retries.

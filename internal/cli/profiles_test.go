@@ -92,17 +92,17 @@ func TestScopedProfileStatusRendersValidatedDiagnostic(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("status exit=%d: %s", code, output)
 				}
-				hint := profile.ServiceReadinessHint(reason)
+				message := profile.ServiceReadinessMessage(reason)
 				wantJSON := `{"yard":"default","id":"fixture","enabled":true,"configured":true,"runtime":"pending","ready":false`
 				wantText := "diagnostic: " + reason + "\n"
 				switch reason {
 				case "private-canary":
 					wantText = "ready: false\n"
 				case "source-unavailable":
-					wantJSON += `,"code":"source-unavailable","hint":` + strconv.Quote(hint)
-					wantText += "hint: " + hint + "\n"
+					wantJSON += `,"diagnostic":{"code":"source-unavailable","message":` + strconv.Quote(message) + `}`
+					wantText += "message: " + message + "\n"
 				default:
-					wantJSON += `,"code":"` + reason + `"`
+					wantJSON += `,"diagnostic":{"code":"` + reason + `"}`
 				}
 				if asJSON && output.String() != wantJSON+"}\n" {
 					t.Fatalf("status JSON: %s", output)
@@ -744,7 +744,7 @@ func TestScopedProfileEnableAcceptsSourceAccessAfterApply(t *testing.T) {
 	if string(data) != "ENVIRONMENT_PROFILES='neighbor fixture'\n" || verified != 1 || strings.Join(runtime.applied, " ") != "fixture" || strings.Join(runtime.recorded, " ") != "fixture=true" {
 		t.Fatalf("selection=%q verified=%d applied=%v recorded=%v", data, verified, runtime.applied, runtime.recorded)
 	}
-	if want := "profile fixture is pending (source-unavailable): " + profile.ServiceReadinessHint(profile.SourceUnavailable); !strings.Contains(output.String(), want) {
+	if want := "profile fixture is pending (source-unavailable): " + profile.ServiceReadinessMessage(profile.SourceUnavailable); !strings.Contains(output.String(), want) {
 		t.Fatalf("the boundary did not render the readiness hint: %s", output)
 	}
 }
@@ -754,7 +754,7 @@ func TestInitReporterRendersPendingReadinessHint(t *testing.T) {
 	var output bytes.Buffer
 	initReporter{output: &output}.StagePending(application.ReconcileStage{ID: ports.ReconcileStageProfileServices},
 		ports.ReconcileStageObservation{Converged: true, Owner: "user-skills", Reason: profile.SourceUnavailable})
-	want := "  [ !! ] profile-services: profile user-skills is pending (source-unavailable): " + profile.ServiceReadinessHint(profile.SourceUnavailable) + "\n"
+	want := "  [ !! ] profile-services: profile user-skills is pending (source-unavailable): " + profile.ServiceReadinessMessage(profile.SourceUnavailable) + "\n"
 	if output.String() != want {
 		t.Fatalf("summary: %q", output.String())
 	}
