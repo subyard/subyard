@@ -53,7 +53,8 @@ func TestProvisionEndpointSelection(t *testing.T) {
 
 func provisionEndpointFixture(t *testing.T) (*CLI, config.Loaded, string, *testkit.ScriptedAdapter) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeProvisionProfile(t, root, "sample")
 	yardFile := filepath.Join(root, "state", "yards", "vpn", "config.env")
 	if err := os.MkdirAll(filepath.Dir(yardFile), 0o700); err != nil {
@@ -76,10 +77,7 @@ SHUTDOWN=down
 	writeCLIFile(t, filepath.Join(directory, "relay", "handler.sh"), "#!/bin/sh\nexit 70\n", 0o700)
 	incus := lifecycleIncus()
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Incus: incus, AdapterRunner: runner})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Incus: incus, AdapterRunner: runner})
 	loaded, err := program.loadContext("vpn")
 	if err != nil {
 		t.Fatal(err)

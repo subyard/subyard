@@ -67,15 +67,13 @@ func TestReleaseDiagnosticsPreservePublicWrapperOverRawRefusals(t *testing.T) {
 }
 
 func TestReleaseDiagnosticsIdentifyMalformedNamedYard(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "broken", "config.env"),
 		"# location\nSSH_PORT=${UNSET:?synthetic-private-value}\n")
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
 	reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, allLocal: true, scopeResolved: true}
-	_, err = reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	_, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if !errors.As(err, &diagnostic) {
 		t.Fatalf("missing named-yard diagnostic: %v", err)
@@ -90,11 +88,8 @@ func TestReleaseDiagnosticsIdentifyMalformedNamedYard(t *testing.T) {
 		t.Fatalf("unsafe or misdirected named-yard diagnostic: %q / %q", message, retry)
 	}
 	var stderr bytes.Buffer
-	reader, err := New(Options{RepositoryRoot: root, Environment: environment,
+	reader := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Arguments: []string{"-Y", "broken", "config", "status"}, Stdout: io.Discard, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if reader.Run(context.Background()) == 0 {
 		t.Fatal("malformed config status unexpectedly succeeded")
 	}
@@ -119,21 +114,19 @@ func (fixture *releaseDiagnosticConfigPlatform) RefreshConfigs(context.Context, 
 }
 
 func TestReleaseDiagnosticsApplySecondTargetPreservesNativeCause(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "second", "config.env"), "SSH_PORT=2233\n")
 	cause := publicReconcileTestError{}
 	platform := &releaseDiagnosticConfigPlatform{initPlatformFixture: newInitPlatformFixture(), cause: cause}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard})
 	applier := releaseTransitionConfigApplier{cli: program}
 	if err := applier.ApplyConfig(context.Background(), "default", nil); err != nil {
 		t.Fatalf("first target failed: %v", err)
 	}
-	err = applier.ApplyConfig(context.Background(), "second", nil)
+	err := applier.ApplyConfig(context.Background(), "second", nil)
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if !errors.Is(err, cause) || !errors.As(err, &diagnostic) || platform.configs != 2 {
 		t.Fatalf("native second-target cause lost: calls=%d error=%v", platform.configs, err)
@@ -171,7 +164,8 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 	for _, phase := range []string{"inspect", "apply", "verify"} {
 		for _, public := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/public=%t", phase, public), func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				cliFixture := newFixture(t)
+				root, environment := cliFixture.Root, cliFixture.Environment
 				writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 				configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 				seedCurrentReleaseLedger(t, root, configHome)
@@ -181,10 +175,8 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 					cause = publicReconcileTestError{}
 				}
 				platform := &releaseDiagnosticProfilePlatform{initPlatformFixture: newInitPlatformFixture(), phase: phase, cause: cause}
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Incus: &testkit.Incus{}, Stdout: io.Discard, Stderr: io.Discard})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Incus: &testkit.Incus{}, Stdout: io.Discard, Stderr: io.Discard})
+				var err error
 				reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: configHome}, "sample-runtime")
 				if phase == "inspect" {
 					_, err = reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
@@ -212,7 +204,8 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 // Pending inspection discovers exactly the repository's configured yards plus
 // default, with or without an optional overlay. Missing instances are uninspected.
 func TestMaterializedPendingListingNamesEveryYard(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "second", "config.env"), "SSH_PORT=2299\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "alpha", "config.env"), "SSH_PORT=2298\n")
 	expected, err := config.YardNames(configHome)
@@ -223,10 +216,7 @@ func TestMaterializedPendingListingNamesEveryYard(t *testing.T) {
 		expected = append(expected, "default")
 	}
 	slices.Sort(expected)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: &testkit.Incus{}, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: &testkit.Incus{}, Stdout: io.Discard, Stderr: io.Discard})
 	plan, err := program.inspectPendingInit(context.Background(), configHome)
 	if err != nil {
 		t.Fatal(err)

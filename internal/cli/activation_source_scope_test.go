@@ -82,7 +82,8 @@ type sourceScopeFixture struct {
 
 func newSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	// Prospective activation binds the shipped project hook before consent.
 	// Retain that native source dependency in the common migration fixture.
@@ -118,12 +119,9 @@ func newSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 		"subyard-named/yard-named": {Name: "yard-named", Project: "subyard-named", Status: "Running"},
 	}}
 	boundary := &sourceScopeConfigBoundary{converged: map[string]bool{}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Incus: incus, Executor: boundary, Config: boundary, InitPlatform: newInitPlatformFixture(),
 		Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
 	store, err := releasetransition.NewPOSIXV2Store(configHome)
 	if err != nil {
 		t.Fatal(err)

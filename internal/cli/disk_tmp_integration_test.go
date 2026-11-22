@@ -32,7 +32,8 @@ func TestStoppedMaterializedIntegrationPlanIsNotReplayed(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				ctx := context.Background()
-				root, _, _, environment := configCommandFixture(t)
+				cliFixture := newFixture(t, withCheckoutConfig())
+				root, environment := cliFixture.Root, cliFixture.Environment
 				loaded := loadConfigCommandContext(t, root, environment, "default")
 				loaded.Integrations = config.IntegrationSelection{Present: true, AllowsCodingTools: true}
 				yard := loaded.Context
@@ -45,10 +46,7 @@ func TestStoppedMaterializedIntegrationPlanIsNotReplayed(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime, Incus: native, Executor: executor})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime, Incus: native, Executor: executor})
 				owner := &materializedConfigActivationReconciler{projectedIntegrationPlans: projected,
 					integrationPlans: map[string]reconcileruntime.IntegrationPlan{}}
 				owner.integrationPlans["default"] = approved

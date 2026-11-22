@@ -33,7 +33,8 @@ const (
 // command manifest and a synthetic profile resource. Release-gate inspection fails with a
 // distinctive configuration error, so consulting it is observable without side effects.
 func TestRunAdmissionStages(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	cliFixture, _ := newResourceCommandFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
@@ -142,15 +143,12 @@ func TestRunAdmissionStages(t *testing.T) {
 	for _, test := range cases {
 		t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root,
 				Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
 				Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			code := program.Run(ctx)
@@ -174,7 +172,8 @@ func TestRunAdmissionStages(t *testing.T) {
 }
 
 func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	cliFixture, _ := newResourceCommandFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
@@ -190,10 +189,7 @@ func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
 	for _, arguments := range [][]string{{"update", "--yes"}, {"migrate", "--yes"}, {"host", "rename", "other"}, {"config", "apply", "--all-local", "--yes"}, {"teardown", "--full", "--yes"}} {
 		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}})
 			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "hard cleanup is pending") {
 				t.Fatalf("early mutation escaped recovery fence: exit=%d %s", code, stderr.String())
 			}
@@ -205,7 +201,8 @@ func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
 // context loading. Each case requires the exit code and a diagnostic or output owned by the
 // expected path, so an unrelated early exit cannot satisfy it.
 func TestRunAdmissionEarlyPaths(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	cliFixture, _ := newResourceCommandFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
@@ -245,15 +242,12 @@ func TestRunAdmissionEarlyPaths(t *testing.T) {
 	for _, test := range cases {
 		t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root,
 				Stdin: strings.NewReader(test.stdin), Stdout: &stdout, Stderr: &stderr,
 				Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			code := program.Run(ctx)
@@ -277,16 +271,14 @@ func TestRunAdmissionEarlyPaths(t *testing.T) {
 // TestAdmissionPolicy pins the pure classification behind Run's stages, including the
 // reader/exempt distinction and the recovery that may replace a blocked gate.
 func TestAdmissionPolicy(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	cliFixture, _ := newResourceCommandFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 	type want struct {
 		readOnly      bool
 		gate          gatePolicy

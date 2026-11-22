@@ -24,7 +24,8 @@ func TestPublicIngressResourceMustBeDownBeforeConfigDropsOrChangesIt(t *testing.
 			{"endpoint closed", "RESOURCE_RELAY_PORT", "42001", false, 0},
 		} {
 			t.Run(protocol+"/"+test.name, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				cliFixture := newFixture(t)
+				root, environment := cliFixture.Root, cliFixture.Environment
 				yardFile := filepath.Join(root, "state", "yards", "private", "config.env")
 				if err := os.MkdirAll(filepath.Dir(yardFile), 0o700); err != nil {
 					t.Fatal(err)
@@ -60,11 +61,8 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 					writeCLIFile(t, filepath.Join(root, "relay-enabled"), "synthetic\n", 0o600)
 				}
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_OPERATION_ID=config-relay"),
+				program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_OPERATION_ID=config-relay"),
 					WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
 				loaded, err := program.loadContext("private")
 				if err != nil {
 					t.Fatal(err)

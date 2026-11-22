@@ -16,7 +16,8 @@ import (
 func TestConfigRegistrationRepairPreservesBothFilesUntilAuthorized(t *testing.T) {
 	for _, mode := range []string{"check", "decline", "approve", "stale", "archive-conflict"} {
 		t.Run(mode, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 			nested := filepath.Join(configHome, "yards", "named", "config.env")
 			flat := filepath.Join(configHome, "yards", "named.env")
 			archive := filepath.Join(configHome, "recovery", "yard-registrations", "named.env")
@@ -33,14 +34,11 @@ func TestConfigRegistrationRepairPreservesBothFilesUntilAuthorized(t *testing.T)
 				arguments = append(arguments, "--check")
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if mode == "stale" {
 				program.options.Prompt = &callbackPrompt{callback: func() {
 					writeConfigCommandFile(t, nested, canonical+"# concurrent\n", 0o600)

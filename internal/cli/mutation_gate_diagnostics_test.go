@@ -17,7 +17,8 @@ import (
 func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 	for _, transport := range []string{"CLI", "RPC"} {
 		t.Run(transport, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
 			runtimeRoot := filepath.Join(root, "runtime-diagnostics")
 			capture := filepath.Join(root, "v2-candidate-inspections")
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+capture)
@@ -30,10 +31,7 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 			})
 			runner := &testkit.ScriptedAdapter{}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"start"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: runner})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"start"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: runner})
 			var payload []byte
 			if transport == "CLI" {
 				if code := program.Run(context.Background()); code != 1 {

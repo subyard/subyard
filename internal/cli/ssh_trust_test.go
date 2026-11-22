@@ -28,16 +28,14 @@ func TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload(t *testing.T) {
 		{name: "payload flag", arguments: []string{"--", "some-command", "-y"}, want: domain.ErrConfirmationRequired},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			cliFixture := newFixture(t, withCheckoutConfig())
 			var output bytes.Buffer
 			input := strings.NewReader(test.input)
-			cli, err := New(Options{RepositoryRoot: repositoryRoot(t), Stdin: input, Stderr: &output, Environment: []string{"HOME=" + t.TempDir()}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			cli := cliFixture.New(Options{RepositoryRoot: cliFixture.Root, Stdin: input, Stderr: &output})
 			cli.promptInputTerminal = func() bool { return test.tty }
 			manager := cli.sshTrust(t.TempDir(), test.automation || commandAssumeYes(test.arguments))
 			defer manager.Close()
-			err = manager.Confirm(context.Background(), []sshtrust.Proposal{{Target: "yard-example", Namespace: "subyard-remote-example", File: "/state/known_hosts", Algorithm: "ssh-ed25519", Fingerprint: "SHA256:example"}})
+			err := manager.Confirm(context.Background(), []sshtrust.Proposal{{Target: "yard-example", Namespace: "subyard-remote-example", File: "/state/known_hosts", Algorithm: "ssh-ed25519", Fingerprint: "SHA256:example"}})
 			if !errors.Is(err, test.want) {
 				t.Fatalf("confirmation=%v want=%v", err, test.want)
 			}

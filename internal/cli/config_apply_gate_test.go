@@ -183,20 +183,18 @@ func TestConfigApplyRepairBindsCheckpointAuthorityAfterConversion(t *testing.T) 
 }
 
 func TestConfigApplyRepairRejectsUnfinishedAndCorruptProtectedJournals(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-config-apply-pending")
 	environment = append(environment,
 		"YARD_RUNTIME_ROOT="+runtimeRoot,
 		"V2_GATE_CAPTURE="+filepath.Join(root, "capture"),
 	)
 	journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Environment: environment, WorkingDir: root,
 		Incus: lifecycleIncus(), Executor: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	outcome, err := program.inspectMutationGate(context.Background(), "default")
 	if err != nil || outcome == nil {
 		t.Fatalf("inspect pending gate: outcome=%#v err=%v", outcome, err)
@@ -341,7 +339,8 @@ type configApplyRepairFixture struct {
 }
 
 func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixture {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	for _, name := range []string{"config/profiles/test-vms/profile.json", "config/profiles/test-vms/service-binding.py", "config/profiles/test-vms/full-cleanup.py"} {
 		path := filepath.Join(root, name)
@@ -416,13 +415,10 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 		t, root, environment, runtimeRoot, journalPath,
 	)
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Environment: environment, WorkingDir: root,
 		Incus: fake, Executor: fake,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.resolveReleaseTransitionContext(context.Background(),
 		"default", environmentValue(environment, "SUBYARD_CONFIG_HOME"),
 	)

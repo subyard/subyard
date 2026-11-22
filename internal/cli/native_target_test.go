@@ -20,7 +20,14 @@ import (
 
 func nativeTargetFixture(t *testing.T) (*CLI, *testkit.Incus, string) {
 	t.Helper()
-	root, _, _ := nativeFixture(t)
+	_, program, native, home := newNativeTargetFixture(t)
+	return program, native, home
+}
+
+func newNativeTargetFixture(t *testing.T) (*cliFixture, *CLI, *testkit.Incus, string) {
+	t.Helper()
+	cliFixture := newFixture(t)
+	root := cliFixture.Root
 	home := filepath.Join(root, "home")
 	configHome := filepath.Join(root, "state")
 	environment := []string{"HOME=" + home, "SUBYARD_OPERATOR_HOME=" + home, "SUBYARD_CONFIG_HOME=" + configHome, "SUBYARD_HOME=" + root + "/data", "SUBYARD_NO_AUDIT=1"}
@@ -32,11 +39,8 @@ func nativeTargetFixture(t *testing.T) (*CLI, *testkit.Incus, string) {
 	writeEmptyNamedFile(t, filepath.Join(configHome, "config.env"), "INCUS_PROJECT=custom\nHOST_BASE="+home+"/host\nRESTRICTED_DISK_PATHS="+home+"/host\n", 0600)
 	writeEmptyNamedFile(t, filepath.Join(configHome, "yards/named/config.env"), "# named\n", 0600)
 	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cli, native, configHome
+	cli := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native, Stdout: io.Discard, Stderr: io.Discard})
+	return cliFixture, cli, native, configHome
 }
 func nativeInstance(owner string) ports.InstanceInfo {
 	values := map[string]string{"volatile.uuid": "fixture-uuid", "user.subyard.name": owner}
@@ -134,7 +138,7 @@ func (native *collisionReadGuard) Instance(context.Context, string, string) (por
 }
 
 func TestNativeTargetGateAdmitsAddressRepair(t *testing.T) {
-	cli, native, home := nativeTargetFixture(t)
+	cliFixture, cli, native, home := newNativeTargetFixture(t)
 	root := cli.options.RepositoryRoot
 	environment := append(cli.options.Environment, "YARD_RUNTIME_ROOT="+filepath.Join(root, "runtime"))
 	writeEmptyNamedFile(t, filepath.Join(home, "config.env"), "INCUS_PROJECT=custom\nYARD_INSTANCE_NAME=box\n", 0600)
@@ -167,10 +171,7 @@ func TestNativeTargetGateAdmitsAddressRepair(t *testing.T) {
 	options := cli.options
 	options.Environment, options.Stdout, options.Stderr = environment, &output, &output
 	options.Arguments = []string{"-Y", "named", "config", "set", "INCUS_PROJECT", "subyard-named", "--scope", "yard", "--yes"}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(options)
 	code := program.Run(context.Background())
 	repaired, err := cli.loadContext("named")
 	if code != 0 || err != nil || repaired.Context.IncusProject != "subyard-named" {
@@ -185,10 +186,7 @@ func TestNativeTargetGateAdmitsAddressRepair(t *testing.T) {
 		before := mustReadConfigFixture(t, path)
 		output.Reset()
 		options.Arguments = []string{"-Y", "named", "config", "set", "INCUS_PROJECT", "another-project", "--scope", "yard", "--yes"}
-		program, err := New(options)
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := cliFixture.New(options)
 		outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "named")
 		if err != nil || outcome == nil || !nativeTargetAddressRepair("@config", options.Arguments[3:], inspection) {
 			t.Fatalf("expected native-target-only V2 gate: outcome=%+v err=%v", outcome, err)
@@ -243,7 +241,7 @@ func TestNativeTargetSurfacesRefuseBeforeMutation(t *testing.T) {
 		{"hard-cleanup", "cleanup", "--hard", "", "share native target"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cli, native, home := nativeTargetFixture(t)
+			cliFixture, cli, native, home := newNativeTargetFixture(t)
 			host := "INCUS_PROJECT=custom\nYARD_INSTANCE_NAME=box\nSRV_VOLUME=shared-data\n"
 			if strings.HasPrefix(tc.name, "status-") {
 				host = "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n"
@@ -282,10 +280,7 @@ func TestNativeTargetSurfacesRefuseBeforeMutation(t *testing.T) {
 			}
 			options.Arguments = append([]string{"-Y", yard, tc.command}, strings.Fields(tc.flags)...)
 			options.Arguments = append(options.Arguments, "--yes")
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(options)
 			if code := program.Run(context.Background()); code == 0 {
 				t.Fatal("refusal accepted")
 			}

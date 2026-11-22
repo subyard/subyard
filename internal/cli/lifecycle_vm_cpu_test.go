@@ -37,9 +37,11 @@ func (fixture *lifecycleCPUFixture) VMCPUConverged(_ context.Context, project, i
 
 func lifecycleVMCPUCommandFixture(t *testing.T, status string, ready bool) (*CLI, config.Loaded, *lifecycleCPUFixture, *testkit.ScriptedAdapter, string) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withCommands("sudo"))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	log := filepath.Join(root, "sudo.log")
-	testkit.WriteFile(t, filepath.Join(root, "sudo"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SUDO_LOG\"\nexit 1\n"), 0o700)
+	cliFixture.Exec().On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}},
+		testkit.Reply{Script: "printf '%s\\n' \"$*\" >> \"$SUDO_LOG\"; return 1"})
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status, instance.Type = status, domain.YardVM
@@ -47,12 +49,9 @@ func lifecycleVMCPUCommandFixture(t *testing.T, status string, ready bool) (*CLI
 	incus.Instances["subyard/yard"] = instance
 	fixture := &lifecycleCPUFixture{Incus: incus, t: t, ready: ready, project: "subyard"}
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Program: "yard",
-		Environment: append(environment, "PATH="+root, "SUDO_LOG="+log),
+	program := cliFixture.New(Options{RepositoryRoot: root, WorkingDir: root, Program: "yard",
+		Environment: append(environment, "SUDO_LOG="+log),
 		Incus:       fixture, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.effectiveUID = func() int { return 1000 }
 	loaded, err := program.loadContext("default")
 	if err != nil {
@@ -230,17 +229,23 @@ func TestLifecycleVMCPUPrivilegesSkipConvergedStart(t *testing.T) {
 		{name: "invalid", failure: failure},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			root := testkit.TempDir(t)
+			cliFixture := newFixture(t, withCommands("sudo"))
+			root := cliFixture.Root
 			log := filepath.Join(root, "sudo.log")
-			testkit.WriteFile(t, filepath.Join(root, "sudo"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SUDO_LOG\"\nexit 1\n"), 0o700)
-			t.Setenv("PATH", root)
+			cliFixture.Exec().On(testkit.Match{Tool: "sudo", Args: []string{"-n", "true"}},
+				testkit.Reply{Script: "printf '%s\\n' \"$*\" >> \"$SUDO_LOG\"; return 1"})
 			fixture := &lifecycleCPUFixture{Incus: &testkit.Incus{}, t: t, ready: scenario.ready, err: scenario.failure}
-			program := &CLI{options: Options{Incus: fixture}, env: map[string]string{"PATH": root, "SUDO_LOG": log},
+			program := &CLI{options: Options{Incus: fixture}, env: map[string]string{"PATH": cliFixture.Env("PATH"), "SUDO_LOG": log},
 				effectiveUID: func() int { return 1000 }, operatorTerminal: func() bool { return false }}
 			var diagnostics bytes.Buffer
 			err := program.prepareLifecycleVMCPUPrivileges(context.Background(), &diagnostics,
 				domain.Context{IncusProject: "synthetic", YardInstanceName: "yard"},
 				&lifecycleExecution{action: "start", changed: scenario.changed})
+			var calls []testkit.Call
+			if scenario.authorization {
+				calls = append(calls, testkit.Call{Tool: "sudo", Args: []string{"-n", "true"}})
+			}
+			cliFixture.Exec().AssertCalls(calls...)
 			_, statErr := os.Stat(log)
 			if (statErr == nil) != scenario.authorization || (err != nil) != (scenario.authorization || scenario.failure != nil) {
 				t.Fatalf("authorization=%t err=%v diagnostic=%q", statErr == nil, err, diagnostics.String())

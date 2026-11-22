@@ -148,7 +148,14 @@ func (fixture *integrationRuntimeFixture) ApplyIntegrations(context.Context, rec
 }
 func integrationFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *integrationRuntimeFixture, string, *bytes.Buffer) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	_, cli, incus, runtime, path, output := newIntegrationFixture(t, selection)
+	return cli, incus, runtime, path, output
+}
+
+func newIntegrationFixture(t *testing.T, selection string) (*cliFixture, *CLI, *testkit.Incus, *integrationRuntimeFixture, string, *bytes.Buffer) {
+	t.Helper()
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -167,14 +174,11 @@ func integrationFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *
 	incus.Instances["subyard/yard"] = instance
 	runtime := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: "stable", Changed: true, Steps: []string{"Reconcile owned integrations"}}}
 	var output bytes.Buffer
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output, IntegrationRuntime: func(loaded config.Loaded) IntegrationRuntime {
+	cli := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output, IntegrationRuntime: func(loaded config.Loaded) IntegrationRuntime {
 		runtime.requested = slices.Clone(loaded.Integrations.Requested)
 		return runtime
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cli, incus, runtime, path, &output
+	return cliFixture, cli, incus, runtime, path, &output
 }
 func prepareIntegrationTest(t *testing.T, cli *CLI, arguments ...string) (*preparedCommand, error) {
 	t.Helper()
@@ -465,12 +469,9 @@ func TestIntegrationConcurrentHostSettingsChangeCannotReportReady(t *testing.T) 
 func TestRetiredIntegrationCommands(t *testing.T) {
 	fixture := func(t *testing.T, selection string) (*CLI, string) {
 		t.Helper()
-		cli, _, _, path, _ := integrationFixture(t, selection)
+		cliFixture, cli, _, _, path, _ := newIntegrationFixture(t, selection)
 		writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"integration","id":"old-tool"}]}`, 0644)
-		reloaded, err := New(cli.options)
-		if err != nil {
-			t.Fatal(err)
-		}
+		reloaded := cliFixture.New(cli.options)
 		return reloaded, path
 	}
 	t.Run("enable refuses", func(t *testing.T) {

@@ -15,7 +15,8 @@ import (
 func TestRollbackSourceCapabilityProbeIsReadOnlyAndHasNoTransitionInputs(t *testing.T) {
 	for _, extra := range []string{"", `,"target":"release-b"`} {
 		t.Run(map[bool]string{true: "probe", false: "transition-input-refused"}[extra == ""], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
 			manifestPath := filepath.Join(root, "config/commands.registry")
 			manifest, err := os.ReadFile(manifestPath)
 			if err != nil {
@@ -23,13 +24,10 @@ func TestRollbackSourceCapabilityProbeIsReadOnlyAndHasNoTransitionInputs(t *test
 			}
 			writeCLIFile(t, manifestPath, string(manifest)+"_release-transition||@release-transition||local|mutate|dynamic|hidden|internal|none|_release-transition|inspect or converge one exact release transition||\n", 0600)
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 				Arguments: []string{"_release-transition"},
 				Stdin:     strings.NewReader(`{"schemaVersion":2,"mode":"rollback-source-activation-capabilities"` + extra + `}`),
 				Stdout:    &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			before := nativeTreeSnapshot(t, root)
 			code := program.Run(context.Background())
 			if extra == "" {

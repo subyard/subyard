@@ -8,12 +8,10 @@ import (
 )
 
 func TestProfileActivationConcurrentObservationRequiresNativeDeclaredOwner(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	for _, test := range []struct {
 		name, id string
 		inject   func(*Options)
