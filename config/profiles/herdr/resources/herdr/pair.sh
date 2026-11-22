@@ -25,9 +25,9 @@ key_operation() {
   local phase="$1" operation="$2" owner
   owner=$(owner_fingerprint) || die 'could not read the managed owner public key fingerprint'
   if [ "$operation" = list ]; then
-    as_dev "$helper" keys "$phase" list "$owner"
+    as_dev "${helper:?}" keys "$phase" list "$owner"
   else
-    printf '%s' "$pair_value" | as_dev "$helper" keys "$phase" "$operation" "$owner" "$pair_label"
+    printf '%s' "$pair_value" | as_dev "${helper:?}" keys "$phase" "$operation" "$owner" "$pair_label"
   fi
 }
 

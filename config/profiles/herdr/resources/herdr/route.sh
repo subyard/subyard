@@ -78,7 +78,7 @@ endpoint() {
     (( 10#${BASH_REMATCH[1]} >= 64 && 10#${BASH_REMATCH[1]} <= 127 )) ||
     die 'Herdr requires an active owner Tailscale IPv4 address'
   ips=$(getent ahostsv4 "$name" | awk '{print $1}' | sort -u) || die 'Herdr owner address does not resolve'
-  if ! grep -Fxq -- "$address" <<< "$ips" || ! ip -o -4 addr show up | awk '{sub(/\/.*/, "", $4); print $4}' | grep -Fxq -- "$address"; then
+  if ! grep -Fxq -- "$address" <<< "$ips" || ! ip -o -4 addr show up | awk '{sub(/\/.*/, "", $4); print $4}' | grep -Fx -- "$address" >/dev/null; then
     die 'Herdr advertised host must resolve to the owner Tailscale IPv4 address'
   fi
   printf '%s\n' "$address"

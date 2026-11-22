@@ -4,7 +4,8 @@ umask 0022
 export TMPDIR=/tmp
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$root"
-shellcheck -x -S warning config/profiles/herdr/{guest-ssh.sh,runtime.sh,resources/herdr/{handler,install-core,login,projects-changed}.sh,tests/*.sh}
+mapfile -t shell_files < <(find config/profiles/herdr -type f -name '*.sh' | sort)
+shellcheck -x -S warning "${shell_files[@]}"
 go test -race -count=1 ./config/profiles/herdr/...
 bash config/profiles/herdr/tests/install-core.sh
 bash config/profiles/herdr/tests/handler.sh

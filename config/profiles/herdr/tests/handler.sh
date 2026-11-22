@@ -220,7 +220,7 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   export SUBYARD_CONFIG_HOME="$test_root/config" SUBYARD_RESOURCE_MODE=apply SUBYARD_OPERATION_ID=fixture
   mkdir -p "$SUBYARD_CONFIG_HOME/generated/integration-locks"
   install -m 0600 /dev/null "$SUBYARD_CONFIG_HOME/generated/integration-locks/default.lock"
-  SUBYARD_RESOURCE_ACTION=pair-list "$handler" pair --list | grep -Fxq '1  fixture-client'
+  SUBYARD_RESOURCE_ACTION=pair-list "$handler" pair --list | grep -Fx '1  fixture-client' >/dev/null
   SUBYARD_RESOURCE_ACTION=pair-revoke "$handler" pair --revoke "$key"
   grep -Fxq 'revoke client key' "$HERDR_TEST_CALLS"
 )
