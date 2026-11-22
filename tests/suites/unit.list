@@ -5,6 +5,7 @@ developer-identity.sh
 docker-forwarding-convergence.sh
 lib-power-network.sh
 p0-capacity.sh
+p0-release-smoke.sh
 runtime-privilege-reexec.sh
 ssh-config.sh
 ssh-transport-identity.sh
