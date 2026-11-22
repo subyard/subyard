@@ -514,7 +514,7 @@ entries = {entry["id"]: entry["command"][2:] for group in default_plan.values() 
 plan = {kind: {"include": [entry | {"command": entries[entry["id"]]} for entry in group["include"]]}
         for kind, group in default_plan.items()}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
-config_sync = {"id": "periodic:config-sync",
+config_sync = {"id": "periodic:config-sync", "tier": "vm",
                "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                            "bash", "dev/e2e/config-sync-acceptance.sh", "--slot", "1"]}
 assert plan["checks"]["include"].count(config_sync) == 1
@@ -526,7 +526,7 @@ assert not any(entry["id"].split(":")[-1] == "config-sync" or
                for entry in release_entries), "config sync leaked into release acceptance"
 apparmor_id = "vm:incus-apparmor-probe"
 apparmor = [entry for group in plan.values() for entry in group["include"] if entry["id"] == apparmor_id]
-assert apparmor == [{"id": apparmor_id, "command": [
+assert apparmor == [{"id": apparmor_id, "tier": "vm", "command": [
     "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
     "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]}]
 assert apparmor[0] in plan["checks"]["include"]  # Containers need no Intel-only nested VM job.
@@ -539,7 +539,7 @@ for name, duration, guest_env in (
     ("zabbly-download-smoke", "15m", []),
 ):
     check_id = "periodic:" + name
-    optional_vm[check_id] = {"id": check_id, "optional": True, "command": [
+    optional_vm[check_id] = {"id": check_id, "tier": "vm", "optional": True, "command": [
         "timeout", "--signal=TERM", "--kill-after=600s", duration,
         "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
         "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh",
@@ -548,7 +548,7 @@ for name, duration, guest_env in (
             if entry["id"] == check_id] == [optional_vm[check_id]]
     assert optional_vm[check_id] in plan["checks"]["include"]
 nm_checks = [entry for entry in plan["checks"]["include"] if entry["id"].startswith("periodic:nm-guard/")]
-assert nm_checks == [{"id": f"periodic:nm-guard/{lane}", "optional": True,
+assert nm_checks == [{"id": f"periodic:nm-guard/{lane}", "tier": "vm", "optional": True,
                       "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
                                   "bash", "dev/e2e/nm-admin-uplink.sh", "--slot", "1",
                                   "--lane", lane]}

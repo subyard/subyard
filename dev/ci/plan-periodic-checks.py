@@ -74,7 +74,9 @@ def veranda_short(name, options):
 
 def plan(root=ROOT, image=IMAGES[0]):
     module = collector()
-    declared = module.commands(root, "0.0.0", module.profile_inventory(root), periodic=True)
+    inventory = module.profile_inventory(root)
+    declarations = module.check_declarations(root, inventory)
+    declared = module.commands(root, "0.0.0", inventory, periodic=True)
     # The same release checks the collector runs: every shipped profile lane, the core VM catalog
     # with its agent upgrade baselines, and the release smoke check, plus periodic-only lanes.
     include = [{"id": name, "command": command + SLOT} for name, command in declared.items()
@@ -134,7 +136,8 @@ def plan(root=ROOT, image=IMAGES[0]):
         raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
     # Every planned command leases through the hosted controller. Its image flag
     # applies to every acquisition without changing the release lane entrypoints.
-    include = [check | {"command": ["--image", image, *check["command"]]} for check in include]
+    include = [check | {"tier": module.resolve_tier(declarations.get(check["id"], {})),
+                        "command": ["--image", image, *check["command"]]} for check in include]
     return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
             "nested": {"include": [c for c in include if c["id"] in NESTED]}}
 

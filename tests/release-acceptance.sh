@@ -1990,6 +1990,30 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with self.assertRaisesRegex(ValueError, "invalid or duplicate"):
                 m.profile_inventory(checkout)
 
+    def test_catalog_placement(self):
+        self.assertEqual(m.resolve_tier({}), "vm")
+        for tier in m.TIERS:
+            self.assertEqual(m.resolve_tier({"tier": tier}), tier)
+            self.assertEqual(m.resolve_tier({"tier": tier}, "full"), "vm")
+        for entry in ({"tier": "lxc"}, {"needs": "kvm"}, {"needs": ["unknown"]},
+                      {"tier": "runner", "needs": ["reboot"]}, {"tier": "system-container", "needs": ["kvm"]}):
+            with self.assertRaises(ValueError):
+                m.resolve_tier(entry)
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = fixture_checkout(Path(temporary))
+            p = checkout / "config/profiles/sample/tests/e2e/acceptance-lanes.json"
+            manifest = json.loads(p.read_text())
+            manifest["tier"] = "system-container"
+            manifest["lanes"][0]["tier"] = "runner"
+            p.write_text(json.dumps(manifest))
+            declarations = m.check_declarations(checkout, m.profile_inventory(checkout))
+            self.assertEqual(m.resolve_tier(declarations["profile:sample/one"]), "runner")
+            self.assertEqual(m.resolve_tier(declarations["profile:sample/two"]), "system-container")
+            manifest["lanes"][1]["needs"] = ["bogus"]
+            p.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "needs"):
+                m.profile_inventory(checkout)
+
     def test_periodic_only_lane_is_never_a_release_check(self):
         with tempfile.TemporaryDirectory() as temporary:
             checkout = fixture_checkout(Path(temporary))

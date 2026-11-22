@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "tier": "vm",
+  "needs": [],
   "lanes": [
     {"id": "bootstrap", "arguments": ["--lane", "bootstrap"]},
     {"id": "existing-yard", "arguments": ["--lane", "existing-yard"]},

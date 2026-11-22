@@ -298,6 +298,36 @@ def bundle(root, destination, *extra_paths):
                     str(root), str(destination), *extra_paths], cwd=root, env=clean_environment(), check=True)
 
 
+TIERS = ("system-container", "runner", "vm")
+VM_NEEDS = {"reboot", "kernel", "host-network", "disk-quota", "distro"}
+RUNNER_NEEDS = {"kvm", "idmap-shift", "apparmor"}
+
+
+def resolve_tier(entry, level="ordinary"):
+    tier, needs = entry.get("tier", "vm"), entry.get("needs", [])
+    if tier not in TIERS:
+        raise ValueError(f"unknown acceptance tier {tier!r}")
+    if (not isinstance(needs, list) or any(not isinstance(n, str) or n not in VM_NEEDS | RUNNER_NEEDS for n in needs)
+            or len(needs) != len(set(needs))):
+        raise ValueError(f"invalid acceptance needs {needs!r}")
+    if tier != "vm" and (VM_NEEDS.intersection(needs) or tier == "system-container" and needs):
+        raise ValueError(f"{tier} cannot provide declared needs {needs}")
+    if level not in ("ordinary", "full"):
+        raise ValueError("unknown release level")
+    return "vm" if level == "full" else tier
+
+
+def check_declarations(root, inventory):
+    result = {"vm:" + entry["id"]: entry for entry in core_vm_catalog(root)}
+    for name, entry in inventory.items():
+        if "lanes" in entry:
+            for lane in entry["lanes"]:
+                result["profile:" + name + "/" + lane["id"]] = entry | lane
+        else:
+            result["profile:" + name] = entry
+    return result
+
+
 def profile_inventory(root):
     rows = subprocess.check_output(["bash", "dev/test-profiles.sh", "--e2e", "--list"],
                                    cwd=root, text=True, stderr=subprocess.DEVNULL).splitlines()
@@ -314,8 +344,10 @@ def profile_inventory(root):
             document = json.loads(manifest.read_text())
             lanes = document.get("lanes", [])
             if (kind != "runner" or document.get("schema_version") != 1 or not isinstance(lanes, list)
-                or (not lanes and ("lanes" in document or "preflight" not in document))):
+                or (not lanes and ("lanes" in document or not document.keys() & {"preflight", "tier", "needs"}))):
                 raise ValueError("invalid profile acceptance lanes")
+            resolve_tier(document)
+            result[name].update({key: document[key] for key in ("tier", "needs") if key in document})
             if "preflight" in document:
                 command = document["preflight"]
                 if (not isinstance(command, list) or not command
@@ -326,13 +358,14 @@ def profile_inventory(root):
             ids = set()
             for lane in lanes:
                 # An optional "periodic_only": true lane runs in Periodic E2E and never gates a release.
-                if (not isinstance(lane, dict) or set(lane) - {"periodic_only"} != {"id", "arguments"}
+                if (not isinstance(lane, dict) or set(lane) - {"periodic_only", "tier", "needs"} != {"id", "arguments"}
                     or lane.get("periodic_only", True) is not True
                     or not isinstance(lane["id"], str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", lane["id"])
                     or lane["id"] in ids or not isinstance(lane["arguments"], list)
                     or any(not isinstance(arg, str) or len(arg) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in arg) for arg in lane["arguments"])
                     or "--slot" in lane["arguments"]):
                     raise ValueError("invalid or duplicate profile acceptance lane")
+                resolve_tier(result[name] | lane)
                 ids.add(lane["id"])
             if lanes:
                 result[name]["lanes"] = lanes
@@ -596,10 +629,14 @@ def core_vm_catalog(root):
     for index, entry in enumerate(entries):
         label = entry.get("id") if isinstance(entry, dict) and isinstance(entry.get("id"), str) else f"entry {index}"
         lease = entry.get("lease", {}) if isinstance(entry, dict) else None
-        if (not isinstance(entry, dict) or set(entry) - {"id", "lease", "timeout_seconds", "command", "requires"}
+        if (not isinstance(entry, dict) or set(entry) - {"id", "lease", "timeout_seconds", "command", "requires", "tier", "needs"}
                 or not isinstance(entry.get("id"), str) or not CORE_VM_ID.fullmatch(entry["id"])):
             refusals.append(f"{label}: invalid identity or fields")
             continue
+        try:
+            resolve_tier(entry)
+        except ValueError as err:
+            refusals.append(f"{label}: {err}")
         if type(entry.get("timeout_seconds")) is not int or not 60 <= entry["timeout_seconds"] <= 86400:
             refusals.append(f"{label}: timeout_seconds must be an integer from 60 to 86400")
         command = entry.get("command")
@@ -1454,10 +1491,12 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
         if (not isinstance(readiness, dict) or set(readiness) - set(receipt["external_obligations"])
             or any(value not in ("available", "unavailable", "unknown") for value in readiness.values())):
             raise ValueError("invalid external readiness declaration")
+    declarations = check_declarations(root, receipt["profiles"])
     report = {"schema_version": 1, "candidate": "frozen" if output else "worktree", "superseded": bool(receipt.get("superseded")),
               "checks": [{"id": name, "status": entry["status"], "required": entry["status"] != "not-applicable" and (name in required or not optional_vm_not_run(name, entry)),
                           "selected": name in selected and name not in excluded,
-                          "excluded": name in excluded, "physical": is_live(name)}
+                          "excluded": name in excluded, "physical": is_live(name),
+                          **({"tier": resolve_tier(declarations.get(name, {}), receipt.get("release_level", {}).get("level", "ordinary"))} if is_live(name) else {})}
                          for name, entry in checks.items()],
               "pending": [name for name, entry in checks.items() if entry["status"] not in ("passed", "not-applicable")],
               "external_prerequisites": [{"id": name, "status": entry["status"], "required": entry.get("required", True),

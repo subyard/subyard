@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "tier": "vm",
+  "needs": [],
   "preflight": ["bash", "config/profiles/test-vms/tests/run.sh", "--preflight"],
   "lanes": [
     {"id": "broker-cold-upgrade", "arguments": ["--lane", "broker-cold-upgrade"]},
