@@ -242,6 +242,21 @@ PY
   printf 'ok: telemetry acceptance syntax; checksum-frozen candidate assets and native prerequisites checked on disposable stage\n'
   exit 0
 fi
+if [ "${1:-}" = --published-rollback ]; then
+  # The core published-upgrade lane from v0.30.0, the last release that reads runtime format 1,
+  # with the telemetry rollback scenario before its rollback.
+  [ "$#" = 3 ] && [ "$2" = --slot ] && [[ "$3" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'Usage: config/profiles/telemetry/tests/e2e/acceptance.sh --published-rollback --slot N\n' >&2; exit 2;
+  }
+  [ -f "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ] && [[ "${SUBYARD_E2E_CANDIDATE_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] || {
+    printf 'telemetry acceptance requires a frozen candidate bundle and SHA256\n' >&2; exit 2;
+  }
+  allocation_route=()
+  [ -z "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] || allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
+  exec bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$3" --vm-count 1 --purpose published-upgrade --vm 1 -- \
+    timeout --signal=TERM --kill-after=120s 60m bash dev/e2e/published-upgrade.sh 0.30.0 none \
+    config/profiles/telemetry/tests/e2e/published-rollback.sh
+fi
 mode=all
 case "${1:-}" in --held-diagnostic|--resources|--local|--native-only|--android|--android-resources) mode="$1"; shift ;; esac
 [ "$#" = 2 ] && [ "$1" = --slot ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || {

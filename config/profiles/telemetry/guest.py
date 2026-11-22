@@ -30,7 +30,10 @@ CUTOVER = '.spool-cutover.json'
 PENDING = '.telemetry-archive.pending'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
+UNIT_PREFIX = '# Managed by Subyard telemetry profile.\n'
 BINARY_LIMIT = 64*1024*1024
+# The plan's stated effect of rollback-apply.
+ROLLBACK_CONSEQUENCE = 'rewrite the collector unit for v0.30 and move the collector token to /var/lib/subyard/telemetry/auth.token'
 # Inventory key for the other digest an interrupted asset update may leave on
 # disk. Path entries stay single digests, which v0.30 can still read.
 REPLACED = 'replaced'
@@ -128,23 +131,30 @@ class Runtime:
             if content is None:
                 raise ValueError('missing profile asset')
             self.assets[library/name] = (content, mode)
-        prefix = '# Managed by Subyard telemetry profile.\n'
-        common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
         # The profile's TELEMETRY_DISK_BUDGET; the collector default applies without it.
         budget = os.environ.get('SUBYARD_TELEMETRY_DISK_BYTES', '')
         budget = ' --disk-bytes '+budget if re.fullmatch('[1-9][0-9]{0,18}', budget) else ''
         self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}{budget}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
-        collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
-        # Workloads inherit their caller's ceilings. Do not put a low collector
-        # MemoryMax on this delegated ancestor or kill workloads on opt-out.
-        manager = prefix+common+f'Slice=user-{self.uid}.slice\nExecStart={self.starts[MANAGER]}\nDelegate=cpu memory io pids\nKillMode=process\n[Install]\nWantedBy=multi-user.target\n'
         self.helper = library/'otlp-headers'
         self.assets[self.helper] = (headers_helper(self.auth), 0o755)
-        self.assets[units/COLLECTOR] = (collector.encode(), 0o644)
-        self.assets[units/MANAGER] = (manager.encode(), 0o644)
+        for path, content in self.unit_files(self.starts).items():
+            self.assets[path] = (content, 0o644)
+        # Runtime format 1, which rollback-apply prepares for releases up to v0.30: the
+        # collector reads its bearer from the analytics directory and has no disk budget.
+        self.rollback_auth = data/'auth.token'
+        self.rollback_starts = {**self.starts, COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.rollback_auth}'}
+        self.rollback_units = self.unit_files(self.rollback_starts)
         for command, target, extra in [('subyard-telemetry-run', 'launcher.py', 'run '), ('subyard-telemetry-forward', 'forward.py', '')]:
-            self.assets[commands/command] = (('#!/bin/sh\n'+prefix+'exec /usr/bin/python3 -B '+str(library/target)+' '+extra+'"$@"\n').encode(), 0o755)
+            self.assets[commands/command] = (('#!/bin/sh\n'+UNIT_PREFIX+'exec /usr/bin/python3 -B '+str(library/target)+' '+extra+'"$@"\n').encode(), 0o755)
+
+    def unit_files(self, starts):
+        common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={self.user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
+        collector = UNIT_PREFIX+common+f'ExecStart={starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
+        # Workloads inherit their caller's ceilings. Do not put a low collector
+        # MemoryMax on this delegated ancestor or kill workloads on opt-out.
+        manager = UNIT_PREFIX+common+f'Slice=user-{self.uid}.slice\nExecStart={starts[MANAGER]}\nDelegate=cpu memory io pids\nKillMode=process\n[Install]\nWantedBy=multi-user.target\n'
+        return {self.units/COLLECTOR: collector.encode(), self.units/MANAGER: manager.encode()}
 
     def asset_limit(self, path):
         return BINARY_LIMIT if path == self.library/'subyard-telemetry' else native.CONFIG_LIMIT
@@ -342,18 +352,7 @@ class Runtime:
             # Apply stops the loaded unit: the workloads the manager delegates must survive it.
             if unit == MANAGER and fields.get('KillMode') != 'process':
                 raise ValueError('foreign loaded unit stop policy')
-            expected = {'FragmentPath': str(self.units/unit), 'User': self.user, 'Group': str(self.gid),
-                        'Type': 'simple', 'UMask': '0077', 'LimitCORE': '0', 'AmbientCapabilities': '',
-                        'ExecStartPre': '', 'ExecStartPost': '', 'ExecStop': '', 'ExecStopPost': '', 'Environment': '', 'EnvironmentFiles': ''}
-            if unit == COLLECTOR:
-                expected.update(KillMode='control-group', MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
-            else:
-                expected['Delegate'] = 'yes'
-            command = self.starts[unit]
-            start = fields.get('ExecStart', '')
-            if (any(fields.get(key, '') != value for key, value in expected.items())
-                    or not start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ')
-                    or start.count('argv[]=') != 1 or fields.get('NoNewPrivileges') not in (('yes', 'no') if dropins else ('yes',))):
+            if not self.loaded_as(unit, fields, self.starts[unit]):
                 # Any other loaded unit is a previous one of ours, stale until apply rewrites it,
                 # only when it is a file the inventory recorded: a previous file loaded from disk,
                 # or one an interrupted apply replaced after recording both versions. Over the
@@ -372,6 +371,21 @@ class Runtime:
                 if not all(stock_dropin(Path(dropin), before) for dropin in dropins):
                     raise ValueError('foreign loaded unit drop-in')
         return fields
+
+    def loaded_as(self, unit, fields, command):
+        """Whether a loaded unit's own fields are exactly ours with this startup."""
+        expected = {'FragmentPath': str(self.units/unit), 'User': self.user, 'Group': str(self.gid),
+                    'Type': 'simple', 'UMask': '0077', 'LimitCORE': '0', 'AmbientCapabilities': '',
+                    'ExecStartPre': '', 'ExecStartPost': '', 'ExecStop': '', 'ExecStopPost': '', 'Environment': '', 'EnvironmentFiles': ''}
+        if unit == COLLECTOR:
+            expected.update(KillMode='control-group', MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms')
+        else:
+            expected['Delegate'] = 'yes'
+        start = fields.get('ExecStart', '')
+        return (all(fields.get(key, '') == value for key, value in expected.items())
+                and start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ')
+                and start.count('argv[]=') == 1
+                and fields.get('NoNewPrivileges') in (('yes', 'no') if fields.get('DropInPaths', '').split() else ('yes',)))
 
     def running_no_new_privs(self, fields):
         if fields.get('ActiveState') != 'active':
@@ -736,10 +750,10 @@ class Runtime:
         finally:
             os.close(directory)
 
-    def remove_old_auth(self, path):
+    def remove_auth(self, path):
         with records.open_private(path):
             path.unlink()
-        records.sync_directory(self.data)
+        records.sync_directory(path.parent)
 
     def retire_operational_state(self):
         target = records.operational_directory(self.data)
@@ -831,7 +845,7 @@ class Runtime:
             self.as_developer(self.retire_legacy_producers)
             self.as_developer(self.retire_operational_state)
         if old_auth.exists() or old_auth.is_symlink():
-            self.as_developer(lambda: self.remove_old_auth(old_auth))
+            self.as_developer(lambda: self.remove_auth(old_auth))
         if self.selected and not prepared:
             binary = self.library/'subyard-telemetry'
             self.publish_asset(binary, saved)
@@ -879,6 +893,128 @@ class Runtime:
             with records.directory_lock(self.data, fcntl.LOCK_SH) as directory:
                 os.fsync(directory)
 
+    def rollback_state(self):
+        """Observed facts and the parts not yet in runtime format 1.
+
+        Each part is in this release's form or in format 1, and the inventory records
+        every unit file on disk. Anything else, including drift that only apply
+        converges, refuses: preparation converts a converged installation."""
+        unconverged = native.Refusal([('rollback-unconverged',)])
+        saved = self.saved_inventory()
+        paths = [*self.assets, *self.retained]
+        if not isinstance(saved.get(REPLACED, {}), dict) or set(saved)-{REPLACED}-{str(path) for path in paths}:
+            raise unconverged
+        facts, pending, on_disk = {}, [], {}
+        for path in paths:
+            content = self.asset_snapshot(path)
+            if content is None:
+                if path in self.retained:
+                    continue
+                raise unconverged
+            digest, mode = hashlib.sha256(content).hexdigest(), stat.S_IMODE(path.stat().st_mode)
+            on_disk[str(path)] = digest
+            facts[str(path)] = [digest, mode]
+            if digest not in self.recorded_digests(saved, path):
+                raise unconverged
+            if path in self.rollback_units:
+                if content not in (self.assets[path][0], self.rollback_units[path]):
+                    raise unconverged
+                if (content, mode) != (self.rollback_units[path], 0o644):
+                    pending.append({'parameter': 'telemetry.rollback.unit.'+path.name, 'installed': 'changed', 'desired': 'current'})
+            elif path in self.assets and (content, mode) != self.assets[path] or path in self.retained and mode != self.retained[path]:
+                raise unconverged
+        facts['inventory'] = saved == on_disk
+        if saved != on_disk:
+            pending.append({'parameter': 'telemetry.rollback.inventory', 'installed': 'changed', 'desired': 'current'})
+        for unit in (COLLECTOR, MANAGER):
+            fields = self.manager(unit)
+            loaded = (fields.get('LoadState') == 'loaded' and fields.get('NeedDaemonReload') == 'no'
+                      and self.loaded_as(unit, fields, self.rollback_starts[unit]))
+            facts[unit] = dict(loaded=loaded, **{key: fields.get(key, '') for key in ('LoadState', 'UnitFileState')})
+            if not loaded:
+                pending.append({'parameter': 'telemetry.rollback.loaded.'+unit, 'installed': 'changed', 'desired': 'current'})
+            if not self.running_no_new_privs(fields) or unit == COLLECTOR and (
+                    fields.get('ActiveState') == 'active' or fields.get('UnitFileState') == 'enabled'):
+                raise unconverged
+        tokens = {}
+        for name, path in (('private', self.auth), ('analytics', self.rollback_auth)):
+            if path.exists() or path.is_symlink():
+                try:
+                    tokens[name] = self.token(path)
+                except (OSError, ValueError):
+                    raise unconverged from None
+        try:
+            info = self.data.lstat()
+        except FileNotFoundError:
+            raise unconverged from None
+        if (len(set(tokens.values())) != 1 or not stat.S_ISDIR(info.st_mode) or info.st_uid != self.uid
+                or stat.S_IMODE(info.st_mode) != 0o700 or not self.reconcile_native(check=True)):
+            raise unconverged
+        facts['token'] = sorted(tokens)
+        if 'private' in tokens:
+            pending.append({'parameter': 'telemetry.rollback.token', 'installed': 'changed', 'desired': 'current'})
+        return facts, pending
+
+    def rollback_desired(self):
+        value = {'format': 1, 'units': {str(path): hashlib.sha256(content).hexdigest() for path, content in self.rollback_units.items()},
+                 'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()
+                            if path not in self.rollback_units},
+                 'retained': {str(path): mode for path, mode in self.retained.items()}, 'auth': str(self.rollback_auth)}
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    def rollback_observe(self):
+        """How the installed state relates to runtime format 1, which v0.30 reads."""
+        if not self.owned():
+            if any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
+                raise ValueError('unmanaged collector assets')
+            return {'state': 'absent', 'actual': '', 'desired': ''}
+        # A v0.30 collector cannot open this release's store or its retired producer files.
+        if self.selected:
+            raise native.Refusal([('rollback-enabled',)])
+        facts, pending = self.rollback_state()
+        desired = self.rollback_desired()
+        if not pending:
+            return {'state': 'current', 'actual': desired, 'desired': desired}
+        return {'state': 'stale', 'actual': hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest(),
+                'desired': desired, 'consequence': ROLLBACK_CONSEQUENCE, 'diagnostics': pending}
+
+    def rollback_apply(self):
+        """Convert to runtime format 1. Every step is idempotent and leaves a state
+        that both observers report stale, so a rerun resumes and apply reverts it."""
+        if self.rollback_observe()['state'] != 'stale':
+            return
+        if self.auth.exists():
+            token = self.token()
+            if not self.rollback_auth.exists():
+                self.as_developer(lambda: native.publish(self.rollback_auth, (token+'\n').encode(), None))
+            self.as_developer(lambda: self.remove_auth(self.auth))
+        inventory_path = self.control/'assets.json'
+        before = native.snapshot(inventory_path)
+        saved = json.loads(before)
+        recorded = {key: value for key, value in saved.items() if key != REPLACED}
+        replaced = dict(saved.get(REPLACED, {}))
+        for path, content in self.rollback_units.items():
+            current = self.asset_snapshot(path)
+            if current != content:
+                recorded[str(path)] = hashlib.sha256(current).hexdigest()
+                replaced[str(path)] = hashlib.sha256(content).hexdigest()
+        # Record both versions before replacing a unit, so every observer accepts either.
+        pending = self.encode_inventory(recorded, replaced)
+        if pending != before:
+            native.publish(inventory_path, pending, before)
+        for path, content in self.rollback_units.items():
+            current = self.asset_snapshot(path)
+            if current != content:
+                native.publish(path, content, current, mode=0o644)
+            elif stat.S_IMODE(path.stat().st_mode) != 0o644:
+                os.chmod(path, 0o644)
+        exact = {str(path): hashlib.sha256(content).hexdigest() for path in [*self.assets, *self.retained]
+                 if (content := self.asset_snapshot(path)) is not None}
+        final = self.encode_inventory(exact, {})
+        if final != pending:
+            native.publish(inventory_path, final, pending)
+        systemctl('daemon-reload')
+
 
 def main():
     if os.getuid() != 0:
@@ -917,6 +1053,17 @@ def main():
         return
     if mode == 'startup':
         print(json.dumps(runtime.startup()))
+        return
+    if mode in ('rollback-observe', 'rollback-apply'):
+        observation = runtime.rollback_observe()
+        if mode == 'rollback-apply':
+            if bindings != [observation['actual'], observation['desired']]:
+                raise ValueError('telemetry observation changed')
+            runtime.rollback_apply()
+            observation = runtime.rollback_observe()
+            if observation['state'] != 'current':
+                raise ValueError('telemetry did not converge')
+        print(json.dumps(observation))
         return
     observation = runtime.observe()
     if mode == 'observe':

@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,6 +34,37 @@ type RuntimeHook struct {
 	// its yard and may wait for that yard's init. Absent means blocking.
 	FailureScope         string   `json:"failure_scope,omitempty"`
 	ProjectsChangedHooks []string `json:"projects_changed_hooks,omitempty"`
+	// Format numbers the runtime's installed state format; absent is
+	// DefaultRuntimeFormat. PreparesRollbackTo names the one earlier format the
+	// handler converts its state to through rollback-observe and rollback-apply,
+	// before a rollback to a release whose runtime has that format.
+	Format             RuntimeFormat `json:"format,omitempty"`
+	PreparesRollbackTo RuntimeFormat `json:"prepares_rollback_to,omitempty"`
+}
+
+// RuntimeFormat is a declared runtime state format. A declaration is a
+// positive integer; zero means the field is absent.
+type RuntimeFormat int
+
+func (format *RuntimeFormat) UnmarshalJSON(data []byte) error {
+	var value int
+	if string(data) == "null" || json.Unmarshal(data, &value) != nil || value < 1 {
+		return errors.New("runtime format must be a positive integer")
+	}
+	*format = RuntimeFormat(value)
+	return nil
+}
+
+// DefaultRuntimeFormat is the format of a runtime that declares none, which
+// includes every runtime of releases up to v0.30.
+const DefaultRuntimeFormat RuntimeFormat = 1
+
+// EffectiveFormat is the declared format, or DefaultRuntimeFormat.
+func (hook RuntimeHook) EffectiveFormat() RuntimeFormat {
+	if hook.Format == 0 {
+		return DefaultRuntimeFormat
+	}
+	return hook.Format
 }
 
 // FailureScopeYard is the only declarable failure scope: a typed hook failure

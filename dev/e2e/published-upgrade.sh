@@ -37,7 +37,15 @@ published_agent_selection() {
   done
   printf '%s\n' "$selection"
 }
-[ "$#" -le 2 ] || { printf 'usage: published-upgrade.sh VERSION [AGENTS|all|none|refusal]\n' >&2; exit 2; }
+[ "$#" -le 3 ] || { printf 'usage: published-upgrade.sh VERSION [AGENTS|all|none|refusal] [ROLLBACK_SCENARIO]\n' >&2; exit 2; }
+# An owning profile's scenario runs on the candidate before the rollback and leaves the
+# rollback admissible; the rollback, Ready and the update after it stay this lane's checks.
+ROLLBACK_SCENARIO="${3:-}"
+if [ -n "$ROLLBACK_SCENARIO" ]; then
+  [ "$PUBLISHED_MODE" = direct ] && [[ "$ROLLBACK_SCENARIO" =~ ^config/profiles/[a-z0-9-]+/tests/e2e/[a-z0-9-]+\.sh$ ]] \
+    && [ -f "$ROOT/$ROLLBACK_SCENARIO" ] && [ ! -L "$ROOT/$ROLLBACK_SCENARIO" ] \
+    || { printf 'published-upgrade: invalid rollback scenario %q\n' "$ROLLBACK_SCENARIO" >&2; exit 2; }
+fi
 if [ "$PUBLISHED_MODE" = direct ]; then
   PUBLISHED_AGENTS="$(published_agent_selection "${2:-none}")" || exit 2
 else
@@ -268,7 +276,13 @@ operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json
   "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" || registry_relation=$?
 # cmp exits 1 for different registries and 2 when either cannot be read.
 [ "$registry_relation" -le 1 ] || die 'cannot compare the published and candidate registries'
+[ -z "$ROLLBACK_SCENARIO" ] || [ "$registry_relation" = 0 ] || die 'the rollback scenario needs a rollback target'
 if [ "$registry_relation" = 0 ]; then
+  if [ -n "$ROLLBACK_SCENARIO" ]; then
+    info "running rollback scenario $ROLLBACK_SCENARIO"
+    # shellcheck disable=SC1090
+    . "$ROOT/$ROLLBACK_SCENARIO"
+  fi
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
   operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \

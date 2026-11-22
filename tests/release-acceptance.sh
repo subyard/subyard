@@ -3798,7 +3798,7 @@ class LiveRetry(unittest.TestCase):
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 23)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 24)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

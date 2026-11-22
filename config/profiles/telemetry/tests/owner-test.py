@@ -191,11 +191,11 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                     'STORAGE_PATH','HOST_BASE','RESTRICTED_DISK_PATHS','ACCESS_KIND','YARD_KIND','YARD_INSTANCE_NAME',
                     'INCUS_PROJECT','INCUS_BRIDGE','SSH_HOST','DEV_USER','DEV_UID','DEV_SUDO','FORWARD_SSH_AGENT','NESTED_E2E_VMS'):
             environment[key] = 'dev' if key == 'DEV_USER' else 'fixture'
-        def observe(**overrides):
+        def observe(*action, **overrides):
             log = root/'exec.log'
             if log.exists():
                 log.unlink()
-            result = subprocess.run(['bash', str(profile/'runtime.sh'), 'observe'], env=dict(environment, **overrides),
+            result = subprocess.run(['bash', str(profile/'runtime.sh'), *(action or ['observe'])], env=dict(environment, **overrides),
                                     capture_output=True, text=True, timeout=10)
             archives = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, archives
@@ -227,6 +227,33 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             selected_run, selected_archives = observe(ENVIRONMENT_PROFILES='telemetry')
             self.assertEqual(selected_run.returncode, 0, selected_run.stderr)
             self.assertIn('subyard-telemetry', selected_archives[0])
+
+    def test_rollback_actions_use_the_guest_transport(self):
+        with tempfile.TemporaryDirectory(prefix='telemetry-owner-rollback-', dir='/tmp') as name:
+            _, observe = self.runtime_fixture(Path(name))
+            for action in (['rollback-observe'], ['rollback-apply', 'op-1', 'a'*64, 'b'*64]):
+                with self.subTest(action=action[0]):
+                    result, archives = observe(*action)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout), {'state': 'absent', 'actual': '', 'desired': ''})
+                    self.assertEqual(len(archives), 1)
+            for action in (['rollback-observe', 'extra'], ['rollback-apply', 'op-1', 'a'*64]):
+                with self.subTest(invalid=action):
+                    result, archives = observe(*action)
+                    self.assertEqual((result.returncode, archives), (2, []))
+
+    def test_rollback_refusals_name_their_next_step(self):
+        from unittest.mock import patch
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        for reasons, message, retry in (
+                ('[["rollback-enabled"]]', 'telemetry is enabled', 'run yard -Y secondary profile disable telemetry'),
+                ('[["rollback-unconverged"]]', 'not converged with this release', 'run yard migrate'),
+                ('[["unsafe-policy","codex"]]', 'unsafe or foreign telemetry policy', 'run yard -Y secondary config paths')):
+            with self.subTest(reasons=reasons), patch.dict(os.environ, YARD_NAME='secondary'), \
+                    self.assertRaisesRegex(owner['Refusal'], message) as refused:
+                owner['run']([sys.executable, '-c', 'import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)',
+                              'telemetry-native-refusal-v2 '+reasons])
+            self.assertEqual(refused.exception.retry, retry)
 
     def test_unsafe_or_missing_collector_refuses_before_any_guest_effect(self):
         with tempfile.TemporaryDirectory(prefix='telemetry-owner-refusal-', dir='/tmp') as name:

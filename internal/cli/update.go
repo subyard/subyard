@@ -160,7 +160,48 @@ func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContex
 			}
 			return observation, nil
 		},
+		ProfileRuntimeRollbackObservation: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+			hooks, err := cli.profileRuntimeRollbackHooks(ctx, root, loaded)
+			if err != nil {
+				return ports.RuntimeObservation{}, err
+			}
+			return hooks.ObserveProfileRuntimeRollback(ctx, id)
+		},
+		// The yard lock init and activation hold keeps their applies apart.
+		ProfileRuntimeRollbackApply: func(ctx context.Context, root string, loaded config.Loaded, id, operation, actual, desired, consequence string) error {
+			hooks, err := cli.profileRuntimeRollbackHooks(ctx, root, loaded)
+			if err != nil {
+				return err
+			}
+			unlock, err := lockIntegrationYard(ctx, loaded)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			return hooks.ApplyProfileRuntimeRollback(ctx, id, operation, actual, desired, consequence)
+		},
 	}
+}
+
+type profileRuntimeRollbackHooks interface {
+	ObserveProfileRuntimeRollback(context.Context, string) (ports.RuntimeObservation, error)
+	ApplyProfileRuntimeRollback(ctx context.Context, id, operation, actual, desired, consequence string) error
+}
+
+// profileRuntimeRollbackHooks runs one release root's rollback actions for
+// one yard, once the yard's native instance is its own.
+func (cli *CLI) profileRuntimeRollbackHooks(ctx context.Context, root string, loaded config.Loaded) (profileRuntimeRollbackHooks, error) {
+	operation := cli.releaseActivationOperation()
+	if err := operation.checkNativeOwner(ctx, loaded); err != nil {
+		return nil, err
+	}
+	operation.options.RepositoryRoot = root
+	platform := operation.initPlatformWithDispatcher(loaded, nil, filepath.Join(root, "bin", "yard-engine"))
+	hooks, ok := platform.(profileRuntimeRollbackHooks)
+	if !ok {
+		return nil, errors.New("profile runtime rollback actions are unavailable")
+	}
+	return hooks, nil
 }
 
 func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
@@ -209,6 +250,15 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 	if result.Status == "ok" && execution.prepared.RefreshConfigs {
 		runErr = errors.Join(runErr, cli.refreshReleaseConfig(ctx, execution))
 	}
+	if execution.prepared.Action == releaseruntime.PrepareRollbackAction && runErr == nil && result.Status == "ok" {
+		inspection, checkErr := execution.prepared.Check(ctx)
+		if checkErr != nil {
+			execution.failurePhase, execution.failureCode = execution.phase, "final_check_failed"
+			runErr = fmt.Errorf("final rollback preparation check: %w", checkErr)
+		} else {
+			execution.inspection = &inspection
+		}
+	}
 	if _, update := updateDirection(execution.prepared.Action); update && runErr == nil && result.Status == "ok" {
 		if cli.updateProgress != nil {
 			if execution.prepared.RepairCurrent {
@@ -246,11 +296,18 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 }
 
 func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
-	if _, update := updateDirection(execution.prepared.Action); !update {
+	preparation := execution.prepared.Action == releaseruntime.PrepareRollbackAction
+	if _, update := updateDirection(execution.prepared.Action); !update && !preparation {
 		return
 	}
 	output := cli.options.Stdout
-	if execution.repairPending && !execution.followup {
+	if preparation {
+		if success {
+			fmt.Fprintln(output, "\n  [ ok ] Profile runtimes prepared for rollback")
+		} else {
+			fmt.Fprintln(output, "\n  [FAIL] Rollback preparation did not complete")
+		}
+	} else if execution.repairPending && !execution.followup {
 		fmt.Fprintln(output, "\n  Release is active; additional activation repair requires a fresh plan.")
 	} else if execution.prepared.RepairCurrent {
 		if success {
@@ -274,7 +331,7 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 			}
 		}
 		outcome = execution.inspection.Outcome
-	} else {
+	} else if !preparation {
 		fmt.Fprintln(output, "  Final readiness: not verified")
 	}
 	if outcome == nil {
@@ -406,6 +463,10 @@ func (cli *CLI) finishUpdateHistory(ctx context.Context, execution *releaseExecu
 }
 
 func (cli *CLI) recordUpdateTerminal(arguments []string, operationID, phase, status, code string, execution *releaseExecution) error {
+	// Rollback preparation is not a release update and keeps no update history.
+	if execution != nil && execution.prepared.Action == releaseruntime.PrepareRollbackAction {
+		return nil
+	}
 	direction := "activate"
 	for _, argument := range arguments {
 		if argument == "--rollback" {

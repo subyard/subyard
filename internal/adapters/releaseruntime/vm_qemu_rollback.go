@@ -65,16 +65,24 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 // public error cause. Only its protocol outcome is bounded; the operation boundary
 // renders the complete cause once, including for a new rollback's planning refusal.
 func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selection *releaseSelection) error {
+	_, err := runtime.rollbackCompatibility(ctx, target, request, selection, false)
+	return err
+}
+
+// rollbackCompatibility also returns the profile runtime observation when
+// an owner is still to be prepared for the rollback; when preparing, such
+// an owner is not a refusal.
+func (runtime *Runtime) rollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selection *releaseSelection, preparing bool) (*formatObservation, error) {
 	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
 	if selection != nil && (err != nil || links != selection.links) {
-		return staleRetainedSelection(request.RuntimeRoot, request.Target)
+		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	observed := releaseLinksFromRuntimeSnapshot(links)
 	if (selection == nil || selection.draft != nil) && request.Direction != releasetransition.DirectionActivatePrevious {
-		return nil
+		return nil, nil
 	}
 	var migrationMessages []string
 	var migrationErr error
@@ -84,13 +92,28 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	layout, layoutErr := runtime.inspectConfigLayoutRollback(ctx, target, request)
 	messages, vmErr := runtime.inspectVMQEMURollback(ctx, target, request)
 	vmRefused := len(messages) != 0
+	format, err := runtime.inspectProfileFormatRollback(ctx, target, request, selection)
+	if err != nil {
+		return nil, err
+	}
+	var pending *formatObservation
+	if len(format.pending()) != 0 {
+		pending = &format
+	}
+	if !preparing {
+		for _, item := range format.pending() {
+			format.refuse(fmt.Sprintf("yard %s: profile runtime %s must first be prepared for rollback", item.yard, item.owner), rollbackRetry, nil)
+		}
+	}
 	if layout != nil {
 		messages = append([]string{layout.Message}, messages...)
 	}
-	messages = append(migrationMessages, messages...)
+	messages = append(append(migrationMessages, messages...), format.messages...)
+	formatErr := domain.CollectOrderedRefusals(format.causes...)
 	if len(messages) == 0 {
-		return domain.CollectRefusals(migrationErr, layoutErr, vmErr)
+		return pending, domain.CollectRefusals(migrationErr, layoutErr, vmErr, formatErr)
 	}
+	formatOnly := len(messages) == len(format.messages)
 	var outcome releasetransition.Outcome
 	if layout != nil {
 		outcome = *layout
@@ -104,6 +127,9 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	if layout != nil && vmRefused && len(migrationMessages) == 0 {
 		outcome.Retry = "retain a release supporting the installed configuration and reporting VM values, then run yard update --rollback"
 	}
+	if formatOnly {
+		outcome.Retry = format.retry
+	}
 	outcome.Message = strings.Join(messages, "; ")
 	complete := outcome.Message
 	if len(complete) > 512 {
@@ -113,6 +139,9 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		}
 		if len(migrationMessages) != 0 {
 			reason = "rollback requires matching migration registries and compatible installed state"
+		}
+		if formatOnly {
+			reason = "rollback requires prepared profile runtimes in every local yard"
 		}
 		command := "yard update --version " + target.version
 		if request.Direction == releasetransition.DirectionActivatePrevious {
@@ -124,5 +153,5 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	if complete != outcome.Message {
 		cause = fmt.Errorf("%w; %s", cause, complete)
 	}
-	return publicReleaseInspectionError{cause: domain.CollectRefusals(cause, migrationErr, layoutErr, vmErr), outcome: outcome}
+	return nil, publicReleaseInspectionError{cause: domain.CollectRefusals(cause, migrationErr, layoutErr, vmErr, formatErr), outcome: outcome}
 }

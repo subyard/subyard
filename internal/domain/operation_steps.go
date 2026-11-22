@@ -31,8 +31,11 @@ type OperationStep struct {
 	Consequence   string       `json:"consequence,omitempty"`
 }
 
+// MaxOperationSteps is the most steps one operation plan may show.
+const MaxOperationSteps = 256
+
 func ValidateOperationSteps(steps []OperationStep) error {
-	if len(steps) > 256 {
+	if len(steps) > MaxOperationSteps {
 		return fmt.Errorf("%w: too many operation steps", ErrActionPolicyInvalid)
 	}
 	seen := make(map[string]bool, len(steps))

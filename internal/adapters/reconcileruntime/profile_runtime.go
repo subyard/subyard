@@ -83,8 +83,16 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 	if domain.SafeName(definition.Name) && domain.SafeName(runtime.Yard.YardName) {
 		failure.retry = "run yard -Y " + runtime.Yard.YardName + " config paths"
 	}
-	// Only explicitly public owner refusals may add a path and executable step.
-	// Exception text and ordinary stderr remain private.
+	if message, retry, ok := publicOwnerRefusal(stderr); ok {
+		failure.message, failure.retry = message, retry
+	}
+	return failure
+}
+
+// publicOwnerRefusal is the one explicitly public owner refusal in a hook's
+// stderr. Only it may add a path and executable step; exception text and
+// ordinary stderr remain private.
+func publicOwnerRefusal(stderr []byte) (message, retry string, ok bool) {
 	const prefix = "subyard-profile-observation-refusal-v1 "
 	var records []string
 	for _, line := range strings.Split(string(stderr), "\n") {
@@ -92,30 +100,31 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 			records = append(records, strings.TrimPrefix(line, prefix))
 		}
 	}
-	if len(records) == 1 && len(records[0]) <= 2048 {
-		var record struct {
-			Message string `json:"message"`
-			Retry   string `json:"retry"`
+	if len(records) != 1 || len(records[0]) > 2048 {
+		return "", "", false
+	}
+	var record struct {
+		Message string `json:"message"`
+		Retry   string `json:"retry"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(records[0]))
+	decoder.DisallowUnknownFields()
+	valid := func(value string) bool {
+		if value == "" || len(value) > 480 {
+			return false
 		}
-		decoder := json.NewDecoder(strings.NewReader(records[0]))
-		decoder.DisallowUnknownFields()
-		valid := func(value string) bool {
-			if value == "" || len(value) > 480 {
+		for _, r := range value {
+			if unicode.IsControl(r) {
 				return false
 			}
-			for _, r := range value {
-				if unicode.IsControl(r) {
-					return false
-				}
-			}
-			return true
 		}
-		var tail any
-		if decoder.Decode(&record) == nil && decoder.Decode(&tail) == io.EOF && valid(record.Message) && valid(record.Retry) && strings.HasPrefix(record.Retry, "run ") {
-			failure.message, failure.retry = record.Message, record.Retry
-		}
+		return true
 	}
-	return failure
+	var tail any
+	if decoder.Decode(&record) != nil || decoder.Decode(&tail) != io.EOF || !valid(record.Message) || !valid(record.Retry) || !strings.HasPrefix(record.Retry, "run ") {
+		return "", "", false
+	}
+	return record.Message, record.Retry, true
 }
 
 // A runtime hook may state one short plan consequence of applying a stale contract.
@@ -208,9 +217,68 @@ func (runtime Runtime) ProfileRuntimeObservation(ctx context.Context, activation
 	return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
 }
 
+// profileRuntimeActions names one observe/apply pair of the runtime hook
+// protocol. Rollback preparation uses the same output contract and checks.
+type profileRuntimeActions struct{ observe, apply, name string }
+
+var (
+	profileRuntimeRefresh  = profileRuntimeActions{observe: "observe", apply: "apply", name: "profile runtime refresh"}
+	profileRuntimeRollback = profileRuntimeActions{observe: "rollback-observe", apply: "rollback-apply", name: "profile runtime rollback preparation"}
+)
+
+// ObserveProfileRuntimeRollback runs one declared owner's read-only
+// rollback-observe: how its installed state relates to the format it prepares
+// for rollback. A missing or stopped yard is absent or deferred, as for observe.
+func (runtime Runtime) ObserveProfileRuntimeRollback(ctx context.Context, id string) (ports.RuntimeObservation, error) {
+	definition, err := runtime.rollbackRuntimeDefinition(id)
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	if ports.LocalInstallationAbsent(runtime.Incus) {
+		return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
+	}
+	observations, err := runtime.observeProfileRuntimesWith(ctx, []profile.Definition{definition}, profileRuntimeRollback.observe)
+	return observations[id], err
+}
+
+// ApplyProfileRuntimeRollback converts one owner's state to its prepared
+// rollback format, with the assessment, result and verification checks of
+// apply. The confirmed consequence is part of the assessment.
+func (runtime Runtime) ApplyProfileRuntimeRollback(ctx context.Context, id, operationID, actual, desired, consequence string) error {
+	definition, err := runtime.rollbackRuntimeDefinition(id)
+	if err != nil {
+		return err
+	}
+	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRollback, operationID, actual, desired, &consequence)
+}
+
+func (runtime Runtime) rollbackRuntimeDefinition(id string) (profile.Definition, error) {
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return profile.Definition{}, err
+	}
+	for _, definition := range definitions {
+		if definition.Runtime.ActivationID == id {
+			if definition.Runtime.PreparesRollbackTo == 0 {
+				return profile.Definition{}, fmt.Errorf("profile runtime %s prepares no rollback format", id)
+			}
+			return definition, nil
+		}
+	}
+	return profile.Definition{}, errors.New("profile runtime owner is unavailable")
+}
+
 func (runtime Runtime) observeProfileRuntimes(
 	ctx context.Context,
 	definitions []profile.Definition,
+) (map[string]ports.RuntimeObservation, error) {
+	return runtime.observeProfileRuntimesWith(ctx, definitions, profileRuntimeRefresh.observe)
+}
+
+func (runtime Runtime) observeProfileRuntimesWith(
+	ctx context.Context,
+	definitions []profile.Definition,
+	action string,
 ) (map[string]ports.RuntimeObservation, error) {
 	observations := make(map[string]ports.RuntimeObservation, len(definitions))
 	if len(definitions) == 0 {
@@ -235,6 +303,13 @@ func (runtime Runtime) observeProfileRuntimes(
 	if err != nil {
 		return nil, fmt.Errorf("inspect yard for profile runtimes: %w", err)
 	}
+	// Nothing is installed to prepare for rollback in a never-provisioned guest.
+	if never && action == profileRuntimeRollback.observe {
+		for _, definition := range definitions {
+			observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
+		}
+		return observations, nil
+	}
 	if strings.EqualFold(instance.Status, "stopped") || never {
 		for _, definition := range definitions {
 			observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateDeferred}
@@ -253,7 +328,7 @@ func (runtime Runtime) observeProfileRuntimes(
 		slots <- struct{}{}
 		workers.Go(func() {
 			defer func() { <-slots }()
-			outputs[index], diagnostics[index], failures[index] = runtime.runProfileRuntimeHandler(ctx, definition, "observe")
+			outputs[index], diagnostics[index], failures[index] = runtime.runProfileRuntimeHandler(ctx, definition, action)
 		})
 	}
 	workers.Wait()
@@ -341,10 +416,20 @@ func (runtime Runtime) applyProfileRuntime(
 	definition profile.Definition,
 	operationID, actual, desired string,
 ) error {
+	return runtime.applyProfileRuntimeWith(ctx, definition, profileRuntimeRefresh, operationID, actual, desired, nil)
+}
+
+func (runtime Runtime) applyProfileRuntimeWith(
+	ctx context.Context,
+	definition profile.Definition,
+	actions profileRuntimeActions,
+	operationID, actual, desired string,
+	consequence *string,
+) error {
 	if !domain.SafeID(operationID) {
-		return errors.New("profile runtime refresh requires a valid operation ID")
+		return errors.New(actions.name + " requires a valid operation ID")
 	}
-	observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+	observations, err := runtime.observeProfileRuntimesWith(ctx, []profile.Definition{definition}, actions.observe)
 	if err != nil {
 		return err
 	}
@@ -352,7 +437,8 @@ func (runtime Runtime) applyProfileRuntime(
 	if observation.State == ports.RuntimeStateCurrent && observation.Actual == desired && observation.Desired == desired {
 		return nil
 	}
-	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired {
+	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired ||
+		consequence != nil && observation.Consequence != *consequence {
 		return fmt.Errorf("%w: profile runtime assessment changed before apply", domain.ErrPlanStale)
 	}
 	nonce, err := profileRuntimeDiagnosticNonce()
@@ -360,8 +446,16 @@ func (runtime Runtime) applyProfileRuntime(
 		return err
 	}
 	environment := append(slices.Clone(runtime.Environment), profileRuntimeNonceVariable+"="+nonce)
-	stdout, stderr, err := runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, environment, profileRuntimeApplyLimit, "apply", operationID, actual, desired)
+	stdout, stderr, err := runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, environment, profileRuntimeApplyLimit, actions.apply, operationID, actual, desired)
 	if err != nil {
+		// Rollback hook stderr stays private, as an observation's does: only
+		// the owner's parsed public refusal and the generic failure show.
+		if actions == profileRuntimeRollback {
+			if message, retry, ok := publicOwnerRefusal(stderr); ok {
+				return &integrationLifecycleError{cause: err, message: message, retry: retry}
+			}
+			return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
+		}
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
 		}
@@ -372,15 +466,15 @@ func (runtime Runtime) applyProfileRuntime(
 		return fmt.Errorf("validate profile runtime apply result: %w", err)
 	}
 	if applied.State != ports.RuntimeStateCurrent || applied.Actual != desired || applied.Desired != desired {
-		return errors.New("profile runtime refresh did not produce the expected contract")
+		return errors.New(actions.name + " did not produce the expected contract")
 	}
-	verified, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+	verified, err := runtime.observeProfileRuntimesWith(ctx, []profile.Definition{definition}, actions.observe)
 	if err != nil {
-		return fmt.Errorf("verify profile runtime refresh: %w", err)
+		return fmt.Errorf("verify %s: %w", actions.name, err)
 	}
 	result := verified[definition.Runtime.ActivationID]
 	if result.State != ports.RuntimeStateCurrent || result.Actual != desired || result.Desired != desired {
-		return errors.New("profile runtime refresh did not retain the expected contract")
+		return errors.New(actions.name + " did not retain the expected contract")
 	}
 	return nil
 }
@@ -472,7 +566,7 @@ func (runtime Runtime) runProfileRuntimeHandler(
 	arguments ...string,
 ) ([]byte, []byte, error) {
 	timeout := profileRuntimeObserveLimit
-	if action == "apply" {
+	if action == profileRuntimeRefresh.apply || action == profileRuntimeRollback.apply {
 		timeout = profileRuntimeApplyLimit
 	}
 	return runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, runtime.Environment, timeout, action, arguments...)

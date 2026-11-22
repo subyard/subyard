@@ -334,6 +334,7 @@ func TestCoreActionRegistryClassifiesUpdateVariants(t *testing.T) {
 		{action: "update.check", effect: domain.ActionBoundedWrite, recovery: domain.RecoveryNotNeeded, policy: domain.ActionConfirmationNever},
 		{action: "update.activate", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, recovery: domain.RecoveryReversible, policy: domain.ActionConfirmationPromptDefaultYes},
 		{action: "update.rollback", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime}, recovery: domain.RecoveryReversible, policy: domain.ActionConfirmationPromptDefaultYes},
+		{action: "update.prepare-rollback", effect: domain.ActionMutation, impacts: []domain.ActionImpact{domain.ImpactPersistentData, domain.ImpactYardRuntime}, recovery: domain.RecoveryReversible, policy: domain.ActionConfirmationPromptDefaultYes},
 	} {
 		t.Run(string(test.action), func(t *testing.T) {
 			assessment, err := registry.Assess(test.action, domain.ActionDelta{

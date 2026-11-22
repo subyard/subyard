@@ -74,17 +74,23 @@ upgrade removes the recorded token and keeps the private one. Subsequent telemet
 and disable operations leave home documents alone. Policy files that still contain the
 bearer are rewritten without it; the helper is installed before a policy names it.
 
-Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
-Those releases can also reintroduce the collector token into home documents, where an
-older template writer can publish it with mode `0644`. If an upgrade stopped while it was
-replacing collector assets, finish it before rolling back: those releases refuse a collector
-asset that the inventory does not record. This release adds no telemetry rollback check
-of its own. While the telemetry profile is installed (enabled, or disabled with its collector
-unit still present), v0.30 refuses the rollback itself: its telemetry runtime observation
-rejects the collector unit installed by later releases, the update reports
-`dependency-unavailable` for `activation.telemetry-runtime`, and the current release stays
-active. `profile disable` leaves the collector unit installed. Process environment settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can
-bypass the managed policy. Claude ignores local drop-ins when server-managed settings apply.
+Releases v0.28–v0.30 read telemetry runtime format 1, and this release installs format 2.
+Rollback is supported only to v0.30.0; rollback to v0.29.0 or earlier stays refused.
+`yard update --rollback` to v0.30.0 refuses while telemetry is enabled in a local
+yard: its collector cannot open this release's store or the producer files it retired.
+Run `yard -Y NAME profile disable telemetry` first, which also removes both system policy
+files. It also refuses drift that only `yard migrate` converges. The first rollback command
+then converts each yard. It rewrites the collector unit in the v0.30.0 form and moves the collector
+token to `/var/lib/subyard/telemetry/auth.token`. No telemetry data is moved or converted.
+Until the rollback itself, this release reports that drift, and `yard migrate` reverts it.
+v0.30.0 cannot read this release's profile declarations, so its own
+`yard update --rollback` back refuses without changing anything. Return with
+`yard update --version VERSION`, which reads this release's declarations itself.
+Re-enabling telemetry on v0.30.0 fails: its collector refuses this release's store,
+and after an upgrade from v0.30 its run manager cannot reopen the producer files this release
+retired. Process environment settings such
+as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
+local drop-ins when server-managed settings apply.
 
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection

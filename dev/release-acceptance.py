@@ -445,6 +445,7 @@ CI_HOSTED_CHECKS = frozenset({
     # Split from vm:p0-full, whose --split-covered matrix keeps only the nested-VM stages.
     "vm:p0-power-systemd", "vm:p0-legacy-continuation",
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",
+    "profile:telemetry/published-rollback",
 })
 # release-vm.yml Git blobs reviewed to execute one exact collector selection per job.
 CI_HOSTED_POLICIES = frozenset({

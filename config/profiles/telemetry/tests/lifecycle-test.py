@@ -1002,6 +1002,7 @@ for path, value in (
             runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},
                 data=units/'data',auth=units/'data-private/auth.token',
                 assets={units/guest.COLLECTOR:(b'known unit',0o644)})
+            runtime.loaded_as=lambda *arguments: guest.Runtime.loaded_as(runtime,*arguments)
             fields=dict(LoadState='loaded',FragmentPath=str(units/guest.COLLECTOR),User='dev',Group='1000',
                 Type='simple',KillMode='control-group',UMask='0077',LimitCORE='0',NoNewPrivileges='no',
                 DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf',MemoryMax='268435456',TasksMax='64',

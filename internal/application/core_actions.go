@@ -140,6 +140,11 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryReversible,
 		},
 		{
+			Action: "update.prepare-rollback", Summary: "Prepare profile runtimes for rollback", Effect: domain.ActionMutation,
+			Impacts:  []domain.ActionImpact{domain.ImpactPersistentData, domain.ImpactYardRuntime},
+			Recovery: domain.RecoveryReversible,
+		},
+		{
 			Action: "test-vms.logs", Summary: "Show test VM broker logs", Effect: domain.ActionRead,
 			Recovery: domain.RecoveryNotNeeded,
 		},

@@ -47,7 +47,10 @@ type Config struct {
 	HTTPClient                *http.Client
 	InstalledRuntimePresence  func(context.Context, string, config.Loaded, string) (ports.RuntimePresence, error)
 	ProfileRuntimeObservation func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error)
-	YardInstance              func(context.Context, config.Loaded) (ports.InstanceInfo, error)
+	// The active release's rollback-observe and rollback-apply of one owner.
+	ProfileRuntimeRollbackObservation func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error)
+	ProfileRuntimeRollbackApply       func(ctx context.Context, root string, loaded config.Loaded, id, operation, actual, desired, consequence string) error
+	YardInstance                      func(context.Context, config.Loaded) (ports.InstanceInfo, error)
 	// ConfigurationState supplies configuration state that update --check
 	// reports beside its inspection, such as ignored operator assignments.
 	ConfigurationState func() []config.ConfigurationState
@@ -80,6 +83,8 @@ type Prepared struct {
 	convergedOutcome *releasetransition.Outcome
 	// Set only for an ordinary resume of an unfinished journal.
 	newerRelease func(context.Context) NewerRelease
+	// Set only for a rollback preparation: the observation its plan binds.
+	preparation *formatObservation
 }
 
 type verifiedPreparationError struct {
@@ -584,10 +589,25 @@ func (runtime *Runtime) PrepareTransition(
 	configHome string,
 	yard string,
 ) (Prepared, error) {
+	return runtime.prepareTransition(ctx, arguments, configHome, yard, false)
+}
+
+func (runtime *Runtime) prepareTransition(
+	ctx context.Context,
+	arguments []string,
+	configHome string,
+	yard string,
+	rerun bool,
+) (Prepared, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, help, err := runtime.parse(arguments)
 	if err != nil {
 		return Prepared{}, err
+	}
+	// A rerun repeats the admission without its progress.
+	parsed.quiet = rerun
+	parsed.rerun = func(ctx context.Context) (Prepared, error) {
+		return runtime.prepareTransition(ctx, arguments, configHome, yard, true)
 	}
 	if help {
 		return runtime.prepareHelp(), nil
@@ -725,7 +745,9 @@ func (runtime *Runtime) PrepareTransition(
 		exactCompletedTarget := !parsed.offline && protected.journal.SourceIngress != nil &&
 			parsed.version != "" && parsed.version == protected.target.version &&
 			(parsed.tag == "" || parsed.tag == "v"+protected.target.version) && !parsed.rollback && !parsed.force
-		if unfinished || exactCompletedTarget {
+		// Owners prepared for rollback report their converted state as drift;
+		// only that drift leaves the rollback admitted.
+		if (unfinished || exactCompletedTarget) && !(parsed.rollback && runtime.preparedDriftOnly(ctx, parsed.root, protected)) {
 			if unfinished {
 				newerRelease = newerReleaseReplacement(parsed, configHome)
 			}
@@ -1314,12 +1336,21 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(err)
 	}
 	ctx = selectionContext(ctx, parsed.selection)
-	if err := runtime.inspectRollbackCompatibility(ctx, verified, request, parsed.selection); err != nil {
-		var refusal publicReleaseInspectionError
-		if parsed.check && errors.As(err, &refusal) {
-			return runtime.preparePublicInspectionOutcome(parsed, refusal.outcome), nil
+	// Owners the active release still has to prepare are not a refusal here;
+	// once every other admission passes, they are the whole plan.
+	pending, compatErr := runtime.rollbackCompatibility(ctx, verified, request, parsed.selection, true)
+	var compatRefusal publicReleaseInspectionError
+	if compatErr != nil && !errors.As(compatErr, &compatRefusal) {
+		return Prepared{}, verifiedPreparation(compatErr)
+	}
+	refused := func(err error, outcome releasetransition.Outcome) (Prepared, error) {
+		if parsed.check {
+			return runtime.preparePublicInspectionOutcome(parsed, outcome), nil
 		}
 		return Prepared{}, verifiedPreparation(err)
+	}
+	if compatErr != nil && compatRefusal.outcome.Code == releasetransition.CodePlanStale {
+		return refused(compatErr, compatRefusal.outcome)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
@@ -1327,7 +1358,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 	targetOwners := map[string]bool{}
 	applicable, err := retainedRuntimeApplicable(activeRoot)
 	if err != nil {
-		return Prepared{}, verifiedPreparation(err)
+		return Prepared{}, verifiedPreparation(domain.CollectOrderedRefusals(compatErr, err))
 	}
 	if applicable && verified.registryDigest != "" {
 		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, parsed.root, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
@@ -1343,10 +1374,24 @@ func (runtime *Runtime) prepareRetainedTransition(
 	// still requires the independent runtime binding below AND a successful
 	// ordinary V1 inspection before returning a plan. Neither an exit status nor
 	// a version claim proves compatibility; execution rechecks both proofs.
-	runtimeBinding, err := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
-	if err != nil {
-		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
-			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
+	// Both admissions are independent; a refusal reports both.
+	runtimeBinding, bindingErr := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
+	if compatErr != nil && bindingErr != nil {
+		joined := joinReleaseRefusals(compatRefusal, retainedBindingMessage, bindingErr)
+		return refused(joined, joined.outcome)
+	}
+	if compatErr != nil {
+		return refused(compatErr, compatRefusal.outcome)
+	}
+	if bindingErr != nil {
+		return Prepared{}, verifiedPreparation(retainedBindingRefusal(observed, release, bindingErr))
+	}
+	if pending != nil {
+		prepared, err := runtime.prepareRollbackPreparation(parsed, request, verified, *pending, runtimeBinding)
+		if refusal := (publicReleaseInspectionError{}); errors.As(err, &refusal) {
+			return refused(err, refusal.outcome)
+		}
+		return prepared, err
 	}
 	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request)
 	if err != nil {
@@ -1620,7 +1665,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	return Prepared{
 		Request: request,
 		Action: map[bool]domain.ActionID{
-			true: "update.rollback", false: "update.activate",
+			true: rollbackAction, false: "update.activate",
 		}[request.Direction == releasetransition.DirectionActivatePrevious],
 		Changed: changed, Consequences: consequences,
 		RefreshConfigs:   !activationReconciliationOwned,
@@ -1808,7 +1853,7 @@ type publishedCandidate struct {
 }
 
 func (runtime *Runtime) progress(options options, format string, arguments ...any) {
-	if !options.check && runtime.config.Progress != nil {
+	if !options.check && !options.quiet && runtime.config.Progress != nil {
 		fmt.Fprintf(runtime.config.Progress, format+"\n", arguments...)
 	}
 }
@@ -1906,7 +1951,9 @@ type options struct {
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool
-	rootExplicit                                            bool
+	rootExplicit, quiet                                     bool
+	// rerun plans this same command again.
+	rerun func(context.Context) (Prepared, error)
 }
 
 func (runtime *Runtime) prepareHelp() Prepared {

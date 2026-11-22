@@ -866,7 +866,9 @@ with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1
 check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
 previous release distinct from both remains a direct baseline. When the baseline ships the
 candidate's exact registry bytes, the lane also rolls back to it, checks Ready and unchanged
-migration history, and updates to the candidate again.
+migration history, and updates to the candidate again. An owning profile lane can pass a
+`config/profiles/PROFILE/tests/e2e/*.sh` scenario as the third argument; the lane sources it on
+the candidate before the rollback, and requires the rollback target.
 Host-free `dev/verify-release-upgrades.py --only-source-anchor` checks refusal at
 v0.11.0, v0.17.3 and v0.27.0, including update and `--check`, the exact hop command,
 unchanged protected state and rejection of Incus mutations; these have no VM catalog entries.

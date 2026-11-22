@@ -39,6 +39,20 @@ type releaseSelection struct {
 	// compatibility is the history verdict for an installed engine; a fresh
 	// forward draft has its own migration planner and no verdict.
 	compatibility *releasetransition.HistoryCompatibilityVerdict
+	// formatOwners are the runtime owners the active release prepares for
+	// this rollback target.
+	formatOwners []string
+}
+
+// appendRefusal reports a refusal beside the one already selected, whose
+// next step stays first.
+func (selection *releaseSelection) appendRefusal(message, retry string, cause error) {
+	if selection.refusal == "" {
+		selection.refusal, selection.retry, selection.cause = message, retry, cause
+		return
+	}
+	selection.refusal += "; " + message
+	selection.cause = domain.CollectOrderedRefusals(selection.cause, cause)
 }
 
 func selectionContext(ctx context.Context, selection *releaseSelection) context.Context {
@@ -101,13 +115,13 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 	return runtime.captureTransitionSelection(ctx, target, request, links, false)
 }
 
-func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot, freshDraft bool) (*releaseSelection, error) {
+func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot, freshDraft bool) (selection *releaseSelection, err error) {
 	unlock, err := runtime.lockReleaseSelection(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	selection := &releaseSelection{request: request, links: links, targetArtifact: target.manifestDigest}
+	selection = &releaseSelection{request: request, links: links, targetArtifact: target.manifestDigest}
 	if observed, err := runtime.inspectRuntimeLinks(request.RuntimeRoot); err != nil || observed != links {
 		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
 	}
@@ -125,6 +139,16 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 	}
 	defer active.Close()
 	selection.activeArtifact = active.manifestDigest
+	// Both routes to an older release: one fixed rule for its runtime formats.
+	retained := links.previous.present && links.previous.target == "releases/"+string(target.candidate.release)
+	formatOwners, formatRefusal, formatRetry, formatCause := profileFormatAdmission(active, target,
+		request.Direction == releasetransition.DirectionActivatePrevious, retained)
+	selection.formatOwners = formatOwners
+	defer func() {
+		if selection != nil && formatRefusal != "" {
+			selection.appendRefusal(formatRefusal, formatRetry, formatCause)
+		}
+	}()
 	selection.state, err = runtime.readCurrentSnapshot(request.RuntimeRoot, request.ConfigHome)
 	if err != nil {
 		selection.refusal, selection.cause = "the selected release cannot verify the authoritative active migration history", err
