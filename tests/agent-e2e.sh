@@ -3108,6 +3108,13 @@ for grant_filter in 'del(.grant.environment)' '.grant.environment.lifecycle = "r
   fi
 done
 (
+  ENVIRONMENT_TYPE=system-container
+  resolve_vm_count
+  container_grant="$(jq -c '.grant.environment |= (.type = "system-container" | .disk_per_vm = "" | .memory_per_vm = "")' <<<"$structured_response")"
+  parse_lease_grant "$container_grant"
+  [ "${#VM_IP[@]}" = 2 ] && [ -z "$GRANT_MEMORY_PER_VM$GRANT_DISK_PER_VM" ] || fail 'unexpected container grant'
+) || fail 'container grant was rejected'
+(
   ENVIRONMENT_TYPE=android-test
   VM_COUNT=1
   android_grant="$(jq -c '.grant.environment.type = "android-test" | .grant.environment.vm_count = 1 | .grant.environment.memory_per_vm = "8GiB" | .grant.environment.disk_per_vm = "40GiB" | .grant.targets = [.grant.targets[0]]' <<<"$structured_response")"

@@ -428,6 +428,10 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 	cfg := runtime.Config
 	totalCPU := strconv.Itoa(cfg.CPU * cfg.guestCount())
 	totalMemory := cfg.totalSize(cfg.Memory)
+	vmLimit := strconv.Itoa(cfg.guestCount())
+	if cfg.systemContainer() {
+		totalMemory, vmLimit = "", "0"
+	}
 	exists, err := runtime.projectPresence(ctx)
 	if err != nil {
 		return fmt.Errorf("inventory inner Incus projects: %w", err)
@@ -487,7 +491,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 				"-c", "features.images=false",
 				"-c", "user.subyard.managed="+managedMarker,
 				"-c", "limits.instances="+strconv.Itoa(cfg.guestCount()),
-				"-c", "limits.virtual-machines="+strconv.Itoa(cfg.guestCount()),
+				"-c", "limits.virtual-machines="+vmLimit,
 				"-c", "limits.cpu="+totalCPU,
 				"-c", "limits.memory="+totalMemory,
 				"-c", "restricted=true")
@@ -498,11 +502,17 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		fmt.Fprintf(runtime.Stdout, "  [ ok ] created inner Incus project %q\n", cfg.Project)
 	}
 	settings := [][2]string{
-		{"limits.instances", strconv.Itoa(cfg.guestCount())}, {"limits.virtual-machines", strconv.Itoa(cfg.guestCount())},
+		{"limits.instances", strconv.Itoa(cfg.guestCount())}, {"limits.virtual-machines", vmLimit},
 		{"restricted", "true"}, {"restricted.networks.access", cfg.Network},
 		{"user.subyard.managed", managedMarker},
 	}
-	if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
+	if cfg.systemContainer() {
+		// Only the broker operates this project. The lowlevel permission is
+		// required by Incus for the fixed, enlarged nested ID map.
+		settings = append(settings, [2]string{"limits.memory", ""}, [2]string{"restricted.virtual-machines.lowlevel", ""},
+			[2]string{"restricted.containers.privilege", "isolated"}, [2]string{"restricted.containers.nesting", "allow"},
+			[2]string{"restricted.containers.lowlevel", "allow"})
+	} else if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
 		settings = append(settings, [2]string{"restricted.virtual-machines.lowlevel", lowlevel})
 	}
 	for _, setting := range settings {
@@ -513,6 +523,13 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 	devices, err := runtime.incus(ctx, "profile", "device", "list", "default", "--project", cfg.Project)
 	if err != nil {
 		return err
+	}
+	if cfg.systemContainer() {
+		for _, device := range nonemptyLines(devices) {
+			if device != "root" && device != "eth0" {
+				return fmt.Errorf("unexpected profile device %q in container lease project", device)
+			}
+		}
 	}
 	if !linePresent(devices, "root") {
 		if _, err := runtime.incus(ctx, "profile", "device", "add", "default", "root",
@@ -549,8 +566,12 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(kind) != "VIRTUAL-MACHINE" {
-			return fmt.Errorf("managed name %q is not a virtual machine", vm)
+		expected := "VIRTUAL-MACHINE"
+		if cfg.systemContainer() {
+			expected = "CONTAINER"
+		}
+		if strings.TrimSpace(kind) != expected {
+			return fmt.Errorf("managed name %q is not a %s", vm, expected)
 		}
 		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			return err
@@ -567,21 +588,9 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 		}
 		fmt.Fprintf(runtime.Stdout, "  [ ok ] created %s\n", vm)
 	}
-	if _, err := runtime.incus(ctx, "config", "set", vm, "limits.cpu",
-		strconv.Itoa(cfg.CPU), "--project", cfg.Project); err != nil {
-		return err
-	}
-	if _, err := runtime.incus(ctx, "config", "set", vm, "limits.memory",
-		cfg.Memory, "--project", cfg.Project); err != nil {
-		return err
-	}
-	if _, err := runtime.incus(ctx, "config", "set", vm, "boot.autostart",
-		"false", "--project", cfg.Project); err != nil {
-		return err
-	}
-	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
-		if _, err := runtime.incus(ctx, "config", "set", vm, "raw.qemu.conf", rawQEMU,
-			"--project", cfg.Project); err != nil {
+	for _, setting := range cfg.instanceSettings() {
+		key, value, _ := strings.Cut(setting, "=")
+		if _, err := runtime.incus(ctx, "config", "set", vm, key, value, "--project", cfg.Project); err != nil {
 			return err
 		}
 	}
@@ -595,6 +604,19 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 	return err
 }
 
+func (cfg Config) instanceSettings() []string {
+	settings := []string{"limits.cpu=" + strconv.Itoa(cfg.CPU), "boot.autostart=false"}
+	if cfg.systemContainer() {
+		return append(settings, "limits.processes=4096", "security.nesting=true",
+			"security.idmap.isolated=true", "security.idmap.size=200000")
+	}
+	settings = append(settings, "limits.memory="+cfg.Memory)
+	if _, raw := vmSleepPolicy(imageArchitecture()); raw != "" {
+		settings = append(settings, "raw.qemu.conf="+raw)
+	}
+	return settings
+}
+
 func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 	cfg := runtime.Config
 	sleep := runtime.Sleep
@@ -603,9 +625,16 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 	}
 	const attempts = 4
 	for attempt := 1; attempt <= attempts; attempt++ {
-		args := []string{"init", cfg.Image, vm, "--vm", "--project", cfg.Project,
-			"-c", "limits.cpu=" + strconv.Itoa(cfg.CPU), "-c", "limits.memory=" + cfg.Memory,
-			"-c", "user.subyard.managed=" + managedMarker}
+		args := []string{"init", cfg.Image, vm}
+		if cfg.systemContainer() {
+			args = append(args, "--project", cfg.Project)
+			for _, setting := range cfg.instanceSettings() {
+				args = append(args, "-c", setting)
+			}
+		} else {
+			args = append(args, "--vm", "--project", cfg.Project, "-c", "limits.cpu="+strconv.Itoa(cfg.CPU), "-c", "limits.memory="+cfg.Memory)
+		}
+		args = append(args, "-c", "user.subyard.managed="+managedMarker)
 		if runtime.allocation != nil {
 			args = append(args, "-c", "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
 				"-c", "user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
@@ -613,8 +642,10 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 		if runtime.agentLogOwner != "" {
 			args = append(args, "-c", agentLogOwnerMarker+"="+runtime.agentLogOwner)
 		}
-		if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
-			args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
+		if !cfg.systemContainer() {
+			if _, raw := vmSleepPolicy(imageArchitecture()); raw != "" {
+				args = append(args, "-c", "raw.qemu.conf="+raw)
+			}
 		}
 		_, err := runtime.incus(ctx, args...)
 		if err == nil || !remoteImageLookupError(err) || attempt == attempts {
@@ -640,6 +671,10 @@ func remoteImageLookupError(err error) bool {
 
 func (runtime *Runtime) tightenProject(ctx context.Context) error {
 	cfg := runtime.Config
+	if cfg.systemContainer() {
+		_, err := runtime.incus(ctx, "project", "set", cfg.Project, "limits.cpu", strconv.Itoa(cfg.CPU*cfg.guestCount()))
+		return err
+	}
 	for _, setting := range [][2]string{
 		{"limits.cpu", strconv.Itoa(cfg.CPU * cfg.guestCount())}, {"limits.memory", cfg.totalSize(cfg.Memory)},
 	} {
@@ -666,8 +701,10 @@ func (runtime *Runtime) startVM(ctx context.Context, vm string) error {
 	if strings.TrimSpace(state) != "STOPPED" {
 		return fmt.Errorf("%s is not stopped before initialization", vm)
 	}
-	if err := runtime.ensureCloudInitDisk(ctx, vm); err != nil {
-		return err
+	if !runtime.Config.systemContainer() {
+		if err := runtime.ensureCloudInitDisk(ctx, vm); err != nil {
+			return err
+		}
 	}
 	if err := runtime.progress(ctx, "starting "+vm, func() error {
 		_, err := runtime.incus(ctx, "start", vm, "--project", runtime.Config.Project)

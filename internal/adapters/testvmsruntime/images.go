@@ -175,6 +175,27 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 	if grant.Environment.Name == EnvironmentAndroid && runtime.GOARCH != "amd64" {
 		return grant, errors.New("android-test requires x86_64")
 	}
+	if child.Config.systemContainer() {
+		selected := *rt
+		var err error
+		selected.Config, err = rt.Config.withImage(grant.Environment.Image)
+		if err != nil {
+			return grant, err
+		}
+		if err := rt.checkCacheBudget(ctx); err != nil {
+			return grant, err
+		}
+		if err := rt.reserveEnvironment(ctx, store, grant); err != nil {
+			return grant, err
+		}
+		image, source, err := selected.upstreamImage(ctx, "container")
+		if err != nil {
+			return grant, err
+		}
+		grant.BaseFingerprint = image.Fingerprint
+		child.Config.Image = source
+		return grant, store.pinBase(grant)
+	}
 	pinned, err := rt.pinnedRecipeRuntime()
 	if err != nil {
 		return grant, err
@@ -218,7 +239,7 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 		if err != nil {
 			return err
 		}
-		upstream, _, upstreamErr := rt.upstreamImage(ctx)
+		upstream, _, upstreamErr := rt.upstreamImage(ctx, "virtual-machine")
 		if upstreamErr != nil {
 			registry.LastError = "upstream_lookup_failed"
 			if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
@@ -280,20 +301,10 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 			return err
 		}
 		// Persist the pin before exposing the image to instance creation.
-		if err := store.withLock(true, func(pool *LeasePool) error {
-			slot, err := findSlot(pool, grant.SlotID)
-			if err != nil {
-				return err
-			}
-			if slot.State != SlotProvisioning || slot.LeaseID != grant.LeaseID || slot.LeaseEpoch != grant.LeaseEpoch {
-				return ErrLeaseLost
-			}
-			slot.BaseFingerprint = base.Fingerprint
-			return nil
-		}); err != nil {
+		grant.BaseFingerprint = base.Fingerprint
+		if err := store.pinBase(grant); err != nil {
 			return err
 		}
-		grant.BaseFingerprint = base.Fingerprint
 		child.Config.Image = base.Fingerprint
 		return nil
 	})
@@ -317,13 +328,13 @@ func (rt *Runtime) listImages(ctx context.Context, arguments ...string) ([]incus
 	return images, nil
 }
 
-func (rt *Runtime) upstreamImage(ctx context.Context) (incusImage, string, error) {
+func (rt *Runtime) upstreamImage(ctx context.Context, kind string) (incusImage, string, error) {
 	remote, selector, hasRemote := strings.Cut(rt.Config.Image, ":")
 	if !hasRemote {
 		selector = remote
 		remote = "local"
 	}
-	images, err := rt.listImages(ctx, remote+":", selector, "type=virtual-machine")
+	images, err := rt.listImages(ctx, remote+":", selector, "type="+kind)
 	if err != nil {
 		return incusImage{}, "", err
 	}
@@ -334,7 +345,7 @@ func (rt *Runtime) upstreamImage(ctx context.Context) (incusImage, string, error
 		for _, alias := range candidate.Aliases {
 			match = match || alias.Name == selector
 		}
-		if !match || candidate.Type != "virtual-machine" || candidate.Architecture != imageArchitecture() {
+		if !match || candidate.Type != kind || candidate.Architecture != imageArchitecture() {
 			continue
 		}
 		if selected != nil {
@@ -343,7 +354,7 @@ func (rt *Runtime) upstreamImage(ctx context.Context) (incusImage, string, error
 		selected = candidate
 	}
 	if selected == nil || !imageFingerprint.MatchString(selected.Fingerprint) {
-		return incusImage{}, "", errors.New("upstream VM image fingerprint unavailable")
+		return incusImage{}, "", errors.New("upstream image fingerprint unavailable")
 	}
 	return *selected, remote + ":" + selected.Fingerprint, nil
 }
@@ -384,7 +395,7 @@ func (rt *Runtime) cachedBaseUsable(ctx context.Context, owner string, base Base
 }
 
 func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseGrant, registry *ImageRegistry, recipe string) (result BaseImage, buildErr error) {
-	upstream, source, err := rt.upstreamImage(ctx)
+	upstream, source, err := rt.upstreamImage(ctx, "virtual-machine")
 	if err != nil {
 		return result, err
 	}

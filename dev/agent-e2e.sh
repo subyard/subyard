@@ -53,7 +53,7 @@ Usage:
   dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
   dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|system-container|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--vm 1|2|both] -- COMMAND [ARG...]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh 1|2 [-- COMMAND [ARG...]]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh-stdin 1|2 -- COMMAND [ARG...]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --verify-boundary

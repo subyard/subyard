@@ -54,7 +54,7 @@ func measureDirVMUsage(ctx context.Context, incusRoot string) (uint64, error) {
 	}
 	seen := map[cacheInode]bool{}
 	var usage uint64
-	for _, name := range []string{"virtual-machines", "virtual-machines-snapshots"} {
+	for _, name := range []string{"virtual-machines", "virtual-machines-snapshots", "containers", "containers-snapshots"} {
 		root := filepath.Join(poolRoot, name)
 		value, err := optionalCacheBlocks(ctx, root, seen)
 		if err != nil {
