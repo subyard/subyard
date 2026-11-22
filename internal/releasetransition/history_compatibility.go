@@ -130,7 +130,11 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 		verdict.Refusals = []HistoryRefusal{{
 			HistoryRegistryUnreadable, "the selected release cannot parse the active release's migration registry", path.Unreadable,
 		}}
-		if verdict.Registry != RegistryIdentical && !verdict.DeclaredPredecessor && !verdict.DeclaredSuccessor {
+		declared := verdict.DeclaredPredecessor
+		if verdict.Successor {
+			declared = verdict.DeclaredSuccessor
+		}
+		if verdict.Registry != RegistryIdentical && !declared {
 			verdict.Refusals = append(verdict.Refusals, registryDiffersRefusal)
 		}
 		return verdict

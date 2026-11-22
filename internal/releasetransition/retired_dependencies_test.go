@@ -179,3 +179,29 @@ func TestUnreadableIdentityKeepsRegistryRelation(t *testing.T) {
 		t.Fatalf("unaware identity = %#v", verdict)
 	}
 }
+
+func TestUnreadablePairsRequireTheDeclarationInTheirDirection(t *testing.T) {
+	base, retired := publishedV030Registry(t), retiringCandidate(t)
+	partly := retire(t, base, map[string]int{"settings": 2})
+	for _, pair := range [][2]RegistryV2{{retired, base}, {partly, retired}} {
+		active, _ := pair[0].CanonicalDigest()
+		target, _ := pair[1].CanonicalDigest()
+		for _, successor := range []bool{false, true} {
+			input := HistoryCompatibilityInput{Active: &pair[0], Target: &pair[1]}
+			if successor {
+				input.TargetPredecessor = active
+			} else {
+				input.Predecessor = target
+			}
+			verdict := HistoryCompatibility(input)
+			want := 1
+			if verdict.Successor != successor {
+				want = 2
+			}
+			if verdict.Admitted() || len(verdict.Refusals) != want || verdict.Refusals[0].Reason != HistoryRegistryUnreadable ||
+				want == 2 && verdict.Refusals[1].Reason != HistoryRegistryDiffers {
+				t.Fatalf("successor/declaration = %t/%t: %#v", verdict.Successor, successor, verdict)
+			}
+		}
+	}
+}
