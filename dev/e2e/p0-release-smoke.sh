@@ -69,9 +69,16 @@ establish_smoke_ownership() {
 # and a declaration naming the candidate registry as its predecessor. The
 # engine's own registry code derives both.
 write_retired_release_inputs() {
-  local registry="$STATE_ROOT/candidate-release-transition.json" fixture="$STATE_ROOT/registry-fixture" bundle
-  bundle="$(compgen -G "$RELEASE_ROOT/subyard-$CANDIDATE_VERSION-linux-*.tar.gz")" \
-    || die 'release smoke cannot find the candidate bundle'
+  local registry="$STATE_ROOT/candidate-release-transition.json" fixture="$STATE_ROOT/registry-fixture" bundle arch
+  # Prepared releases contain both architectures; select this worker VM's exact asset.
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die 'release smoke candidate bundle architecture is unsupported' ;;
+  esac
+  bundle="$RELEASE_ROOT/subyard-$CANDIDATE_VERSION-linux-$arch.tar.gz"
+  [ -f "$bundle" ] && [ ! -L "$bundle" ] \
+    || die "release smoke cannot find a regular candidate bundle for $arch: $bundle"
   tar -xzOf "$bundle" --wildcards '*config/release-transition.json' > "$registry"
   go build -buildvcs=false -o "$fixture" "$ROOT/tests/helpers/registry-fixture"
   "$fixture" retire "$registry" project-state=1 > "$RETIRED_REGISTRY" \
