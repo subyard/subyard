@@ -255,10 +255,12 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		inspection.Blockers[index].Retry = CurrentReleaseRetry(blockerOutcome)
 	}
 	var recoveryRequest *releasetransition.RecoveryProcessRequest
+	var cleanupSource releasetransition.ReleaseID
 	if protected != nil {
 		recoveryRequest = protected.recoveryRequest
+		cleanupSource = protected.journal.Releases.From
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest, cleanupSource)
 	if err != nil {
 		return Prepared{}, err
 	}

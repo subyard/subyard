@@ -3,6 +3,7 @@ package releaseruntime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -194,51 +195,58 @@ func TestProtectedRollbackRetainsAgentCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, direction := range []releasetransition.Direction{releasetransition.DirectionActivatePrevious, releasetransition.DirectionActivateTarget} {
-		for _, switched := range []bool{false, true} {
-			t.Run(string(direction)+"/"+map[bool]string{false: "before activation", true: "after activation"}[switched], func(t *testing.T) {
-				fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{targetVersion: "0.30.0", seed: func(active, _ string) {
-					testkit.WriteFile(t, filepath.Join(active, "config/release-rollback.json"), data, 0o600)
-				}})
-				prepared, err := fixture.prepare(t)
-				if err != nil {
-					t.Fatal(err)
-				}
-				active, target := fixture.verified(t)
-				request := prepared.Request
-				request.Mode = releasetransition.ProcessInspect
-				response, err := fixture.runtime.invokeVerifiedCandidateTransition(context.Background(), active, request, "")
-				if err != nil {
-					t.Fatal(err)
-				}
-				request.Direction = direction
-				if switched {
-					next := filepath.Join(fixture.runtimeRoot, "next-current")
-					if err := os.Symlink("releases/"+fixture.targetID, next); err != nil {
+		for _, targetOwner := range []bool{false, true} {
+			for _, switched := range []bool{false, true} {
+				t.Run(string(direction)+"/target-owner="+fmt.Sprint(targetOwner)+"/"+map[bool]string{false: "before activation", true: "after activation"}[switched], func(t *testing.T) {
+					fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{targetVersion: "0.30.0", seed: func(active, _ string) {
+						testkit.WriteFile(t, filepath.Join(active, "config/release-rollback.json"), data, 0o600)
+					}})
+					prepared, err := fixture.prepare(t)
+					if err != nil {
 						t.Fatal(err)
 					}
-					if err := os.Rename(next, filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+					active, target := fixture.verified(t)
+					request := prepared.Request
+					request.Mode = releasetransition.ProcessInspect
+					response, err := fixture.runtime.invokeVerifiedCandidateTransition(context.Background(), active, request, "")
+					if err != nil {
 						t.Fatal(err)
 					}
-					response.Inspection.Outcome.Active = releasetransition.ReleaseID(fixture.targetID)
-					previous := releasetransition.ReleaseID(fixture.activeID)
-					response.Inspection.Outcome.Previous = &previous
-				}
-				resumed, err := fixture.runtime.prepareProtectedTransition(options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
-					owner: verificationOf(active), target: verificationOf(target), request: request, inspection: *response.Inspection,
-					activationReconciliationOwned: true,
+					request.Direction = direction
+					if switched {
+						next := filepath.Join(fixture.runtimeRoot, "next-current")
+						if err := os.Symlink("releases/"+fixture.targetID, next); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(next, filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+							t.Fatal(err)
+						}
+						response.Inspection.Outcome.Active = releasetransition.ReleaseID(fixture.targetID)
+						previous := releasetransition.ReleaseID(fixture.activeID)
+						response.Inspection.Outcome.Previous = &previous
+					}
+					owner := active
+					if targetOwner {
+						owner = target
+					}
+					resumed, err := fixture.runtime.prepareProtectedTransition(options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
+						journal: releasetransition.JournalRecord{Releases: releasetransition.ReleasePair{From: releasetransition.ReleaseID(fixture.activeID), Target: releasetransition.ReleaseID(fixture.targetID)}},
+						owner:   verificationOf(owner), target: verificationOf(target), request: request, inspection: *response.Inspection,
+						activationReconciliationOwned: true,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(resumed.AgentCleanup) == 0 || !slices.Equal(resumed.AgentCleanupConsequences(), prepared.AgentCleanupConsequences()) {
+						t.Fatalf("resume lost cleanup: %#v", resumed.AgentCleanup)
+					}
+					for _, consequence := range prepared.AgentCleanupConsequences() {
+						if !slices.Contains(resumed.Consequences, consequence) {
+							t.Fatalf("resumed plan lost %s", consequence)
+						}
+					}
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(resumed.AgentCleanup) == 0 || !slices.Equal(resumed.AgentCleanupConsequences(), prepared.AgentCleanupConsequences()) {
-					t.Fatalf("resume lost cleanup: %#v", resumed.AgentCleanup)
-				}
-				for _, consequence := range prepared.AgentCleanupConsequences() {
-					if !slices.Contains(resumed.Consequences, consequence) {
-						t.Fatalf("resumed plan lost %s", consequence)
-					}
-				}
-			})
+			}
 		}
 	}
 }

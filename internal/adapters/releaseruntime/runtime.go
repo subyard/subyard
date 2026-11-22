@@ -1243,7 +1243,7 @@ func (runtime *Runtime) prepareProtectedTransition(
 	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(
 		parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
-		protected.activationReconciliationOwned, protected.recoveryRequest,
+		protected.activationReconciliationOwned, protected.recoveryRequest, protected.journal.Releases.From,
 	)
 	if err == nil && !parsed.check {
 		prepared.RepairCurrent = protected.inspection.Outcome.Active == protected.request.Target &&
@@ -1602,7 +1602,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	activationReconciliationOwned bool,
 ) (Prepared, error) {
 	return runtime.prepareInspectedCandidateTransitionWithRecovery(
-		parsed, owner, target, request, inspection, activationReconciliationOwned, nil,
+		parsed, owner, target, request, inspection, activationReconciliationOwned, nil, "",
 	)
 }
 
@@ -1614,6 +1614,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
 	recoveryRequest *releasetransition.RecoveryProcessRequest,
+	cleanupSource releasetransition.ReleaseID,
 ) (prepared Prepared, err error) {
 	if recoveryRequest != nil {
 		requestCopy := *recoveryRequest
@@ -1627,8 +1628,8 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	var cleanup []releasetransition.RollbackBoundary
 	if parsed.selection != nil {
 		cleanup = slices.Clone(parsed.selection.agentCleanup)
-	} else if !parsed.check && owner.candidate.release != target.candidate.release {
-		cleanup, err = runtime.protectedAgentCleanup(request.RuntimeRoot, owner, target)
+	} else if !parsed.check && cleanupSource != "" && cleanupSource != target.candidate.release {
+		cleanup, err = runtime.protectedAgentCleanup(request.RuntimeRoot, cleanupSource, target)
 		if err != nil {
 			return Prepared{}, fmt.Errorf("read protected rollback cleanup: %w", err)
 		}
