@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-test_root=$(mktemp -d /tmp/subyard-herdr-install.XXXXXX)
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/subyard-herdr-install.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir "$test_root/home" "$test_root/bin" "$test_root/archive"
 export PATH="$test_root/bin:$PATH"

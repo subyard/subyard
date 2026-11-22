@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-test_root=$(mktemp -d /tmp/subyard-herdr-handler.XXXXXX)
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/subyard-herdr-handler.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/bin" "$test_root/fixture/config/profiles"
 ln -s "$PWD/scripts" "$test_root/fixture/scripts"

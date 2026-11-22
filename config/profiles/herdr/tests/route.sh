@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-test_root=$(mktemp -d /tmp/subyard-herdr-route.XXXXXX)
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/subyard-herdr-route.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
 die() { printf '%s\n' "$*" >&2; exit 1; }
 # shellcheck source=config/profiles/herdr/resources/herdr/route.sh

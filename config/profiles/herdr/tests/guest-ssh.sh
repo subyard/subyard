@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-test_root=$(mktemp -d /tmp/subyard-herdr-policy.XXXXXX)
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/subyard-herdr-policy.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir "$test_root/bin"
 export PATH="$test_root/bin:$PATH" DEV_USER=dev HERDR_TEST_CALLS="$test_root/calls"

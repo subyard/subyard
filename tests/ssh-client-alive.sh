@@ -2,7 +2,7 @@
 # Exercise the generic guest keepalive policy without changing host SSH.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-scratch="$(mktemp -d /tmp/subyard-ssh-client-alive.XXXXXX)"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/subyard-ssh-client-alive.XXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
 mkdir "$scratch/bin"
 export PATH="$scratch/bin:$PATH" CLIENT_ALIVE_TEST_CALLS="$scratch/calls"
