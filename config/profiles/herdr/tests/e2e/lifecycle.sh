@@ -344,13 +344,15 @@ yard herdr down --yes > "$state/down.log" 2>&1
 verify_down
 if guest_dev kill -0 "$terminal_pid" 2>/dev/null; then fail 'terminal survived down'; fi
 # Make the installed runtime stale so the release update really reinstalls its assets.
-guest sh -c 'printf stale > /usr/local/libexec/subyard/herdr-profile.sha256
-  printf "# stale\n" >> /usr/local/libexec/subyard/herdr-login'
+# An older candidate leaves a different valid digest and different assets.
+stale="$(printf 'older candidate\n' | sha256sum | cut -d ' ' -f1)"
+printf '%s\n' "$stale" | guest sh -c 'cat > /usr/local/libexec/subyard/herdr-profile.sha256
+  printf "# older candidate\n" >> /usr/local/libexec/subyard/herdr-login'
 version="$("$yard_bin" version | awk '{print $2}')"
 yard update --version "$version" --offline --yes > "$state/yard-update.log" 2>&1
 guest cmp -s - /usr/local/libexec/subyard/herdr-login < "$root/config/profiles/herdr/resources/herdr/login.sh" ||
   fail 'yard update did not reinstall the Herdr assets'
-[ "$(guest cat /usr/local/libexec/subyard/herdr-profile.sha256)" != stale ] ||
+[ "$(guest cat /usr/local/libexec/subyard/herdr-profile.sha256)" != "$stale" ] ||
   fail 'yard update did not refresh the Herdr runtime digest'
 verify_down
 yard herdr up --yes > "$state/up-again.log" 2>&1
