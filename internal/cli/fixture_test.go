@@ -215,9 +215,10 @@ func checkoutSource() string {
 }
 
 // trackedCheckoutFiles lists the checkout trees' tracked files relative to
-// source, which may be below its Git top level. Only an export, which Git
-// reports is not in a repository and has no .git of its own, falls back to
-// every file below the trees; any other Git failure is an error.
+// source, which may be below its Git top level. An export has no .git of its
+// own and either is outside a repository or has no tracked checkout files in
+// an ancestor repository. It falls back to every file below the trees; any
+// other Git failure is an error.
 func trackedCheckoutFiles(source string) ([]string, error) {
 	// The export decision reads Git's message, so it runs in the C locale.
 	environment := append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C", "LANGUAGE=")
@@ -231,7 +232,12 @@ func trackedCheckoutFiles(source string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("list checkout files in %s: %w", source, err)
 		}
-		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00"), nil
+		if len(listed) != 0 {
+			return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00"), nil
+		}
+		if _, statErr := os.Lstat(filepath.Join(source, ".git")); !errors.Is(statErr, os.ErrNotExist) {
+			return nil, statErr
+		}
 	} else if _, statErr := os.Lstat(filepath.Join(source, ".git")); !strings.Contains(stderr.String(), "not a git repository") ||
 		!errors.Is(statErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("list checkout files in %s: %w: %s", source, err, strings.TrimSpace(stderr.String()))
@@ -262,6 +268,11 @@ func copyCheckoutTrees(t *testing.T, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	copyCheckoutFiles(t, source, root, files)
+}
+
+func copyCheckoutFiles(t *testing.T, source, root string, files []string) {
+	t.Helper()
 	for _, relative := range files {
 		info, err := os.Lstat(filepath.Join(source, relative))
 		if errors.Is(err, os.ErrNotExist) {
@@ -667,6 +678,9 @@ func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(nested, "config", "tracked.env"), nil, 0o600)
 	runConfigSyncGit(t, repository, "init", "-q")
+	if files, err := trackedCheckoutFiles(repository); err != nil || len(files) != 0 {
+		t.Fatalf("empty checkout listing: %q %v", files, err)
+	}
 	runConfigSyncGit(t, repository, "add", "nested/config/tracked.env")
 	testkit.WriteFile(t, filepath.Join(nested, "config", "untracked.env"), nil, 0o600)
 	if files, err := trackedCheckoutFiles(nested); err != nil || !slices.Equal(files, []string{filepath.Join("config", "tracked.env")}) {
@@ -677,5 +691,51 @@ func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(export, ".git"), []byte("gitdir: "+filepath.Join(export, "missing")+"\n"), 0o600)
 	if files, err := trackedCheckoutFiles(export); err == nil {
 		t.Fatalf("broken checkout listed %q", files)
+	}
+}
+
+func TestCLIFixtureCopiesIgnoredNestedExport(t *testing.T) {
+	repository, err := os.MkdirTemp("/tmp", "subyard-fixture-export-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(repository) })
+	runConfigSyncGit(t, repository, "init", "-q")
+	testkit.WriteFile(t, filepath.Join(repository, ".gitignore"), []byte(".build/\n"), 0o600)
+	runConfigSyncGit(t, repository, "add", ".gitignore")
+	export := filepath.Join(repository, ".build", "source")
+	want := []string{}
+	for _, tree := range checkoutTrees {
+		if err := os.MkdirAll(filepath.Join(export, tree), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		relative := filepath.Join(tree, "shipped")
+		want = append(want, relative)
+		testkit.WriteFile(t, filepath.Join(export, relative), []byte(relative), 0o750)
+	}
+	if err := os.Mkdir(filepath.Join(export, "private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(export, "private", "excluded"), nil, 0o600)
+	files, err := trackedCheckoutFiles(export)
+	if err != nil || !slices.Equal(files, want) {
+		t.Fatalf("ignored export listing: %q %v", files, err)
+	}
+	root := testkit.TempDir(t)
+	copyCheckoutFiles(t, export, root, files)
+	for _, relative := range want {
+		path := filepath.Join(root, relative)
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != relative {
+			t.Fatalf("copied %s: %q %v", relative, data, err)
+		}
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o750 {
+			t.Fatalf("copied %s mode: %v %v", relative, info, err)
+		}
+	}
+	for _, excluded := range []string{".git", "private"} {
+		if _, err := os.Lstat(filepath.Join(root, excluded)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("copied excluded %s: %v", excluded, err)
+		}
 	}
 }
