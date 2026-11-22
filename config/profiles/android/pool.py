@@ -463,8 +463,8 @@ class SdkPackages:
     @staticmethod
     def revision(directory):
         try:
-            values = dict(line.split('=', 1) for line in (directory / 'source.properties').read_text().splitlines()
-                          if '=' in line and not line.startswith('#'))
+            values = {key.strip(): value for line in (directory / 'source.properties').read_text().splitlines()
+                      if '=' in line and not line.startswith('#') for key, value in [line.split('=', 1)]}
         except (OSError, ValueError):
             return None
         return values.get('Pkg.Revision', '').strip() or None
