@@ -235,24 +235,38 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 			return initArguments{}, fmt.Errorf("unknown option %q", argument)
 		}
 	}
-	if request.environmentProfiles != nil {
-		if request.mode != initReconcile || request.profile != "" || request.adopt || request.continueLegacy {
-			return initArguments{}, errors.New("--environment-profiles cannot be combined with --configs, --reset, --profile, --adopt or --continue-legacy")
-		}
-		if err := validateCreationProfileNames(*request.environmentProfiles); err != nil {
-			return initArguments{}, err
-		}
-	}
+	// The parsed request accompanies a refusal so the target-yard check can
+	// report together with these.
+	return request, domain.CollectRefusals(initArgumentRefusals(request)...)
+}
+
+// initArgumentRefusals reports every combination and name refusal that the
+// parsed arguments alone determine.
+func initArgumentRefusals(request initArguments) []error {
+	refusals := creationOptionRefusals(request)
 	if request.consentFD >= 0 && request.mode != initConfigs {
-		return initArguments{}, errors.New("--config-consent-fd is only for init --configs")
+		refusals = append(refusals, errors.New("--config-consent-fd is only for init --configs"))
 	}
 	if request.continueLegacy && (request.mode != initReconcile || request.profile != "") {
-		return initArguments{}, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile")
+		refusals = append(refusals, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile"))
 	}
 	if request.adopt && (request.continueLegacy || request.mode != initReconcile || request.profile != "") {
-		return initArguments{}, errors.New("--adopt cannot be combined with --continue-legacy, --configs, --reset or --profile")
+		refusals = append(refusals, errors.New("--adopt cannot be combined with --continue-legacy, --configs, --reset or --profile"))
 	}
-	return request, nil
+	return refusals
+}
+
+// creationOptionRefusals reports the combination and name refusals of
+// --environment-profiles.
+func creationOptionRefusals(request initArguments) []error {
+	if request.environmentProfiles == nil {
+		return nil
+	}
+	var refusals []error
+	if request.mode != initReconcile || request.profile != "" || request.adopt || request.continueLegacy {
+		refusals = append(refusals, errors.New("--environment-profiles cannot be combined with --configs, --reset, --profile, --adopt or --continue-legacy"))
+	}
+	return append(refusals, creationProfileNameRefusals(*request.environmentProfiles)...)
 }
 
 func (cli *CLI) loadInitContext(
@@ -261,11 +275,13 @@ func (cli *CLI) loadInitContext(
 	arguments []string,
 ) (config.Loaded, *initBootstrap, error) {
 	request, err := parseInitArguments(arguments)
+	if request.environmentProfiles != nil && (!explicit || yard == "" || yard == "default") {
+		// Combination, name and target refusals are independent; report them together.
+		return config.Loaded{}, nil, domain.CollectRefusals(append(initArgumentRefusals(request),
+			errors.New("--environment-profiles requires selecting a new non-default yard with -Y"))...)
+	}
 	if err != nil {
 		return config.Loaded{}, nil, err
-	}
-	if request.environmentProfiles != nil && (!explicit || yard == "" || yard == "default") {
-		return config.Loaded{}, nil, errors.New("--environment-profiles requires selecting a new non-default yard with -Y")
 	}
 	if request.profile == "" {
 		loaded, err := cli.loadContext(yard)

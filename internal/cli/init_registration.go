@@ -27,9 +27,9 @@ func (bootstrap *initBootstrap) description() string {
 	return "create named yard definition with empty environment profiles and coding tools"
 }
 
-// validateCreationProfileNames reports every unsafe or repeated name in an
+// creationProfileNameRefusals reports every unsafe or repeated name in an
 // init --environment-profiles value before any configuration is read.
-func validateCreationProfileNames(value string) error {
+func creationProfileNameRefusals(value string) []error {
 	var refusals []error
 	seen := map[string]bool{}
 	for _, name := range strings.Fields(value) {
@@ -41,7 +41,7 @@ func validateCreationProfileNames(value string) error {
 		}
 		seen[name] = true
 	}
-	return domain.CollectRefusals(refusals...)
+	return refusals
 }
 
 // creationProfileEligibility reports every requested profile that is unknown or

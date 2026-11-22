@@ -276,6 +276,8 @@ func TestInitNamedYardCreationProfiles(t *testing.T) {
 		{"twice", "fresh", true, []string{"--environment-profiles", "alpha", "--environment-profiles", "beta"}, []string{"only once"}},
 		{"missing value", "fresh", true, []string{"--environment-profiles"}, []string{"needs a value"}},
 		{"names", "fresh", true, []string{"--environment-profiles", "Bad alpha alpha ../x"}, []string{`invalid profile name "Bad"`, `profile "alpha" is repeated`, `invalid profile name "../x"`}},
+		{"independent refusals together", "default", true, []string{"--reset", "--environment-profiles", "Bad alpha alpha"},
+			[]string{"cannot be combined", "requires selecting a new non-default yard", `invalid profile name "Bad"`, `profile "alpha" is repeated`}},
 		{"eligibility", "fresh", true, []string{"--environment-profiles", "missing alpha off ghost"}, []string{`unknown environment profile "missing"`, `profile "off" is not eligible for this yard (policy-disabled)`, `unknown environment profile "ghost"`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
