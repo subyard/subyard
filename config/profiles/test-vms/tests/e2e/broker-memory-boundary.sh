@@ -1109,6 +1109,16 @@ holder_failure() {
       /^ssh:/ { print "holder SSH transport failed"; next }
       /: unbound variable$/ { print "holder shell variable was unset" }
     ' >&2
+    if tail -n 240 "$STATE_PARENT/$client.log" | grep -E '^agent-e2e: retryable capacity refusal for slot-[0-9][0-9][0-9]: resource=memory; retry after resources become available$' >/dev/null; then
+      {
+        timeout --kill-after=1s 5s "$SUBYARD_HOME/runtime/current/bin/yard" -Y test-yard test-vms status --json 2>/dev/null \
+          | jq -c '.resources.memory_admission.headroom_bytes | select(type == "number" and . >= 0) |
+              {check: "holder-memory-refusal", admission_headroom_bytes: .}'
+        awk '/^Mem(Total|Available):[[:space:]]+[0-9]+[[:space:]]+kB$/ {
+          printf "%s%s_kib=%s", sep, substr($1,1,length($1)-1), $2; sep=" "
+        } END {print ""}' /proc/meminfo
+      } >&2 || true
+    fi
   fi
   die "$1"
 }
@@ -1130,6 +1140,11 @@ OWNER_BASELINE_CAPTURED=1
 ensure_owner_base_image
 # shellcheck disable=SC2034
 OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
+# Telemetry needs two observed guests whose combined RAM exceeds the broker's
+# 2GiB process ceiling, with startup headroom inside its 8GiB controller.
+if [ "$TELEMETRY_ONLY" = 1 ] && [ "$LEASE_EXPIRY" = 0 ]; then
+  OWNER_DIAGNOSTIC_VM_MEMORY=1536MiB
+fi
 install_owner_runtime
 [ -x "$SUBYARD_HOME/runtime/current/config/profiles/github/bin/broker" ] \
   || die 'installed owner runtime lacks its required native GitHub helper'
@@ -1320,9 +1335,9 @@ if [ "$TELEMETRY_ONLY" = 0 ]; then
   assert_guests_outside_broker_budget
   assert_launch_memory_bound
 fi
-runtime_yard -Y test-yard test-vms status --json | jq -e '
+runtime_yard -Y test-yard test-vms status --json | jq -e --arg memory "$OWNER_DIAGNOSTIC_VM_MEMORY" '
   .pool.slots[] | select(.slot_id == "slot-001") |
-    .environment.vm_count == 2 and .environment.memory_per_vm == "2GiB"' >/dev/null \
+    .environment.vm_count == 2 and .environment.memory_per_vm == $memory' >/dev/null \
   || die 'guest allocation exceeding the broker process budget was not held'
 printf '  [ ok ] ready guests release startup RAM promises to host accounting\n'
 if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then

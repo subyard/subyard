@@ -91,6 +91,27 @@ for flag, expected in [('--telemetry-resources','1 0 --telemetry-resources'), ('
     result = subprocess.run(['bash','-eu','-c',script,'probe',flag], text=True, capture_output=True, check=True)
     assert result.stdout.strip() == expected
 assert '"$TELEMETRY_FLAG" "$TOKEN"' in broker
+memory = 'OWNER_DIAGNOSTIC_VM_MEMORY=2GiB\n'+broker.split('OWNER_DIAGNOSTIC_VM_MEMORY=2GiB\n', 1)[1].split('\ninstall_owner_runtime', 1)[0]
+held_size = 'runtime_yard -Y test-yard test-vms status --json | jq -e --arg memory'+broker.split('runtime_yard -Y test-yard test-vms status --json | jq -e --arg memory', 1)[1].split("\nprintf '  [ ok ] ready guests", 1)[0]
+def memory_bytes(value):
+    return int(value[:-3])*{'MiB': 1024**2, 'GiB': 1024**3}[value[-3:]]
+overhead = memory_bytes(broker.split('\nE2E_VM_OVERHEAD=', 1)[1].splitlines()[0])
+broker_ceiling = int(broker.split('$r.broker_memory.ram_limit_bytes == ', 1)[1].split()[0])
+for flag, expected_memory in (('--telemetry-resources', '1536MiB'), ('--telemetry-held-diagnostic', '1536MiB'),
+                              ('--lease-expiry', '2GiB'), ('--pregrant-cancellation', '2GiB'), ('', '2GiB')):
+    script = 'PREGRANT_ONLY=0; PREGRANT_WORKING_ONLY=0; TELEMETRY_ONLY=0; SUBYARD_E2E_RESOURCE_OBSERVER=fixture; SUBYARD_AGENT_RUN_ID=fixture; SUBYARD_TELEMETRY_DATA_DIR=/fixture\n'+dispatch+'\n'+memory+'\nprintf "%s\\n" "$OWNER_DIAGNOSTIC_VM_MEMORY"'
+    result = subprocess.run(['bash', '-eu', '-c', script, 'probe', flag], text=True, capture_output=True, check=True)
+    assert result.stdout.strip() == expected_memory
+    assert 2*memory_bytes(result.stdout.strip()) > broker_ceiling, 'held guest RAM must exceed the broker process ceiling'
+    if flag in ('--telemetry-resources', '--telemetry-held-diagnostic'):
+        assert 2*(memory_bytes(result.stdout.strip())+overhead) == 4*1024**3, 'telemetry pair must reserve 4GiB including overhead'
+    for count, size, valid in ((2, result.stdout.strip(), True), (1, result.stdout.strip(), False), (2, '1GiB', False)):
+        status = json.dumps({'pool': {'slots': [{'slot_id': 'slot-001', 'environment': {'vm_count': count, 'memory_per_vm': size}}]}})
+        probe = 'runtime_yard() { printf "%s\\n" "$fixture_status"; }\ndie() { exit 2; }\n'+held_size
+        checked = subprocess.run(['bash', '-eu', '-c', probe], capture_output=True,
+                                 env={**os.environ, 'fixture_status': status, 'OWNER_DIAGNOSTIC_VM_MEMORY': result.stdout.strip()})
+        assert checked.returncode == (0 if valid else 2), 'held allocation size assertion accepted the wrong contract'
+print('ok: telemetry resources and held diagnostic use a 4GiB nested pair; owning memory-boundary modes retain 5GiB')
 conditions = [line for line in broker.splitlines() if line.startswith('if [ "$HELD_DIAGNOSTIC" = 0 ]')]
 assert len(conditions) == 2
 for condition in conditions:
