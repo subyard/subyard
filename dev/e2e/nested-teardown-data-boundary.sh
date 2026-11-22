@@ -76,10 +76,10 @@ sync_capacity_diagnostics() {
 }
 
 sync_candidate() {
-  local started=$SECONDS rc=0
-  printf '  [ .. ] syncing the exact candidate into the outer yard at %s\n' \
-    "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  local started sync_started rc=0
   sync_capacity_diagnostics
+  sync_started="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  printf '  [ .. ] syncing the exact candidate into the outer yard at %s\n' "$sync_started"
   started=$SECONDS
   # Keep the prepared archive's exact byte count and digest in the lane log.
   yard sync "$ROOT" --name NestedBoundary --target yard --yes || rc=$?
@@ -90,6 +90,9 @@ sync_candidate() {
     printf '\n== candidate sync: outer yard kernel warnings ==\n'
     timeout --kill-after=2 10 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
       journalctl -k --no-pager --priority=warning --since "$FIXTURE_STARTED" || true
+    printf '\n== candidate sync: host Incus journal (last 100 entries since sync start) ==\n'
+    timeout --kill-after=2 10 sudo -n journalctl -u incus --no-pager --lines=100 \
+      --since "$sync_started" || true
   fi
   return "$rc"
 }
