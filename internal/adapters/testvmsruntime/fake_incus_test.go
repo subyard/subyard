@@ -31,6 +31,7 @@ type fakeIncusProject struct {
 }
 
 type fakeIncusVM struct {
+	kind           string
 	status         string
 	config         map[string]string
 	ip             string
@@ -103,6 +104,11 @@ func (fake *fakeIncus) incus(args []string) (string, error) {
 		switch incusArg(args, "-c") {
 		case "n":
 			return strings.Join(slices.Sorted(maps.Keys(project.instances)), "\n"), nil
+		case "nt":
+			if vm := project.instances[args[1]]; vm != nil {
+				return args[1] + "," + strings.ToUpper(vm.kind), nil
+			}
+			return "", nil
 		case "ns":
 			if vm := project.instances[args[1]]; vm != nil {
 				return args[1] + "," + vm.status, nil
@@ -117,7 +123,11 @@ func (fake *fakeIncus) incus(args []string) (string, error) {
 		config := incusSettings(args, "-c")
 		config["volatile.base_image"] = args[1]
 		config["volatile.uuid"] = fmt.Sprintf("00000000-0000-4000-8000-%012d", len(fake.calls))
-		project.instances[name] = &fakeIncusVM{status: "STOPPED", config: config}
+		kind := "container"
+		if slices.Contains(args, "--vm") {
+			kind = "virtual-machine"
+		}
+		project.instances[name] = &fakeIncusVM{kind: kind, status: "STOPPED", config: config}
 		project.volumes[name] = true
 		return "", nil
 	case "info", "config", "stop", "start", "delete", "exec", "console":
@@ -285,7 +295,7 @@ func (fake *fakeIncus) query(path string) (string, error) {
 	}
 	vm := project.instances[parts[0]]
 	if len(parts) == 1 {
-		return fakeJSON(map[string]any{"type": "virtual-machine", "config": vm.config}), nil
+		return fakeJSON(map[string]any{"type": vm.kind, "config": vm.config}), nil
 	}
 	switch parts[1] {
 	case "state":

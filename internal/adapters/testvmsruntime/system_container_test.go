@@ -48,6 +48,12 @@ func TestSystemContainerPool(t *testing.T) {
 	}
 	// A failed native deletion stays fenced for the next reap.
 	f.now = grant.ExpiresAt.Add(time.Second)
+	vm := project.instances[cfg.vm(2)]
+	vm.kind = "virtual-machine"
+	if err := f.rt.ReapExpired(f.ctx, f.store); err == nil || len(project.instances) != 2 || f.slot(1).State != SlotDraining {
+		t.Fatal("foreign instance type did not fence the entire allocation before deletion")
+	}
+	vm.kind = "container"
 	f.incus.fault = []string{"delete", cfg.vm(1), "--project", cfg.Project, "--force"}
 	if err := f.rt.ReapExpired(f.ctx, f.store); err == nil || f.slot(1).State != SlotDraining {
 		t.Fatal("failed deletion did not stay draining")
