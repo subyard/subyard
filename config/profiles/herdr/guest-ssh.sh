@@ -22,19 +22,21 @@ owned() {
 refuse() { printf 'Herdr: %s\n' "$*" >&2; exit 1; }
 
 effective() {
-    current=$(/usr/sbin/sshd -T) || return 1
+    # Evaluate Match blocks for a proxied login of the development user.
+    current=$(/usr/sbin/sshd -T -C "user=${user:?},addr=127.0.0.1,host=localhost,laddr=127.0.0.1,lport=22") || return 1
     valid=0
-    if ! printf '%s\n' "$current" | grep -qx 'passwordauthentication no'; then
+    if ! printf '%s\n' "$current" | grep -x 'passwordauthentication no' >/dev/null; then
         printf 'Herdr: Remove the overriding PasswordAuthentication directive from the guest SSH configuration before publishing Herdr.\n' >&2
         valid=1
     fi
-    if ! printf '%s\n' "$current" | grep -qx 'kbdinteractiveauthentication no'; then
+    if ! printf '%s\n' "$current" | grep -x 'kbdinteractiveauthentication no' >/dev/null; then
         printf 'Herdr: Remove the overriding KbdInteractiveAuthentication directive from the guest SSH configuration before publishing Herdr.\n' >&2
         valid=1
     fi
     return "$valid"
 }
 
+user="${2:-}"
 case "${1:-}" in
     check) matches; exit ;;
     absent) absent; exit ;;

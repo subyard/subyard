@@ -13,8 +13,8 @@ for command in curl dpkg git incus ip jq python3 sg ssh ssh-keygen ssh-keyscan s
   command -v "$command" >/dev/null || fail "required VM tool is missing: $command"
 done
 sudo -n true || fail 'passwordless sudo is required on the disposable VM'
-in_session_group() { id -nG | tr ' ' '\n' | grep -Fxq incus-admin; }
-in_account_group() { id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; }
+in_session_group() { id -nG | tr ' ' '\n' | grep -Fx incus-admin >/dev/null; }
+in_account_group() { id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx incus-admin >/dev/null; }
 if ! in_session_group && in_account_group; then
   printf -v reexec 'exec bash %q' "$fixture/lifecycle.sh"
   exec sg incus-admin -c "$reexec"
@@ -90,7 +90,7 @@ printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$state/config/config.env"
 chmod 0600 "$state/config/config.env"
 
 # The address, proxy, sshd and Core RPC are real; only discovery of the owner address is synthetic.
-ip -o -4 addr show | awk '{print $4}' | grep -Fxq "$address/32" && fail 'fixture address already exists'
+ip -o -4 addr show | awk '{print $4}' | grep -Fx "$address/32" >/dev/null && fail 'fixture address already exists'
 [ ! -e /usr/local/bin/tailscale ] && [ ! -L /usr/local/bin/tailscale ] && ! command -v tailscale >/dev/null ||
   fail 'the synthetic tailnet needs a VM without tailscale'
 sudo -n ip address add "$address/32" dev lo
@@ -181,7 +181,7 @@ verify_ready() {
 }
 verify_policy() {
   local config
-  config="$(guest /usr/sbin/sshd -T)"
+  config="$(guest /usr/sbin/sshd -T -C user=dev,addr=127.0.0.1,host=localhost,laddr=127.0.0.1,lport=22)"
   grep -Fxq 'passwordauthentication no' <<< "$config"
   grep -Fxq 'kbdinteractiveauthentication no' <<< "$config"
 }

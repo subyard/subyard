@@ -30,7 +30,7 @@ native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
 as_dev() { yexec runuser -u "$DEV_USER" -- "$@"; }
-guest_ssh() { cat "$root/scripts/lib/sshd.sh" "$profile/guest-ssh.sh" | yexec sh -eu -s -- "$1"; }
+guest_ssh() { cat "$root/scripts/lib/sshd.sh" "$profile/guest-ssh.sh" | yexec sh -eu -s -- "$1" "$DEV_USER"; }
 # shellcheck source=config/profiles/herdr/resources/herdr/route.sh
 . "$here/route.sh"
 # shellcheck source=config/profiles/herdr/resources/herdr/pair.sh
