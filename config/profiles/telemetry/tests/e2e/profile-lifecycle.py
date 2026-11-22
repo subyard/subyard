@@ -15,6 +15,9 @@ NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
 spec = importlib.util.spec_from_file_location('telemetry_failure_evidence', Path(__file__).with_name('failure-evidence.py'))
 failure_evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(failure_evidence)
+spec = importlib.util.spec_from_file_location('telemetry_native_signals', Path(__file__).with_name('native-signals.py'))
+native_signals = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(native_signals)
 
 SNAPSHOT = '''import hashlib,json,pathlib,pwd,subprocess
 account=pwd.getpwnam('dev')
@@ -99,7 +102,7 @@ if NATIVE_STAGE:
         '--data-dir',str(data),'--source',str(pathlib.Path(NATIVE_STAGE)/'source'),'--kind','android','--',
         '/srv/cache/android-sdk/.subyard/bin/android-broker','run','--api','36','--yard',FIXTURE_YARD,'--project','telemetry-fixture',
         '--purpose','telemetry-incus-native','--','python3','-c','import time;time.sleep(2)'],
-        evidence_root,secrets=secrets,check=True,timeout=1200)
+        evidence_root,secrets=secrets,check=True,timeout=NATIVE_EXERCISE_TIMEOUT)
     bindings=json.loads((prepared/'exercise/native-resource-bindings.json').read_text())
     claude=next(run for run in bindings['runs'] if run['agent']=='claude')
     document=json.loads(subprocess.check_output(['/usr/local/lib/subyard-telemetry/subyard-telemetry','show-run',
@@ -137,7 +140,7 @@ os.chown(marker,account.pw_uid,account.pw_gid)
 print(json.dumps({'root':str(root),'unit':'subyard-telemetry-fixture-'+root.name.rsplit('.',1)[1]+'.service'}))
 '''
 
-START = '''import importlib.util,json,os,pathlib,stat,subprocess,sys,time
+START = f'''import importlib.util,json,os,pathlib,stat,subprocess,sys,time
 fixture=json.loads(sys.argv[1])
 root=pathlib.Path(fixture['root'])
 assert root.parent==pathlib.Path('/tmp') and root.name.startswith('subyard-telemetry-delegated.') and not root.is_symlink()
@@ -148,7 +151,7 @@ subprocess.run(['systemd-run','--quiet','--unit',fixture['unit'],'--property=Use
     '--property=UMask=0077','--property=LimitCORE=0','--property=NoNewPrivileges=true',
     '--setenv=HOME='+sys.argv[3],'--setenv=PATH=/usr/local/bin:/usr/bin:/bin','--setenv=LANG=C.UTF-8',
     '/usr/bin/python3','-B',str(root/'payload.py')],check=True,timeout=20)
-deadline=time.monotonic()+1300
+deadline=time.monotonic()+{native_signals.RESOURCE_EXERCISE_TIMEOUT + 100}
 while time.monotonic()<deadline:
     if (root/'result').is_file():
         print((root/'result').read_text(),end='',flush=True)
@@ -374,7 +377,8 @@ def main():
         assert path.is_file()
         command(['/usr/bin/incus', 'file', 'push', str(path), args.instance+str(stage/name), '--project', args.project,
                  '--uid', str(before['uid']), '--gid', str(before['gid']), '--mode', '0755' if name.startswith('native/bin/') else '0600'])
-    body = 'FIXTURE_SOURCE='+repr(source)+'\nNATIVE_STAGE='+repr(str(stage))+'\nFIXTURE_YARD='+repr(args.yard)+'\n'+PREPARE
+    body = ('FIXTURE_SOURCE='+repr(source)+'\nNATIVE_STAGE='+repr(str(stage))+'\nFIXTURE_YARD='+repr(args.yard)+
+            '\nNATIVE_EXERCISE_TIMEOUT='+repr(native_signals.RESOURCE_EXERCISE_TIMEOUT)+'\n'+PREPARE)
     # Keep the delegated caller alive until the external observer has durably
     # finalized every child scope; systemd must not remove empty counters first.
     payload = '''import contextlib,importlib.util,io,json,os,pathlib,time,traceback
@@ -440,7 +444,8 @@ except BaseException as error:
         cli('profile', 'enable', 'telemetry', '--yes')
         assert guest(REPEAT_FACTS, timeout=25) == repeat_facts, 'repeated enable changed telemetry units'
         unit_requested = True
-        output = guest(START, json.dumps(fixture), str(before['gid']), before['home'], timeout=1340)
+        output = guest(START, json.dumps(fixture), str(before['gid']), before['home'],
+                       timeout=native_signals.RESOURCE_EXERCISE_TIMEOUT + 140)
         for line in output.splitlines():
             if line.startswith('{') and json.loads(line).get('schema') == 'subyard.telemetry.acceptance-example/v1':
                 print(line, flush=True)

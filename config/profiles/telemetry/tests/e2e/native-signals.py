@@ -36,6 +36,12 @@ def load(path, name):
 
 failure_evidence = load(Path(__file__).with_name('failure-evidence.py'), 'telemetry_failure_evidence')
 
+# Each resource exercise cold-starts a distinct allocation for each native agent.
+RESOURCE_CODEX_TIMEOUT = 1830
+RESOURCE_CLAUDE_TIMEOUT = 630
+# Allow session binding, allocation projection and backend shutdown for both runs.
+RESOURCE_EXERCISE_TIMEOUT = RESOURCE_CODEX_TIMEOUT + RESOURCE_CLAUDE_TIMEOUT + 200
+
 
 def claude_failure(phase, result, token):
     failure_evidence.emit(phase, {'claude.stdout': getattr(result, 'stdout', None),
@@ -397,6 +403,7 @@ state=pathlib.Path(os.environ.get('SUBYARD_E2E_STATE_DIR','/nonexistent'))
 context['controller_identity_exists']=all((state/name).is_file() for name in ('id_ed25519','id_ed25519.pub'))
 context['controller_state_exists']=(state/'yards'/yard/'client-id').is_file()
 output=pathlib.Path(sys.argv[1]).with_suffix('.output')
+started=time.monotonic()
 fd=os.open(output,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
 os.fchmod(fd,0o600)
 stream=os.fdopen(fd,'w+b')
@@ -439,7 +446,7 @@ def finish(status):
     fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
     with os.fdopen(fd,'w') as receipt:
         os.fchmod(receipt.fileno(),0o600)
-        json.dump(dict(schema='subyard.telemetry.native-command/v1',exit_code=status,context=context,error_class=reason,
+        json.dump(dict(schema='subyard.telemetry.native-command/v1',exit_code=status,elapsed_seconds=round(time.monotonic()-started,3),context=context,error_class=reason,
                        runner_error_callsites=callsites,output_sha256=fingerprint),receipt)
 process=subprocess.Popen(sys.argv[3:],stdout=stream,stderr=subprocess.STDOUT)
 def cancel(signum,frame):
@@ -487,6 +494,9 @@ def require_command_success(receipt, agent):
         fingerprint = result.get('output_sha256', '')
         if isinstance(fingerprint, str) and re.fullmatch('[a-f0-9]{64}', fingerprint):
             facts['output_sha256'] = fingerprint
+        elapsed = result.get('elapsed_seconds')
+        if type(elapsed) in (int, float) and 0 <= elapsed <= 86400:
+            facts['elapsed_seconds'] = elapsed
     assert status == 0, json.dumps(facts, sort_keys=True)
     print(json.dumps(facts, sort_keys=True), flush=True)
     return result
@@ -636,7 +646,7 @@ print(json.dumps(proof,sort_keys=True))
     return shlex.join([sys.executable, '-B', '-c', code, str(home), str(data_dir)])
 
 
-def run_codex_command(app, provider, session, project, command, receipt=None, timeout=1830):
+def run_codex_command(app, provider, session, project, command, receipt=None, timeout=RESOURCE_CODEX_TIMEOUT):
     # exec_command may finish its turn while its command session is still running.
     deadline = time.monotonic()+timeout
     app.command_result = None
@@ -683,7 +693,7 @@ def exercise(args):
     import native
     import tomli_w
     fixture = load(args.source/'config/profiles/orca/tests/e2e/codex-permissions.py', 'codex_fixture_exercise')
-    fixture.TIMEOUT = 1830
+    fixture.TIMEOUT = RESOURCE_CODEX_TIMEOUT
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     assert command and args.kind in ('vm', 'android')
     token = (args.data_dir.with_name(args.data_dir.name+'-private')/'auth.token').read_text().strip()
@@ -737,7 +747,7 @@ def exercise(args):
             try:
                 result = claude_command(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent),
                     '-p', 'Run the fixture command.', '--allowedTools', 'Bash', '--output-format', 'stream-json', '--verbose', '--max-turns', '3'],
-                    token, env=env, cwd=project, capture_output=True, timeout=630, check=True)
+                    token, env=env, cwd=project, capture_output=True, timeout=RESOURCE_CLAUDE_TIMEOUT, check=True)
                 frames = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
                 session = next(frame['session_id'] for frame in frames if frame.get('session_id'))
                 assert provider.requests >= 2, 'native Claude did not complete its real tool call'

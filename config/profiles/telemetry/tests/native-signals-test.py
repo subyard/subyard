@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import base64
 from contextlib import closing, redirect_stdout
 import hashlib
@@ -108,6 +109,32 @@ pathlib.Path(sys.argv[2]).write_text('export acknowledged')
         self.assertTrue(line.startswith('run-attribution plain: '))
         self.assertEqual(json.loads(line.split(': ', 1)[1]),
             dict(new=[], tool_run='', tool_exe='', traces_grew_for=[]))
+
+    def test_native_resource_timeout_budget_contract(self):
+        profile = fixture.load(Path(__file__).parent/'e2e/profile-lifecycle.py', 'profile_budget_fixture')
+        # The enclosing deadline must cover two sequential native commands,
+        # their session/allocation projections, and orderly backend shutdown.
+        budget = fixture.RESOURCE_EXERCISE_TIMEOUT
+        self.assertGreaterEqual(budget, fixture.RESOURCE_CODEX_TIMEOUT + fixture.RESOURCE_CLAUDE_TIMEOUT + 190)
+        self.assertEqual(profile.native_signals.RESOURCE_EXERCISE_TIMEOUT, budget)
+
+        def timeout_value(tree, matches, environment):
+            call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and matches(node))
+            value = next(item.value for item in call.keywords if item.arg == 'timeout')
+            return eval(compile(ast.Expression(value), '<fixture-budget>', 'eval'), environment)
+
+        exercise = timeout_value(ast.parse(profile.PREPARE),
+            lambda call: isinstance(call.func, ast.Attribute) and call.func.attr == 'run'
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == 'failure_evidence',
+            {'NATIVE_EXERCISE_TIMEOUT': budget})
+        self.assertEqual(exercise, budget)
+        deadline = next(node.value.right.value for node in ast.walk(ast.parse(profile.START))
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'deadline' for target in node.targets))
+        guest = timeout_value(ast.parse(Path(profile.__file__).read_text()),
+            lambda call: isinstance(call.func, ast.Name) and call.func.id == 'guest' and call.args
+            and isinstance(call.args[0], ast.Name) and call.args[0].id == 'START', {'native_signals': profile.native_signals})
+        self.assertGreater(deadline, exercise)
+        self.assertGreater(guest, deadline)
 
     def test_native_agent_delivery_uses_verified_fixture_archives(self):
         def package(files):
@@ -311,6 +338,7 @@ pathlib.Path(sys.argv[2]).write_text('export acknowledged')
                             fixture.run_codex_command(app, None, None, root, command, receipt, timeout=timeout)
                             self.assertTrue(receipt.is_file(), 'backend teardown must follow the actual command receipt')
                             self.assertEqual(json.loads(receipt.read_text())['exit_code'], 0)
+                            self.assertGreaterEqual(json.loads(receipt.read_text())['elapsed_seconds'], delay)
                         else:
                             with self.assertRaises(AssertionError) as error:
                                 fixture.run_codex_command(app, None, None, root, command, receipt, timeout=timeout)
