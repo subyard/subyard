@@ -405,7 +405,9 @@ boot_helper = runtime_source[runtime_source.index('android_gradle_boot_evidence(
 for status, phase, capture_exit, called in (
         (0, 'telemetry-native', 0, False), (23, 'images', 0, False),
         (23, 'telemetry-native', 0, True), (23, 'telemetry-native', 7, True),
-        (23, 'telemetry-profile', 0, True), (23, 'telemetry-storage', 0, True)):
+        (23, 'telemetry-profile', 0, True), (23, 'telemetry-storage', 0, True),
+        (0, 'telemetry-resource-observer', 0, False),
+        (23, 'telemetry-resource-observer', 0, True), (23, 'telemetry-resource-observer', 7, True)):
     script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; journal_exit="$3"\n'
               'lane=memory-budget; project=fixture; instance=fixture; incus_binary=(incus)\n'
               'timeout() { printf "%s\\n" "$*"; '

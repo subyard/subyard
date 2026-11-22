@@ -154,7 +154,7 @@ cleanup() {
   # summary before teardown removes its journal with the disposable yard.
   if [ "$status" -ne 0 ] && [ -n "$project" ] && [ -n "$instance" ]; then
     case "$failed_phase" in
-      telemetry-profile|telemetry-native|telemetry-storage) android_gradle_boot_evidence ;;
+      telemetry-profile|telemetry-native|telemetry-storage|telemetry-resource-observer) android_gradle_boot_evidence ;;
     esac
   fi
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \

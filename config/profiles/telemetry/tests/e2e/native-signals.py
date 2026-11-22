@@ -42,6 +42,9 @@ RESOURCE_CODEX_TIMEOUT = RESOURCE_TOOL_TIMEOUT_MS // 1000 + 30
 RESOURCE_CLAUDE_TIMEOUT = RESOURCE_CODEX_TIMEOUT
 # Allow session binding, allocation projection and backend shutdown for both runs.
 RESOURCE_EXERCISE_TIMEOUT = RESOURCE_CODEX_TIMEOUT + RESOURCE_CLAUDE_TIMEOUT + 200
+ANDROID_RESOURCE_ERRORS = {'boot_timeout': 'android_boot_timeout', 'capacity': 'android_capacity_refusal',
+                           'busy': 'android_pool_busy', 'timeout': 'android_pool_wait_timeout',
+                           'stale': 'android_lease_stale'}
 
 
 def claude_failure(phase, result, token):
@@ -386,7 +389,7 @@ def run_probe_code():
 
 
 def command_with_receipt(command, receipt, expected=None):
-    code = run_probe_code()+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
+    code = run_probe_code()+f'ANDROID_RESOURCE_ERRORS={ANDROID_RESOURCE_ERRORS!r}\n'+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
 expected=json.loads(sys.argv[2])
 context={}
 for name,value in expected.get('environment',{}).items():
@@ -428,15 +431,12 @@ def finish(status):
             ('capacity_refusal',b'agent-e2e: retryable capacity refusal for ')]
     reason=next((name for name,prefix in errors if prefix in raw),'unclassified')
     kind=expected.get('kind','vm')
-    android_errors={'boot_timeout':'android_boot_timeout','capacity':'android_capacity_refusal',
-                    'busy':'android_pool_busy','timeout':'android_pool_wait_timeout',
-                    'stale':'android_lease_stale'}
     android_error=None
     if kind=='android':
         match=re.search(rb'Android (boot_timeout|capacity|busy|timeout|stale): ',raw)
         if match:
             android_error=match[1].decode('ascii')
-            reason=android_errors[android_error]
+            reason=ANDROID_RESOURCE_ERRORS[android_error]
     matches=[]
     if expected.get('runner_source'):
         try:
@@ -507,9 +507,8 @@ def require_command_success(receipt, agent):
         reason = result.get('error_class')
         facts['error_class'] = reason if reason in ('workspace_attribution', 'missing_pinned_host_key', 'controller_identity',
             'capability_probe', 'unknown_acquire_outcome', 'ssh_authentication', 'ssh_name_resolution', 'ssh_connection_refused',
-            'shell_unbound_variable', 'shell_command_missing', 'capacity_refusal', 'runner_guard',
-            'android_boot_timeout', 'android_capacity_refusal', 'android_pool_busy', 'android_pool_wait_timeout',
-            'android_lease_stale') else 'unclassified'
+            'shell_unbound_variable', 'shell_command_missing', 'capacity_refusal', 'runner_guard') \
+            or reason in ANDROID_RESOURCE_ERRORS.values() else 'unclassified'
         facts['runner_error_callsites'] = [line for line in result.get('runner_error_callsites', [])
                                            if type(line) is int and 1 <= line <= 10000][:8]
         fingerprint = result.get('output_sha256', '')
