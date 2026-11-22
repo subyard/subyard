@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/herdr/resources/herdr/handler.sh", "kind": "profile", "owner": "config/profiles/herdr/resources/herdr.res", "reference": "HANDLER=resources/herdr/handler.sh"},
+    {"path": "config/profiles/herdr/resources/herdr/pair.sh", "kind": "library", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "herdr/pair.sh"},
+    {"path": "config/profiles/herdr/resources/herdr/route.sh", "kind": "library", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "herdr/route.sh"},
+    {"path": "config/profiles/herdr/resources/herdr/install-core.sh", "kind": "embedded", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "install-core.sh"},
+    {"path": "config/profiles/herdr/resources/herdr/login.sh", "kind": "embedded", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "login.sh"},
+    {"path": "config/profiles/herdr/resources/herdr/projects-changed.sh", "kind": "embedded", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "projects-changed.sh"},
+    {"path": "config/profiles/herdr/guest-ssh.sh", "kind": "embedded", "owner": "config/profiles/herdr/resources/herdr/handler.sh", "reference": "guest-ssh.sh"}
+  ]
+}

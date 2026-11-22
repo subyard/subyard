@@ -132,22 +132,22 @@ case "$action" in
         fi
         case "$interrupt_sessions:$vcstate" in
           1:active)
-            warn "interrupting the SSH and VS Code Remote-SSH sessions still connected to '$SSH_HOST', as approved in the operation plan"
+            warn "interrupting active SSH connections to '$SSH_HOST', as approved in the operation plan"
             ;;
           1:unknown)
-            warn "could not verify SSH and VS Code sessions in '$SSH_HOST'; stopping as approved in the operation plan"
+            warn "could not verify SSH connections in '$SSH_HOST'; stopping as approved in the operation plan"
             ;;
           *:active)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
-            die "VS Code Remote-SSH, the SSH agent forwarder or another SSH session is still connected to '$SSH_HOST' — if the SSH agent is unlocked, run '$(yard_cmd_hint) ssh-agent lock'; close every remote window (File > Close Remote Connection) and shell, then retry; use '$(yard_cmd_hint) stop --force' only for emergency shutdown"
+            die "An SSH connection is still active in '$SSH_HOST' — close remote clients and shells, then retry. If the SSH agent is unlocked, run '$(yard_cmd_hint) ssh-agent lock'. Use '$(yard_cmd_hint) stop --force' only for emergency shutdown."
             ;;
           *:unknown)
             ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
-            die "could not verify that VS Code Remote-SSH is idle — retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown"
+            die "could not verify that SSH connections are idle — retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown"
             ;;
         esac
       elif [ "$reconcile" = 0 ]; then
-        warn "--force bypasses the active SSH / VS Code session guard"
+        warn "--force bypasses the active SSH connection guard"
       fi
       info "stopping $YARD_INSTANCE_NAME"
       if ! power_stop_instance "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then

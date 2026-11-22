@@ -1992,7 +1992,13 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 	}
-	return true, nil
+	keepalive, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "scripts", "ssh-client-alive.sh"))
+	if err != nil {
+		return false, err
+	}
+	result, err = runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
+		ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check"}, Stdin: keepalive})
+	return result.ExitCode == 0 && err == nil, err
 }
 
 func (runtime Runtime) vmSSHRelayConverged(ctx context.Context, address, port string) bool {

@@ -147,7 +147,7 @@ MOCK_VSCODE_STATE=active
 if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
   fail "stop accepted an active VS Code window"
 fi
-grep -Fq 'Close Remote Connection' "$TMP/out" \
+grep -Fq 'close remote clients and shells' "$TMP/out" \
   || fail "active-window failure has no repair guidance: $(tr '\n' ' ' < "$TMP/out")"
 grep -Fq "ssh-agent lock" "$TMP/out" \
   || fail "active-session failure does not name the SSH agent forwarder: $(tr '\n' ' ' < "$TMP/out")"
@@ -164,7 +164,7 @@ restore_line="$(grep -nFx ssh-restore "$MOCK_INCUS_LOG" | cut -d: -f1)"
 reset_case
 MOCK_VSCODE_STATE=active
 "$ROOT/scripts/lifecycle-guard.sh" stop --force > "$TMP/out" 2>&1
-grep -Fq 'bypasses the active SSH / VS Code session guard' "$TMP/out" \
+grep -Fq 'bypasses the active SSH connection guard' "$TMP/out" \
   || fail "forced active stop emitted no warning"
 grep -Fxq stop "$MOCK_INCUS_LOG" || fail "--force did not reach incus stop"
 reset_case
@@ -204,9 +204,9 @@ for approved in active unknown idle; do
   grep -Fxq profile-stop "$MOCK_INCUS_LOG" || fail "approved stop did not pause the profile"
   if grep -Fxq ssh-restore "$MOCK_INCUS_LOG"; then fail "approved stop restored the SSH listener"; fi
   case "$approved" in
-    active) grep -Fq 'interrupting the SSH and VS Code Remote-SSH sessions' "$TMP/out" \
+    active) grep -Fq 'interrupting active SSH connections' "$TMP/out" \
       || fail "approved stop did not report interrupted sessions" ;;
-    unknown) grep -Fq 'could not verify SSH and VS Code sessions' "$TMP/out" \
+    unknown) grep -Fq 'could not verify SSH connections' "$TMP/out" \
       || fail "approved stop did not report the unknown session state" ;;
     idle) if grep -Fq '[warn]' "$TMP/out"; then fail "approved idle stop warned: $(tr '\n' ' ' < "$TMP/out")"; fi ;;
   esac
