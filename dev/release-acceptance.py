@@ -315,16 +315,7 @@ VM_NEEDS = {"reboot", "kernel", "host-network", "disk-quota", "distro"}
 RUNNER_NEEDS = {"kvm", "idmap-shift", "apparmor"}
 
 
-# P0 also exposes individual diagnostic lanes outside the release catalog. Split
-# catalog entries retain their candidate-defined requirements in the planner.
-P0_LANE_TIERS = {
-    **dict.fromkeys(("init-settings", "newer-release", "profile-resource", "cleanup",
-                     "dependencies", "peer", "transport"), "system-container"),
-    **dict.fromkeys(("nested-teardown", "release", "yard-maintenance"), "runner"),
-}
-
-
-def resolve_tier(entry, level="ordinary", *, hosted_singleton=False):
+def resolve_tier(entry, level="ordinary"):
     tier, needs = entry.get("tier", "vm"), entry.get("needs", [])
     if tier not in TIERS:
         raise ValueError(f"unknown acceptance tier {tier!r}")
@@ -338,9 +329,7 @@ def resolve_tier(entry, level="ordinary", *, hosted_singleton=False):
         raise ValueError("system-container cannot provide an android-test lease")
     if level not in ("ordinary", "full"):
         raise ValueError("unknown release level")
-    if level == "full":
-        return "vm"
-    return "runner" if hosted_singleton and tier == "system-container" else tier
+    return "vm" if level == "full" else tier
 
 
 def local_lease_tier(tier):
@@ -3465,7 +3454,7 @@ def supersede(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    placement = sub.add_parser("placement", help="resolve a check's local lease tier")
+    placement = sub.add_parser("placement", help="resolve a core catalog check's local lease tier")
     placement.add_argument("check")
     prep = sub.add_parser("prepare", help="retain an immutable source/artifact candidate")
     prep.add_argument("--version", required=True)
@@ -3521,11 +3510,6 @@ def main():
     args = parser.parse_args()
     if args.action == "placement":
         declarations = check_declarations(ROOT, {})
-        # p0-acceptance validates its lane before resolving the local fallback.
-        if args.check.startswith("p0:"):
-            entry = {"tier": P0_LANE_TIERS.get(args.check[3:], "vm")}
-            print(local_lease_tier(resolve_tier(entry)))
-            return 0
         if args.check not in declarations:
             parser.error("unknown core check")
         tier = resolve_tier(declarations[args.check])

@@ -856,6 +856,14 @@ at once and is repeated up to 30 times; checks that never reached Intel fail tha
 Only the `reschedule` job may
 start runs, and the `supersede` job cancels replaced ones; neither checks out code.
 
+Each matrix entry carries the tier its catalog declares; periodic-only checks declare their own.
+A `vm` or `system-container` check leases from the candidate pool on its runner. A `runner`
+check skips the pool: `dev/ci/runner-lease.sh` grants the ubuntu-24.04 hosted job itself as the
+single guest, so it reports `image=ubuntu-24.04` whatever the run's lease image is, and nothing
+nests, so a nested check declared `runner` is not retried on Intel. `periodic:container-pool`
+proves a system-container lease on the candidate pool (acquire, SSH, release, empty slot project)
+as its own job, so a container defect does not skip the VM checks behind the `pool` gate.
+
 Periodic-only `vm:incus-apparmor-probe` installs the packaged candidate on one standard VM and
 checks failed AppArmor probes, both real Incus AppArmor transitions and nested Docker preservation.
 The inner Incus must start with AppArmor enabled; the fixture refuses a disabled baseline and
