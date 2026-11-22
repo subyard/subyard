@@ -519,7 +519,7 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 	if validationErr == nil {
 		check := `incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"`
 		if cfg.systemContainer() {
-			check = `incus --version >/dev/null; cd /var/lib/subyard/product-image; sha256sum -c SHA256SUMS`
+			check = `incus --version >/dev/null; test -x /usr/bin/getfacl; test -x /usr/bin/setfacl; cd /var/lib/subyard/product-image; sha256sum -c SHA256SUMS`
 		}
 		_, validationErr = builder.guest(validationCtx, vm, nil, "sh", "-eu", "-c", check)
 	}
