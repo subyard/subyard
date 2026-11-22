@@ -493,9 +493,7 @@ stop_runner_children() {
 }
 p0_guest() {
   local vm="$1"; shift
-  local -a placement=()
-  [ "$ENVIRONMENT_TYPE" != system-container ] || placement+=(SHIFT_MODE=acl)
-  guest "$vm" runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev "${placement[@]}" \
+  guest "$vm" runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
     sh -c 'cd "$HOME"; exec "$@"' _ "$@"
 }
 run_vm() {

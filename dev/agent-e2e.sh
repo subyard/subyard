@@ -306,9 +306,6 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_SLOT=%q\n' "$LEASE_SLOT"
 	printf 'export SUBYARD_E2E_GENERATION=%q\n' "$LEASE_GENERATION"
 	printf 'export SUBYARD_E2E_TYPE=%q\n' "$ENVIRONMENT_TYPE"
-	if [ "$ENVIRONMENT_TYPE" = system-container ]; then
-		printf 'export SHIFT_MODE=acl\n'
-	fi
 	printf 'export SUBYARD_E2E_VM_COUNT=%q\n' "$VM_COUNT"
 	printf 'export SUBYARD_E2E_CPU_PER_VM=%q\n' "$GRANT_CPU_PER_VM"
 	printf 'export SUBYARD_E2E_MEMORY_PER_VM=%q\n' "$GRANT_MEMORY_PER_VM"

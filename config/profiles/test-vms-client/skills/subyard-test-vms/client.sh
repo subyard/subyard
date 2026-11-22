@@ -1368,6 +1368,7 @@ verify_boundary() {
 
 guest() {
   local vm="$1" command; shift
+  [ "$ENVIRONMENT_TYPE" != system-container ] || set -- env SHIFT_MODE=acl "$@"
   command="$(quote_ssh_command "$@")"
   if [ -n "${E2E_GUEST_TIMEOUT:-}" ]; then
     timeout --signal=TERM --kill-after=5 "$E2E_GUEST_TIMEOUT" ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command"
