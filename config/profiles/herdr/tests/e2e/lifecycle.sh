@@ -38,6 +38,12 @@ on_exit() {
       stage "${log##*/}:" >&2
       tail -n 40 "$log" >&2
     done
+    if [ -n "${project_ready:-}" ]; then
+      stage 'guest Herdr diagnostics:' >&2
+      incus --project "$project" exec "$instance" -- runuser -u dev -- sh -c '
+        cd "$HOME/.local/state/herdr-core/default" 2>/dev/null && tail -n 40 core.log holder.log
+        XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user list-units --all --no-pager "hc-*"' >&2 || true
+    fi
   fi
   stage "evidence: $state" >&2
   exit "$rc"
@@ -144,6 +150,7 @@ guest() { incus --project "$project" exec "$instance" -- "$@"; }
 guest_dev() { guest runuser -u dev -- "$@"; }
 yard init --yes > "$state/init.log" 2>&1
 yard start --yes > "$state/start.log" 2>&1
+project_ready=1
 
 stage 'verify a fresh up: kick, key-only SSH and ClientAlive convergence'
 yard herdr up --yes > "$state/up.log" 2>&1
