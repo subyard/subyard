@@ -28,26 +28,47 @@ assert '/run-'+parent+'/run-'+document['child']+'/workload' in document['cgroup'
                     '--agent-version', 'fixture', '--scope-mode', 'require', '--project-id', 'telemetry-fixture',
                     '--', sys.executable, '-c', code, str(context)], check=True, timeout=25)
     run = json.loads(context.read_text())
-    deadline = time.monotonic()+40
-    with closing(sqlite3.connect((args.data_dir/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
+    wait_for_nested_finals(args.data_dir, run)
+    print(json.dumps({'schema': 'subyard.telemetry.nested-scope/v1', 'nested_placement': True,
+                      'parent_relation': True, 'parent_final': True, 'child_final': True}), flush=True)
+
+
+def wait_for_nested_finals(data_dir, run):
+    started = time.monotonic()
+    deadline = started+40
+    observed, status, polls = {}, {}, 0
+    conditions = dict.fromkeys(('parent_final', 'parent_journal_removed', 'child_final',
+                               'child_journal_removed', 'child_scope_present', 'child_run_present'), False)
+    with closing(sqlite3.connect((data_dir/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
         while time.monotonic() < deadline:
-            finals = {}
+            polls += 1
             for name in ('parent', 'child'):
-                samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run[name]+':scope',))]
-                finals[name] = any(sample.get('final') and sample.get('populated') is False for sample in samples)
-            if all(finals.values()) and not any((args.data_dir/'runs-v5'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
-                parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (run['child']+':scope',)).fetchone()
-                child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run['child'],)).fetchone()
-                if not parent or not child_run:
-                    time.sleep(.2)
-                    continue
+                samples = [json.loads(row[0]) for row in db.execute(
+                    'SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (run[name]+':scope',))]
+                conditions[name+'_final'] = any(sample.get('final') and sample.get('populated') is False for sample in samples)
+                journal = (data_dir/'runs-v5'/(run[name]+'.json')).exists()
+                conditions[name+'_journal_removed'] = not journal
+                # Only identified counters/flags, never raw run or journal bodies.
+                status[name] = {'agent_run_id': run[name], 'sample_count': len(samples), 'journal_present': journal,
+                                'last_sample': {key: samples[-1].get(key) for key in
+                                                ('final', 'populated', 'cpu_ns', 'monotonic_ns')} if samples else None}
+            parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (run['child']+':scope',)).fetchone()
+            child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run['child'],)).fetchone()
+            conditions['child_scope_present'] = parent is not None
+            conditions['child_run_present'] = child_run is not None
+            elapsed = round(time.monotonic()-started, 3)
+            for condition, ready in conditions.items():
+                if ready:
+                    observed.setdefault(condition, elapsed)
+            if all(conditions.values()):
                 assert parent and parent[0] == run['parent']+':scope'
                 assert child_run and json.loads(child_run[0])['parent_run_id'] == run['parent']
-                print(json.dumps({'schema': 'subyard.telemetry.nested-scope/v1', 'nested_placement': True,
-                                  'parent_relation': True, 'parent_final': True, 'child_final': True}), flush=True)
                 return
             time.sleep(.2)
-    raise AssertionError('nested scope final counters were not committed')
+    raise AssertionError('nested scope final counters were not committed: '+json.dumps({
+        'elapsed_seconds': round(time.monotonic()-started, 3), 'budget_seconds': 40, 'polls': polls,
+        'missing': [condition for condition, ready in conditions.items() if not ready],
+        'first_observed_seconds': observed, 'runs': status}, sort_keys=True))
 
 
 def wait_for_short_run_samples(data_dir, run):
