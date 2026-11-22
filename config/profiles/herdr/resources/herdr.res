@@ -1,0 +1,13 @@
+COMMAND=herdr
+HANDLER=resources/herdr/handler.sh
+TITLE="Herdr remote core"
+BOOTSTRAP=profile
+ACTION="up up bootstrap-change recreatable"
+ACTION="is-up is-up read-only not-needed"
+ACTION="status status read-only not-needed"
+ACTION="update update yard-change recreatable"
+ACTION="restart restart yard-change reversible"
+ACTION="logs logs read-only not-needed"
+ACTION="down down runtime-destruction irreversible"
+BRINGUP=up
+SHUTDOWN=down
