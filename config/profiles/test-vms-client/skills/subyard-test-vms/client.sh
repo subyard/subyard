@@ -314,26 +314,38 @@ ensure_client_id() {
   ) 9>"$STATE_ROOT/.client-id.lock"
 }
 
-read_agent_logs() {
-  local mode="$1" count="$2" json_output="$3" incident_id="$4" client response request status
-  command -v jq >/dev/null 2>&1 || die 'jq is required'
+# One non-fatal owned diagnostic read: OPERATION ARGS [TIMEOUT]. Prints the ok reply.
+# Returns 2 no lease history, 3 invalid identity, 4 unreachable, 5 unsupported, 6 refused.
+agent_log_request() {
+  local operation="$1" arguments="$2" budget="${3:-}" client status response
   # A read must not manufacture a new identity with no ownership history.
-  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] \
-    || die 'no controller lease history; acquire a lease with this controller first'
-  read -r client < "$STATE_ROOT/client-id"
-  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || die 'invalid persistent E2E client id'
-  status="$(facade_request status)" || die 'test environment unavailable'
+  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || return 2
+  read -r client < "$STATE_ROOT/client-id" || return 3
+  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || return 3
+  status="$(facade_request status "$budget")" || return 4
   jq -e '.schema_version == 1 and .status == "ok" and
-    ((.capabilities // []) | index("lease-logs-v1") != null)' <<<"$status" >/dev/null 2>&1 \
-    || die 'broker does not support lease logs (lease-logs-v1); operator runtime update required'
+    ((.capabilities // []) | index("lease-logs-v1") != null)' <<<"$status" >/dev/null 2>&1 || return 5
+  response="$(facade_request "$operation $client $arguments" "$budget")" || return 4
+  jq -e '.schema_version == 1 and .status == "ok"' <<<"$response" >/dev/null 2>&1 || return 6
+  printf '%s\n' "$response"
+}
+
+read_agent_logs() {
+  local mode="$1" count="$2" json_output="$3" incident_id="$4" response rc=0
+  command -v jq >/dev/null 2>&1 || die 'jq is required'
   if [ "$mode" = incident ]; then
-    request="incident-v1 $client $incident_id"
+    response="$(agent_log_request incident-v1 "$incident_id")" || rc=$?
   else
-    request="logs-v1 $client ${LEASE_REQUESTED_SLOT:--} $count"
+    response="$(agent_log_request logs-v1 "${LEASE_REQUESTED_SLOT:--} $count")" || rc=$?
   fi
-  response="$(facade_request "$request")" || die 'test environment unavailable'
-  jq -e '.schema_version == 1 and .status == "ok"' <<<"$response" >/dev/null 2>&1 \
-    || die 'diagnostics are unavailable for this controller'
+  case "$rc" in
+    0) ;;
+    2) die 'no controller lease history; acquire a lease with this controller first' ;;
+    3) die 'invalid persistent E2E client id' ;;
+    4) die 'test environment unavailable' ;;
+    5) die 'broker does not support lease logs (lease-logs-v1); operator runtime update required' ;;
+    *) die 'diagnostics are unavailable for this controller' ;;
+  esac
   if [ "$mode" = incident ]; then
     jq -e '.incident | type == "object"' <<<"$response" >/dev/null \
       || die 'invalid incident response'
@@ -1078,18 +1090,17 @@ lease_release_request() {
 # events (the failing step, its error and timing) into the caller's log. Never changes
 # the outcome; each read is bounded.
 release_refusal_events() {
-  local client status response
+  local response generation=null
   [ "$RELEASE_STATE" = refused ] && [ "$RELEASE_CODE" != lease_lost ] || return 0
-  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || return 1
-  read -r client < "$STATE_ROOT/client-id" || return 1
-  [[ "$client" =~ ^[0-9a-f]{32}$ && "$LEASE_SLOT" =~ ^slot-[0-9]+$ && "$LEASE_EPOCH" =~ ^[0-9]+$ ]] || return 1
-  status="$(facade_request status 30)" \
-    && jq -e '(.capabilities // []) | index("lease-logs-v1") != null' <<<"$status" >/dev/null 2>&1 \
-    && response="$(facade_request "logs-v1 $client $LEASE_SLOT 30" 30)" \
-    && jq -e '.status == "ok" and (.events | type == "array")' <<<"$response" >/dev/null 2>&1 \
+  [[ "$LEASE_SLOT" =~ ^slot-[0-9]+$ && "$LEASE_EPOCH" =~ ^[0-9]+$ ]] || return 1
+  [[ ! "$LEASE_GENERATION" =~ ^[1-9][0-9]*$ ]] || generation="$LEASE_GENERATION"
+  response="$(agent_log_request logs-v1 "$LEASE_SLOT 30" 30)" \
+    && jq -e '.events | type == "array"' <<<"$response" >/dev/null 2>&1 \
     || { printf 'E2E_RELEASE_EVENT unavailable slot=%s\n' "$LEASE_SLOT" >&2; return 1; }
-  jq -r --argjson epoch "$LEASE_EPOCH" '
-    [.events[] | select(.lease_epoch == $epoch)] as $own
+  # Only this lease: its epoch, and its generation when both sides carry one.
+  jq -r --argjson epoch "$LEASE_EPOCH" --argjson generation "$generation" '
+    [.events[] | select(.lease_epoch == $epoch and
+      ($generation == null or .resource_generation == null or .resource_generation == $generation))] as $own
     | if ($own | length) == 0 then "E2E_RELEASE_EVENT none lease_epoch=\($epoch)" else
         $own[] | "E2E_RELEASE_EVENT kind=\(.kind) at=\(.timestamp)"
           + (if .duration_ms then " duration_ms=\(.duration_ms)" else "" end)

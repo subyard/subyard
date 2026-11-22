@@ -663,16 +663,16 @@ func TestBrokerStatusAfterQuarantineIsRedactedAndAttributed(t *testing.T) {
 	}
 }
 
-// A refused release must name the failing step, keep the native stop error and say how
+// A failed drain must name its failing step, keep the native stop error and say how
 // long cleanup ran, so a lane's 65-second refusal is attributable from its own events.
 func TestBrokerReleaseStopEventsNameStepAndTiming(t *testing.T) {
 	for _, scenario := range []struct {
 		name, faultVerb, wantKind, wantStep string
 		wantText                            []string
 	}{
-		{"graceful stop timeout", "stop", "lease.stop_failed", "release step fence-and-stop: ",
+		{"graceful stop timeout", "stop", "lease.stop_failed", "drain step fence-and-stop: ",
 			[]string{fakeIncusUnavailable, `remained in state "RUNNING" after stop`, "graceful stop (timeout 60s) returned after 1m1s"}},
-		{"delete failure", "delete", "lease.stop_failed", "release step delete-allocation: ",
+		{"delete failure", "delete", "lease.stop_failed", "drain step delete-allocation: ",
 			[]string{fakeIncusUnavailable}},
 		{"slow successful stop", "", "lease.stop_succeeded", "", nil},
 	} {

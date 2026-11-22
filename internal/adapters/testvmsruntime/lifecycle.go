@@ -310,10 +310,10 @@ func (runtime *Runtime) finishDrainingSlot(
 	started := runtime.Now()
 	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
 	if stopErr != nil {
-		stopErr = fmt.Errorf("release step fence-and-stop: %w", stopErr)
+		stopErr = fmt.Errorf("drain step fence-and-stop: %w", stopErr)
 	} else if slot.Environment != nil {
 		if deleteErr := child.deleteAllocation(ctx); deleteErr != nil {
-			stopErr = fmt.Errorf("release step delete-allocation: %w", deleteErr)
+			stopErr = fmt.Errorf("drain step delete-allocation: %w", deleteErr)
 		}
 	}
 	if evidence.duration = runtime.Now().Sub(started); evidence.duration < 0 {

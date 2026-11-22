@@ -1520,9 +1520,10 @@ These reads never acquire, renew, release or recover a lease. The private random
 `client-id` is a diagnostic read capability; keep it private along with the controller identity.
 After a refused foreground release, the runner and `client.sh release` print
 `E2E_RELEASE_REFUSAL code=... message=...` and the same lease epoch's own events as
-`E2E_RELEASE_EVENT` lines; the outcome is unchanged. `lease.stop_failed` names the release step
-(`fence-and-stop` or `delete-allocation`), keeps the native error with the elapsed graceful stop
-time, and both stop outcome events carry the cleanup `duration_ms`.
+`E2E_RELEASE_EVENT` lines; the outcome is unchanged. For every drain (release, expiry, revoke,
+drain-all or resize), `lease.stop_failed` names the drain step (`fence-and-stop` or
+`delete-allocation`), keeps the native error with the elapsed graceful stop time, and both stop
+outcome events carry the cleanup `duration_ms`.
 The broker stamps each archived record with its captured private controller identity when writing
 the record, starting before provisioning. Slot, resource generation and lease epoch remain
 diagnostic metadata; reused counters do not transfer access to another controller.
