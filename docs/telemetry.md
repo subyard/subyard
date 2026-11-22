@@ -75,17 +75,18 @@ and disable operations leave home documents alone. Policy files that still conta
 bearer are rewritten without it; the helper is installed before a policy names it.
 
 Releases v0.28–v0.30 read telemetry runtime format 1, and this release installs format 2.
-`yard update --rollback` to such a release refuses while telemetry is enabled in a local
-yard: their collector cannot open this release's store or the producer files it retired.
+Rollback is supported only to v0.30.0; rollback to v0.29.0 or earlier stays refused.
+`yard update --rollback` to v0.30.0 refuses while telemetry is enabled in a local
+yard: its collector cannot open this release's store or the producer files it retired.
 Run `yard -Y NAME profile disable telemetry` first, which also removes both system policy
 files. It also refuses drift that only `yard migrate` converges. The first rollback command
-then converts each yard. It rewrites the collector unit in their form and moves the collector
+then converts each yard. It rewrites the collector unit in the v0.30.0 form and moves the collector
 token to `/var/lib/subyard/telemetry/auth.token`. No telemetry data is moved or converted.
 Until the rollback itself, this release reports that drift, and `yard migrate` reverts it.
-Those releases cannot read this release's profile declarations, so their own
+v0.30.0 cannot read this release's profile declarations, so its own
 `yard update --rollback` back refuses without changing anything. Return with
 `yard update --version VERSION`, which reads this release's declarations itself.
-Re-enabling telemetry on such a release fails: its collector refuses this release's store,
+Re-enabling telemetry on v0.30.0 fails: its collector refuses this release's store,
 and after an upgrade from v0.30 its run manager cannot reopen the producer files this release
 retired. Process environment settings such
 as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
