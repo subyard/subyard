@@ -1,6 +1,6 @@
 # Testing changes
 
-Test-selection policy lives in [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+Test-selection policy lives in the dev-flow skill and [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 This guide documents how to run checks and interpret their evidence.
 
 ## Reading map by task type
@@ -300,8 +300,12 @@ The ordinary profile/release inventory and mandatory smoke/full gates retain the
 
 ## Execution and reporting principles
 
-Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)
-for roles and model settings. Preserve required coverage and candidate identity.
+Assign roles through [Subyard dev-flow agents](../.agents/skills/subyard-dev-flow/SKILL.md#agents).
+Preserve required coverage and candidate identity.
+
+- **Native terminal outcome:** the client's own final result object for a command (exit code,
+  output, duration), not a summary or log tail.
+- **Evidence pointer:** a path to logs, receipts or bundles, given instead of copied content.
 
 - One assigned polling owner reads active progress/logs; the developer and coordinator use
   its events and evidence instead of parallel polling. Interactive root-console work also has

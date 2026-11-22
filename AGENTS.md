@@ -6,8 +6,10 @@ Operator-specific requirements and planning may live in the optional private ove
 
 ## Development workflow
 
-For features, fixes, refactoring, tests, and developer documentation, use
-[Subyard dev-flow](.agents/skills/subyard-dev-flow/SKILL.md).
+For features, fixes, refactoring, tests, and developer documentation, develop with the
+[dev-flow](https://github.com/Dmitry-Borodin/dev-flow) skill (process) and
+[Subyard dev-flow](.agents/skills/subyard-dev-flow/SKILL.md) (Subyard parameters, checks, tools).
+The `user-skills` profile installs dev-flow; if it is not loaded, stop and ask the operator.
 
 Optional-profile behavior and tests belong to the owning profile, not core. Core owns generic
 extension contracts and synthetic contract tests; do not add profile-specific branches or assertions.

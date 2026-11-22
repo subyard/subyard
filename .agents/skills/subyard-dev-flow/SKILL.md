@@ -1,24 +1,13 @@
 ---
 name: subyard-dev-flow
-description: Always use when developing Subyard project itself.
+description: "Always use with dev-flow when developing Subyard itself: its parameters, checks and tools."
 ---
 
 # Subyard dev-flow
 
-This skill is the authoritative source for development workflow and test-selection policy.
-The linked guides describe commands, evidence, tools and environment constraints; they do not
-add automatic test gates. Explicit user instructions take precedence over this skill.
-
-Terms used below:
-
-- **Candidate:** the exact public source being checked or reviewed, including uncommitted and
-  untracked files; its identity is the recorded hash/manifest of those inputs, or the pushed
-  commit SHA for CI checks.
-- **Freeze:** stop editing and record or package the final candidate so later checks use the same bytes.
-- **Native terminal outcome:** the client's own final result object for a command (exit code,
-  output, duration), not a summary or log tail.
-- **Receipt:** the result file a runner writes for a check, with its status and candidate binding.
-- **Evidence pointer:** a path to logs, receipts or bundles, given instead of copied content.
+The [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) skill owns the process; this skill names
+what stands behind its terms in Subyard. The linked guides own commands and evidence; they add no
+automatic gates. Explicit operator instructions win.
 
 ## Read the relevant sources
 
@@ -35,129 +24,64 @@ Read by task; links are relative to this skill.
 | Live host or release behavior | [Real-host acceptance](../../../docs/real-host-acceptance.md): physical-boundary and release checks. |
 | Configuration or credentials | [Configuration](../../../docs/configuration.md) and [Keys](../../../docs/keys.md), respectively. |
 
-Without a private overlay or other instructions on where task plans and notes live, ask the
-operator. Ask for missing requirements when the task depends on them.
+## Project parameters
 
-## Work
+- **Tasks and instructions:** the optional private overlay `private/`, a separate gitignored
+  repository; rules in `private/AGENTS.md`. Keep the main checkout's `private/` current and never
+  commit it; the operator syncs it with [subyard-private-sync](../subyard-private-sync/SKILL.md).
+  Without an overlay or other instructions, ask the operator. Operator questions live where the
+  overlay says.
+- **Commits:** the coordinator commits and pushes the accepted candidate without asking.
+- **Checks:** [Choose checks by risk](#choose-checks-by-risk). **PR format:** [Pull requests](#pull-requests).
+- **Code areas:** `product`, `tests`, `fixtures and tools`, `documentation`.
+- **Agents:** [Agents](#agents); models are chosen outside this repository.
 
-The coordinator owns this section's task planning and acceptance. Assigned workers follow
-the engineering and testing rules within their assignment, report remaining work to the
-coordinator, and do not create or close shared task files or start another full role cycle.
+## Engineering
 
-1. Establish the requested outcome, scope, plan steps, and acceptance checks before
-   editing. Keep task plans where the private overlay or other instructions say; otherwise ask
-   the operator. Follow the overlay's task-file workflow when present. Keep
-   remaining steps current; change the agreed scope only with the user's agreement.
-   For a substantial change, first run a read-only design pass listing invariants, failure,
-   interruption, upgrade, security and privacy cases and the simplest structure covering them.
-   The developer names the shared primitive for each invariant (writes, private directories,
-   refusal collection, resume); a hand-written substitute is a first-round review finding.
-   The interruption harness and the refusal table test run before review.
-   Changes to profile runtime formats, migration registries, or agent integration sources must
-   pass `TestPublishedRollbackGate` against the latest published baseline. Provide the existing
-   rollback hooks/down path, or seal a rollback boundary in the introducing release's
-   `config/release-rollback.json`. Runtime owners absent from either release are skipped. Agent inventory changes (tracked
-   package/materialization inputs and project dispatcher) require a non-blocking declaration of
-   surviving yard files and manual cleanup, shown in plan/result output and release notes;
-   accepted agent cleanup limitations never refuse rollback.
-   See [rollback boundaries](../../../docs/control-plane.md#declared-rollback-boundaries).
-2. Preserve unrelated edits and follow the affected component's architecture.
-   Make host fixes reproducible through product setup, including repeat runs.
-   For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes;
-   use the [development cache workflow](../../../docs/development.md#toolchain) for
-   shared Cargo intermediates and separate final outputs. Do not copy build caches
-   into each evidence directory. Preserve deliberate cold-cache and UID-isolation fixtures.
-   Choose tests by the policy below and existing coverage.
-   Simplify unnecessary implementation scope before expanding its test machinery.
-3. Run the applicable checks against the final changes using the policy below.
-   Planned checks on available allocated VMs are agent work: complete them before
-   reporting readiness.
-4. Before handoff or compaction, update the concise task plan: remaining work, decisions,
-   evidence and candidate identities. Preserve required rules and relevant architecture,
-   without a chat journal or full history.
-
-## Pull requests
-
-- Branch each task from the default branch, or from the release branch for a release in
-  preparation, and target that base; branch from an unmerged PR branch only with the operator's
-  agreement. Commit and push your branch without asking. The operator invokes
-  [subyard-private-sync](../subyard-private-sync/SKILL.md) manually to sync the private overlay.
-- By default a change ships as one PR: the first commit adds the mechanism without changing
-  behavior, the second changes behavior, and the first review round goes commit by commit.
-  Moving existing code onto shared primitives goes in separate PRs. There is no line-count threshold.
-- After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
-  returns the title and body from the diff and your short public brief: problem, expected
-  behavior, checks run and known limits, without private details. Save the body outside the
-  repository, append the output of
-  `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ...
-  [--check NAME=URL ...]` (areas: `product`, `tests`, `fixtures and tools`, `documentation`),
-  push, and run
-  `subyard-github run -- gh pr create --base BASE --title TITLE --body-file FILE`, adding
-  `--label bug` when the PR fixes a defect; add `--draft`
-  while checks you still owe must pass before merging, then
-  `subyard-github run -- gh pr ready NUMBER`. Update the body with
-  `subyard-github run -- gh pr edit NUMBER --body-file FILE`.
-- Before asking for merge, run as a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners)
-  on the PR branch not only the standard VM checks but every profile and lane check that
-  [coverage ownership](../../../docs/testing.md#coverage-ownership) assigns to the changed behavior,
-  and watch them; use leased VMs for non-standard states, reproduction and
-  targeted cases. Dispatched runs are not PR checks: pass their run URLs as `--check`.
-  A required check counts only when green on the current branch head, including its Intel retry
-  runs; after a push, rerun what the risk policy selects for the new changes.
-- Fix findings and red checks with new commits; never rewrite reviewed commits. Rebase only for a
-  conflict or a base change the task needs, resolve conflicts by hand, and force-push only your
-  branch with `--force-with-lease`.
-- Merging needs the operator's OK or an approving review of the current head by a repository
-  member (`subyard-github run -- gh pr view NUMBER --json headRefOid,latestReviews`); put the PR
-  URL in the message that asks for it. After either, with the PR ready and its checks and your
-  dispatched runs green, update the statistics and run
-  `subyard-github run -- gh pr merge NUMBER --auto --squash`; it merges when required checks pass,
-  at once if there are none. If you want another review before merging, do not enable it; that
-  review is a task step. While it is still open push small fixes; after a substantial change with
-  auto-merge on, run `subyard-github run -- gh pr merge NUMBER --disable-auto` and ask again.
-  After the merge, fixes go into a new PR.
-- Fix red checks of your own task's PR. All agent PRs share one GitHub identity: leave other
-  tasks' PRs to their owners.
-- Public PRs, commits and comments carry no attribution and no operator conversation.
+- Make host fixes reproducible through product setup, including repeat runs.
+- Name the shared primitive for each invariant (writes, private directories, refusal collection,
+  resume); a hand-written substitute is a first-round review finding. The interruption harness
+  and the refusal table test run before review.
+- For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes; use the
+  [development cache workflow](../../../docs/development.md#toolchain) for shared Cargo
+  intermediates and separate final outputs. Do not copy build caches into evidence directories.
+  Preserve deliberate cold-cache and UID-isolation fixtures.
+- Changes to profile runtime formats, migration registries, or agent integration sources must
+  pass `TestPublishedRollbackGate` against the latest published baseline. Provide the existing
+  rollback hooks/down path, or seal a rollback boundary in the introducing release's
+  `config/release-rollback.json`. Runtime owners absent from either release are skipped. Agent
+  inventory changes (tracked package/materialization inputs and project dispatcher) require a
+  non-blocking declaration of surviving yard files and manual cleanup, shown in plan/result
+  output and release notes; accepted agent cleanup limitations never refuse rollback.
+  See [rollback boundaries](../../../docs/control-plane.md#declared-rollback-boundaries).
 
 ## Choose checks by risk
 
-- Normal checks and acceptance test the current public worktree, including uncommitted and
-  untracked public inputs. Installed-runtime and reboot checks package that worktree and install
-  the resulting candidate through the supported installer. Use a published release only as an
-  explicit problem-reproduction baseline; a pass on it does not establish current-worktree acceptance.
-- Start with the smallest existing check that proves the changed behavior. Add a regression
-  case only for a distinct failure or observable contract not already covered. Assert outcomes;
-  source-text assertions belong only to explicit source-level contracts. If a small change needs
-  extensive fixtures, reconsider its implementation before adding test machinery.
-- Before an expensive affected VM check, run changed-component unit/contract checks, then the
-  smallest fixture preflight, then the affected E2E lane. Reuse a current applicable PASS;
-  a failed prerequisite stops dependent expensive checks. If no local check exists or it cannot
-  prove the physical contract, record that limit in one line and run the smallest owning VM
-  diagnostic. Use the VM guide's [fixture preflight](../../../docs/test-vms.md#fixture-preflight)
-  for commands, execution user, readiness and capacity; this does not require the full host-free suite.
-- For documentation, formatting and mechanical changes with unchanged behavior, inspect the diff
-  and use relevant syntax, link or format validation. Do not automatically build, run the core
-  suite or acquire VMs. Small behavioral changes normally need focused package or contract tests.
-- Preserve checks for permissions, data loss, migrations, atomic updates and recovery. Choose
-  broader checks when shared behavior or actual coupling makes focused coverage insufficient.
-  Run the full host-free suite (`./tests/run.sh`) for that reason, an explicit user request, or
-  an applicable merge/release gate, not merely because a CLI or shell file changed.
-- Use targeted VM/real-host checks when correctness depends on physical behavior that local tests
-  cannot establish. Mocks do not prove external CLI/protocol or host compatibility. Run full P0
-  only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted
-  lanes cannot adequately cover. Explain that reason before the expensive run; availability of
-  VMs alone does not justify using them.
-- Select required owning lanes, including profile-owned lanes, from the explicit dependency map in
+| dev-flow kind | Subyard | Guide |
+| --- | --- | --- |
+| Local | focused `go test`, shell/Python contracts, profile `tests/run.sh`, `./tests/run.sh`, `make verify`, `make cli-docs-check` | [core checks](../../../docs/testing.md#run-the-core-checks) |
+| VM pipelines | `dev/agent-e2e.sh` leases: P0 `vm:p0-full` or `--lane`, profile `tests/e2e/acceptance.sh --slot N`, fixture preflight | [VM guide](../../../docs/test-vms.md) |
+| Base CI | `verify` and CodeQL on every push | [required CI checks](../../../docs/testing.md#required-ci-checks) |
+| Extended CI | Periodic E2E dispatch on the PR branch, including ARM and Intel retry runs | [Periodic E2E](../../../docs/testing.md#periodic-e2e-on-hosted-runners) |
+| Stand | leased disposable VM (root), Android emulator, web preview | VM guide, `subyard-android`, `subyard-preview` |
+
+- Checks and acceptance test the current public worktree, including uncommitted and untracked
+  inputs. Installed-runtime and reboot checks package that worktree and install it through the
+  supported installer. A published release is only a problem-reproduction baseline.
+- Before an expensive VM check, run changed-component unit/contract checks, then the smallest
+  [fixture preflight](../../../docs/test-vms.md#fixture-preflight), then the affected lane. Reuse a
+  current applicable PASS. If no local check can prove the physical contract, record that limit
+  in one line and run the smallest owning VM diagnostic. The full host-free suite is not required.
+- Run `./tests/run.sh` for shared behavior or actual coupling, an explicit request, or a
+  merge/release gate, not merely because a CLI or shell file changed.
+- Run full P0 only on explicit request or for cross-domain lifecycle/recovery coupling that
+  targeted lanes cannot cover; state the reason first. Free VMs alone do not justify it.
+- Select owning lanes, including profile-owned lanes and transitive validators, from
   [coverage ownership](../../../docs/testing.md#coverage-ownership); there is no automatic
-  changed-file selector. Include transitive validator changes and run a lane's local prerequisites
-  before its allocation. Mocks and host-free stubs cannot close a contract the map assigns to a
-  physical lane.
-- For release preparation, acceptance and publication, follow the
+  changed-file selector. Mocks cannot close a contract the map assigns to a physical lane.
+- Planned checks on available allocated VMs are agent work: complete them before readiness.
+- Release preparation, acceptance and publication follow the
   [agent release workflow](../../../docs/reference/release-publication.md#agent-release-workflow).
-- Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
-  risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
-  the full lifecycle or release gate passed.
 
 ## Test progress across leases
 
@@ -178,132 +102,50 @@ coordinator, and do not create or close shared task files or start another full 
 - A required full P0 gate is one fresh `vm:p0-full` run plus its split checks on the same candidate;
   targeted passes cannot substitute for them.
 
-## Test execution and delegation
+## Pull requests
 
-Keep short mechanical/doc edits, small focused fixes and read-only answers direct; add review
-for a concrete risk. Substantial changes use one sole writer (developer) and one independent
-reviewer by default. A change is substantial when it adds or changes behavior across components,
-or touches permissions, data retention, migrations, atomic updates or recovery. Add a second
-reviewer only for an explicit two-axis request or a concrete independent risk. Preserve the
-risk-based checks above; orchestration does not add acceptance runs.
+- Run GitHub commands as `subyard-github run -- gh …`. The body is the describer's output plus
+  `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ... [--check NAME=URL ...]`;
+  `--review-cycles` counts dev-flow rounds.
+- Create with `gh pr create --base BASE --title TITLE --body-file FILE`, adding `--label bug` for a
+  defect fix and `--draft` while owed checks must still pass; then `gh pr ready NUMBER`. Update the
+  body with `gh pr edit NUMBER --body-file FILE`.
+- Owed before merge, all green on the current head: base CI; a
+  [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners) on the PR branch
+  of the standard VM checks plus every profile and lane check that coverage ownership assigns to
+  the change, Intel retry runs included, with run URLs passed as `--check`; planned leased-VM
+  checks; required review.
+- A member's approving review of the current head shows in
+  `gh pr view NUMBER --json headRefOid,latestReviews`. After consent, update the statistics, then
+  run `gh pr merge NUMBER --auto --squash`; hold it with `gh pr merge NUMBER --disable-auto`.
+- All agent PRs share one GitHub identity; leave other tasks' PRs to their owners.
 
-Role-specific obligations live in the client-neutral [developer](roles/developer.md),
-[reviewer](roles/reviewer.md), [observer](roles/observer.md) and [describer](roles/describer.md)
-contracts. Claude Code has [native project agents](../../../.claude/agents/) for
-`developer` and `reviewer` agents using Opus with `autoCompactWindow: 400000`; other
-clients use the same contracts through their native tools or the cross-vendor bridge.
-The window applies only to those Claude subagents, not the coordinator or a standalone
-Claude bridge worker. Read the selected contract when assigning a role and give a
-self-contained assignment to a fresh worker without inherited conversation history.
-Spawn settings by client; record a comparable available alternative if needed:
+## Agents
 
-| Client | Developer and fresh reviewer | Long-check observer | Resume the same worker |
+| Role | Claude Code | Codex | Cross-vendor |
 | --- | --- | --- | --- |
-| Any | Strongest available model, high reasoning effort | Haiku or Codex `gpt-6-luna`, medium effort; do not default to Sonnet | Same worker, not a new one |
-| Codex → Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"` | `send_message` while running; `followup_task` when idle |
-| Claude Code → Claude Code | Agent tool, `subagent_type="developer"` or `"reviewer"`, `model="opus"` | `subagent_type="general-purpose"`, `model="haiku"`, `effort="medium"`; include the observer contract | `SendMessage` to the same agent |
-| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` steers active Codex or queues Claude's next turn; `resume --task NEXT` continues a finished or stopped worker |
+| Developer, reviewer | [native project agents](../../../.claude/agents/) `developer`, `reviewer` | `spawn_agent` with `fork_turns="none"` | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md) `--role developer\|reviewer` |
+| Observer, describer, design consult | `general-purpose` agent with the role brief | `spawn_agent` with the role brief | `--role observer`, or the role brief as the task |
 
-For cross-vendor work, use the installed skill's Python entrypoint, not the temporary
-`agent-bridge-local` command. Keep STATE outside the checkout. The bridge inherits
-native permissions; its reviewer preset keeps the repository read-only while allowing
-temporary outputs (set TMPDIR outside the repository). Model and effort override their
-role defaults. The reviewer role rejects an explicit Codex sandbox mode. A bridge
-worker is a standalone vendor session, so the
-Claude native subagent's compaction window does not apply to it.
+- A brief is the loaded dev-flow skill's `roles/<role>.md` plus the role additions below.
+- Use the installed bridge skill, not the temporary `agent-bridge-local` command.
+  `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 
-Wait with one background `wait --dir STATE --timeout SECONDS` call: done `0`, failed
-`1`, pending approval `2`, interrupted `130`, timeout `124`. On `2`, show the pending
-request to the operator and pass only their single-use decision through `approve` or
-`deny`; never auto-approve. Use `status` and `tail` for progress and read the
-`result_file` published in terminal state. If `wait` returns `1` without `result_file`,
-run `stop` to recover the turn and publish its result. `interrupt` works while approval
-is pending and `stop` is idempotent. Within one vendor, keep native delegation and approval behavior.
+### Role additions
 
-`--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
+- **Developer, observer:** follow the testing guide's
+  [execution principles](../../../docs/testing.md#execution-and-reporting-principles),
+  [long checks](../../../docs/testing.md#launch-and-observe-long-checks),
+  [repair after a failure](../../../docs/testing.md#repair-after-a-failure) and
+  [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup). Agent
+  termination does not drain a lease. Keep global settings and existing runner infrastructure unchanged.
+- **Reviewer:** assess execution evidence by the same execution principles.
+- **Describer:** English Markdown; omit statistics.
 
-Native same-vendor agents rely on the reviewer's contract for read-only behavior;
-the bridge reviewer preset also supplies native filesystem restrictions. A necessary
-long check may use one Haiku or Codex Luna observer; run it directly if unavailable.
-Short checks stay with the developer.
+## Environment
 
-The coordinator owns original requirements, editable scope, one shared task and final acceptance:
-
-1. Assign a complete block to one developer. Do only the discovery needed to assign work or
-   resolve a finding; delegate implementation and use its evidence pointers.
-2. After the writer stops and relevant checks reach native terminal outcomes, assign review of
-   that exact dirty/untracked candidate. An observer handoff alone does not meet this condition.
-   Preliminary review with incomplete checks cannot establish readiness.
-   Review hunts corner cases and vulnerabilities wherever the change reaches; before merge,
-   review the full branch diff, since the bar applies to what lands on the base branch.
-3. Resolve unsupported findings with a reason; return confirmed repairs to
-   the same developer while its context is relevant. Recheck affected claims after writing stops.
-4. Accept when original requirements, findings and required evidence match the final candidate.
-   Read native receipts and concrete risky areas as needed, using the reviewer's independent
-   binding check without repeating the whole review or generating another report. A substantial
-   change stays review-pending if an independent reviewer is unavailable; self-review cannot
-   replace it. Only the coordinator closes the shared task and responds to the operator.
-
-A review round is one review of a frozen candidate that returns confirmed P1 or P2 findings;
-`--review-cycles` counts these rounds. The developer fixes P3-only findings and the coordinator
-checks the fix without another round. Before another repair, ask a fresh session of the strongest
-available model why the candidate does not converge: after the second failed round when a fix
-introduced a new defect in the same mechanism or the design must change, otherwise after the
-third. After the fourth, and no later than the fifth, stop and consult the operator.
-
-Keep assignments compact: role and canonical coordinator/developer targets, working directory,
-requirements, editable scope/exclusions, known facts and source links, acceptance,
-candidate/evidence pointers, checkpoint/stop conditions and expected result. Long-check
-assignments also name the exact command and one progress recipient. Reuse existing candidate
-bindings and native receipts; one concise result per role is enough. Copy relevant pointers
-rather than the chat or whole guides. Workers report remaining work to the coordinator and
-follow only their assigned phase.
-
-Before handoff/compaction, the coordinator preserves remaining work, decisions, active
-writer/runner ownership, candidate and evidence pointers in the shared task. Workers send
-concise state instead of editing it. Before takeover, confirm the former writer stopped and
-establish runner/cleanup status; agent termination does not drain a lease. At checkpoint expiry
-or a concrete stall, obtain one targeted ownership/blocker result, report partial work and any
-blocker, then choose owned interruption/takeover or a reasoned continuation with a new finite
-bound. Loss of context and missed deadlines never imply success or a silent extension.
-
-While long checks run, report only completion, failure or a needed decision, not unchanged
-status. Ask the operator a question once, then wait for the answer.
-
-Execution, polling/cursors, native outcomes, repair and evidence handling belong to the testing
-guide's [execution protocol](../../../docs/testing.md#execution-and-reporting-principles).
-Keep global settings and existing runner infrastructure unchanged.
-
-## Boundaries
-
-- Keep optional-profile implementation and tests in the owning profile. Core provides generic
-  extension contracts and synthetic fixtures, without profile-specific branches or assertions.
-- Keep public files generic and in English. Keep private material in the overlay;
-  never print or store secrets in task notes or reports.
-- Use allocated test targets within the VM guide's ownership boundary. The outer
-  yard's lifecycle belongs to the operator. Ask the user to run exact commands
-  when operator access or `sudo` is required.
-
-## Completion
-
-**Report done only when the agreed change is verified, required review has passed, its PR is open
-and not a draft, or already merged, and no check you started, including dispatched E2E runs, is
-still running.** Keep the plan, with the PR link, until squash auto-merge is enabled or the PR is
-merged; then close or delete it per the governing task workflow.
-
-When ending an implementation session with a development plan still present, link it in
-the final response, explain why it is unfinished, and list the concrete remaining work
-and any blocking input or access. Updating the plan alone does not satisfy this requirement.
-
-Production updates and post-deployment checks belong to the operator after handoff;
-exclude them from development plans and automatic follow-up or `check-*` tasks.
-Release publication retains its separate gates.
-
-If implementation or required validation steps remain, report **partial** and continue
-executable work. If none can proceed without missing input or access, report **blocked**
-and name what is needed. Report pending required checks and optional `not-run` checks accurately.
-Moving an in-scope step to another file or ending a session does not complete it.
-
-Report what changed, what was actually checked, and the operator handoff. A component or
-host-free pass proves only that scope; it does not prove the planned yard lifecycle
-or full release acceptance. End file-changing work with the PR link.
+- Use allocated test targets within the VM guide's ownership boundary. The outer yard's lifecycle
+  belongs to the operator. Ask the operator to run exact commands that need operator access or `sudo`.
+- Production updates and post-deployment checks belong to the operator after handoff; exclude
+  them from development plans and automatic follow-up tasks. Release publication keeps its
+  separate gates.

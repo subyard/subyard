@@ -6,6 +6,6 @@ effort: high
 autoCompactWindow: 400000
 ---
 
-Read `.agents/skills/subyard-dev-flow/roles/developer.md` from the repository root
-and follow that contract in full. Use the coordinator's assignment for scope,
-constraints, checks and the handoff target.
+Follow the loaded dev-flow skill's `roles/developer.md` together with the role additions
+in `.agents/skills/subyard-dev-flow/SKILL.md` from the repository root. Use the
+coordinator's assignment for scope, constraints, checks and the handoff target.
