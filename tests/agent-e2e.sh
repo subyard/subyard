@@ -3443,9 +3443,9 @@ for runner_mode in \
   blocked_mode_output="$(run_runner_fixture busy --slot 2 $runner_mode 2>&1)"
   blocked_mode_rc=$?
   set -e
-  [ "$blocked_mode_rc" = 2 ] || fail "telemetry changed blocked lease mode ($runner_mode) exit"
+  [ "$blocked_mode_rc" = 4 ] || fail "telemetry changed blocked lease mode ($runner_mode) exit"
   assert_phase_markers "$blocked_mode_output" \
-    $'allocation:start:0:-\nallocation:end:2:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+    $'allocation:start:0:-\nallocation:end:4:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 done
 
 # Informational modes remain slotless and status never issues an acquire request.
@@ -3590,7 +3590,7 @@ for capacity_case in capacity-snapshot capacity-unsafe capacity-state-unsafe; do
   fi
 done
 
-# A bounded wait retries capacity refusals; the collector may bound capacity alone.
+# A bounded wait retries resource and slot refusals against one deadline.
 new_runner_fixture capacity-wait-flag
 run_runner_fixture capacity-then-grant --slot 2 --wait 30s --ssh 1 -- true >"$TMP/capacity-wait.log" 2>&1 \
   && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] && grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
@@ -3602,10 +3602,10 @@ SUBYARD_E2E_CAPACITY_WAIT=30s run_runner_fixture capacity-then-grant --slot 2 --
   || fail 'capacity refusal was not retried within SUBYARD_E2E_CAPACITY_WAIT'
 new_runner_fixture capacity-wait-busy
 capacity_rc=0
-SUBYARD_E2E_CAPACITY_WAIT=30s run_runner_fixture capacity-then-busy --slot 2 --ssh 1 -- true >"$TMP/capacity-busy.log" 2>&1 || capacity_rc=$?
-[ "$capacity_rc" != 0 ] && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 2 ] \
-  && grep -Fq 'is unavailable: state=held' "$TMP/capacity-busy.log" && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
-  || fail 'capacity-only wait also waited for a busy slot'
+SUBYARD_E2E_CAPACITY_WAIT=4s run_runner_fixture capacity-then-busy --slot 2 --ssh 1 -- true >"$TMP/capacity-busy.log" 2>&1 || capacity_rc=$?
+[ "$capacity_rc" = 4 ] && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" -ge 2 ] \
+  && grep -Fq 'timed out waiting for slot-002: state=held' "$TMP/capacity-busy.log" && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  || fail 'capacity wait lost the deadline or refused a competing lease without waiting'
 new_runner_fixture capacity-wait-expired
 capacity_rc=0
 capacity_output="$(SUBYARD_E2E_CAPACITY_WAIT=3s run_runner_fixture capacity --slot 2 --ssh 1 -- true 2>&1)" || capacity_rc=$?
@@ -3623,7 +3623,7 @@ set +e
 busy_output="$(run_runner_fixture busy --slot 2 --ssh 1 -- true 2>&1)"
 busy_rc=$?
 set -e
-[ "$busy_rc" = 2 ] \
+[ "$busy_rc" = 4 ] \
   && grep -Fq 'state=held reason=busy' <<<"$busy_output" \
   && grep -Fq 'owner=test-yard/Subyard-2 run=run-a purpose=contract-tests' <<<"$busy_output" \
   && ! grep -Fq 'client_id' <<<"$busy_output" \
@@ -3631,7 +3631,7 @@ set -e
   && grep -Eq '^acquire.* slot-002$' "$RUNNER_FIXTURE/facade.log" \
   || fail "exact busy response was not immediate, redacted, and slot-pinned: $busy_output"
 assert_phase_markers "$busy_output" \
-  $'allocation:start:0:-\nallocation:end:2:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
+  $'allocation:start:0:-\nallocation:end:4:-\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
 
 new_runner_fixture exact-invalid
 set +e
@@ -3783,9 +3783,9 @@ done
 lane_id=0123456789abcdef0123456789abcdef
 lane_records() { sed -n "s/^E2E_LEASE lane=$lane_id run=[0-9a-f]\{8\} slot=slot-002 event=//p" "$1"; }
 lane_grant="grant type=subyard-pair vms=2 base=$(printf 'a%.0s' {1..64})"
-for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s; do
+for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s busy:--ssh:1 busy:--wait:1s; do
   IFS=: read -r lane_scenario lane_mode lane_value <<<"$lane_case"
-  new_runner_fixture "lane-$lane_scenario"
+  new_runner_fixture "lane-$lane_scenario-$lane_mode"
   set +e
   SUBYARD_E2E_LANE="$lane_id" SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
     run_runner_fixture "$lane_scenario" --slot 2 "$lane_mode" "$lane_value" -- true >"$TMP/lane-$lane_scenario.log" 2>&1
@@ -3796,6 +3796,7 @@ for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wa
     # A raw guest command stages nothing.
     phase-direct-failure) lane_expected="request"$'\n'"$lane_grant"$'\nrelease exit_code=0' ;;
     capacity) lane_expected=$'request\nrefused resource=memory' ;;
+    busy) lane_expected=$'request\nrefused resource=slot' ;;
   esac
   [ "$(lane_records "$TMP/lane-$lane_scenario.log")" = "$lane_expected" ] \
     || fail "lane records of $lane_scenario differ: $(cat "$TMP/lane-$lane_scenario.log")"
