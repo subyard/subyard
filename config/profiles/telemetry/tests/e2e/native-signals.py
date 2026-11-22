@@ -870,6 +870,7 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
                     return path.read_text().strip() if path.exists() else ''
                 result = dict(new=sorted(new), tool_run=receipt('.run'), tool_exe=receipt('.exe'), traces_grew_for=sorted(grown))
                 print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
+        assert (project/(name+'.run')).is_file() and (project/(name+'.exe')).is_file(), name+': tool receipts missing'
         return result
 
     telemetry = ['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--project-id', 'attribution', '--']
