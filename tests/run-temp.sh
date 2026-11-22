@@ -3,9 +3,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 python3 -B - "$ROOT" <<'PY'
+import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -13,16 +16,24 @@ import sys
 import tempfile
 import time
 import uuid
+from unittest.mock import patch
 
 source = Path(sys.argv[1]) / 'dev'
+# Fixture scratch templates honor the runner's TMPDIR; guest-command contract
+# strings are not local scratch allocations.
+for path in [*source.parent.glob('config/profiles/*/tests/**/*.sh'), *source.parent.glob('tests/**/*.sh')]:
+    assert not re.search(r'\$\(mktemp (?:-d )?/tmp/', path.read_text()), path
 prefix = f'subyard-test-run-{os.getuid()}-fixture-{uuid.uuid4().hex}-'
 environment = {k: v for k, v in os.environ.items() if not k.startswith('SUBYARD_RUN_TEMP')}
 
-with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-') as temporary:
+with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as temporary:
     fixture = Path(temporary)
     helper = fixture / 'test-run-temp.py'
     helper.write_text((source / helper.name).read_text().replace(
-        'PREFIX = "s"', f'PREFIX = {prefix!r}'))
+        'PREFIX = "subyard-run."', f'PREFIX = {prefix!r}'))
+    spec = importlib.util.spec_from_file_location('run_temp', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     wrapper = fixture / 'with-test-temp.sh'
     shutil.copyfile(source / wrapper.name, wrapper)
     command = ['bash', str(wrapper)]
@@ -63,6 +74,50 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-') as temporary:
             assert not roots(), roots()
         run('bash', '-c', 'before=$TMPDIR; bash "$1" bash -c \'test "$TMPDIR" = "$1"\' _ "$before"', '_', str(wrapper))
         assert not roots(), roots()
+
+        # A matching PID marker alone is not inherited ownership.
+        result = subprocess.run(['bash', '-c', 'export SUBYARD_RUN_TEMP_ENTERED=$$; exec bash "$@"',
+                                 '_', str(wrapper), 'bash', '-c', 'printf "%s" "$TMPDIR"'],
+                                env={**environment, 'TMPDIR': '/tmp'}, capture_output=True, text=True, check=True)
+        assert Path(result.stdout).name.startswith(prefix), result
+        assert not roots(), roots()
+
+        for mode in (0o500, 0):
+            process, root = blocked('permissions-' + str(mode))
+            child = root / 'restricted'
+            child.mkdir()
+            (child / 'file').touch()
+            child.chmod(mode)
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+            run('true')
+            assert not root.exists(), root
+
+        # Once authorized, a failed sweep reports the retained root in one line.
+        process, root = blocked('sweep-failure')
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        import io
+        diagnostic = io.StringIO()
+        parent = os.open('/tmp', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with patch.object(module, 'remove', side_effect=PermissionError('fixture refusal')), patch('sys.stderr', diagnostic):
+                module.sweep(parent)
+        finally:
+            os.close(parent)
+        assert len(diagnostic.getvalue().splitlines()) == 1 and str(root) in diagnostic.getvalue()
+        run('true')
+
+        # Failed cleanup preserves the command status, including a successful command.
+        original = helper.read_text()
+        helper.write_text(original.replace('if sys.argv[1] == "clean":',
+                                          'if sys.argv[1] == "clean":\n        raise OSError("fixture cleanup failure")'))
+        try:
+            run('bash', '-c', 'exit 23', code=23)
+            run('true', code=1)
+        finally:
+            helper.write_text(original)
+        run('true')
 
         for whole_group in (False, True):
             process, root = blocked('kill-' + str(whole_group), 'sleep 60 &' if whole_group else '')
@@ -130,8 +185,40 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-') as temporary:
             path = logs / f'run.{index:02}'
             path.mkdir()
             os.utime(path, (index, index))
+        active = os.open(logs / 'run.00', os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(active, fcntl.LOCK_EX)
+        subprocess.run(['python3', str(helper), 'retain', str(logs)], check=True)
+        assert (logs / 'run.00').exists(), 'retention deleted active logs'
+        assert not (logs / 'run.01').exists(), 'retention stopped at an active run'
+        os.close(active)
         subprocess.run(['python3', str(helper), 'retain', str(logs)], check=True)
         assert sorted(p.name for p in logs.iterdir()) == [f'run.{i:02}' for i in range(2, 12)]
+
+        for error in (FileNotFoundError, PermissionError):
+            stale = logs / 'run.old'
+            stale.mkdir(exist_ok=True)
+            os.utime(stale, (0, 0))
+            original_open = os.open
+
+            def fail_open(path, *args, **kwargs):
+                if path == 'run.old':
+                    raise error('fixture retention race or refusal')
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(module.os, 'open', side_effect=fail_open):
+                module.retain(logs)
+            assert stale.exists()
+        # Concurrent deletion during enumeration is harmless too.
+        original_stat = os.stat
+
+        def vanished(path, *args, **kwargs):
+            if path == 'run.old':
+                raise FileNotFoundError('fixture concurrent delete')
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(module.os, 'stat', side_effect=vanished):
+            module.retain(logs)
+        subprocess.run(['python3', str(helper), 'retain', str(logs)], check=True)
         assert roots() == set(protected), roots()
     finally:
         (fixture / 'release').touch()

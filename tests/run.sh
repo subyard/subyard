@@ -13,16 +13,18 @@ esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # Disposable fixtures must not become workspace repositories in Orca.
-if [ "${SUBYARD_RUN_TEMP_ENTERED:-}" != "$$" ]; then
+if ! python3 "$ROOT/dev/test-run-temp.py" check; then
   exec python3 "$ROOT/dev/test-run-temp.py" enter bash "$0" "$@"
 fi
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
-trap 'python3 "$ROOT/dev/test-run-temp.py" clean' EXIT
+trap 'rc=$?; python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }; exit "$rc"' EXIT
 
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
+exec {run_log_fd}<"$RUN_DIR"
+flock -x "$run_log_fd"
 export SUBYARD_TEST_LOG_DIR="$RUN_DIR"
 python3 "$ROOT/dev/test-run-temp.py" retain "$ROOT/.build/test-runs"
 # Tests keep disposable state outside the checkout; see tests/helpers/checkout-guard.sh.

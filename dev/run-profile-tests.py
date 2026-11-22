@@ -6,11 +6,14 @@ from itertools import islice
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 
 
 def main():
+    # Bash background children inherit SIGINT ignored; restore cancellation.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     log_dir = Path(sys.argv[1])
     count = int(sys.argv[2])
     runners = [Path(arg) for arg in sys.argv[3:3 + count]]

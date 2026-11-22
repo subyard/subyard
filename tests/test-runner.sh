@@ -103,6 +103,11 @@ run_fixture() {
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
 
 (umask 0077; run_fixture success)
+# Spoofing the entry PID must still allocate and validate a private root.
+env -u SUBYARD_RUN_TEMP_FD -u SUBYARD_RUN_TEMP -u SUBYARD_RUN_TEMP_OWNER \
+  PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/spoof.go" TMPDIR=/tmp \
+  bash -c 'export SUBYARD_RUN_TEMP_ENTERED=$$; exec bash "$1"' _ "$fixture/tests/run.sh" \
+  > "$tmp/spoof.out" 2>&1
 awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }
   !/-count=1/ { exit 1 }
   $1 == "0022" && /-run / { exit 1 }
@@ -241,6 +246,16 @@ def interrupted_case(name, sig, expected_status):
                 time.sleep(0.05)
             if not marker.exists():
                 raise AssertionError(f'{name}: runner did not reach blocked umask 0077 check')
+            summary = next(line.removeprefix('RESULTS ') for line in output_path.read_text().splitlines()
+                           if line.startswith('RESULTS '))
+            live_logs = Path(summary).parent
+            for index in range(11):
+                padding = live_logs.parent / f'run.padding-{index}'
+                padding.mkdir(exist_ok=True)
+                os.utime(padding, (time.time() + 100, time.time() + 100))
+            subprocess.run(['python3', runner.parent.parent / 'dev/test-run-temp.py',
+                            'retain', live_logs.parent], check=True)
+            assert live_logs.exists(), 'retention removed active core logs'
             os.killpg(process.pid, sig)
             status = process.wait(timeout=10)
         except BaseException:
@@ -296,6 +311,9 @@ mkdir -p "$fixture/config/profiles/example/tests"
 printf '#!/usr/bin/env bash\n[ "$TMPDIR" = "$SUBYARD_RUN_TEMP" ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
 (umask 0002; TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh") > "$tmp/profiles.out" 2>&1
+env -u SUBYARD_RUN_TEMP_FD -u SUBYARD_RUN_TEMP -u SUBYARD_RUN_TEMP_OWNER TMPDIR=/tmp \
+  bash -c 'export SUBYARD_RUN_TEMP_ENTERED=$$; exec bash "$1"' _ "$fixture/dev/test-profiles.sh" \
+  > "$tmp/profiles-spoof.out" 2>&1
 grep -Fxq 'PROFILE TESTS example passed' "$tmp/profiles.out" || fail 'profile tests were not discovered'
 grep -Fxq 'profile check ran' "$fixture"/.build/profile-test-runs/run.*/example.log \
   || fail 'successful profile output was not retained'
@@ -466,39 +484,68 @@ root = tmp / "interrupt"
 (root / "dev/test-run-temp.py").write_bytes((wrapper.parent.parent / "dev/test-run-temp.py").read_bytes())
 for name in ("test-profiles.sh", "run-profile-tests.py"):
     (root / "dev" / name).write_bytes(wrapper.with_name(name).read_bytes())
-marked = tmp / "interrupt-started"
-marked.mkdir()
-for index in range(5):
-    profile = root / "config" / "profiles" / str(index) / "tests"
-    profile.mkdir(parents=True)
-    script = 'import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\n'
-    if index < 3:
-        script += 'time.sleep(30)\n'
-    (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
+signal.signal(signal.SIGINT, signal.default_int_handler)
+for label, sig, group, expected in (("int", signal.SIGINT, True, 130),
+                                    ("term-pid", signal.SIGTERM, False, 143)):
+    marked = tmp / ("interrupt-started-" + label)
+    marked.mkdir()
+    for index in range(5):
+        profile = root / "config" / "profiles" / str(index) / "tests"
+        profile.mkdir(parents=True, exist_ok=True)
+        script = 'import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\n'
+        if index < 3:
+            script += 'time.sleep(30)\n'
+        (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
 {script}PY
 """)
 
-signal.signal(signal.SIGINT, signal.default_int_handler)
-with (tmp / "profile-interrupt.out").open("wb") as log:
-    with subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
-                          stdout=log, stderr=log, start_new_session=True,
-                          env={key: value for key, value in os.environ.items()
-                               if not key.startswith('SUBYARD_RUN_TEMP')}) as process:
+    with (tmp / ("profile-interrupt-" + label + ".out")).open("wb") as log:
+        process = subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
+                                   stdout=log, stderr=log, start_new_session=True,
+                                   env={key: value for key, value in os.environ.items()
+                                        if not key.startswith('SUBYARD_RUN_TEMP')})
         try:
             deadline = time.monotonic() + 10
             while len(list(marked.iterdir())) < 3:
                 assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
                 time.sleep(0.01)
-            os.killpg(process.pid, signal.SIGINT)
-            code = process.wait(timeout=10)
+            live_logs = next(line.removeprefix('PROFILE TESTS logs: ') for line in
+                             (tmp / ("profile-interrupt-" + label + ".out")).read_text().splitlines()
+                             if line.startswith('PROFILE TESTS logs: '))
+            live_logs = Path(live_logs)
+            for index in range(11):
+                padding = live_logs.parent / f'run.padding-{index}'
+                padding.mkdir(exist_ok=True)
+                os.utime(padding, (time.time() + 100, time.time() + 100))
+            subprocess.run(['python3', root / 'dev/test-run-temp.py', 'retain', live_logs.parent], check=True)
+            assert live_logs.exists(), 'retention removed active profile logs'
+            (os.killpg if group else os.kill)(process.pid, sig)
+            code = process.wait(timeout=5)
             assert sorted(p.name for p in marked.iterdir()) == ["0", "1", "2"], (
                 "interruption started a waiting profile"
             )
-            assert code == 130, f"profile runner returned {code} after SIGINT"
+            assert code == expected, f"profile runner returned {code} after {label}"
         finally:
-            if process.poll() is None:
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
 PYCASE
+
+# A cleanup refusal cannot replace a profile failure with status 1.
+python3 - "$fixture/dev/test-run-temp.py" <<'PYCASE'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('if sys.argv[1] == "clean":',
+    'if sys.argv[1] == "clean":\n        raise OSError("fixture cleanup failure")'))
+PYCASE
+rc=0
+SUBYARD_PROFILE_TESTS_SERIAL=1 bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' \
+  > "$tmp/profile-cleanup-failure.out" 2>&1 || rc=$?
+[ "$rc" -eq 29 ] || fail 'profile cleanup replaced the native failure'
+cp "$ROOT/dev/test-run-temp.py" "$fixture/dev/test-run-temp.py"
 
 # The selected matrix uses real children/masks, rejects empty/missing checks,
 # and preserves the first operation failure before later masks.

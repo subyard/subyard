@@ -8,8 +8,7 @@ import stat
 import sys
 import tempfile
 
-# Keep Unix socket fixtures below Linux's 108-byte pathname limit.
-PREFIX = "s"
+PREFIX = "subyard-run."
 RECEIPT = ".test-run.json"
 
 
@@ -49,11 +48,18 @@ def clear(fd, root_mount, keep_receipt=False):
             continue  # Keep the authorization if an interrupted cleanup needs a retry.
         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode):
-            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            child = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
                 if identity(child) != [info.st_dev, info.st_ino] or mount(child) != root_mount:
                     raise ValueError("temporary directory replaced or mounted")
-                clear(child, root_mount)
+                # Pin before chmod: crashed permission fixtures can leave 000 directories.
+                if info.st_uid == os.getuid():
+                    os.chmod(f"/proc/self/fd/{child}", stat.S_IMODE(info.st_mode) | 0o700)
+                readable = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=child)
+                try:
+                    clear(readable, root_mount)
+                finally:
+                    os.close(readable)
                 current = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 if identity(child) != [current.st_dev, current.st_ino]:
                     raise ValueError("temporary directory replaced")
@@ -85,7 +91,10 @@ def sweep(parent):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if valid(fd):
-                    remove(parent, name, fd)
+                    try:
+                        remove(parent, name, fd)
+                    except (OSError, ValueError) as error:
+                        print(f"test temporary sweep: could not remove /tmp/{name}: {error}", file=sys.stderr)
             finally:
                 os.close(fd)
         except (OSError, ValueError):
@@ -106,24 +115,54 @@ def inherited():
     return fd, path
 
 
-def main():
-    if sys.argv[1] == "retain":
-        parent = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            runs = [(os.stat(name, dir_fd=parent, follow_symlinks=False).st_mtime_ns, name)
-                    for name in os.listdir(parent) if name.startswith("run.")
-                    and stat.S_ISDIR(os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode)]
-            for _, name in sorted(runs, reverse=True)[10:]:
+def retain(path):
+    try:
+        parent = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return  # Log retention must never prevent tests from running.
+    try:
+        runs = []
+        for name in os.listdir(parent):
+            if not name.startswith("run."):
+                continue
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    runs.append((info.st_mtime_ns, name))
+            except OSError:
+                continue
+        for _, name in sorted(runs, reverse=True)[10:]:
+            try:
                 fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 try:
-                    if mount(fd) != mount(parent):
-                        raise ValueError("mounted log directory")
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if identity(fd) != [current.st_dev, current.st_ino] or mount(fd) != mount(parent):
+                        raise ValueError("log directory replaced or mounted")
                     clear(fd, mount(fd))
                     os.rmdir(name, dir_fd=parent)
                 finally:
                     os.close(fd)
-        finally:
-            os.close(parent)
+            except (OSError, ValueError):
+                continue  # Active, concurrently removed or undeletable logs are preserved.
+    except OSError:
+        pass
+    finally:
+        os.close(parent)
+
+
+def main():
+    if sys.argv[1] == "check":
+        try:
+            _, path = inherited()
+            return_code = not (os.environ.get("SUBYARD_RUN_TEMP_ENTERED") == str(os.getppid())
+                               and os.environ.get("TMPDIR") == str(path)
+                               and os.environ.get("GOTMPDIR") == str(path))
+        except (KeyError, OSError, ValueError):
+            return_code = 1
+        sys.exit(return_code)
+    if sys.argv[1] == "retain":
+        retain(sys.argv[2])
         return
     if sys.argv[1] == "clean":
         if os.environ.get("SUBYARD_RUN_TEMP_OWNER") == str(os.getppid()):
@@ -136,9 +175,9 @@ def main():
         return
     if sys.argv[1] != "enter":
         raise ValueError("expected enter or clean")
-    if "SUBYARD_RUN_TEMP_FD" in os.environ:
+    try:
         fd, path = inherited()
-    else:
+    except (KeyError, OSError, ValueError):
         parent = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             sweep(parent)
