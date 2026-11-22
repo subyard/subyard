@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "tier": "vm",
+  "needs": [],
   "lanes": [
     {"id": "local", "arguments": ["--local"]},
     {"id": "resources", "arguments": ["--resources"]},
