@@ -117,6 +117,13 @@ pathlib.Path(sys.argv[2]).write_text('export acknowledged')
         budget = fixture.RESOURCE_EXERCISE_TIMEOUT
         self.assertGreaterEqual(budget, fixture.RESOURCE_CODEX_TIMEOUT + fixture.RESOURCE_CLAUDE_TIMEOUT + 190)
         self.assertEqual(profile.native_signals.RESOURCE_EXERCISE_TIMEOUT, budget)
+        self.assertGreater(fixture.RESOURCE_CODEX_TIMEOUT, fixture.RESOURCE_TOOL_TIMEOUT_MS // 1000)
+        self.assertGreater(fixture.RESOURCE_CLAUDE_TIMEOUT, fixture.RESOURCE_TOOL_TIMEOUT_MS // 1000)
+        environment = next(node for node in ast.walk(ast.parse(Path(fixture.__file__).read_text()))
+            if isinstance(node, ast.keyword) and node.arg == 'BASH_MAX_TIMEOUT_MS')
+        maximum = eval(compile(ast.Expression(environment.value), '<fixture-budget>', 'eval'),
+                       {'RESOURCE_TOOL_TIMEOUT_MS': fixture.RESOURCE_TOOL_TIMEOUT_MS})
+        self.assertGreaterEqual(int(maximum), fixture.RESOURCE_TOOL_TIMEOUT_MS)
 
         def timeout_value(tree, matches, environment):
             call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and matches(node))
@@ -570,6 +577,32 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
                         server.shutdown()
                         server.server_close()
                         thread.join(timeout=3)
+
+    def test_claude_provider_resource_timeout_is_opt_in(self):
+        for timeout in (None, fixture.RESOURCE_TOOL_TIMEOUT_MS):
+            with self.subTest(timeout=timeout):
+                server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.ClaudeProvider)
+                server.requests, server.command = 0, 'true'
+                if timeout is not None:
+                    server.command_timeout_ms = timeout
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    connection.request('POST', '/v1/messages', json.dumps({'model': 'fixture'}))
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    events = [json.loads(line.removeprefix('data: ')) for line in response.read().decode().splitlines()
+                              if line.startswith('data: ')]
+                    arguments = next(json.loads(event['delta']['partial_json']) for event in events
+                                     if event.get('delta', {}).get('type') == 'input_json_delta')
+                    self.assertEqual(arguments['timeout'], 600000 if timeout is None else timeout)
+                    self.assertIsNone(server.command)
+                finally:
+                    connection.close()
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
     def database(self, directory):
         data = Path(directory)

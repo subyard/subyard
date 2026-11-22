@@ -37,8 +37,9 @@ def load(path, name):
 failure_evidence = load(Path(__file__).with_name('failure-evidence.py'), 'telemetry_failure_evidence')
 
 # Each resource exercise cold-starts a distinct allocation for each native agent.
-RESOURCE_CODEX_TIMEOUT = 1830
-RESOURCE_CLAUDE_TIMEOUT = 630
+RESOURCE_TOOL_TIMEOUT_MS = 1800000
+RESOURCE_CODEX_TIMEOUT = RESOURCE_TOOL_TIMEOUT_MS // 1000 + 30
+RESOURCE_CLAUDE_TIMEOUT = RESOURCE_CODEX_TIMEOUT
 # Allow session binding, allocation projection and backend shutdown for both runs.
 RESOURCE_EXERCISE_TIMEOUT = RESOURCE_CODEX_TIMEOUT + RESOURCE_CLAUDE_TIMEOUT + 200
 
@@ -94,7 +95,7 @@ class ClaudeProvider(http.server.BaseHTTPRequestHandler):
                 self.server.command = None
                 events = [('message_start', dict(message=message)),
                           ('content_block_start', dict(index=0, content_block=dict(type='tool_use', id='toolu_subyard', name='Bash', input={}))),
-                          ('content_block_delta', dict(index=0, delta=dict(type='input_json_delta', partial_json=json.dumps(dict(command=command, description='Run the disposable local fixture', timeout=600000))))),
+                          ('content_block_delta', dict(index=0, delta=dict(type='input_json_delta', partial_json=json.dumps(dict(command=command, description='Run the disposable local fixture', timeout=getattr(self.server, 'command_timeout_ms', 600000)))))),
                           ('content_block_stop', dict(index=0)),
                           ('message_delta', dict(delta=dict(stop_reason='tool_use', stop_sequence=None), usage=dict(output_tokens=1))),
                           ('message_stop', {})]
@@ -717,7 +718,7 @@ def exercise(args):
         if agent == 'codex':
             provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), codex_provider_class(fixture.Provider))
             provider.command, provider.failure, provider.workspace = None, None, project
-            provider.command_timeout_ms = 1800000
+            provider.command_timeout_ms = RESOURCE_TOOL_TIMEOUT_MS
             threading.Thread(target=provider.serve_forever, daemon=True).start()
             config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'on-request',
                       'features': {'plugins': False, 'unified_exec': False},
@@ -737,13 +738,15 @@ def exercise(args):
         else:
             provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ClaudeProvider)
             provider.requests, provider.command = 0, tool_command
+            provider.command_timeout_ms = RESOURCE_TOOL_TIMEOUT_MS
             threading.Thread(target=provider.serve_forever, daemon=True).start()
             # The installed helper supplies Authorization; the bearer stays out of both documents.
             settings = native.desired('claude', 'http://127.0.0.1:14318')
             env.update(settings['env'])
             native.publish(state/'claude/settings.json', (json.dumps(settings)+'\n').encode(), None)
             env.update(ANTHROPIC_BASE_URL=f'http://127.0.0.1:{provider.server_port}', ANTHROPIC_API_KEY='local-fixture-only',
-                       DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
+                       DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1',
+                       BASH_MAX_TIMEOUT_MS=str(RESOURCE_TOOL_TIMEOUT_MS))
             try:
                 result = claude_command(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent),
                     '-p', 'Run the fixture command.', '--allowedTools', 'Bash', '--output-format', 'stream-json', '--verbose', '--max-turns', '3'],
