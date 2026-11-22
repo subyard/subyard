@@ -48,9 +48,17 @@ output="$(tar -C "$profile" --exclude=__pycache__ -cf - skills/subyard-user-skil
     trap '\''rm -rf -- "$bundle"'\'' EXIT
     tar --no-same-owner --no-same-permissions -xf - -C "$bundle"
     chmod -R u=rwX,go=rX "$bundle"
-    home="$(getent passwd "$user" | cut -d: -f6)"
+    home="$(getent passwd "$user" | cut -d: -f6 || :)"
+    if [ -z "$home" ]; then
+      # Without the developer account nothing of the profile can exist yet.
+      case "$mode:$selected" in
+        check:1) printf "work\n" ;;
+        check:0) printf "current\n" ;;
+        apply:1) exit 2 ;;
+      esac
+      exit 0
+    fi
     uid="$(id -u "$user")" gid="$(id -g "$user")"
-    [ -n "$home" ] || exit 2
     cd /
     sync_helper() {
       setpriv --reuid "$uid" --regid "$gid" --init-groups --no-new-privs \

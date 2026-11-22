@@ -50,6 +50,7 @@ exec "$@"
 SH
 cat > "$state/guest-bin/getent" <<SH
 #!/bin/bash
+[ -z "\${FIXTURE_NO_DEV:-}" ] || exit 2
 [ "\$1 \$2" = "passwd dev" ] && printf 'dev:x:1000:1000::%s:/bin/bash\n' "$state/home"
 SH
 chmod 755 "$state/bin/incus" "$state/guest-bin/setpriv" "$state/guest-bin/getent"
@@ -113,6 +114,11 @@ SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --yes
 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
 expect 0 '' -- --remove
 tail -n 1 "$state/calls" | grep -Fxq '["apply", "0", "dev"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
+# Without the developer account a deselected profile is current; a selected one is work.
+FIXTURE_NO_DEV=1 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
+FIXTURE_NO_DEV=1 expect 1 '' -- --check
+FIXTURE_NO_DEV=1 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --yes
+FIXTURE_NO_DEV=1 expect 2 'user-skills: skill delivery or source sync failed' -- --yes
 # Stopped yards and never-provisioned removal stay outside the guest.
 : > "$state/calls"
 FIXTURE_POWER=STOPPED expect 0 '' -- --check
