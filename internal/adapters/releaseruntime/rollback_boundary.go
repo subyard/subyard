@@ -1,6 +1,7 @@
 package releaseruntime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -84,14 +85,8 @@ func declaredRollbackBoundary(active, target *verifiedPublishedCandidate) (strin
 
 // Protected recovery reads the journal's original source independently of the
 // transition engine owner, even after the current link has switched to the older target. It does not reassess authorization.
-func (runtime *Runtime) protectedAgentCleanup(root string, source releasetransition.ReleaseID, target candidateVerification) ([]releasetransition.RollbackBoundary, error) {
-	// Ordinary forward recovery does not depend on its older source remaining present.
-	sourceVersion, sourceErr := releasetransition.ReleaseIDVersion(source)
-	targetVersion, targetErr := releasetransition.ReleaseIDVersion(target.candidate.release)
-	if sourceErr != nil || targetErr != nil || !sourceVersion.GT(targetVersion) {
-		return nil, nil
-	}
-	active, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{release: source, root: filepath.Join(root, "releases", string(source))}, root, nil, false)
+func (runtime *Runtime) protectedAgentCleanup(ctx context.Context, root string, source releasetransition.ReleaseID, target candidateVerification) ([]releasetransition.RollbackBoundary, error) {
+	active, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: source, root: filepath.Join(root, "releases", string(source))}, root, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +114,9 @@ func (runtime *Runtime) protectedAgentCleanup(root string, source releasetransit
 // consequences. It adds no cleanup action, authorization, or protocol family.
 func (prepared Prepared) AgentCleanupConsequences() []string {
 	var notes []string
+	if prepared.AgentCleanupWarning != "" {
+		notes = append(notes, prepared.AgentCleanupWarning)
+	}
 	for _, cleanup := range prepared.AgentCleanup {
 		notes = append(notes, "Agent integration rollback limitation (manual cleanup; rollback proceeds): "+cleanup.Reason)
 		for _, path := range cleanup.Files {

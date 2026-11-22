@@ -994,7 +994,7 @@ func TestExactTargetRefusalNamesTheCurrentReleaseStep(t *testing.T) {
 			inspection: releasetransition.Inspection{Outcome: &releasetransition.Outcome{
 				Active: scenario.active, Target: "1.2.3-aaaaaaaaaaaa", Retry: "run yard update"}},
 		}
-		_, err := (&Runtime{}).prepareProtectedTransition(options{rollback: true}, protected)
+		_, err := (&Runtime{}).prepareProtectedTransition(context.Background(), options{rollback: true}, protected)
 		if err == nil || !strings.HasSuffix(err.Error(), scenario.want) {
 			t.Fatalf("active %s: %v, want %q", scenario.active, err, scenario.want)
 		}

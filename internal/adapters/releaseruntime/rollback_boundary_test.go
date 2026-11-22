@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -229,7 +230,7 @@ func TestProtectedRollbackRetainsAgentCleanup(t *testing.T) {
 					if targetOwner {
 						owner = target
 					}
-					resumed, err := fixture.runtime.prepareProtectedTransition(options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
+					resumed, err := fixture.runtime.prepareProtectedTransition(context.Background(), options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
 						journal: releasetransition.JournalRecord{Releases: releasetransition.ReleasePair{From: releasetransition.ReleaseID(fixture.activeID), Target: releasetransition.ReleaseID(fixture.targetID)}},
 						owner:   verificationOf(owner), target: verificationOf(target), request: request, inspection: *response.Inspection,
 						activationReconciliationOwned: true,
@@ -328,5 +329,103 @@ func TestBlockingBoundaryCannotBeBypassedByOlderVersionOrBootstrap(t *testing.T)
 				t.Fatalf("previous changed: %s %v", previous, err)
 			}
 		})
+	}
+}
+
+func agentCleanupFixture(t *testing.T) *preparedRollbackFixture {
+	t.Helper()
+	data, err := os.ReadFile("../../../config/release-rollback.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newPreparedRollbackFixture(t, preparedRollbackOptions{targetVersion: "0.30.0", seed: func(active, _ string) {
+		testkit.WriteFile(t, filepath.Join(active, "config/release-rollback.json"), data, 0o600)
+	}})
+}
+
+func TestProtectedAgentCleanupUsesTheVerifiedSourceVersion(t *testing.T) {
+	for _, sourceID := range []string{"legacy-source", "0.29.0-source"} {
+		t.Run(sourceID, func(t *testing.T) {
+			fixture := agentCleanupFixture(t)
+			_, target := fixture.verified(t)
+			source := publishedCandidate{release: releasetransition.ReleaseID(sourceID), root: filepath.Join(fixture.runtimeRoot, "releases", sourceID)}
+			if err := os.Rename(filepath.Join(fixture.runtimeRoot, "releases", fixture.activeID), source.root); err != nil {
+				t.Fatal(err)
+			}
+			active, err := fixture.runtime.verifyPublishedCandidate(context.Background(), source, fixture.runtimeRoot, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer active.Close()
+			fresh, err := declaredRollbackChanges(active, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup, err := fixture.runtime.protectedAgentCleanup(context.Background(), fixture.runtimeRoot, source.release, verificationOf(target))
+			if err != nil || len(cleanup) == 0 || !reflect.DeepEqual(cleanup, fresh) {
+				t.Fatalf("resume differs from verified fresh source: fresh=%#v cleanup=%#v err=%v", fresh, cleanup, err)
+			}
+		})
+	}
+}
+
+func TestProtectedRollbackContinuesWhenCleanupCannotBeRead(t *testing.T) {
+	for _, failure := range []string{"missing source", "corrupt declaration", "broken engine"} {
+		for _, switched := range []bool{false, true} {
+			t.Run(fmt.Sprint(failure, "/activated=", switched), func(t *testing.T) {
+				fixture := agentCleanupFixture(t)
+				prepared, err := fixture.prepare(t)
+				if err != nil {
+					t.Fatal(err)
+				}
+				active, target := fixture.verified(t)
+				request := prepared.Request
+				request.Mode = releasetransition.ProcessInspect
+				response, err := fixture.runtime.invokeVerifiedCandidateTransition(context.Background(), active, request, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				transaction := releasetransition.TransactionID("tx-0123456789abcdef")
+				inspection := *response.Inspection
+				inspection.Resume, inspection.Outcome.Transaction = &transaction, &transaction
+				inspection.Plan = releasetransition.PlanToken("resume-v1-" + strings.Repeat("a", 64))
+				inspection.Outcome.Status, inspection.Outcome.Code = releasetransition.StatusRecovering, releasetransition.CodeRecoveryPending
+				if switched {
+					next := filepath.Join(fixture.runtimeRoot, "next-current")
+					if err := os.Symlink("releases/"+fixture.targetID, next); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(next, filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+						t.Fatal(err)
+					}
+					inspection.Outcome.Active = releasetransition.ReleaseID(fixture.targetID)
+					previous := releasetransition.ReleaseID(fixture.activeID)
+					inspection.Outcome.Previous = &previous
+				}
+				source := filepath.Join(fixture.runtimeRoot, "releases", fixture.activeID)
+				switch failure {
+				case "missing source":
+					if err := os.Rename(source, filepath.Join(filepath.Dir(fixture.runtimeRoot), "unavailable-source")); err != nil {
+						t.Fatal(err)
+					}
+				case "corrupt declaration":
+					testkit.WriteFile(t, filepath.Join(source, "config/release-rollback.json"), []byte("{}"), 0o600)
+				case "broken engine":
+					testkit.WriteFile(t, filepath.Join(source, "bin/yard-engine"), []byte("#!/bin/sh\nexit 64\n"), 0o700)
+					sealPrepRelease(t, source)
+				}
+				resumed, err := fixture.runtime.prepareProtectedTransition(context.Background(), options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
+					journal: releasetransition.JournalRecord{Releases: releasetransition.ReleasePair{From: releasetransition.ReleaseID(fixture.activeID), Target: releasetransition.ReleaseID(fixture.targetID)}},
+					owner:   verificationOf(target), target: verificationOf(target), request: request, inspection: inspection, activationReconciliationOwned: true,
+				})
+				if err != nil {
+					t.Fatalf("optional notices prevented recovery: %v", err)
+				}
+				warning := resumed.AgentCleanupWarning
+				if resumed.Changed || len(resumed.AgentCleanup) != 0 || !strings.Contains(warning, "cleanup notices could not be read") || !strings.Contains(warning, fixture.activeID) || strings.ContainsAny(warning, "\r\n") || !slices.Contains(resumed.Consequences, warning) {
+					t.Fatalf("resume lost warning or demanded fresh authorization: %#v", resumed)
+				}
+			})
+		}
 	}
 }

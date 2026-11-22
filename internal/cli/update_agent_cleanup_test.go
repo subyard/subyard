@@ -144,3 +144,19 @@ func (writer *cleanupOrderWriter) Write(data []byte) (int, error) {
 func (writer *cleanupOrderWriter) WriteString(data string) (int, error) {
 	return writer.Write([]byte(data))
 }
+
+func TestRollbackCleanupReadWarningIsVisibleWithPlanAndResult(t *testing.T) {
+	const warning = "Warning: cleanup notices could not be read for release 0.31.0-source; recovery proceeds."
+	var output bytes.Buffer
+	cli := &CLI{options: Options{Stdout: &output}}
+	execution := &releaseExecution{prepared: releaseruntime.Prepared{Action: "update.rollback", AgentCleanupWarning: warning}}
+	cli.printUpdateAgentCleanup(execution)
+	if output.String() != warning+"\n" {
+		t.Fatalf("plan warning missing or repeated: %s", output.String())
+	}
+	output.Reset()
+	cli.printUpdateResult(execution, true)
+	if strings.Count(output.String(), warning) != 1 {
+		t.Fatalf("result warning missing or repeated: %s", output.String())
+	}
+}

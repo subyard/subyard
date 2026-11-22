@@ -260,7 +260,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		recoveryRequest = protected.recoveryRequest
 		cleanupSource = protected.journal.Releases.From
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest, cleanupSource)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(ctx, options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, recoveryRequest, cleanupSource)
 	if err != nil {
 		return Prepared{}, err
 	}
