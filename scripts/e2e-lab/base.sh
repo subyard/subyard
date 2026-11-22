@@ -37,6 +37,8 @@ base_finalize_image() {
 }
 
 base_prepare_nested_host() {
+  # The host installer grants its operator access using these tools on first boot.
+  DEBIAN_FRONTEND=noninteractive apt-get -y -qq install --no-install-recommends acl
   install -d -m 0755 /etc/systemd/system/incus.service.d /var/lib/subyard/product-image
   printf '%s\n' '[Service]' 'Environment=INCUS_SECURITY_APPARMOR=false' > /etc/systemd/system/incus.service.d/nested-host.conf
   systemctl daemon-reload
@@ -57,7 +59,7 @@ base_prepare_nested_host() {
      [ "$(cat "$@" | sha256sum | cut -d" " -f1)" = "$fingerprint" ]
      printf '%s\n' "$fingerprint" > fingerprint)
   done
-  (cd /var/lib/subyard/product-image && sha256sum */yard* */fingerprint > SHA256SUMS)
+  (cd /var/lib/subyard/product-image && sha256sum ./*/yard* ./*/fingerprint > SHA256SUMS)
 }
 
 base_install_incus() (
