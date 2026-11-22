@@ -398,6 +398,31 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
         assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))
 
 
+# Telemetry failures retain the bounded boot summary after the client released
+# its failed allocation; capture failure preserves the original test exit.
+boot_helper = runtime_source[runtime_source.index('android_gradle_boot_evidence() {'):
+                             runtime_source.index('\ncleanup() {')]
+for status, phase, capture_exit, called in (
+        (0, 'telemetry-native', 0, False), (23, 'images', 0, False),
+        (23, 'telemetry-native', 0, True), (23, 'telemetry-native', 7, True),
+        (23, 'telemetry-profile', 0, True), (23, 'telemetry-storage', 0, True),
+        (0, 'telemetry-resource-observer', 0, False),
+        (23, 'telemetry-resource-observer', 0, True), (23, 'telemetry-resource-observer', 7, True)):
+    script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; journal_exit="$3"\n'
+              'lane=memory-budget; project=fixture; instance=fixture; incus_binary=(incus)\n'
+              'timeout() { printf "%s\\n" "$*"; '
+              'printf "android boot readiness cores=2 settled=false elapsed_seconds=1200.0 first_package_seconds=None\\n"; '
+              'return "$journal_exit"; }\n'
+              + capture_helper + boot_helper + journal_branch + '\nexit "$status"\n')
+    result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == status, result.stderr
+    assert ('settled=false elapsed_seconds=1200.0' in result.stderr) == called
+    if called:
+        assert '-n 8 -o cat -u subyard-android-pool.service --grep=^android boot readiness ' in result.stderr
+        assert f'capture_exit={capture_exit}' in result.stderr
+        assert 'subyard-android-slot-' not in result.stderr
+
 # A passing connected test still needs evidence from the expected slot journal.
 sample_probe = runtime_source[runtime_source.index('android_require_gradle_console() {'):
                               runtime_source.index('\ncleanup() {')]
@@ -591,7 +616,7 @@ with tempfile.TemporaryDirectory(prefix='android-repeat-provision-', dir='/tmp')
         assert result.returncode == (1 if downloaded else 0), result.stderr
         assert (f'android {label}=PASS archive_downloads=0' in result.stdout) is not downloaded
 diagnostic_branch = runtime_source[runtime_source.index('  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ]'):
-                                   runtime_source.index('\n  if [ -n "$monitor_pid" ]')]
+                                   runtime_source.index('  # The emulator journal includes the guest console')]
 for lane, phase, api, diagnostic_status, called in (('sdk-images', 'images', 36, 0, True),
                                                   ('sdk-images', 'images', 36, 17, True),
                                                   ('sdk-images', 'setup', 36, 0, False),

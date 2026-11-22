@@ -42,6 +42,9 @@ RESOURCE_CODEX_TIMEOUT = RESOURCE_TOOL_TIMEOUT_MS // 1000 + 30
 RESOURCE_CLAUDE_TIMEOUT = RESOURCE_CODEX_TIMEOUT
 # Allow session binding, allocation projection and backend shutdown for both runs.
 RESOURCE_EXERCISE_TIMEOUT = RESOURCE_CODEX_TIMEOUT + RESOURCE_CLAUDE_TIMEOUT + 200
+ANDROID_RESOURCE_ERRORS = {'boot_timeout': 'android_boot_timeout', 'capacity': 'android_capacity_refusal',
+                           'busy': 'android_pool_busy', 'timeout': 'android_pool_wait_timeout',
+                           'stale': 'android_lease_stale'}
 
 
 def claude_failure(phase, result, token):
@@ -386,7 +389,7 @@ def run_probe_code():
 
 
 def command_with_receipt(command, receipt, expected=None):
-    code = run_probe_code()+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
+    code = run_probe_code()+f'ANDROID_RESOURCE_ERRORS={ANDROID_RESOURCE_ERRORS!r}\n'+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
 expected=json.loads(sys.argv[2])
 context={}
 for name,value in expected.get('environment',{}).items():
@@ -427,6 +430,13 @@ def finish(status):
             ('shell_command_missing',b'command not found'),
             ('capacity_refusal',b'agent-e2e: retryable capacity refusal for ')]
     reason=next((name for name,prefix in errors if prefix in raw),'unclassified')
+    kind=expected.get('kind','vm')
+    android_error=None
+    if kind=='android':
+        match=re.search(rb'Android (boot_timeout|capacity|busy|timeout|stale): ',raw)
+        if match:
+            android_error=match[1].decode('ascii')
+            reason=ANDROID_RESOURCE_ERRORS[android_error]
     matches=[]
     if expected.get('runner_source'):
         try:
@@ -442,12 +452,18 @@ def finish(status):
     if reason=='unclassified' and callsites: reason='runner_guard'
     stream.seek(0)
     fingerprint=hashlib.file_digest(stream,'sha256').hexdigest()
-    context['allocation_started']=b'E2E_PHASE phase=allocation state=start ' in raw
-    context['lease_granted']=b'E2E lease: yard=' in raw
+    # VM runner banners say nothing about an Android allocation. A boot timeout
+    # follows reservation, before the broker returns a ready lease to its client.
+    if kind=='vm':
+        context['allocation_started']=b'E2E_PHASE phase=allocation state=start ' in raw
+        context['lease_granted']=b'E2E lease: yard=' in raw
+    elif android_error in ('boot_timeout','capacity','busy','timeout'):
+        context['lease_granted']=False
+        if android_error=='boot_timeout': context['allocation_started']=True
     fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
     with os.fdopen(fd,'w') as receipt:
         os.fchmod(receipt.fileno(),0o600)
-        json.dump(dict(schema='subyard.telemetry.native-command/v1',exit_code=status,elapsed_seconds=round(time.monotonic()-started,3),context=context,error_class=reason,
+        json.dump(dict(schema='subyard.telemetry.native-command/v1',resource_kind=kind,exit_code=status,elapsed_seconds=round(time.monotonic()-started,3),context=context,error_class=reason,
                        runner_error_callsites=callsites,output_sha256=fingerprint),receipt)
 process=subprocess.Popen(sys.argv[3:],stdout=stream,stderr=subprocess.STDOUT)
 def cancel(signum,frame):
@@ -483,13 +499,16 @@ def require_command_success(receipt, agent):
     facts = dict(check='native-resource-command', agent=agent, receipt_present=receipt.is_file(),
                  exit_code_known=status is not None, exit_code=status)
     if status is not None:
+        if result.get('resource_kind') in ('vm', 'android'):
+            facts['resource_kind'] = result['resource_kind']
         context = result.get('context', {})
         facts['context'] = {key: value for key, value in (context.items() if isinstance(context, dict) else [])
                             if type(value) is bool and re.fullmatch('[a-z0-9_]{1,80}', key)}
         reason = result.get('error_class')
         facts['error_class'] = reason if reason in ('workspace_attribution', 'missing_pinned_host_key', 'controller_identity',
             'capability_probe', 'unknown_acquire_outcome', 'ssh_authentication', 'ssh_name_resolution', 'ssh_connection_refused',
-            'shell_unbound_variable', 'shell_command_missing', 'capacity_refusal', 'runner_guard') else 'unclassified'
+            'shell_unbound_variable', 'shell_command_missing', 'capacity_refusal', 'runner_guard') \
+            or reason in ANDROID_RESOURCE_ERRORS.values() else 'unclassified'
         facts['runner_error_callsites'] = [line for line in result.get('runner_error_callsites', [])
                                            if type(line) is int and 1 <= line <= 10000][:8]
         fingerprint = result.get('output_sha256', '')
@@ -710,7 +729,7 @@ def exercise(args):
                    CODEX_HOME=str(state/'codex'), CLAUDE_CONFIG_DIR=str(state/'claude'), SUBYARD_PROJECT_ID='telemetry-fixture',
                    SUBYARD_TELEMETRY_DATA_DIR=str(args.data_dir), OTEL_METRIC_EXPORT_INTERVAL='1000', OTEL_BSP_SCHEDULE_DELAY='100', OTEL_BLRP_SCHEDULE_DELAY='100')
         receipt = state/'native-command-result.json'
-        expected = dict(agent=agent, data_dir=str(args.data_dir), yard=os.environ.get('SUBYARD_E2E_YARD', 'test-yard'),
+        expected = dict(agent=agent, kind=args.kind, data_dir=str(args.data_dir), yard=os.environ.get('SUBYARD_E2E_YARD', 'test-yard'),
                         runner_source=str(args.source/'dev/agent-e2e.sh'),
                         environment={name: env[name] for name in ('HOME', 'PATH', 'SUBYARD_E2E_STATE_DIR', 'SUBYARD_CONFIG_HOME',
                             'SUBYARD_E2E_TEST_MODE', 'SUBYARD_E2E_WORKSPACES_ROOT', 'SUBYARD_TELEMETRY_DATA_DIR') if name in env})
