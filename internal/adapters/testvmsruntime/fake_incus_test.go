@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fakeIncusUnavailable = "Error: Failed to connect to local daemon"
@@ -34,6 +35,7 @@ type fakeIncusVM struct {
 	kind           string
 	status         string
 	config         map[string]string
+	lastUsedAt     time.Time
 	ip             string
 	agentKeyWrites []guestKeyWrite
 }
@@ -130,6 +132,18 @@ func (fake *fakeIncus) incus(args []string) (string, error) {
 		project.instances[name] = &fakeIncusVM{kind: kind, status: "STOPPED", config: config}
 		project.volumes[name] = true
 		return "", nil
+	case "copy":
+		target := fake.projects[incusArg(args, "--target-project")]
+		if project == nil || target == nil || project.instances[args[1]] == nil || target.instances[args[2]] != nil {
+			break
+		}
+		source := project.instances[args[1]]
+		config := maps.Clone(source.config)
+		maps.Copy(config, incusSettings(args, "-c"))
+		config["volatile.uuid"] = fmt.Sprintf("00000000-0000-4000-8000-%012d", len(fake.calls))
+		target.instances[args[2]] = &fakeIncusVM{kind: source.kind, status: "STOPPED", config: config}
+		target.volumes[args[2]] = true
+		return "", nil
 	case "info", "config", "stop", "start", "delete", "exec", "console":
 		if project != nil {
 			return fake.instance(project, args)
@@ -211,6 +225,7 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 		}
 	case "start":
 		vm.status = "RUNNING"
+		vm.lastUsedAt = time.Now().UTC()
 		return "", nil
 	case "stop":
 		if incusArg(args, "--timeout") == "60" {
@@ -295,7 +310,8 @@ func (fake *fakeIncus) query(path string) (string, error) {
 	}
 	vm := project.instances[parts[0]]
 	if len(parts) == 1 {
-		return fakeJSON(map[string]any{"type": vm.kind, "config": vm.config}), nil
+		status := map[string]string{"STOPPED": "Stopped", "RUNNING": "Running"}[vm.status]
+		return fakeJSON(map[string]any{"type": vm.kind, "config": vm.config, "status": status, "last_used_at": vm.lastUsedAt}), nil
 	}
 	switch parts[1] {
 	case "state":

@@ -477,6 +477,9 @@ func (runtime *Runtime) cleanupRetiringSlot(ctx context.Context, slot int) error
 			return errors.New("idle slot contains untracked instances; explicit recovery is required before pool shrink")
 		}
 	}
+	if err := child.retirePreparedContainer(ctx); err != nil {
+		return err
+	}
 	if err := child.cleanupManaged(ctx, true); err != nil {
 		return err
 	}
