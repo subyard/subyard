@@ -96,7 +96,8 @@ type exportOwnerFacts struct {
 
 func ownerProjectExportFixture(t *testing.T) (*CLI, *preparedCommand, *exportOwnerFacts) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -131,10 +132,7 @@ func ownerProjectExportFixture(t *testing.T) (*CLI, *preparedCommand, *exportOwn
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: probe, ProjectArchive: forbiddenExportArchive{opens: &facts.archiveOpens}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: probe, ProjectArchive: forbiddenExportArchive{opens: &facts.archiveOpens}})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

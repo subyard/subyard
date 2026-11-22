@@ -70,7 +70,8 @@ func (host *orphanIngressSnapshotHost) Instance(_ context.Context, project, name
 
 func orphanIngressFixture(t *testing.T, selected bool) (*CLI, config.Loaded, *orphanIngressSnapshotHost) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	yardFile := filepath.Join(root, "state", "yards", "private", "config.env")
 	if err := os.MkdirAll(filepath.Dir(yardFile), 0o700); err != nil {
 		t.Fatal(err)
@@ -98,11 +99,8 @@ SHUTDOWN=down
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(resourceDir, "relay", "handler.sh"), "#!/bin/sh\nexit 0\n", 0o700)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
 		WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard, Incus: &testkit.Incus{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("private")
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +247,8 @@ func (closer orphanIngressCloserStub) RemoveOwnedResourceIngress(_ context.Conte
 }
 
 func TestOrphanIngressRecoversDedicatedRuntimeAfterRouteAlreadyRemoved(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	yardFile := filepath.Join(root, "state", "yards", "private", "config.env")
 	if err := os.MkdirAll(filepath.Dir(yardFile), 0o700); err != nil {
 		t.Fatal(err)
@@ -285,11 +284,8 @@ fi
 `, 0o700)
 	writeCLIFile(t, filepath.Join(root, "service-enabled"), "synthetic\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "state-key"), "synthetic-key\n", 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
 		WorkingDir: root, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("private")
 	if err != nil {
 		t.Fatal(err)

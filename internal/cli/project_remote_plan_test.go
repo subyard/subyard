@@ -51,7 +51,14 @@ const ownerCopyHook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
 
 func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	_, program, prepared, changed := newOwnerProjectCopyFixture(t)
+	return program, prepared, changed
+}
+
+func newOwnerProjectCopyFixture(t *testing.T) (*cliFixture, *CLI, *preparedCommand, *bool) {
+	t.Helper()
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -83,10 +90,7 @@ func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 		}
 		return ports.InstanceExecResult{}, nil
 	}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: probe})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: probe})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +113,7 @@ func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 			t.Fatal(err)
 		}
 	})
-	return program, prepared, &contentChanged
+	return cliFixture, program, prepared, &contentChanged
 }
 
 func TestProjectOwnerCopyPrepareDoesNotReserveOrOpenControllerSource(t *testing.T) {
@@ -182,15 +186,12 @@ func TestProjectOwnerCopyCloseAbortsAdmission(t *testing.T) {
 }
 
 func TestProjectOwnerCopyRechecksTargetAfterConsentBeforeAdmission(t *testing.T) {
-	program, initial, _ := ownerProjectCopyFixture(t)
+	cliFixture, program, initial, _ := newOwnerProjectCopyFixture(t)
 	root := program.options.RepositoryRoot
 	writeProvisionProfile(t, root, "sample")
 	configPath := filepath.Join(root, "state/yards/default/config.env")
 	writeProfileTestFile(t, configPath, []byte("ENVIRONMENT_PROFILES=sample\n"), 0600)
-	fresh, err := New(program.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fresh := cliFixture.New(program.options)
 	loaded, err := fresh.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

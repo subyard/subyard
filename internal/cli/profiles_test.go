@@ -134,7 +134,14 @@ func TestScopedProfileStatusShowsDeclaredAdvisoryOfConvergedProfile(t *testing.T
 
 func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	_, cli, incus, runtime, path, output := newScopedProfileFixture(t, selection)
+	return cli, incus, runtime, path, output
+}
+
+func newScopedProfileFixture(t *testing.T, selection string) (*cliFixture, *CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
+	t.Helper()
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifest := filepath.Join(root, "config", "commands.registry")
 	data, err := os.ReadFile(manifest)
 	if err != nil {
@@ -152,15 +159,12 @@ func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus,
 	runtime := &profileRuntimeFixture{}
 	platform := newInitPlatformFixture()
 	var output bytes.Buffer
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output, ProfileRuntime: func(loaded config.Loaded) ProfileServiceRuntime {
+	cli := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdin: strings.NewReader(""), Stdout: &output, Stderr: &output, ProfileRuntime: func(loaded config.Loaded) ProfileServiceRuntime {
 		selected := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
 		_, explicit := loaded.Environment["ENVIRONMENT_PROFILES"]
 		return profileRuntimeSelection{runtime, !explicit || slices.Contains(selected, "fixture")}
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cli, incus, runtime, path, &output
+	return cliFixture, cli, incus, runtime, path, &output
 }
 
 func prepareScopedProfile(t *testing.T, cli *CLI, arguments ...string) (*preparedCommand, error) {
@@ -416,16 +420,12 @@ func TestScopedProfileDisableRejectsArtifactReplacement(t *testing.T) {
 // when the existing protected connection can be reused.
 func scopedProfileSetupFixture(t *testing.T) (*CLI, *testkit.Incus, string, *bytes.Buffer) {
 	t.Helper()
-	cli, incus, _, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+	cliFixture, cli, incus, _, path, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 	writeProfileSetupDeclaration(t, cli.options.RepositoryRoot)
 	declaration := filepath.Join(cli.options.RepositoryRoot, "config", "profiles", "fixture", "profile.json")
 	data, _ := os.ReadFile(declaration)
 	writeCLIFile(t, declaration, strings.Replace(string(data), `"schema_version":1,`, `"schema_version":1,"owner_service":"owner.sh",`, 1), 0600)
-	var err error
-	cli, err = New(cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli = cliFixture.New(cli.options)
 	cli.promptInputTerminal = func() bool { return true }
 	return cli, incus, path, output
 }

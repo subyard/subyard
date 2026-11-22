@@ -16,7 +16,8 @@ import (
 )
 
 func TestAddressWaitingIsVisibleAcrossStatusAndInventory(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	fake := lifecycleIncus()
 	instance := fake.Instances["subyard/yard"]
 	instance.Config["user.subyard.desired_power"] = "running"
@@ -31,15 +32,12 @@ func TestAddressWaitingIsVisibleAcrossStatusAndInventory(t *testing.T) {
 		}
 		for _, arguments := range [][]string{{"-Y", "default", "status"}, {"status"}, {"yards"}, {"yards", "--json"}} {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				Incus: fake, Executor: fake, StatusFacts: statusFactsStub{},
 				LocalAddresses: func() ([]netip.Addr, error) { return addresses, nil },
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("%v returned %d: %s", arguments, code, stderr.String())
 			}
@@ -85,7 +83,8 @@ func TestAddressWaitingIsVisibleAcrossStatusAndInventory(t *testing.T) {
 }
 
 func TestDeferredPublicationIsVisibleWithoutChangingRunningStatus(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	fake := lifecycleIncus()
 	instance := fake.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -95,13 +94,10 @@ func TestDeferredPublicationIsVisibleWithoutChangingRunningStatus(t *testing.T) 
 	want := []string{"tcp:192.0.2.12:8080"}
 	for _, arguments := range [][]string{{"-Y", "default", "status"}, {"status"}, {"yards", "--json"}} {
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+		program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 			Incus: fake, Executor: fake, StatusFacts: statusFactsStub{},
 			LocalAddresses: func() ([]netip.Addr, error) { return nil, nil }})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("%v returned %d: %s", arguments, code, stderr.String())
 		}

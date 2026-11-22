@@ -16,7 +16,8 @@ import (
 
 func TestConfigGitAuthoringRetryRequiresShutdownBeforeApplyingCommittedProfileChange(t *testing.T) {
 	f := newConfigGitAuthoringFixture(t)
-	root, nativeEnvironment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, nativeEnvironment := cliFixture.Root, cliFixture.Environment
 	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n", 0o600)
 	resourceDir := filepath.Join(root, "config/profiles/sample/resources")
 	writeConfigCommandFile(t, filepath.Join(resourceDir, "relay.res"), `COMMAND=relay
@@ -69,11 +70,8 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 	remoteBefore := strings.TrimSpace(configSourceGitOutput(t, f.remote, "rev-parse", "HEAD"))
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment,
 		WorkingDir: root, Prompt: prompt, Stdout: &bytes.Buffer{}, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("demo")
 	if err != nil {
 		t.Fatal(err)

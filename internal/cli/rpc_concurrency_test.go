@@ -84,13 +84,11 @@ func TestRPCConcurrentKeysPrepareKeepsSessionEnvironmentStable(t *testing.T) {
 }
 
 func TestRPCOperationCopiesMutableMaps(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.inventoryRoutes["existing-route"] = config.Loaded{}
 	program.discoveredOwners["existing-owner"] = ownerinventory.Connection{}
 
@@ -113,18 +111,16 @@ func TestRPCOperationCopiesMutableMaps(t *testing.T) {
 }
 
 func TestRPCExecuteUsesEnvironmentCapturedDuringPlan(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	operationID := "operation-context"
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: operationID, Status: "ok",
 	}}}}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		AdapterRunner: runner, Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

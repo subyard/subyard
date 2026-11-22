@@ -103,7 +103,8 @@ func TestCleanupUsesOnlySelectedExplicitDisposableSubset(t *testing.T) {
 }
 
 func TestCleanupSoftCommandUsesRegisteredDestructiveAction(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
@@ -121,10 +122,7 @@ func TestCleanupSoftCommandUsesRegisteredDestructiveAction(t *testing.T) {
 	environment = append(environment, "ENVIRONMENT_PROFILES=selected")
 	data := &cleanupAssessmentFixture{payload: []byte(`[{"path":"/srv/cache/test","identity":null}]`)}
 	var out bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"cleanup", "--soft", "--yes"}, Environment: environment, WorkingDir: root, Stdout: &out, Stderr: &out, ProjectData: data, Incus: lifecycleIncus()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"cleanup", "--soft", "--yes"}, Environment: environment, WorkingDir: root, Stdout: &out, Stderr: &out, ProjectData: data, Incus: lifecycleIncus()})
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("cleanup command failed %d: %s", code, out.String())
 	}
@@ -136,10 +134,7 @@ func TestCleanupSoftCommandUsesRegisteredDestructiveAction(t *testing.T) {
 	options.Environment = append(environment, "ENVIRONMENT_PROFILES=")
 	options.ProjectData = &cleanupAssessmentFixture{payload: []byte("[]")}
 	out.Reset()
-	empty, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	empty := cliFixture.New(options)
 	if code := empty.Run(context.Background()); code != 0 {
 		t.Fatalf("empty cleanup failed %d: %s", code, out.String())
 	}

@@ -32,11 +32,9 @@ func (input *preparedArchiveInput) Close() error { return input.closeErr }
 
 func preparedArchiveExecution(t *testing.T, fixture *preparedArchiveFixture) (*CLI, *projectExecution) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectArchive: fixture})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectArchive: fixture})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

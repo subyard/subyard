@@ -12,13 +12,11 @@ import (
 )
 
 func TestOperationConfigResourceCaptureLifetime(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	cliFixture, _ := newResourceCommandFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeCLIFile(t, filepath.Join(root, "config", "profiles", "fixture", "profile.json"), `{"schema_version":1}`, 0o600)
 	environment = append(environment, "ENVIRONMENT_PROFILES=fixture")
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
 	options := config.LoadOptions{RepositoryRoot: root, OperatorHome: environmentValue(environment, "HOME"), Environment: program.baseEnv}
 	operation := program.rpcOperation("first")
 	options.Resources = operation.operationResourceRegistry
@@ -55,7 +53,8 @@ func TestOperationConfigResourceCaptureLifetime(t *testing.T) {
 	if _, err := config.Load(options); err == nil {
 		t.Fatal("new RPC operation reused old candidate declarations")
 	}
-	otherRoot, otherEnvironment, _ := nativeFixture(t)
+	otherFixture := newFixture(t)
+	otherRoot, otherEnvironment := otherFixture.Root, otherFixture.Environment
 	if err := os.MkdirAll(filepath.Join(otherRoot, "config", "profiles", "fixture"), 0o700); err != nil {
 		t.Fatal(err)
 	}

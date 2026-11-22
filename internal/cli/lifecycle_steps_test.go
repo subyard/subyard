@@ -123,14 +123,12 @@ func TestTeardownArtifactReplacementRejectsPreservedMetadata(t *testing.T) {
 func TestTeardownAndResetRejectArtifactReplacementBeforeApply(t *testing.T) {
 	for _, reset := range []bool{false, true} {
 		t.Run(map[bool]string{false: "teardown", true: "reset"}[reset], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			program, err := New(Options{
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, Incus: lifecycleIncus(), NetworkPolicy: allowTestNetworkPolicy(),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -180,7 +178,8 @@ func TestTeardownAndResetRejectArtifactReplacementBeforeApply(t *testing.T) {
 }
 
 func TestTeardownPhysicalStaleRefusalRetainsErrorType(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	command := exec.Command("sh", "-c", "exit 75")
 	exitErr := command.Run()
 	if exitErr == nil {
@@ -189,13 +188,10 @@ func TestTeardownPhysicalStaleRefusalRetainsErrorType(t *testing.T) {
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Err: exitErr}}}
 	incus := lifecycleIncus()
 	incus.Reconcile.InstanceFound = true
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment,
 		WorkingDir: root, Incus: incus, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

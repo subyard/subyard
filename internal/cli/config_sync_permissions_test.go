@@ -24,7 +24,8 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 		{"push with converged content", []string{"config", "sync", "push", "-m", "Keep configuration permissions safe"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, home, configHome, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig())
+			root, home, configHome, environment := cliFixture.Root, cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 			localPath := filepath.Join(configHome, "config.env")
 			localContent := "DEV_UID='2299'\n"
 			writeConfigCommandFile(t, localPath, localContent)
@@ -34,14 +35,11 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 			run := func(arguments []string, prompt *testkit.Prompt) (int, string, string) {
 				t.Helper()
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{
+				program := cliFixture.New(Options{
 					RepositoryRoot: root, Program: "yard", Arguments: arguments,
 					Environment: environment, WorkingDir: root, Prompt: prompt,
 					Stdout: &stdout, Stderr: &stderr,
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				code := program.Run(context.Background())
 				return code, stdout.String(), stderr.String()
 			}

@@ -15,7 +15,8 @@ import (
 )
 
 func TestInstallationCacheEnrollmentRejectsVerifiedReplacement(t *testing.T) {
-	home := testkit.TempDir(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	home := cliFixture.Home
 	cache := filepath.Join(home, "cache")
 	runtime := filepath.Join(home, "runtime")
 	for _, path := range []string{cache, runtime} {
@@ -44,11 +45,8 @@ func TestInstallationCacheEnrollmentRejectsVerifiedReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Stdin: bytes.NewReader(input), Stderr: &stderr,
+	program := cliFixture.New(Options{RepositoryRoot: cliFixture.Root, Stdin: bytes.NewReader(input), Stderr: &stderr,
 		Environment: []string{"HOME=" + home, "YARD_RELEASE_CACHE=" + cache, "YARD_RUNTIME_ROOT=" + runtime}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.runInstallation(context.Background(), []string{"runtime"}); code != 1 ||
 		strings.Count(stderr.String(), "verified installation cache artifact changed") != len(paths) {
 		t.Fatalf("cache identity refusal = %d, %s", code, stderr.String())
@@ -59,17 +57,15 @@ func TestInstallationCacheEnrollmentRejectsVerifiedReplacement(t *testing.T) {
 }
 
 func TestInstallationActivationOwnsCanonicalScope(t *testing.T) {
-	root := repositoryRoot(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root := cliFixture.Root
 	home := testkit.TempDir(t)
 	environment := []string{"HOME=" + home, "SUBYARD_HOME=" + filepath.Join(home, "data"), "SUBYARD_CONFIG_HOME=" + filepath.Join(home, "config")}
 	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime-installation")
 	if err := os.Mkdir(runtimeRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	r := &installationActivationReconciler{cli: program, request: releasetransition.ProcessRequest{RuntimeRoot: runtimeRoot, ConfigHome: environmentValue(environment, "SUBYARD_CONFIG_HOME"), Target: "release-b"}}
 	ctx := context.Background()
 	before, err := r.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})

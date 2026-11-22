@@ -17,11 +17,9 @@ import (
 )
 
 func TestIdentityPrerequisitePlanPassesOperationPolicy(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -107,11 +105,9 @@ func TestIdentityContinuationScope(t *testing.T) {
 func TestDeveloperIdentityAdmissionBindsSourceAndDesiredConfiguration(t *testing.T) {
 	for _, change := range []string{"none", "source", "desired", "release"} {
 		t.Run(change, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
