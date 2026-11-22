@@ -58,8 +58,21 @@ func TestSystemContainerPool(t *testing.T) {
 	if err := f.rt.ReapExpired(f.ctx, f.store); err == nil || f.slot(1).State != SlotDraining {
 		t.Fatal("failed deletion did not stay draining")
 	}
+	var status facadeResponse
+	f.request("status", &status)
+	if slot := status.Pool.Slots[0]; slot.State != SlotDraining || slot.FailureReason != containerCleanupFailure || !slot.NextRecoveryAt.IsZero() {
+		t.Fatal("container cleanup failure is missing from draining slot status")
+	}
+	events, err := f.rt.eventRecorder().Export()
+	brokerMust(t, err)
+	if !slices.ContainsFunc(events.Events, func(event BrokerEvent) bool {
+		return event.Kind == "lease.stop_failed" && event.SlotID == grant.SlotID && event.LeaseEpoch == grant.LeaseEpoch &&
+			event.ResourceGeneration == grant.ResourceGeneration && event.ToState == SlotDraining && strings.Contains(event.Error, fakeIncusUnavailable)
+	}) {
+		t.Fatal("missing attributed cleanup failure event")
+	}
 	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
-	if f.slot(1).State != SlotAvailable || len(project.instances)+len(project.volumes) != 0 || project.config["restricted.containers.lowlevel"] != "" {
+	if f.slot(1).State != SlotAvailable || f.slot(1).FailureReason != "" || len(project.instances)+len(project.volumes) != 0 || project.config["restricted.containers.lowlevel"] != "" {
 		t.Fatal("expired allocation survived cleanup")
 	}
 	next := acquire(1)

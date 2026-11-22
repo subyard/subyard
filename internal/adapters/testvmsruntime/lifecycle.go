@@ -311,13 +311,9 @@ func (runtime *Runtime) finishDrainingSlot(
 	var evidence stopEvidence
 	var stopErr error
 	if child.Config.systemContainer() {
-		if err := child.restrictAgentAccess("released"); err != nil {
-			return err
-		}
-		// Leave a failed deletion fenced and draining. GC retries the same
-		// epoch, without quarantining an expired container or recycling it.
-		if err := child.deleteAllocation(ctx); err != nil {
-			return err
+		stopErr = child.restrictAgentAccess("released")
+		if stopErr == nil {
+			stopErr = child.deleteAllocation(ctx)
 		}
 	} else {
 		evidence, stopErr = child.stopRetainedWithEvidence(ctx)
@@ -357,13 +353,16 @@ func (runtime *Runtime) finishDrainingSlot(
 		ResourceGeneration: slot.ResourceGeneration,
 		LeaseEpoch:         slot.LeaseEpoch,
 		FromState:          SlotDraining,
-		ToState:            SlotQuarantined,
+		ToState:            slot.failedDrainState(),
 		DurationMS:         evidence.duration.Milliseconds(),
 		Error:              stopErr.Error(),
 		Context:            leaseContextFromSlot(slot),
 		Allocation:         publicResourceAllocation(slot),
 		agentClientID:      slot.ClientID,
 	})
+	if slot.failedDrainState() == SlotDraining {
+		return errors.Join(finishErr, stopErr)
+	}
 	incidentErr := runtime.handleQuarantineLocked(ctx, store, slot.SlotID, stopErr)
 	return errors.Join(finishErr, incidentErr, stopErr)
 }

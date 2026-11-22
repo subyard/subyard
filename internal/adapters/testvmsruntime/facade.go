@@ -419,7 +419,9 @@ func redactPool(pool *LeasePool) {
 		slot.LeaseID = ""
 		slot.ClientID = ""
 		slot.ControllerFingerprint = ""
-		slot.FailureReason = ""
+		if slot.State != SlotDraining || slot.FailureReason != containerCleanupFailure {
+			slot.FailureReason = ""
+		}
 		slot.AcquireOwner = nil
 	}
 }
