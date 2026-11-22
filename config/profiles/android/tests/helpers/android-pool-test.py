@@ -2598,7 +2598,8 @@ count.write_text(str(int(count.read_text()) + 1 if count.exists() else 1))
 image = target.joinpath(*sys.argv[2].split(';'))
 image.mkdir(parents=True)
 (image / 'system.img').write_bytes(b'base-image')
-(image / 'source.properties').write_text('AndroidVersion.ApiLevel=35\\nSystemImage.Abi=x86_64\\nSystemImage.TagId=google_apis\\nPkg.Revision=1\\n')
+(image / 'source.properties').write_text('AndroidVersion.ApiLevel = 35\\nSystemImage.Abi = x86_64\\n'
+                                         'SystemImage.TagId = google_apis\\nPkg.Revision = 1\\n')
 """)
         installer.chmod(0o755)
         images = poolmod.Images(self.root / 'real-images', sdk)
@@ -2771,6 +2772,8 @@ for package in sys.argv[2:]:
     metadata = 'Pkg.Revision=' + revision + '\\n'
     if package.startswith('platforms;'):
         metadata = 'Pkg.Revision=1\\nAndroidVersion.ApiLevel=' + revision + '\\n'
+    if package == 'platforms;android-36.1':
+        metadata = 'Pkg.Revision = 1\\nAndroidVersion.ApiLevel = ' + revision + '\\n'
     if package.startswith('ndk;'):
         metadata = 'Pkg.Desc = Android NDK\\nPkg.Revision = ' + revision + '\\n'
     (directory / 'source.properties').write_text(metadata)
