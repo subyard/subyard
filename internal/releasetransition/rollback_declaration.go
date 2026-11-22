@@ -110,7 +110,8 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 		if err := boundary.validate(); err != nil {
 			return RollbackDeclaration{}, err
 		}
-		if i > 0 && declaration.Boundaries[i-1].ThroughVersion+"/"+declaration.Boundaries[i-1].Component >= boundary.ThroughVersion+"/"+boundary.Component {
+		if i > 0 && (semver.MustParse(declaration.Boundaries[i-1].ThroughVersion).GT(semver.MustParse(boundary.ThroughVersion)) ||
+			semver.MustParse(declaration.Boundaries[i-1].ThroughVersion).EQ(semver.MustParse(boundary.ThroughVersion)) && declaration.Boundaries[i-1].Component >= boundary.Component) {
 			return RollbackDeclaration{}, invalid("rollback boundaries must be sorted and unique by throughVersion/component")
 		}
 	}

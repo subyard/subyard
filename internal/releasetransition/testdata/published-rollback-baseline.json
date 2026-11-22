@@ -1,6 +1,7 @@
 {
-  "agentSourcesDigest": "94f4162cee9fb8e1ccdab512db08c683db87a67779b1ee0976c0d2fb0d58f7f2",
+  "agentSourcesDigest": "624b84e79812edcf590010f4197e1dbd9528a5e27355d99a9eb3090fab9c104c",
   "bundleSHA256": "85adf086cd630d61ba8ce3f4c0ea6e450bb898964e2135fbddaddf4104d75164",
+  "predecessorRegistryDigest": "",
   "profiles": {
     "git-fetch-runtime": {
       "activation_id": "git-fetch-runtime",

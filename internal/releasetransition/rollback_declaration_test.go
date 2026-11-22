@@ -102,3 +102,19 @@ func TestRollbackBoundaryValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestRollbackBoundaryOrderingUsesNumericVersions(t *testing.T) {
+	declaration := RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: Fingerprint(strings.Repeat("a", 64)), Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}}
+	for _, version := range []string{"0.9.0", "0.10.0"} {
+		declaration.Boundaries = append(declaration.Boundaries, RollbackBoundary{Component: "registry", ThroughVersion: version, Reason: "unreadable state", Recovery: "restore backup"})
+	}
+	data, _ := json.Marshal(declaration)
+	if _, err := ParseRollbackDeclaration(data); err != nil {
+		t.Fatal(err)
+	}
+	declaration.Boundaries[0], declaration.Boundaries[1] = declaration.Boundaries[1], declaration.Boundaries[0]
+	data, _ = json.Marshal(declaration)
+	if _, err := ParseRollbackDeclaration(data); err == nil {
+		t.Fatal("lexicographic version ordering accepted")
+	}
+}

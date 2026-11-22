@@ -16,10 +16,14 @@ definition-free project-state prefix is declared, and the accepting rule. The 25
 5 strictly readable and 20 additional dependency-closed retirements out of 71 candidates.
 
 `published-rollback-baseline.json` pins profile runtime declarations, the registry-reader flags,
-and a SHA-256 inventory of non-test agent integration sources from the latest published release
+and a SHA-256 inventory of tracked integration asset sources from the latest published release
 in `dev/e2e/published-upgrade-baselines.tsv`. Its version and bundle checksum must match that
 source of truth. `python3 dev/update-rollback-baseline.py` regenerates it and the exact registry
 fixture from the local published tag. The agent inventory hashes sorted relative paths,
 the Git executable flag (owner execute, independent of group/other permissions) and file
-SHA-256 values; it excludes `tests/` directories. The repository gate
-reads the current filesystem, including uncommitted and untracked source files.
+SHA-256 values. The updater and gate share `internal/testkit/integrationassets`: the existing
+integration package/materialization inventory plus shipped defaults, the usage provisioner and
+project dispatcher. All declared artifact variants are included, even below `tests/`; unrelated
+files are excluded. The gate reads tracked filesystem contents, including uncommitted edits,
+and ignores untracked scratch files. The baseline also pins the target predecessor declaration
+needed for directional registry admission.

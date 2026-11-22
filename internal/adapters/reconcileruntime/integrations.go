@@ -666,7 +666,7 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	}
 	entries = append(entries, packages...)
 
-	dispatcher, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "config", "projects-changed.sh"))
+	dispatcher, err := os.ReadFile(integrationProjectsDispatcherSource(runtime.RepositoryRoot))
 	if err != nil {
 		return nil, err
 	}

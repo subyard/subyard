@@ -49,9 +49,10 @@
   `/etc/claude-code/subyard-git-approval-hook`, `/etc/codex/requirements.toml`,
   `/etc/codex/subyard-git-approval-hook`, `/usr/local/bin/claude-policy-check`,
   `/usr/local/bin/codex-policy-check`, `~/.codex/config.toml`, and
-  `~/.config/opencode/opencode.jsonc` (`~` is the yard developer's home).
+  `~/.config/opencode/opencode.jsonc`, and
+  `/usr/local/libexec/subyard/projects-changed` (`~` is the yard developer's home).
   After rollback, back up these files in each affected yard, remove only Subyard-managed
-  approval hook and policy files, restore the target release's agent configuration, and run
+  approval hook and policy files, restore the target release's agent configuration and project dispatcher, and run
   `yard init` before restarting agents. Preserve operator-owned content and account for custom
   installation paths. There are no agent integration rollback hooks or automatic cleanup.
 - `yard update --rollback` to v0.30.0 works with the telemetry profile installed. It refuses

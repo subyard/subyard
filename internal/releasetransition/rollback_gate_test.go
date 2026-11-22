@@ -1,11 +1,8 @@
-package releasetransition
+package releasetransition_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -15,23 +12,26 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
+	rt "github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/testkit/integrationassets"
 	"github.com/blang/semver/v4"
 )
 
 type rollbackGateBaseline struct {
-	Version            string                         `json:"version"`
-	BundleSHA256       string                         `json:"bundleSHA256"`
-	AgentSourcesDigest Fingerprint                    `json:"agentSourcesDigest"`
-	Profiles           map[string]profile.RuntimeHook `json:"profiles"`
-	RegistryFeatures   []string                       `json:"registryFeatures"`
+	Version                   string                         `json:"version"`
+	BundleSHA256              string                         `json:"bundleSHA256"`
+	AgentSourcesDigest        rt.Fingerprint                 `json:"agentSourcesDigest"`
+	Profiles                  map[string]profile.RuntimeHook `json:"profiles"`
+	RegistryFeatures          []string                       `json:"registryFeatures"`
+	PredecessorRegistryDigest rt.Fingerprint                 `json:"predecessorRegistryDigest,omitempty"`
 }
 
 type rollbackGateTree struct {
-	registry    RegistryV2
-	declaration RollbackDeclaration
+	registry    rt.RegistryV2
+	declaration rt.RollbackDeclaration
 	profiles    map[string]profile.RuntimeHook
-	agents      Fingerprint
+	agents      rt.Fingerprint
 }
 
 // This is a repository contract, deliberately conservative about agent source
@@ -39,19 +39,16 @@ type rollbackGateTree struct {
 // No network, Git history or packaging-time capability negotiation is needed.
 func rollbackGate(current, previous rollbackGateTree, version string) error {
 	var refusals []error
-	declared := func(component string, digest Fingerprint) bool {
-		return slices.ContainsFunc(current.declaration.Boundaries, func(b RollbackBoundary) bool {
+	declared := func(component string, digest rt.Fingerprint) bool {
+		return slices.ContainsFunc(current.declaration.Boundaries, func(b rt.RollbackBoundary) bool {
 			return b.Component == component && b.ThroughVersion == version && (digest == "" || b.SourceDigest == digest)
 		})
 	}
-	path, err := PlanDownPath(current.registry, previous.registry, previous.declaration.RegistryFeatures...)
-	if err != nil {
-		refusals = append(refusals, err)
-	} else if path.Kind == HistoryRefuse ||
-		path.Kind == HistoryEquivalent && current.declaration.PredecessorRegistryDigest != path.Target {
-		if !declared("registry", "") {
-			refusals = append(refusals, fmt.Errorf("registry changed without a down path to %s or a rollback boundary", version))
-		}
+	verdict := rt.HistoryCompatibility(rt.HistoryCompatibilityInput{Active: &current.registry, Target: &previous.registry,
+		Predecessor: current.declaration.PredecessorRegistryDigest, TargetPredecessor: previous.declaration.PredecessorRegistryDigest,
+		TargetRegistryFeatures: previous.declaration.RegistryFeatures})
+	if !verdict.RegistryAdmitted() && !declared("registry", "") {
+		refusals = append(refusals, fmt.Errorf("registry changed without a down path to %s or a rollback boundary", version))
 	}
 	owners := slices.Sorted(maps.Keys(previous.profiles))
 	for owner := range current.profiles {
@@ -63,7 +60,7 @@ func rollbackGate(current, previous rollbackGateTree, version string) error {
 	for _, owner := range owners {
 		before, beforeOK := previous.profiles[owner]
 		after, afterOK := current.profiles[owner]
-		if beforeOK && afterOK && (before.EffectiveFormat() == after.EffectiveFormat() || after.PreparesRollbackTo == before.EffectiveFormat()) {
+		if !beforeOK || !afterOK || before.EffectiveFormat() == after.EffectiveFormat() || after.PreparesRollbackTo == before.EffectiveFormat() {
 			continue
 		}
 		if !declared("profile:"+owner, "") {
@@ -103,22 +100,29 @@ func TestPublishedRollbackGate(t *testing.T) {
 		t.Fatal("rollback snapshot is stale; run python3 dev/update-rollback-baseline.py from the repository root")
 	}
 	previous := rollbackGateTree{profiles: baseline.Profiles, agents: baseline.AgentSourcesDigest,
-		declaration: RollbackDeclaration{RegistryFeatures: baseline.RegistryFeatures}}
+		declaration: rt.RollbackDeclaration{RegistryFeatures: baseline.RegistryFeatures, PredecessorRegistryDigest: baseline.PredecessorRegistryDigest}}
 	previous.registry = readGateRegistry(t, "testdata/v"+baseline.Version+"-release-transition.json")
 	current := rollbackGateTree{registry: readGateRegistry(t, filepath.Join(root, "config/release-transition.json")), profiles: map[string]profile.RuntimeHook{}}
 	declaration, err := os.ReadFile(filepath.Join(root, "config/release-rollback.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current.declaration, err = ParseRollbackDeclaration(declaration)
+	current.declaration, err = rt.ParseRollbackDeclaration(declaration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, err := filepath.Glob(filepath.Join(root, "config/profiles/*/profile.json"))
+	paths, err := integrationassets.TrackedFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range paths {
+	for _, relative := range paths {
+		if !strings.HasPrefix(relative, "config/profiles/") || !strings.HasSuffix(relative, "/profile.json") {
+			continue
+		}
+		path := filepath.Join(root, relative)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
+		}
 		var definition struct {
 			Runtime *profile.RuntimeHook `json:"runtime"`
 		}
@@ -127,19 +131,19 @@ func TestPublishedRollbackGate(t *testing.T) {
 			current.profiles[definition.Runtime.ActivationID] = *definition.Runtime
 		}
 	}
-	current.agents = agentSourcesDigest(t, filepath.Join(root, "config/agents"))
+	current.agents = agentSourcesDigest(t, root)
 	if err := rollbackGate(current, previous, baseline.Version); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func readGateRegistry(t *testing.T, path string) RegistryV2 {
+func readGateRegistry(t *testing.T, path string) rt.RegistryV2 {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, _, err := ParseRegistryV2(data, BuiltinCapabilityCatalog())
+	registry, _, err := rt.ParseRegistryV2(data, rt.BuiltinCapabilityCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,77 +161,47 @@ func readJSONTest(t *testing.T, path string, target any) {
 	}
 }
 
-func agentSourcesDigest(t *testing.T, root string) Fingerprint {
+func agentSourcesDigest(t *testing.T, root string) rt.Fingerprint {
 	t.Helper()
-	hash := sha256.New()
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if entry.Name() == "tests" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("agent source must be a regular file: %s", path)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		// Git stores one executable flag, based on owner execute, rather than
-		// group/other permissions. Managed worktrees may use 0744 instead of 0755.
-		mode := 0
-		if info.Mode().Perm()&0o100 != 0 {
-			mode = 0o111
-		}
-		fmt.Fprintf(hash, "%s %03o %x\n", filepath.ToSlash(relative), mode, sha256.Sum256(data))
-		return nil
-	})
+	files, err := integrationassets.TrackedFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Fingerprint(hex.EncodeToString(hash.Sum(nil)))
+	digest, _, err := integrationassets.Digest(root, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt.Fingerprint(digest)
 }
 
 func TestRollbackGateRequiresCoverageForEveryChange(t *testing.T) {
-	registry := singleDomainRegistry()
+	registry := gateRegistry()
 	digest, _ := registry.CanonicalDigest()
-	old := rollbackGateTree{registry: registry, profiles: map[string]profile.RuntimeHook{"sample": {}}, agents: Fingerprint(strings.Repeat("a", 64))}
+	old := rollbackGateTree{registry: registry, profiles: map[string]profile.RuntimeHook{"sample": {}}, agents: rt.Fingerprint(strings.Repeat("a", 64))}
 	fresh := func() rollbackGateTree {
 		return rollbackGateTree{registry: registry, profiles: maps.Clone(old.profiles), agents: old.agents,
-			declaration: RollbackDeclaration{PredecessorRegistryDigest: digest}}
+			declaration: rt.RollbackDeclaration{PredecessorRegistryDigest: digest}}
 	}
 	for _, area := range []string{"registry", "profile:sample", "agents"} {
 		t.Run(area, func(t *testing.T) {
 			current := fresh()
 			switch area {
 			case "registry":
-				current.registry = olderHistoryRegistry(registry)
+				current.registry = olderGateRegistry(registry)
 			case "profile:sample":
 				current.profiles["sample"] = profile.RuntimeHook{Format: 2}
 			case "agents":
-				current.agents = Fingerprint(strings.Repeat("b", 64))
+				current.agents = rt.Fingerprint(strings.Repeat("b", 64))
 			}
 			if err := rollbackGate(current, old, "0.30.0"); err == nil {
 				t.Fatal("undeclared change passed")
 			}
-			boundary := RollbackBoundary{Component: area, ThroughVersion: "0.30.0", Reason: "incompatible installed state", Recovery: "keep current release active and restore the saved state"}
+			boundary := rt.RollbackBoundary{Component: area, ThroughVersion: "0.30.0", Reason: "incompatible installed state", Recovery: "keep current release active and restore the saved state"}
 			if area == "agents" {
 				boundary.SourceDigest = current.agents
 				boundary.Files = []string{"/etc/sample/drop-in.json"}
 			}
-			current.declaration.Boundaries = []RollbackBoundary{boundary}
+			current.declaration.Boundaries = []rt.RollbackBoundary{boundary}
 			if err := rollbackGate(current, old, "0.30.0"); err != nil {
 				t.Fatal(err)
 			}
@@ -243,13 +217,13 @@ func TestRollbackGateRequiresCoverageForEveryChange(t *testing.T) {
 		t.Fatalf("profile hook refused: %v", err)
 	}
 	current = fresh()
-	current.registry = retire(t, registry, map[string]int{"settings": 2})
+	current.registry = retireGateRegistry(t, registry, map[string]int{"settings": 2})
 	if err := rollbackGate(current, old, "0.30.0"); err != nil {
 		t.Fatalf("declared equivalent down path refused: %v", err)
 	}
 	current = fresh()
-	current.agents = Fingerprint(strings.Repeat("b", 64))
-	current.declaration.Boundaries = []RollbackBoundary{{Component: "agents", ThroughVersion: "0.30.0", SourceDigest: old.agents}}
+	current.agents = rt.Fingerprint(strings.Repeat("b", 64))
+	current.declaration.Boundaries = []rt.RollbackBoundary{{Component: "agents", ThroughVersion: "0.30.0", SourceDigest: old.agents}}
 	if err := rollbackGate(current, old, "0.30.0"); err == nil {
 		t.Fatal("stale agent source review passed")
 	}
@@ -260,13 +234,71 @@ func TestAgentSourcesDigestUsesGitExecutableFlag(t *testing.T) {
 	path := filepath.Join(root, "provision.sh")
 	source := []byte("#!/bin/sh\nexit 0\n")
 	testkit.WriteFile(t, path, source, 0o744)
-	ownerOnly := agentSourcesDigest(t, root)
+	ownerOnly, err := integrationassets.DigestFiles(root, []string{"provision.sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	testkit.WriteFile(t, path, source, 0o755)
-	if got := agentSourcesDigest(t, root); got != ownerOnly {
+	if got, err := integrationassets.DigestFiles(root, []string{"provision.sh"}); err != nil || got != ownerOnly {
 		t.Fatalf("Git-equivalent executable modes changed digest: 0744=%s 0755=%s", ownerOnly, got)
 	}
 	testkit.WriteFile(t, path, source, 0o644)
-	if got := agentSourcesDigest(t, root); got == ownerOnly {
+	if got, err := integrationassets.DigestFiles(root, []string{"provision.sh"}); err != nil || got == ownerOnly {
 		t.Fatal("removing the executable flag did not change the source digest")
 	}
+}
+
+func TestRollbackGateIgnoresIntroducedAndRemovedRuntimeOwners(t *testing.T) {
+	registry := gateRegistry()
+	previous := rollbackGateTree{registry: registry, profiles: map[string]profile.RuntimeHook{"removed": {Format: 2}, "shared": {Format: 1}}}
+	current := rollbackGateTree{registry: registry, profiles: map[string]profile.RuntimeHook{"introduced": {Format: 3}, "shared": {Format: 1}}}
+	if err := rollbackGate(current, previous, "0.30.0"); err != nil {
+		t.Fatal(err)
+	}
+	current.profiles["shared"] = profile.RuntimeHook{Format: 2}
+	if err := rollbackGate(current, previous, "0.30.0"); err == nil {
+		t.Fatal("a shared owner's format change escaped")
+	}
+}
+
+func TestRollbackGateUsesTheTargetDeclarationForRetiringSuccessors(t *testing.T) {
+	registry := gateRegistry()
+	retired := retireGateRegistry(t, registry, map[string]int{"settings": 2})
+	activeDigest, _ := registry.CanonicalDigest()
+	targetDigest, _ := retired.CanonicalDigest()
+	current := rollbackGateTree{registry: registry, declaration: rt.RollbackDeclaration{PredecessorRegistryDigest: targetDigest}}
+	previous := rollbackGateTree{registry: retired}
+	if err := rollbackGate(current, previous, "0.30.0"); err == nil {
+		t.Fatal("active predecessor incorrectly admitted a retiring target")
+	}
+	current.declaration.PredecessorRegistryDigest = ""
+	previous.declaration.PredecessorRegistryDigest = activeDigest
+	if err := rollbackGate(current, previous, "0.30.0"); err != nil {
+		t.Fatal(err)
+	}
+	previous.declaration.PredecessorRegistryDigest = rt.Fingerprint(strings.Repeat("f", 64))
+	if err := rollbackGate(current, previous, "0.30.0"); err == nil {
+		t.Fatal("foreign target predecessor admitted")
+	}
+}
+
+func gateRegistry() rt.RegistryV2 {
+	return rt.RegistryV2{SchemaVersion: 2, MinimumEpochs: map[string]int{"settings": 1}, CurrentEpochs: map[string]int{"settings": 3}, Migrations: []rt.MigrationDefinitionV2{
+		{ID: "settings-v2", Domain: "settings", FromEpoch: 1, ToEpoch: 2, Kind: "test-vms-settings-v1-to-v2"},
+		{ID: "settings-v3", Domain: "settings", FromEpoch: 2, ToEpoch: 3, Kind: "local-ssh-port-settings-v2-to-v3"},
+	}}
+}
+func olderGateRegistry(registry rt.RegistryV2) rt.RegistryV2 {
+	registry.CurrentEpochs = maps.Clone(registry.CurrentEpochs)
+	registry.CurrentEpochs["settings"] = 2
+	registry.Migrations = slices.Clone(registry.Migrations[:1])
+	return registry
+}
+func retireGateRegistry(t *testing.T, registry rt.RegistryV2, floors map[string]int) rt.RegistryV2 {
+	t.Helper()
+	retired, err := registry.RetirePrefixes(floors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return retired
 }
