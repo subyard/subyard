@@ -492,7 +492,7 @@ for label, sig, group, expected in (("int", signal.SIGINT, True, 130),
     for index in range(5):
         profile = root / "config" / "profiles" / str(index) / "tests"
         profile.mkdir(parents=True, exist_ok=True)
-        script = 'import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\n'
+        script = 'import os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getppid()))\n'
         if index < 3:
             script += 'time.sleep(30)\n'
         (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
@@ -525,6 +525,16 @@ for label, sig, group, expected in (("int", signal.SIGINT, True, 130),
                 "interruption started a waiting profile"
             )
             assert code == expected, f"profile runner returned {code} after {label}"
+            dispatcher = Path('/proc') / (marked / '0').read_text() / 'stat'
+            deadline = time.monotonic() + 5
+            while dispatcher.exists():
+                try:
+                    if dispatcher.read_text().split()[2] == 'Z':
+                        break
+                except FileNotFoundError:
+                    break
+                assert time.monotonic() < deadline, 'profile dispatcher survived cancellation'
+                time.sleep(.01)
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)

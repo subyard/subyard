@@ -5,10 +5,11 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
-import tempfile
 
-PREFIX = "subyard-run."
+# Subyard run roots: a distinct prefix within the Unix socket pathname budget.
+PREFIX = "syr."
 RECEIPT = ".test-run.json"
 
 
@@ -183,7 +184,8 @@ def main():
             sweep(parent)
         finally:
             os.close(parent)
-        path = Path(tempfile.mkdtemp(prefix=PREFIX, dir="/tmp"))
+        # GNU mktemp supplies collision-safe creation with a shorter random suffix.
+        path = Path(subprocess.check_output(["mktemp", "-d", f"/tmp/{PREFIX}XXXXX"], text=True).strip())
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         os.fchmod(fd, 0o700)
         fcntl.flock(fd, fcntl.LOCK_EX)

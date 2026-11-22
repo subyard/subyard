@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as
     fixture = Path(temporary)
     helper = fixture / 'test-run-temp.py'
     helper.write_text((source / helper.name).read_text().replace(
-        'PREFIX = "subyard-run."', f'PREFIX = {prefix!r}'))
+        'PREFIX = "syr."', f'PREFIX = {prefix!r}'))
     spec = importlib.util.spec_from_file_location('run_temp', helper)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

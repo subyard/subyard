@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
 HOOK="$ROOT/config/profiles/android/provision.sh"
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-android-check.XXXXXX")"
+# Leave room for the nested ambient-TMPDIR case and the broker's Unix socket.
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/a.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 fake_bin="$tmp/bin"
