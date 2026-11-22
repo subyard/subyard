@@ -254,6 +254,8 @@ printf '%s  %s\n' "$older_sha" "$state/older.tar.gz" | sha256sum -c --status
 install -d -m 0700 "$state/older"
 tar -xzf "$state/older.tar.gz" -C "$state/older" herdr-core
 downgrade() {
+  # protected_regular forbids reopening another user's file in sticky /tmp.
+  guest rm -f /tmp/herdr-core-older
   incus --project "$project" file push "$state/older/herdr-core" "$instance/tmp/herdr-core-older" \
     --uid 1000 --gid 1000 --mode 0755
   guest_dev /usr/local/libexec/subyard/herdr-login update --from /tmp/herdr-core-older --force \
