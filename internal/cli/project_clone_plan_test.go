@@ -91,6 +91,11 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(program.options.RepositoryRoot, "config/projects-changed.sh"), []byte("#!/bin/sh\n"), 0o644)
 			definition, _ := program.manifest.Lookup("clone")
 			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
+			t.Cleanup(func() {
+				if err := prepared.Close(); err != nil {
+					t.Error(err)
+				}
+			})
 			prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 			if err := prepared.prepareProject(context.Background(), nil); err != nil {
 				t.Fatal(err)
@@ -158,6 +163,11 @@ func TestProjectCloneUsesNativeGitGlobalConfiguration(t *testing.T) {
 	}
 	definition, _ := program.manifest.Lookup("clone")
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
+	t.Cleanup(func() {
+		if err := prepared.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 	if err := prepared.prepareProject(context.Background(), nil); err != nil {
 		t.Fatal(err)
@@ -238,6 +248,11 @@ func TestProjectEmptyCloneRetainsStateAndRefusesNewRefsBeforeAdmission(t *testin
 		t.Fatal("clone definition missing")
 	}
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
+	t.Cleanup(func() {
+		if err := prepared.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 	if err := prepared.prepareProject(context.Background(), nil); err != nil {
 		t.Fatal(err)

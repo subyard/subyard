@@ -102,7 +102,10 @@ grep -Fq 'bash dev/shellcheck.sh' "$RELEASE_WORKFLOW" \
   && grep -Fq 'if: failure()' "$RELEASE_WORKFLOW" \
   && grep -Fq "bash $RUNNER" "$RELEASE_WORKFLOW" \
   || fail 'Release must run full verification and preserve its failure diagnostics'
-verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
+verify_entrypoint="$(awk '/^test verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
+[[ "$verify_entrypoint" == *'bash dev/with-test-temp.sh $(MAKE) $@-in-run'* ]] \
+  || fail 'shared verification entrypoints must own their temporary run'
+verify_recipe="$(awk '/^verify-in-run:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
 [[ "$verify_recipe" == *'./tests/run.sh'* && "$verify_recipe" == *'bash dev/test-profiles.sh'* ]] \
   || fail 'shared verification gate must include core and profile checks'
 line_of() {

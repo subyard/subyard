@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-logs="$(mktemp -d)"
+logs="$(mktemp -d "${TMPDIR:-/tmp}/subyard-shellcheck.XXXXXX")"
 trap 'rm -rf -- "$logs"' EXIT
 
 find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print0 \

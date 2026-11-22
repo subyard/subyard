@@ -3,18 +3,21 @@ PYTHON ?= python3
 VERSION ?= 0.1.0-dev
 TEST_VERSION ?= 0.29.0-test
 
-.PHONY: build package test lint verify verify-veranda clean cli-docs cli-docs-engine cli-docs-check rpc-vocabulary rpc-vocabulary-check
+.PHONY: build package test test-in-run lint verify verify-in-run verify-veranda clean cli-docs cli-docs-engine cli-docs-check rpc-vocabulary rpc-vocabulary-check
 
 build: rpc-vocabulary-check
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" YARD_BUILD_VERSION="$(VERSION)" ./dev/build-engine.sh
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/build-profiles.sh
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/package-engine.sh --runtime-dir .build/runtime --engine .build/yard --version "$(VERSION)"
 
-test:
+test verify:
+	bash dev/with-test-temp.sh $(MAKE) $@-in-run
+
+test-in-run:
 	bash dev/test-profiles.sh --permissions-only
 	bash tests/agent-skills.sh
 	umask 0022 && $(MAKE) build VERSION="$(TEST_VERSION)"
-	umask 0022 && TMPDIR=/tmp $(GO) test -count=1 -timeout=20m ./cmd/... ./internal/...
+	umask 0022 && $(GO) test -count=1 -timeout=20m ./cmd/... ./internal/...
 	bash dev/test-profiles.sh --after-permissions
 
 # Help generation uses its own engine so it never republishes the runtime under test.
@@ -33,7 +36,7 @@ lint:
 	bash dev/lint.sh
 
 # Profiles skip the installer check that the core suite already passed in this run.
-verify: rpc-vocabulary-check
+verify-in-run: rpc-vocabulary-check
 	bash dev/test-profiles.sh --permissions-only
 	$(MAKE) lint
 	./tests/run.sh

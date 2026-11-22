@@ -126,8 +126,7 @@ func (cli *CLI) prepareOwnerProjectCopy(ctx context.Context, loaded config.Loade
 	}
 	prepared.closeResource = func() error { return cli.abortOwnerProjectCopy(context.Background(), prepared) }
 	if err := prepared.preparePlan(ctx); err != nil {
-		_ = prepared.Close()
-		return nil, err
+		return nil, errors.Join(err, prepared.Close())
 	}
 	return prepared, nil
 }
@@ -215,7 +214,12 @@ func (cli *CLI) abortOwnerProjectCopy(ctx context.Context, prepared *preparedCom
 	return err
 }
 
-func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) error {
+func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.Project.closePreparedSource())
+		}
+	}()
 	cli, project := prepared.CLI, prepared.Project
 	if project == nil || prepared.Definition.Name != "sync" || project.Loaded.Context.AccessKind != domain.AccessRemote {
 		return errors.New("remote project copy requires controller sync")

@@ -219,7 +219,7 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(root, fmt.Sprintf("status-%d", len(redirects)+1)), []byte(fmt.Sprint(test.status)), 0o600)
 			command := exec.Command("bash", script, "--yes")
 			command.Env = []string{
-				"PATH=" + root + ":" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=/tmp",
+				"PATH=" + root + ":" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + testkit.TempDir(t),
 				"FAKE_LOG=" + filepath.Join(root, "requests"), "FAKE_RESPONSES=" + root,
 				"YARD_RELEASE_REPOSITORY=" + repository,
 			}

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-teardown-runtime-preservation.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 SUBYARD_OPERATOR_HOME="$TMP/operator"

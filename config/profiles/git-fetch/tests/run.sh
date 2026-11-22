@@ -2,7 +2,7 @@
 # Owning host-free behavior checks; installed systemd evidence belongs to E2E.
 set -euo pipefail
 umask 0022
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 profile="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 root="$(cd "$profile/../../.." && pwd)"
 install -d "$root/.build/git-fetch"

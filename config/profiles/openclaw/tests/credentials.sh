@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OpenClaw consumer and exclusive handoff checks on shared credential fixtures.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

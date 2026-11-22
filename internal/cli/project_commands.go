@@ -102,7 +102,12 @@ func (cli *CLI) observeProjectAction(
 	ctx context.Context,
 	commandName string,
 	execution *projectExecution,
-) error {
+) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, execution.closePreparedSource())
+		}
+	}()
 	if execution == nil {
 		return errors.New("project execution is required")
 	}

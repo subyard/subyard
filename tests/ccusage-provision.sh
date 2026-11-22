@@ -10,7 +10,7 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; 
 for command in cc jq sha256sum tar; do need "$command"; done
 [ -x "$HOOK" ] || fail "ccusage provision hook is not executable"
 
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-ccusage-provision.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 registry="$tmp/registry"
 fake_bin="$tmp/fake-bin"

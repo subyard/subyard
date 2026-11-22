@@ -1119,7 +1119,8 @@ func (fixture *localPersistPlanExecutor) Exec(ctx context.Context, project, inst
 }
 
 func TestPersistAbsentSourceStableAcrossParentCreation(t *testing.T) {
-	t.Setenv("TMPDIR", "/tmp")
+	testkit.UseHostTempDir(t)
+
 	root := testkit.TempDir(t)
 	home := filepath.Join(root, "home")
 	mkdirs(t, home)

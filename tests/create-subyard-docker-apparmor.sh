@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-create-apparmor.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-create-apparmor.XXXXXX")"
 cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then

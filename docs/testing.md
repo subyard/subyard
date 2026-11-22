@@ -723,12 +723,29 @@ Log names are relative to that summary's directory. Each completed check has a
 `check` row, and the final `run` row reports the whole invocation with suite `all`, `go` or
 `shell`. A missing final row means the run did not finish reporting. Absent checks have no
 result. Durations use Bash's elapsed seconds and may be zero for short checks. Separate
-invocations never overwrite each other's results. Local logs stay until explicitly removed.
+invocations never overwrite each other's results. Local core logs keep the newest 10 runs
+under `.build/test-runs`.
 On failure, CI uploads each affected job's verification console output and any core logs
 and summaries as `ci-host-free-<go|shell|profiles>-<attempt>`. Release uploads its full
 `make verify` output, core logs and summaries as `release-host-free-<attempt>`. Both retain
 these artifacts for seven days. Read the summary first and open only the relevant log when
 a check fails.
+
+The two top-level host-free runners (`tests/run.sh`, `dev/test-profiles.sh`) and their
+Makefile entrypoints give each invocation a private root under `/tmp`, with `TMPDIR`
+and `GOTMPDIR` pointing into it. Nested runners reuse that root. The runner holds an
+exclusive flock on the directory itself, inherited by children, and removes it on exit.
+The next invocation removes abandoned sibling roots only after taking their lock and
+validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
+mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks
+are preserved. There is no background supervisor or process-group change.
+
+A descendant that closes inherited fds and outlives its runner cannot retain the lock;
+it may lose its scratch at the next run. SIGKILL before receipt publication leaves an
+unknown directory for manual inspection. Direct individual tests still own their normal
+trap or `t.Cleanup` cleanup; crash recovery belongs to the top-level runners.
+`SUBYARD_KEEP_FAILED=1` explicitly preserves failed engine-release and source-constructor
+fixtures outside the run root for diagnosis. Otherwise only failure logs are retained.
 
 Host-free shell fixtures use a 30-second Incus agent deadline with margin for slow
 CI scheduling instead of real VM boot deadlines. Tests of the deadline itself explicitly

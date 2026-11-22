@@ -413,8 +413,9 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 }
 
 func TestProjectHookObservationBoundsCapturedInputs(t *testing.T) {
+	testkit.UseHostTempDir(t)
 	// Working-tree contents stay outside the core scope, regardless of tree size.
-	t.Setenv("TMPDIR", "/tmp")
+
 	for _, scenario := range []struct {
 		name                         string
 		directories, metadata, hooks int

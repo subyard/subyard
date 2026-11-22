@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -105,13 +106,38 @@ func TestProjectPreparedArchiveRejectsChangedBytesAndMode(t *testing.T) {
 }
 
 func TestProjectPreparedArchiveRejectsProducerCloseFailure(t *testing.T) {
+	temporary := testkit.TempDir(t)
 	failure := errors.New("archive producer failed")
 	fixture := &preparedArchiveFixture{payload: "partial", closeErr: failure}
 	program, execution := preparedArchiveExecution(t, fixture)
+	t.Setenv("TMPDIR", temporary)
 	if err := execution.prepareSource(context.Background(), program); !errors.Is(err, failure) {
 		t.Fatalf("error=%v", err)
 	}
 	if execution.preparedArchive != nil {
 		t.Fatal("failed producer input retained")
+	}
+	entries, err := os.ReadDir(temporary)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed archive left temporary entries: %v, error=%v", entries, err)
+	}
+}
+
+func TestProjectExportAssessmentErrorRemovesPreparedArchive(t *testing.T) {
+	program, execution := preparedArchiveExecution(t, &preparedArchiveFixture{payload: "archive"})
+	temporary := testkit.TempDir(t)
+	t.Setenv("TMPDIR", temporary)
+	failure := errors.New("export observation failed")
+	program.options.ProjectArchive = projectActionArchive("archive")
+	program.options.ProjectData = projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		return ports.InstanceExecResult{}, failure
+	}}
+	execution.OperationID = "operation-export-failure"
+	if err := program.observeProjectAction(context.Background(), "export", execution); !errors.Is(err, failure) {
+		t.Fatalf("error=%v", err)
+	}
+	entries, err := os.ReadDir(temporary)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed assessment left temporary entries: %v, error=%v", entries, err)
 	}
 }

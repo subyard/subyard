@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # A release refresh preserves an inactive timer and never starts sync or a manager.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-runtime-refresh.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-runtime-refresh.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"

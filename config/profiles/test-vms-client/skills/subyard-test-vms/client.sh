@@ -1132,7 +1132,7 @@ lease_keeper() {
   local response response_file keeper_timer_pid='' keeper_job_pid='' renew_rc=0
   # Separate background process groups let cleanup close every transport descendant's streams.
   set -m
-  response_file="$(mktemp "${LOCAL_TEMP:-/tmp}/.subyard-lease-renew.XXXXXX")"
+  response_file="$(mktemp "${LOCAL_TEMP:?lease keeper requires local temporary storage}/.subyard-lease-renew.XXXXXX")"
   trap 'lease_keeper_stop_jobs; rm -f "$response_file"' EXIT
   trap 'exit 0' INT TERM
   # Exit the background child directly, keeping local PIDs in scope for its EXIT trap.

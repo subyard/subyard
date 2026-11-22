@@ -101,8 +101,9 @@ func TestEarlyOwnerMutationRequiresActualHeldBarrier(t *testing.T) {
 // Native fixture at the source-HEAD commit point: owner identity and cache
 // manifest still describe the old pair, while the prepared Git move is committed.
 func pendingSourceRenameFixture(t *testing.T, sealed bool) (*CLI, config.Loaded, string, string, []string) {
+	testkit.UseHostTempDir(t)
 	t.Helper()
-	t.Setenv("TMPDIR", "/tmp")
+
 	root, home, configHome, environment := configCommandFixture(t)
 	if sealed {
 		runtimeRoot := aliasRepairRuntimeFixture(t, home)

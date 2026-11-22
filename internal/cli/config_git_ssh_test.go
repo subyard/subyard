@@ -128,14 +128,19 @@ type configSSHEvent struct {
 	kind, host, detail string
 }
 
-// configSSHTempDir is a private fixture root under /tmp, independent of TMPDIR.
+// configSSHTempDir shares the receipt-owned test run's temporary parent.
 func configSSHTempDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "subyard-config-ssh-")
+	// Keep SSH Unix socket paths short, even for long test names.
+	directory, err := os.MkdirTemp("", "ssh-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

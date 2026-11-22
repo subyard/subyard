@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-docker-forwarding.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-docker-forwarding.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 export TEST_LOG="$TMP/log"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the actual profile transport with a bounded fake Incus guest boundary.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 state="$(mktemp -d /tmp/subyard-git-fetch-owner.XXXXXX)"
 trap 'rm -rf -- "$state"' EXIT

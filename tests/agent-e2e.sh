@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 # A caller's prepared candidate would replace the worktree bundle under test.
 unset SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
@@ -180,6 +180,7 @@ keeper_probe_output="$(timeout 5 bash -c '
     [ "$1" != 300 ] || printf "%s\n" "$BASHPID" > "$timer_file"
     exec /bin/sleep "$@"
   }
+  LOCAL_TEMP="$2"
   start_lease_keeper
   trap "kill \"\$LEASE_KEEPER_PID\" >/dev/null 2>&1 || true" EXIT
   for ((attempt=0; attempt<100; attempt++)); do
@@ -347,10 +348,11 @@ keeper_failure_output="$(timeout 5 bash -c '
   trap '\''printf "owner stopped\n"; exit 0'\'' TERM
   sleep() { exec /bin/sleep 0.01; }
   facade_request() { return 23; }
+  LOCAL_TEMP="$2"
   start_lease_keeper
   wait "$LEASE_KEEPER_PID" || true
   exit 1
-' _ "$ROOT" 2>&1)" || keeper_failure_rc=$?
+' _ "$ROOT" "$keeper_probe_dir" 2>&1)" || keeper_failure_rc=$?
 [ "$keeper_failure_rc" = 0 ] && grep -Fq 'owner stopped' <<<"$keeper_failure_output" \
   && grep -Fq 'lease lost; stopping payload transport' <<<"$keeper_failure_output" \
   || fail "failed renewal no longer stops its authorized owner: $keeper_failure_rc $keeper_failure_output"
@@ -1046,9 +1048,11 @@ for network_cleanup_case in empty used foreign-owner query-failure malformed; do
   esac
 done
 nested_cleanup_function="$TMP/nested-teardown-cleanup.sh"
-sed -n '/^cleanup()/,/^}$/p' "$nested_teardown_script" > "$nested_cleanup_function"
+# Map the guest-only path guard into controller-owned fixture storage.
+sed -n '/^cleanup()/,/^}$/p' "$nested_teardown_script" \
+  | sed "s|/var/tmp/subyard-nested-teardown|$TMP/subyard-nested-teardown|g" > "$nested_cleanup_function"
 for nested_cleanup_case in success teardown-failure backend-failure; do
-  nested_cleanup_state="$(mktemp -d /var/tmp/subyard-nested-teardown.cleanup.XXXXXX)"
+  nested_cleanup_state="$(mktemp -d "$TMP/subyard-nested-teardown.cleanup.XXXXXX")"
   printf '%s\n' nested-teardown-e2e-v1 > "$nested_cleanup_state/.marker"
   set +e
   NESTED_CLEANUP_CASE="$nested_cleanup_case" \
@@ -4612,7 +4616,7 @@ full_matrix_case unrecovered nested-teardown 2 $'nested-teardown\nrecover-vm2' \
 armed_cleanup_order="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" cleanup_armed_full_fixtures | bash -c '
   set -euo pipefail
   eval "$(cat)"
-  FULL_SOURCE_ARM_FILE="$(mktemp)" FULL_POWER_ARM_FILE="$(mktemp)"
+  FULL_SOURCE_ARM_FILE="$(mktemp "${TMPDIR:-/tmp}/subyard-source-arm.XXXXXX")" FULL_POWER_ARM_FILE="$(mktemp "${TMPDIR:-/tmp}/subyard-power-arm.XXXXXX")"
   cleanup_full_source_arm() { printf "source\n"; find "$FULL_SOURCE_ARM_FILE" -delete; }
   cleanup_full_power_arm() { [ ! -e "$FULL_SOURCE_ARM_FILE" ] || return 2; printf "power\n"; find "$FULL_POWER_ARM_FILE" -delete; }
   cleanup_armed_full_fixtures

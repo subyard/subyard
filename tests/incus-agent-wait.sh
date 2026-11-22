@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d /tmp/subyard-agent-wait.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-wait.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 install -d -m 0700 "$TMP/bin"

@@ -34,3 +34,4 @@ cli-fixture-slice-check.sh
 yard-extras-convergence.sh
 yard-usage.sh
 installed-runtime-refresh.sh
+run-temp.sh

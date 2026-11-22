@@ -3,7 +3,8 @@
 set -euo pipefail
 # Host-free profile tests must not inherit the outer allocation route of a live collector.
 unset SUBYARD_E2E_ROLLOUT_YARD
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+original_args=("$@")
 suite=run.sh
 list=0
 permissions=normal
@@ -55,7 +56,12 @@ if [ "$list" = 1 ]; then
   exit 0
 fi
 if [ "$suite" = run.sh ]; then
-  export TMPDIR=/tmp
+  if [ "${SUBYARD_RUN_TEMP_ENTERED:-}" != "$$" ]; then
+    exec python3 "$ROOT/dev/test-run-temp.py" enter bash "$0" "${original_args[@]}"
+  fi
+  trap 'python3 "$ROOT/dev/test-run-temp.py" clean' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   umask 0022
 fi
 # Check the complete inventory before a live runner can acquire a lease.
@@ -84,7 +90,8 @@ if [ "$suite" = run.sh ]; then
     done
   fi
   [ "$permissions" != only ] || exit 0
-  exec python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@"
+  python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@"
+  exit 0
 fi
 for runner in "${runners[@]}"; do
   printf 'PROFILE TESTS %s\n' "${runner#"$ROOT/"}"

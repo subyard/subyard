@@ -2,7 +2,7 @@
 # Actual installed-runtime cold uninstall with Incus absent from the tool path.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixture="$(mktemp -d /tmp/subyard-full-uninstall.XXXXXX)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/subyard-full-uninstall.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture"' EXIT
 # Begin relay address selection contract.
 python3 - "$ROOT" <<'PY_RELAY_ADDRESS'

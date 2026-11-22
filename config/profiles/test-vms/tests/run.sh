@@ -4,7 +4,7 @@ set -euo pipefail
 umask 0022
 PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$PROFILE/../../.." && pwd)"
-export PYTHONDONTWRITEBYTECODE=1 TMPDIR=/tmp
+export PYTHONDONTWRITEBYTECODE=1 TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 preflight=0
 case "$#:${1:-}" in 0:) ;; 1:--preflight) preflight=1 ;; *) printf 'Usage: tests/run.sh [--preflight]\n' >&2; exit 2 ;; esac
 if [ "$preflight" = 1 ] && [ -n "${SUBYARD_E2E_LOCAL_EVIDENCE:-}" ]; then
@@ -19,7 +19,7 @@ print('test-vms preflight: reuse validated make verify PASS; installer then bund
 PYREUSE
   exit 0
 fi
-log="$(mktemp /tmp/subyard-test-vms-checks.XXXXXX)"
+log="$(mktemp "${TMPDIR:-/tmp}/subyard-test-vms-checks.XXXXXX")"
 trap 'rm -f -- "$log"' EXIT
 # `make verify` sets the signal after its core suite passed this installer check.
 if [ "$preflight" = 1 ] || [ "${SUBYARD_CORE_INSTALLER_CHECKED:-}" != 1 ]; then

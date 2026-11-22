@@ -217,7 +217,9 @@ cleanup_guest() {
 
 cleanup_on_exit() {
   local rc=${2:-$?} vm cleanup_failed=0 started=$SECONDS
-  trap - EXIT INT TERM
+  trap - EXIT
+  # Finish local cleanup even if a second interruption arrives. Children keep normal signals.
+  trap : INT TERM
   set +e
   # Interrupted work stays incomplete; EXIT closes terminal failures only.
   if [ "${1:-}" != interrupted ]; then phase_end "$rc"; fi

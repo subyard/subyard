@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d /tmp/subyard-test-vms.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-vms.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 PROVISION="$ROOT/scripts/e2e-lab/provision.sh"
 

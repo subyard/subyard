@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 # Exercise the real runner against a tiny checkout, without recursively running this suite.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-runner.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [ "$rc" -eq 0 ]; then
-    rm -rf -- "$tmp"
-  else
-    printf 'test-runner: failed fixture retained at %s\n' "$tmp" >&2
-  fi
+  rm -rf -- "${tmp:?}"
   exit "$rc"
 }
 trap cleanup EXIT
 fixture="$tmp/source with spaces"
-mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
+mkdir -p "$fixture"/{bin,cmd,internal,scripts/lib,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
+cp "$ROOT/dev/test-run-temp.py" "$ROOT/dev/with-test-temp.sh" "$fixture/dev/"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
 cp "$ROOT/tests/helpers/permission-umasks.sh" "$fixture/tests/helpers/permission-umasks.sh"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
@@ -28,7 +25,7 @@ cp "$tmp/tools/go" "$tmp/tools/gofmt"
 cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${TMPDIR:-}" = /tmp ] || exit 25
+[ "${TMPDIR:-}" = "${SUBYARD_RUN_TEMP:-/tmp}" ] || exit 25
 [ -z "${RUNNER_BASIC_GO_LOG:-}" ] || printf '%s\n' "$*" >> "$RUNNER_BASIC_GO_LOG"
 case " $* " in
   *' test -list '*)
@@ -224,7 +221,8 @@ def interrupted_case(name, sig, expected_status):
     case.mkdir()
     marker = case / 'blocked'
     output_path = case / 'runner.out'
-    env = os.environ.copy()
+    # This detached fixture models a separate top-level run, with fresh ownership.
+    env = {key: value for key, value in os.environ.items() if not key.startswith('SUBYARD_RUN_TEMP')}
     env.update({
         'PATH': str(root / 'tools') + os.pathsep + env.get('PATH', ''),
         'RUNNER_GO_LOG': str(case / 'go.log'),
@@ -295,7 +293,7 @@ awk -F '\t' '$1 == "check" && $3 == "syntax" && $4 == "failed" { found=1 }
 cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
 cp "$ROOT/dev/run-profile-tests.py" "$fixture/dev/run-profile-tests.py"
 mkdir -p "$fixture/config/profiles/example/tests"
-printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile check ran\\n"\n' \
+printf '#!/usr/bin/env bash\n[ "$TMPDIR" = "$SUBYARD_RUN_TEMP" ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
 (umask 0002; TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh") > "$tmp/profiles.out" 2>&1
 grep -Fxq 'PROFILE TESTS example passed' "$tmp/profiles.out" || fail 'profile tests were not discovered'
@@ -465,6 +463,7 @@ import time
 tmp, wrapper = map(Path, sys.argv[1:])
 root = tmp / "interrupt"
 (root / "dev").mkdir(parents=True)
+(root / "dev/test-run-temp.py").write_bytes((wrapper.parent.parent / "dev/test-run-temp.py").read_bytes())
 for name in ("test-profiles.sh", "run-profile-tests.py"):
     (root / "dev" / name).write_bytes(wrapper.with_name(name).read_bytes())
 marked = tmp / "interrupt-started"
@@ -482,7 +481,9 @@ for index in range(5):
 signal.signal(signal.SIGINT, signal.default_int_handler)
 with (tmp / "profile-interrupt.out").open("wb") as log:
     with subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
-                          stdout=log, stderr=log, start_new_session=True) as process:
+                          stdout=log, stderr=log, start_new_session=True,
+                          env={key: value for key, value in os.environ.items()
+                               if not key.startswith('SUBYARD_RUN_TEMP')}) as process:
         try:
             deadline = time.monotonic() + 10
             while len(list(marked.iterdir())) < 3:

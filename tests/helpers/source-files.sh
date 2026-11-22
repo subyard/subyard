@@ -2,7 +2,7 @@
 # Current public source paths, independent of a checkout's Git metadata or history.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${1:-$ROOT}"
 [ "$#" = 0 ] || shift
 # Shared client skills are one public directory alias, not a second source tree.

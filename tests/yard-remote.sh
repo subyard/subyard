@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-yard-remote.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 assert_file_contains() { grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"; }

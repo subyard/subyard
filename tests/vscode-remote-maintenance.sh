@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-vscode-remote-maintenance.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home" SUBYARD_PROC_ROOT="$TMP/proc"

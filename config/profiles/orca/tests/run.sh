@@ -2,7 +2,7 @@
 # Host-free checks owned by the orca profile.
 set -euo pipefail
 umask 0022
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 # The host-free checks never read the caller's stdin.
 exec </dev/null
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"

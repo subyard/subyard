@@ -11,14 +11,20 @@ case "$#:${1:-}" in
   *) printf 'Usage: %s [--go|--shell]\n' "$0" >&2; exit 2 ;;
 esac
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # Disposable fixtures must not become workspace repositories in Orca.
-export TMPDIR=/tmp
+if [ "${SUBYARD_RUN_TEMP_ENTERED:-}" != "$$" ]; then
+  exec python3 "$ROOT/dev/test-run-temp.py" enter bash "$0" "$@"
+fi
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
+trap 'python3 "$ROOT/dev/test-run-temp.py" clean' EXIT
+
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
+export SUBYARD_TEST_LOG_DIR="$RUN_DIR"
+python3 "$ROOT/dev/test-run-temp.py" retain "$ROOT/.build/test-runs"
 # Tests keep disposable state outside the checkout; see tests/helpers/checkout-guard.sh.
 CHECKOUT_TRACKED=0
 if prefix="$(git -C "$ROOT" rev-parse --show-prefix 2>/dev/null)" && [ -z "$prefix" ]; then
@@ -67,6 +73,7 @@ finish() {
     "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
   printf 'SUMMARY status=%s checks=%s duration_seconds=%s exit_code=%s results=%s\n' \
     "$status" "$CHECK_COUNT" "$((SECONDS - RUN_STARTED))" "$rc" "$SUMMARY"
+  python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }
   exit "$rc"
 }
 trap 'finish "$?"' EXIT

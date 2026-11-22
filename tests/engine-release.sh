@@ -3,16 +3,35 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-engine-release.XXXXXX)"
+SOURCE_ROOT="$ROOT"
+fixture_parent="${TMPDIR:-/tmp}"
+[ "${SUBYARD_KEEP_FAILED:-0}" != 1 ] || fixture_parent=/tmp
+TMP="$(mktemp -d "$fixture_parent/subyard-engine-release.XXXXXX")"
 incus_pid=''
 cleanup() {
   local rc=$?
   trap - EXIT
+  set +e
   if [ -n "$incus_pid" ]; then
     kill "$incus_pid" 2>/dev/null || true
     wait "$incus_pid" 2>/dev/null || true
   fi
-  if [ "$rc" -eq 0 ]; then rm -rf "$TMP"; else printf 'engine-release: failed fixture retained at %s\n' "$TMP" >&2; fi
+  if [ "$rc" -ne 0 ] && [ "${SUBYARD_KEEP_FAILED:-0}" = 1 ]; then
+    printf 'engine-release: failed fixture retained at %s\n' "$TMP" >&2
+  else
+    if [ "$rc" -ne 0 ]; then
+      if [ -n "${SUBYARD_TEST_LOG_DIR:-}" ]; then
+        logs="$SUBYARD_TEST_LOG_DIR/engine-release"
+        mkdir -p "$logs"
+      else
+        mkdir -p "$SOURCE_ROOT/.build/test-runs"
+        logs="$(mktemp -d "$SOURCE_ROOT/.build/test-runs/run.XXXXXX")"
+      fi
+      (cd "$TMP"; find . -type f -name '*.log' -print0 | tar --null -T - -cf -) | tar -C "$logs" -xf -
+      printf 'engine-release: failure logs: %s\n' "$logs" >&2
+    fi
+    rm -rf -- "${TMP:?}" || { [ "$rc" -ne 0 ] || rc=1; }
+  fi
   exit "$rc"
 }
 trap cleanup EXIT

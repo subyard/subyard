@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/subyard-release-candidate.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-release-candidate.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 . "$ROOT/tests/helpers/release-candidate.sh"
 root="$TMP/root"
