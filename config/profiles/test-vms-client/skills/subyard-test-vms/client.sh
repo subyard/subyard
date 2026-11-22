@@ -1053,7 +1053,7 @@ lease_command() {
 # Only the reply's status decides success; a refusal code is display text.
 RELEASE_STATE='' RELEASE_CODE=''
 lease_release_request() {
-  local response started=$SECONDS rc=0
+  local response started=$SECONDS rc=0 message
   RELEASE_STATE=failed RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
   if response="$(facade_request "$(lease_command release)" 180)"; then
@@ -1063,6 +1063,8 @@ lease_release_request() {
       RELEASE_STATE=refused rc=1
       RELEASE_CODE="$(jq -r '.code | strings' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
       [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
+      message="$(jq -j '.message | strings' <<<"$response" 2>/dev/null | tr -c '[:print:]' ' ' | cut -c1-200)" || message=''
+      printf 'E2E_RELEASE_REFUSAL code=%s message=%s\n' "$RELEASE_CODE" "${message:-unspecified}" >&2 || true
     fi
   else
     rc=$?
@@ -1070,6 +1072,30 @@ lease_release_request() {
   printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
     "$((SECONDS - started))" "$rc" >&2 || true
   lane_record "$LEASE_SLOT" release "exit_code=$rc"
+}
+
+# Diagnostics only: after a foreground refused release, print this lease's own broker
+# events (the failing step, its error and timing) into the caller's log. Never changes
+# the outcome; each read is bounded.
+release_refusal_events() {
+  local client status response
+  [ "$RELEASE_STATE" = refused ] && [ "$RELEASE_CODE" != lease_lost ] || return 0
+  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || return 1
+  read -r client < "$STATE_ROOT/client-id" || return 1
+  [[ "$client" =~ ^[0-9a-f]{32}$ && "$LEASE_SLOT" =~ ^slot-[0-9]+$ && "$LEASE_EPOCH" =~ ^[0-9]+$ ]] || return 1
+  status="$(facade_request status 30)" \
+    && jq -e '(.capabilities // []) | index("lease-logs-v1") != null' <<<"$status" >/dev/null 2>&1 \
+    && response="$(facade_request "logs-v1 $client $LEASE_SLOT 30" 30)" \
+    && jq -e '.status == "ok" and (.events | type == "array")' <<<"$response" >/dev/null 2>&1 \
+    || { printf 'E2E_RELEASE_EVENT unavailable slot=%s\n' "$LEASE_SLOT" >&2; return 1; }
+  jq -r --argjson epoch "$LEASE_EPOCH" '
+    [.events[] | select(.lease_epoch == $epoch)] as $own
+    | if ($own | length) == 0 then "E2E_RELEASE_EVENT none lease_epoch=\($epoch)" else
+        $own[] | "E2E_RELEASE_EVENT kind=\(.kind) at=\(.timestamp)"
+          + (if .duration_ms then " duration_ms=\(.duration_ms)" else "" end)
+          + (if .incident_id then " incident_id=\(.incident_id)" else "" end)
+          + (if .error then "\n" + (.error | split("\n") | map("  | " + .) | join("\n")) else "" end)
+      end' <<<"$response" | tr -d '\000-\010\013-\037\177' >&2
 }
 
 release_lease() {
@@ -1084,6 +1110,7 @@ release_lease() {
     *)
       printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
         "$released_slot" "$released_run" "$RELEASE_CODE" >&2
+      release_refusal_events || true
       return 1 ;;
   esac
   LEASE_ID=""
@@ -1788,7 +1815,7 @@ client_release() {
     printf 'E2E lease handle %s is not active; nothing to release\n' "$1" >&2
     return 0
   fi
-  release_handle explicit || exit 1
+  release_handle explicit || { release_refusal_events || true; exit 1; }
 }
 
 client_leases() {

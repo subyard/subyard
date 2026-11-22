@@ -307,9 +307,17 @@ func (runtime *Runtime) finishDrainingSlot(
 	child := runtime.slotRuntime(number, "")
 	child.useLeaseSlot(slot)
 	runtime.recordObservation(ctx, slot, "pre_stop")
+	started := runtime.Now()
 	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
-	if stopErr == nil && slot.Environment != nil {
-		stopErr = child.deleteAllocation(ctx)
+	if stopErr != nil {
+		stopErr = fmt.Errorf("release step fence-and-stop: %w", stopErr)
+	} else if slot.Environment != nil {
+		if deleteErr := child.deleteAllocation(ctx); deleteErr != nil {
+			stopErr = fmt.Errorf("release step delete-allocation: %w", deleteErr)
+		}
+	}
+	if evidence.duration = runtime.Now().Sub(started); evidence.duration < 0 {
+		evidence.duration = 0
 	}
 	runtime.recordStopOutcome(slot, evidence, stopErr)
 	finishErr := store.FinishDrain(slot.SlotID, stopErr)
@@ -337,6 +345,7 @@ func (runtime *Runtime) finishDrainingSlot(
 		LeaseEpoch:         slot.LeaseEpoch,
 		FromState:          SlotDraining,
 		ToState:            SlotQuarantined,
+		DurationMS:         evidence.duration.Milliseconds(),
 		Error:              stopErr.Error(),
 		Context:            leaseContextFromSlot(slot),
 		Allocation:         publicResourceAllocation(slot),
@@ -613,6 +622,7 @@ func (runtime *Runtime) stopRetained(ctx context.Context) error {
 type stopEvidence struct {
 	guestKeyCleanupAttempts int
 	guestKeyCleanupDeferred int
+	duration                time.Duration // whole release cleanup, set by the drain
 }
 
 func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvidence, error) {
@@ -748,6 +758,7 @@ func (runtime *Runtime) recordStopOutcome(
 			SlotID:             slot.SlotID,
 			ResourceGeneration: slot.ResourceGeneration,
 			LeaseEpoch:         slot.LeaseEpoch,
+			DurationMS:         evidence.duration.Milliseconds(),
 			Context:            leaseContextFromSlot(slot),
 			Allocation:         publicResourceAllocation(slot),
 			agentClientID:      slot.ClientID,
@@ -756,8 +767,14 @@ func (runtime *Runtime) recordStopOutcome(
 }
 
 func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
+	now := runtime.Now
+	if now == nil {
+		now = time.Now
+	}
+	started := now()
 	_, stopErr := runtime.incus(ctx, "stop", vm, "--project", runtime.Config.Project,
 		"--timeout", "60")
+	elapsed := now().Sub(started).Round(time.Second)
 	state, stateErr := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 	if stateErr == nil && strings.TrimSpace(state) == "STOPPED" {
 		return nil
@@ -768,6 +785,8 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 		stopErr = errors.Join(stopErr,
 			fmt.Errorf("%s remained in state %q after stop", vm, strings.TrimSpace(state)))
 	}
+	// The elapsed time separates an expired 60-second graceful shutdown from a fast refusal.
+	stopErr = errors.Join(stopErr, fmt.Errorf("%s graceful stop (timeout 60s) returned after %s", vm, elapsed))
 	// Native logs remain available when the guest agent is already shutting down.
 	// Keep both tails small enough for the existing 8 KiB broker event error.
 	for _, args := range [][]string{

@@ -60,6 +60,7 @@ case "$command" in
     log status
     capabilities='["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1","disk-size-v1"]'
     [ ! -e "$FAKE/v4" ] || capabilities='["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1","disk-size-v1","process-acquire-v4"]'
+    [ ! -e "$FAKE/lease-logs" ] || capabilities="$(jq -c '. + ["lease-logs-v1"]' <<<"$capabilities")"
     jq -cn --argjson capabilities "$capabilities" '{schema_version:1,status:"ok",capabilities:$capabilities,
       pool:{schema_version:2,slots:[{slot_id:"slot-002",state:"available",resource_generation:1,lease_epoch:1}]}}'
     ;;
@@ -136,6 +137,16 @@ case "$command" in
     else
       printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
     fi
+    ;;
+  logs-v1\ *)
+    read -r _ client slot count <<<"$command"
+    log "logs-v1 slot=$slot count=$count client=$client"
+    jq -cn '{schema_version:1,status:"ok",events:[
+      {kind:"lease.stop_succeeded",timestamp:"2026-08-24T11:00:00Z",slot_id:"slot-002",lease_epoch:1},
+      {kind:"lease.release",timestamp:"2026-08-24T12:00:00Z",slot_id:"slot-002",lease_epoch:2},
+      {kind:"lease.stop_failed",timestamp:"2026-08-24T12:01:05Z",slot_id:"slot-002",lease_epoch:2,duration_ms:64800,
+        error:"release step fence-and-stop: incus stop: context deadline exceeded\nconsole tail:\n  [ ok ] phase=forged\u001b[0m\nA stop job is running for fixture.service"},
+      {kind:"slot.quarantined",timestamp:"2026-08-24T12:01:06Z",slot_id:"slot-002",lease_epoch:2,incident_id:"01795371892254664249-1843ff2f64712754"}]}'
     ;;
   *) log "rejected $command"; printf '%s\n' '{"schema_version":1,"status":"error","code":"invalid_request"}' ;;
 esac
@@ -362,6 +373,27 @@ grep -Fq "release rejected for handle=$handle slot=slot-002 (ok)" "$TMP/err" \
 [ -f "$TMP/client/handles/$handle/lease.json" ] || fail 'a refused release removed the handle'
 rm -f "$TMP/release-error-code-ok"
 client release "$handle" 2>/dev/null || fail 'release after a refused release failed'
+
+# A refused foreground release prints the broker's message and this lease's own events
+# (failing step, error, timing); diagnostics never change the refusal outcome.
+: > "$TMP/facade.log"
+handle="$(client acquire --yard test-yard --slot 2 2>/dev/null)"
+touch "$TMP/release-rejected" "$TMP/lease-logs"
+if client release "$handle" 2>"$TMP/err"; then fail 'a quarantined release succeeded'; fi
+grep -Fxq 'E2E_RELEASE_REFUSAL code=quarantined message=slot fencing or stop failed' "$TMP/err" \
+  && grep -Fxq 'E2E_RELEASE_EVENT kind=lease.stop_failed at=2026-08-24T12:01:05Z duration_ms=64800' "$TMP/err" \
+  && grep -Fxq '  | release step fence-and-stop: incus stop: context deadline exceeded' "$TMP/err" \
+  && grep -Fxq '  | A stop job is running for fixture.service' "$TMP/err" \
+  && grep -Fxq 'E2E_RELEASE_EVENT kind=slot.quarantined at=2026-08-24T12:01:06Z incident_id=01795371892254664249-1843ff2f64712754' "$TMP/err" \
+  && grep -Fxq "logs-v1 slot=slot-002 count=30 client=$(cat "$(find "$TMP/client" -name client-id)")" "$TMP/facade.log" \
+  || fail "refused release did not print its own broker events: $(cat "$TMP/err")"
+if grep -Fq 'lease.stop_succeeded' "$TMP/err" || grep -q $'\e' "$TMP/err" || grep -q '^  \[ ok \]' "$TMP/err"; then
+  fail "refusal diagnostics printed another lease's event or unsafe text: $(cat "$TMP/err")"
+fi
+[ -f "$TMP/client/handles/$handle/lease.json" ] || fail 'refusal diagnostics removed the handle'
+rm -f "$TMP/release-rejected" "$TMP/lease-logs"
+client release "$handle" 2>"$TMP/err" || fail 'release after a quarantined refusal failed'
+! grep -Fq E2E_RELEASE_EVENT "$TMP/err" || fail 'a successful release printed refusal diagnostics'
 
 # Refusals leave no handle and keep the typed outcome and holder.
 for scenario in busy busy-wait capacity; do

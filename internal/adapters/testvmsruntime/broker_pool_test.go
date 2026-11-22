@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -659,5 +660,73 @@ func TestBrokerStatusAfterQuarantineIsRedactedAndAttributed(t *testing.T) {
 		two.Project != ctx.Project || two.Run != ctx.Run || two.Purpose != ctx.Purpose ||
 		two.AcquiredAt.IsZero() || two.ExpiresAt.IsZero() || two.LastHeartbeatAt.IsZero() {
 		t.Error("held neighbor status lost public lease attribution or timestamps")
+	}
+}
+
+// A refused release must name the failing step, keep the native stop error and say how
+// long cleanup ran, so a lane's 65-second refusal is attributable from its own events.
+func TestBrokerReleaseStopEventsNameStepAndTiming(t *testing.T) {
+	for _, scenario := range []struct {
+		name, faultVerb, wantKind, wantStep string
+		wantText                            []string
+	}{
+		{"graceful stop timeout", "stop", "lease.stop_failed", "release step fence-and-stop: ",
+			[]string{fakeIncusUnavailable, `remained in state "RUNNING" after stop`, "graceful stop (timeout 60s) returned after 1m1s"}},
+		{"delete failure", "delete", "lease.stop_failed", "release step delete-allocation: ",
+			[]string{fakeIncusUnavailable}},
+		{"slow successful stop", "", "lease.stop_succeeded", "", nil},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := newBrokerPoolFixture(t, 1)
+			grant := f.acquire(1, "release-step")
+			var project, vm string
+			for name, candidate := range f.incus.projects {
+				for instance := range candidate.instances {
+					project, vm = name, instance
+				}
+			}
+			if vm == "" {
+				t.Fatal("fixture did not create the leased VM")
+			}
+			handler := f.incus.handler
+			f.incus.handler = func(name string, args, env []string, input io.Reader) ([]byte, []byte, error) {
+				if name == "incus" && len(args) > 0 && args[0] == "stop" {
+					f.now = f.now.Add(61 * time.Second) // the graceful stop consumed its budget
+				}
+				return handler(name, args, env, input)
+			}
+			switch scenario.faultVerb {
+			case "stop":
+				f.incus.fault = []string{"stop", vm, "--project", project, "--timeout", "60"}
+			case "delete":
+				f.incus.fault = []string{"delete", vm, "--project", project}
+			}
+			result := f.leaseAction("release", grant)
+			if (scenario.faultVerb == "") != (result.Status == "ok") {
+				t.Fatalf("release: status=%s code=%s message=%s", result.Status, result.Code, result.Message)
+			}
+			batch, err := f.rt.Events.Export()
+			brokerMust(t, err)
+			var event *BrokerEvent
+			for index := range batch.Events {
+				if batch.Events[index].Kind == scenario.wantKind {
+					event = &batch.Events[index]
+				}
+			}
+			if event == nil || event.LeaseEpoch != grant.LeaseEpoch || event.DurationMS < 61000 {
+				t.Fatalf("%s event lacks lease identity or cleanup duration: %+v", scenario.wantKind, event)
+			}
+			if !strings.HasPrefix(event.Error, scenario.wantStep) {
+				t.Fatalf("event error %q does not name step %q", event.Error, scenario.wantStep)
+			}
+			for _, text := range scenario.wantText {
+				if !strings.Contains(event.Error, text) {
+					t.Errorf("event error lacks %q: %q", text, event.Error)
+				}
+			}
+			if scenario.faultVerb != "" && f.slot(1).State != SlotQuarantined {
+				t.Fatalf("failed release left slot %s", f.slot(1).State)
+			}
+		})
 	}
 }
