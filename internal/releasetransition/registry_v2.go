@@ -92,7 +92,7 @@ func (registry RegistryV2) historyRegistryWithFeatures(features []string) (migra
 	if err != nil && slices.Contains(features, RegistryFeatureRetiredPrefixDependencies) {
 		ids, proofErr := registry.closedRetiredMigrationIDs()
 		if proofErr != nil {
-			return migrationhistory.Registry{}, proofErr
+			return migrationhistory.Registry{}, fmt.Errorf("%w: %w (retired dependency proof: %v)", ErrInvalid, err, proofErr)
 		}
 		owner, err = migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired, ids...)
 	}

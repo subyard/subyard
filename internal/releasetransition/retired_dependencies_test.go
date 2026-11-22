@@ -205,3 +205,20 @@ func TestUnreadablePairsRequireTheDeclarationInTheirDirection(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryFallbackPreservesStrictFailure(t *testing.T) {
+	registry := publishedV030Registry(t)
+	registry.CurrentEpochs["settings"] = 9
+	payload, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, strictErr := ParseRegistryV2WithFeatures(payload, BuiltinCapabilityCatalog(), nil)
+	parsed, digest, err := ParseRegistryV2(payload, BuiltinCapabilityCatalog())
+	if strictErr == nil || !strings.Contains(strictErr.Error(), "registry path does not end at current epochs") {
+		t.Fatalf("strict failure = %v", strictErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), strictErr.Error()) || digest != "" || !reflect.DeepEqual(parsed, RegistryV2{}) {
+		t.Fatalf("default parser lost strict cause %v: %#v, %s, %v", strictErr, parsed, digest, err)
+	}
+}
