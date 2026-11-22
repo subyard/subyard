@@ -305,11 +305,16 @@ older broker cannot provide immediate pre-grant cancellation. Legacy acquire is 
 and the runner never switches protocols in response to acquire failure. Only a typed busy or
 capacity response plus bounded `--wait` permits another request for the same slot; a transport
 failure or any other unknown outcome ends the attempt. Without `--wait`,
-`SUBYARD_E2E_CAPACITY_WAIT` (for example `30m` or `90s`) bounds capacity retries alone and a busy
-slot still fails at once; the release acceptance collector sets it to `120m` for VM checks unless
+`SUBYARD_E2E_CAPACITY_WAIT` (for example `30m` or `90s`) bounds resource and slot-contention retries
+with one deadline, including a slot that becomes `provisioning` or `held` while waiting for memory;
+the release acceptance collector sets it to `120m` for VM checks unless
 already set, and hosted CI collector selections set `30m` to stay inside their job limits. The runner retries only while another request can start before the deadline, so a
 late grant is never needed. When the bound expires, the final typed capacity refusal and exit 4
-remain visible. A `held` busy response
+remain visible. Only `provisioning`, `held`, `draining` and `recovering` are transient slot states.
+Their refusal records `resource=slot state=STATE` with exit 4, immediately when no wait is
+configured or after the deadline; the collector records it as retryable `capacity_slot`.
+`quarantined` and `unavailable` fail immediately with exit 2 and require operator action.
+The exact requested slot is retained throughout the wait. A `held` busy response
 contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
 `acquired_at` and `expires_at`. Other unavailable states carry no owner object. The runner validates
 the complete response before retrying; a missing, extra or malformed owner field makes the outcome
