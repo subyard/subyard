@@ -236,7 +236,10 @@ func trackedCheckoutFiles(source string) ([]string, error) {
 			return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00"), nil
 		}
 		if _, statErr := os.Lstat(filepath.Join(source, ".git")); !errors.Is(statErr, os.ErrNotExist) {
-			return nil, statErr
+			if statErr != nil {
+				return nil, fmt.Errorf("list checkout files in %s: %w", source, statErr)
+			}
+			return nil, nil
 		}
 	} else if _, statErr := os.Lstat(filepath.Join(source, ".git")); !strings.Contains(stderr.String(), "not a git repository") ||
 		!errors.Is(statErr, os.ErrNotExist) {
