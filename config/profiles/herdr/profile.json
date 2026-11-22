@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "disabled_when": {"NESTED_E2E_VMS": "1"},
+  "settings": [
+    {"name":"HERDR_ADVERTISE_HOST","type":"string","scopes":["shipped","host","yard","command"],"application":"next-command","syncable":true,"optional":true},
+    {"name":"HERDR_HOST_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","syncable":true,"optional":true,"minimum":1,"maximum":65535,"host_listener":true}
+  ],
   "selected_provision_only": true,
   "runtime": {
     "activation_id": "herdr-runtime",

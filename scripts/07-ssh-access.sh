@@ -159,6 +159,10 @@ incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env PUBKEY="$PUBKEY" --env DEV_U
 ' || die "could not authorize the key in the yard"
 ok "$DEV_USER@$SSH_HOST authorized for your key"
 
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -s -- ensure \
+  < "$SCRIPT_DIR/ssh-client-alive.sh" \
+  || die 'could not configure guest SSH ClientAlive settings'
+
 # Install the generic yard shell/OpenSSH agent fallback. The same helper is used
 # by first unlock to upgrade yards initialized by older releases.
 incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -s -- ensure "$DEV_USER" \

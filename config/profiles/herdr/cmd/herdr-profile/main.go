@@ -20,6 +20,12 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "keys" {
+		return manageKeys(args[1:])
+	}
+	if len(args) == 2 && args[0] == "ssh-policy" {
+		return checkSSHPolicy(os.Stdin, args[1])
+	}
 	path := fmt.Sprintf("/run/user/%d/herdr-core/default.sock", os.Getuid())
 	if len(args) > 0 && (args[0] == "sync" || args[0] == "hook") {
 		restore := len(args) == 2 && args[0] == "sync" && args[1] == "--restore"

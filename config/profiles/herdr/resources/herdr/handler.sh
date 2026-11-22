@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Share a container yard's Herdr Core over tailnet SSH.
+# Usage: yard herdr <up|status|is-up|pair|sync|update|restart|logs|down>
+#   pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
+#   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
+#   update [--force]  Upgrade or restore the pinned release
+#   logs [--follow]   Read Herdr logs
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 profile="$(cd "$here/../.." && pwd)"
@@ -23,6 +29,10 @@ native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
 as_dev() { yexec runuser -u "$DEV_USER" -- "$@"; }
+# shellcheck source=config/profiles/herdr/resources/herdr/route.sh
+. "$here/route.sh"
+# shellcheck source=config/profiles/herdr/resources/herdr/pair.sh
+. "$here/pair.sh"
 yard_running() {
   command -v incus >/dev/null &&
     [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]
@@ -52,7 +62,7 @@ core_release() {
     aarch64) digest="$HERDR_AARCH64_SHA256" ;;
     *) die 'Herdr Core has no release for this guest architecture' ;;
   esac
-  as_dev bash -s -- "$HERDR_VERSION" "$HERDR_GENERATION" "$digest" "$1" < "$here/install-core.sh"
+  as_dev bash -s -- "$HERDR_VERSION" "$HERDR_GENERATION" "$digest" "$1" "$login" < "$here/install-core.sh"
 }
 digest() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
@@ -67,7 +77,9 @@ guest_file() {
     trap '\''rm -f -- "$stage"'\'' EXIT
     cat > "$stage"
     chmod "$mode" "$stage"
-    cmp -s "$stage" "$path" || mv -fT -- "$stage" "$path"
+    if ! cmp -s "$stage" "$path" || [ "$(stat -c "%u:%a" "$path")" != "0:${mode#0}" ]; then
+      mv -fT -- "$stage" "$path"
+    fi
   ' herdr "$1" "$2"
 }
 install_assets() {
@@ -153,7 +165,8 @@ runtime() {
 
 usage() {
   cat <<EOF
-Usage: ${PROG:-yard} herdr <up|status|is-up|sync|update|restart|logs|down>
+Usage: ${PROG:-yard} herdr <up|status|is-up|pair|sync|update|restart|logs|down>
+  pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
   update [--force]  Upgrade to the latest compatible release, or restore the pin
   logs [--follow]   Read Herdr logs
@@ -165,10 +178,14 @@ action="${1:-}"
 if [ "$action" = _runtime ]; then shift; runtime "$@"; exit; fi
 case "$action" in ''|--help|-h|help) usage; exit ;; esac
 shift
-case "$action:$*" in
-  update:--force|logs:--follow|sync:--restore|up:|status:|is-up:|sync:|update:|restart:|logs:|down:) ;;
-  *) svc_usage_error 'invalid Herdr command or arguments' ;;
-esac
+if [ "$action" = pair ]; then
+  parse_pair "$@"
+else
+  case "$action:$#:${1:-}" in
+    update:1:--force|logs:1:--follow|sync:1:--restore|up:0:|status:0:|is-up:0:|sync:0:|update:0:|restart:0:|logs:0:|down:0:) ;;
+    *) svc_usage_error 'invalid Herdr command or arguments' ;;
+  esac
+fi
 
 assessment() {
   local mode="$1" ready=false consequence desired target old result count
@@ -177,6 +194,7 @@ assessment() {
     status|is-up|logs)
       jq -cn --arg action "$action" '{schema:"yard.resource-action-assessment.v1",action:$action,changed:false,consequences:[]}'
       return ;;
+    pair) pair_assessment; return ;;
     sync)
       allowed
       svc_require_yard_running
@@ -184,9 +202,9 @@ assessment() {
       return ;;
     up)
       allowed
-      if up_ready; then ready=true; fi
-      desired='core ready and kick enabled'
-      consequence='install or refresh Herdr Core and enable its startup kick' ;;
+      if up_ready && route_ready; then ready=true; fi
+      desired='core ready, kick enabled and proxy published'
+      consequence='install or refresh Herdr Core, enable its startup kick and publish the tailnet SSH proxy' ;;
     update|restart)
       allowed
       svc_require_yard_running
@@ -203,10 +221,10 @@ assessment() {
     down)
       svc_require_yard_running
       result=$(observe)
-      if [ "$result" = null ] && ! enabled; then ready=true; fi
-      desired='core stopped and kick disabled'
+      if [ "$result" = null ] && ! enabled && route_absent; then ready=true; fi
+      desired='core stopped, kick disabled and proxy absent'
       count=$(jq -r '.Live // 0' <<< "$result")
-      consequence="stop all Herdr terminals, including arrivals; observed live terminals: $count"
+      consequence="remove the Herdr proxy and stop all Herdr terminals, including arrivals; observed live terminals: $count"
       if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
         old=$(jq -er '.[0].consequence' <<< "$SUBYARD_RESOURCE_STEPS")
         consequence="$old"
@@ -224,14 +242,21 @@ assessment() {
 case "${SUBYARD_RESOURCE_MODE:-}" in
   prepare|verify) assessment "$SUBYARD_RESOURCE_MODE" "$@" ;;
   apply)
-    [ "${SUBYARD_RESOURCE_ACTION:-}" = "$action" ] && [ -n "${SUBYARD_OPERATION_ID:-}" ] || die 'typed resource apply required'
+    [ -n "${SUBYARD_OPERATION_ID:-}" ] || die 'typed resource apply required'
+    if [ "$action" = pair ]; then pair_apply; exit; fi
+    [ "${SUBYARD_RESOURCE_ACTION:-}" = "$action" ] || die 'typed resource apply action mismatch'
     case "$action" in
-      up) allowed; svc_require_yard_running; up ;;
-      is-up) yard_running && running ;;
+      up) allowed; svc_require_yard_running; ssh_policy; up; ensure_route ;;
+      is-up) yard_running && running && route_ready ;;
       status)
         if ! yard_running; then printf 'Herdr: yard is stopped or unavailable\n'; exit; fi
         if ! yexec test -x "$helper"; then printf 'Herdr: not installed\n'; exit; fi
         printf 'Minimum Core release: %s\n' "$HERDR_VERSION"
+        if route_ready 2>/dev/null; then
+          printf 'SSH endpoint: %s@%s:%s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT"
+        else
+          printf 'SSH endpoint: unpublished or unavailable\n'
+        fi
         as_dev env "SUBYARD_HERDR_MINIMUM=$HERDR_VERSION" "$helper" status ;;
       sync) allowed; svc_require_yard_running; as_dev "$helper" sync "$@" ;;
       logs) svc_require_yard_running; yexec journalctl --no-pager -n 100 -u "$unit" + "_UID=$DEV_UID" "_COMM=herdr-core" "$@" ;;
@@ -246,10 +271,11 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         as_dev "$login" server restart --fresh
         wait_core "$old" ;;
       down)
+        remove_route "$(route_state)"
         if enabled; then yexec systemctl disable --now "$unit"; fi
         if running; then as_dev "$helper" stop; fi
         if running; then die 'Herdr Core is still running or was started by another client'; fi ;;
     esac ;;
-  '') [ "$action" = is-up ] && yard_running && running ;;
+  '') [ "$action" = is-up ] && yard_running && running && route_ready ;;
   *) die 'unsupported Herdr execution mode' ;;
 esac

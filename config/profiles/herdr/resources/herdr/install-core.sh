@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run as the development user. This is the same destination the official clients update.
 set -euo pipefail
-minimum="$1" generation="$2" digest="$3" mode="$4"
+minimum="$1" generation="$2" digest="$3" mode="$4" login="$5"
 bin="$HOME/.local/bin"
 binary="$bin/herdr-core"
 release=https://releases.herdr.dev/core
@@ -70,9 +70,9 @@ if [ -z "$installed" ] || dpkg --compare-versions "$installed" lt "$target" || \
   if [ -z "$installed" ]; then
     mv -T -- "$stage/herdr-core" "$binary"
   elif [ "$mode" = force ]; then
-    /usr/local/libexec/subyard/herdr-login update --from "$stage/herdr-core" --force
+    "$login" update --from "$stage/herdr-core" --force
   else
-    /usr/local/libexec/subyard/herdr-login update --from "$stage/herdr-core"
+    "$login" update --from "$stage/herdr-core"
   fi
 fi
 [ -L "$bin/hc" ] || ln -s herdr-core "$bin/hc"

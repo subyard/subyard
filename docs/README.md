@@ -23,6 +23,7 @@ choices that widen it.
 
 - [Orca remote server](orca.md) — run a pinned Orca server in a yard and connect over Tailscale or
   SSH forwarding.
+- [Herdr](herdr.md) — share terminal and agent sessions across desktop and mobile clients over Tailscale.
 - [Hermes yard](hermes.md) — prepare a dedicated yard while leaving Hermes installation and
   authentication to its upstream workflow.
 - [GitHub App access](github.md) — provide short-lived GitHub authentication to selected yards.
