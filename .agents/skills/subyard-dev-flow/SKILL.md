@@ -104,17 +104,26 @@ Read by task; links are relative to this skill.
 
 ## Pull requests
 
+- By default a change ships as one PR: the first commit adds the mechanism without changing
+  behavior, the second changes behavior, and the first review round goes commit by commit.
+  Moving existing code onto shared primitives goes in separate PRs. There is no line-count threshold.
 - Run GitHub commands as `subyard-github run -- gh …`. The body is the describer's output plus
   `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ... [--check NAME=URL ...]`;
   `--review-cycles` counts dev-flow rounds.
 - Create with `gh pr create --base BASE --title TITLE --body-file FILE`, adding `--label bug` for a
   defect fix and `--draft` while owed checks must still pass; then `gh pr ready NUMBER`. Update the
   body with `gh pr edit NUMBER --body-file FILE`.
-- Owed before merge, all green on the current head: base CI; a
-  [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners) on the PR branch
-  of the standard VM checks plus every profile and lane check that coverage ownership assigns to
-  the change, Intel retry runs included, with run URLs passed as `--check`; planned leased-VM
-  checks; required review.
+- Owed before merge, all green on the current head:
+  - base CI (`verify`, CodeQL);
+  - a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners) on the PR
+    branch of the standard VM checks plus every profile and lane check that
+    [coverage ownership](../../../docs/testing.md#coverage-ownership) assigns to the change, Intel
+    retry runs included, with run URLs passed as `--check`;
+  - planned leased-VM checks: owned lanes outside the Periodic matrix
+    (`python3 dev/ci/plan-periodic-checks.py` lists it), run after any release acceptance holding
+    the local VMs ends. Release acceptance runs a lane on hosted runners only when
+    `CI_HOSTED_CHECKS` in `dev/release-acceptance.py` names it; otherwise it is leased-VM there;
+  - required review.
 - A member's approving review of the current head shows in
   `gh pr view NUMBER --json headRefOid,latestReviews`. After consent, update the statistics, then
   run `gh pr merge NUMBER --auto --squash`; hold it with `gh pr merge NUMBER --disable-auto`.

@@ -2640,7 +2640,8 @@ Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH
 operator maintains a configurable pool of disposable one- or two-VM allocations. The canonical pool, exact-slot,
 lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The
 release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the full compatibility matrix is
-`dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using
+`dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) check kinds
+and the Subyard parameters in
 [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk). GitHub workflows do not run
 either VM gate. Do not run them on the operator host or in the privileged outer yard.
 

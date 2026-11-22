@@ -2,7 +2,8 @@
 
 The default `./tests/run.sh` is host-free. Live acceptance uses the disposable pool documented in
 [Agent E2E VM pool](test-vms.md#agent-workflow); that guide is the source of truth for setup,
-exact-slot selection, leases, recovery, and the outer-yard boundary. Choose checks using
+exact-slot selection, leases, recovery, and the outer-yard boundary. Choose checks using the
+[dev-flow](https://github.com/Dmitry-Borodin/dev-flow) check kinds and the Subyard parameters in
 [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 To run a release smoke, select an available slot from redacted status and pass it explicitly:
 
