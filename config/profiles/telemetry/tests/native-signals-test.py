@@ -481,6 +481,47 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
                 fixture.require_command_success(receipt, 'codex')
             self.assertTrue(json.loads(str(error.exception))['context']['subyard_e2e_state_dir_matches'])
 
+    def test_android_resource_failures_keep_native_class_and_lease_stage_private(self):
+        cases = [
+            ('boot_timeout', 'android_boot_timeout', False),
+            ('capacity', 'android_capacity_refusal', False),
+            ('busy', 'android_pool_busy', False),
+            ('timeout', 'android_pool_wait_timeout', False),
+            ('stale', 'android_lease_stale', None),
+            ('unknown', 'unclassified', None),
+        ]
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            for kind in ('android', 'vm'):
+                for code, reason, granted in cases:
+                    with self.subTest(kind=kind, code=code):
+                        receipt = Path(directory)/(kind+'-'+code+'.json')
+                        # The native error has no VM runner banner or guard
+                        # callsite. Its message must remain private.
+                        program = ('import sys; print("x"*140000); '
+                                   'print(sys.argv[1],file=sys.stderr); raise SystemExit(1)')
+                        command = fixture.command_with_receipt([sys.executable, '-c', program,
+                            'Android '+code+': PRIVATE_CONTENT'], receipt, dict(kind=kind))
+                        result = subprocess.run(shlex.split(command), capture_output=True, timeout=10)
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stdout+result.stderr, b'')
+                        with self.assertRaises(AssertionError) as error:
+                            fixture.require_command_success(receipt, 'codex')
+                        facts = json.loads(str(error.exception))
+                        self.assertEqual(facts['resource_kind'], kind)
+                        self.assertEqual(facts['error_class'], reason if kind == 'android' else 'unclassified')
+                        self.assertEqual(facts['runner_error_callsites'], [])
+                        context = facts['context']
+                        if kind == 'vm':
+                            self.assertFalse(context['allocation_started'])
+                            self.assertFalse(context['lease_granted'])
+                        else:
+                            self.assertEqual(context.get('lease_granted'), granted)
+                            if code == 'boot_timeout':
+                                self.assertTrue(context['allocation_started'])
+                            else:
+                                self.assertNotIn('allocation_started', context)
+                        self.assertNotIn('PRIVATE_CONTENT', str(error.exception))
+
     def test_resource_command_requires_actual_success(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             for status in (0, 7):

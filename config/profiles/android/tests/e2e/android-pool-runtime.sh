@@ -150,6 +150,13 @@ cleanup() {
       || printf 'android-sdk-diagnostic retry=unavailable original_failure_preserved=true\n' >&2
   fi
   # The emulator journal includes the guest console and survives lease release.
+  # Telemetry tools keep native stderr private. Preserve the pool's numeric boot
+  # summary before teardown removes its journal with the disposable yard.
+  if [ "$status" -ne 0 ] && [ -n "$project" ] && [ -n "$instance" ]; then
+    case "$failed_phase" in
+      telemetry-profile|telemetry-native|telemetry-storage) android_gradle_boot_evidence ;;
+    esac
+  fi
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
     android_gradle_boot_evidence
