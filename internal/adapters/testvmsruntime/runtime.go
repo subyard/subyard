@@ -541,7 +541,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		"size", cfg.Disk, "--project", cfg.Project); err != nil {
 		return err
 	}
-	if cfg.Network != "" && !linePresent(devices, "eth0") {
+	if !linePresent(devices, "eth0") {
 		if _, err := runtime.incus(ctx, "profile", "device", "add", "default", "eth0",
 			"nic", "network="+cfg.Network, "name=eth0", "--project", cfg.Project); err != nil {
 			return err
@@ -617,53 +617,36 @@ func (cfg Config) instanceSettings() []string {
 	return settings
 }
 
-func (runtime *Runtime) allocationSettings() []string {
-	var settings []string
-	if runtime.allocation != nil {
-		settings = append(settings, "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
-			"user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
-	}
-	if runtime.agentLogOwner != "" {
-		settings = append(settings, agentLogOwnerMarker+"="+runtime.agentLogOwner)
-	}
-	return settings
-}
-
 func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
-	cfg := runtime.Config
-	settings := runtime.allocationSettings()
-	if cfg.systemContainer() && runtime.allocation != nil {
-		return runtime.initPreparedGuest(ctx, vm, settings)
-	}
-	return runtime.initFromImage(ctx, vm, settings)
-}
-
-func (runtime *Runtime) initFromImage(ctx context.Context, vm string, settings []string) error {
 	cfg := runtime.Config
 	sleep := runtime.Sleep
 	if sleep == nil {
 		sleep = sleepContext
 	}
-	args := []string{"init", cfg.Image, vm}
-	if cfg.systemContainer() {
-		args = append(args, "--project", cfg.Project)
-		for _, setting := range cfg.instanceSettings() {
-			args = append(args, "-c", setting)
-		}
-	} else {
-		args = append(args, "--vm", "--project", cfg.Project, "-c", "limits.cpu="+strconv.Itoa(cfg.CPU), "-c", "limits.memory="+cfg.Memory)
-	}
-	args = append(args, "-c", "user.subyard.managed="+managedMarker)
-	for _, setting := range settings {
-		args = append(args, "-c", setting)
-	}
-	if !cfg.systemContainer() {
-		if _, raw := vmSleepPolicy(imageArchitecture()); raw != "" {
-			args = append(args, "-c", "raw.qemu.conf="+raw)
-		}
-	}
 	const attempts = 4
 	for attempt := 1; attempt <= attempts; attempt++ {
+		args := []string{"init", cfg.Image, vm}
+		if cfg.systemContainer() {
+			args = append(args, "--project", cfg.Project)
+			for _, setting := range cfg.instanceSettings() {
+				args = append(args, "-c", setting)
+			}
+		} else {
+			args = append(args, "--vm", "--project", cfg.Project, "-c", "limits.cpu="+strconv.Itoa(cfg.CPU), "-c", "limits.memory="+cfg.Memory)
+		}
+		args = append(args, "-c", "user.subyard.managed="+managedMarker)
+		if runtime.allocation != nil {
+			args = append(args, "-c", "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
+				"-c", "user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
+		}
+		if runtime.agentLogOwner != "" {
+			args = append(args, "-c", agentLogOwnerMarker+"="+runtime.agentLogOwner)
+		}
+		if !cfg.systemContainer() {
+			if _, raw := vmSleepPolicy(imageArchitecture()); raw != "" {
+				args = append(args, "-c", "raw.qemu.conf="+raw)
+			}
+		}
 		_, err := runtime.incus(ctx, args...)
 		if err == nil || !remoteImageLookupError(err) || attempt == attempts {
 			return err

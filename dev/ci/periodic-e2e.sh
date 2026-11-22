@@ -179,7 +179,7 @@ CONFIG
   sg incus-admin -c '"$HOME/.local/bin/yard" test-vms status </dev/null'
 }
 
-prepare_runner_lease() {
+prepare_runner_host() {
   # Match the disposable broker guest's operator and dependency-only Incus installation.
   sudo -n useradd --create-home --shell /bin/bash dev
   sudo -n chmod 0711 /home/dev
@@ -189,16 +189,6 @@ prepare_runner_lease() {
   sudo -n bash -euc '. "$1/scripts/e2e-lab/base.sh"; base_install_incus "$1"; base_prepare_platform' bash "$WORKSPACE"
   sudo -n usermod -aG incus-admin,kvm dev
   bash "$WORKSPACE/dev/ci/runner-lease.sh" prepare
-}
-
-# Check the released project through the same native daemon that owns its instances.
-prove_container_pool() {
-  cd "$WORKSPACE"
-  SUBYARD_E2E_TIER=system-container controller_env bash dev/agent-e2e.sh \
-    --slot 1 --type system-container --vm-count 1 --vm 1 --purpose container-boundary -- \
-    bash -ec 'systemd-detect-virt --container --quiet; sudo -n test -s /run/subyard-e2e-lease.json'
-  incus_root exec yard-test-yard --project subyard-test-yard -- \
-    incus list --project subyard-e2e-vms-slot-1 --format json | jq -e 'length == 0'
 }
 
 controller_env() {
@@ -257,16 +247,12 @@ check_probes() {
   probe docker-removed drop_docker
   probe_after prepare-host candidate install_candidate "$BUNDLE"
   if [ "${SUBYARD_E2E_TIER:-vm}" = runner ]; then
-    probe_after candidate runner-lease prepare_runner_lease
-    probe_after runner-lease "check:$id" run_check "$@"
+    probe_after candidate runner-host prepare_runner_host
+    probe_after runner-host "check:$id" run_check "$@"
   else
     probe_after candidate candidate-runtime install_runtime
     probe_after candidate-runtime test-vms-service install_pool "$id"
-    if [ "$id" = pool-boundary ]; then
-      probe_after test-vms-service container-pool prove_container_pool
-    else
-      probe_after test-vms-service "check:$id" run_check "$@"
-    fi
+    probe_after test-vms-service "check:$id" run_check "$@"
   fi
   probe facts-after facts
   write_summary
@@ -282,10 +268,6 @@ case "${1:-}" in
     cd "$WORKSPACE"
     BUNDLE=''
     keep_diagnostics
-    ;;
-  pool)
-    [ "$#" = 4 ] && [ "$3" = --image ] && [ -n "$4" ] || die 'usage: periodic-e2e.sh pool BUNDLE --image IMAGE'
-    SUBYARD_E2E_LEASE_IMAGE="$4" check_probes pool-boundary "$2"
     ;;
   check)
     [ "$#" -ge 6 ] && [ "$4" = --image ] && [ -n "$5" ] \

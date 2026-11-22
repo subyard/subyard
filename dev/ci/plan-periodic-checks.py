@@ -19,13 +19,19 @@ def optional_vm(name, duration, *guest_env):
                         "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh"]}
 
 
-# Only these nested checks need both a VM inside the guest and a guest reboot.
-NESTED = {"p0-release-smoke", "profile:amnezia"}
+# Checks that boot a VM inside the leased VM. On AMD hosted runners such a VM boots far too slowly
+# under the runner's hypervisor for these checks to finish, so on the vm tier they run only on Intel
+# runners. On the runner tier the hosted job itself is the host and nothing nests.
+NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
+          "profile:telemetry/local", "profile:telemetry/resources",
+          "profile:android/gradle", "profile:android/memory-lease", "profile:test-vms/broker-cold-upgrade", "profile:test-vms/memory-boundary",
+          "vm:staging-reliability",
+          "vm:p0-yard-maintenance"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
 # A hosted run took 17 minutes; 45m leaves room for slower runners. The 10m TERM grace covers
 # two 120s guest cleanups and the 180s lease release.
-PERIODIC_ONLY = [{"id": "periodic:config-sync", "tier": "system-container",
+PERIODIC_ONLY = [{"id": "periodic:config-sync",
                   "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                               "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]},
                  # Physical regression outside the release acceptance catalog; uses the normal candidate bundle.
@@ -35,7 +41,10 @@ PERIODIC_ONLY = [{"id": "periodic:config-sync", "tier": "system-container",
                  optional_vm("cleanup-acceptance", "60m", "env",
                              "SUBYARD_E2E_CLEANUP_CACHE_HELPER=config/profiles/subyard-dev/tests/e2e/cleanup-cache.sh"),
                  optional_vm("sudo-terminal-ownership", "45m"),
-                 optional_vm("zabbly-download-smoke", "15m")]
+                 optional_vm("zabbly-download-smoke", "15m"),
+                 # A system-container lease on the candidate pool: acquire, guest SSH, release, empty project.
+                 {"id": "periodic:container-pool", "tier": "system-container",
+                  "command": ["bash", "dev/ci/container-pool.sh", *SLOT]}]
 # Both NM guard lanes keep their ordinary candidate bundle and own their lease/reboots.
 PERIODIC_ONLY += [{"id": f"periodic:nm-guard/{lane}", "optional": True,
                    "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
@@ -70,8 +79,7 @@ def veranda_short(name, options):
 def plan(root=ROOT, image=IMAGES[0]):
     module = collector()
     inventory = module.profile_inventory(root)
-    declarations = {"p0:" + lane: {"tier": tier} for lane, tier in module.P0_LANE_TIERS.items()}
-    declarations.update(module.check_declarations(root, inventory))
+    declarations = module.check_declarations(root, inventory)
     declared = module.commands(root, "0.0.0", inventory, periodic=True)
     # The same release checks the collector runs: every shipped profile lane, the core VM catalog
     # with its agent upgrade baselines, and the release smoke check, plus periodic-only lanes.
@@ -101,9 +109,10 @@ def plan(root=ROOT, image=IMAGES[0]):
     for lane, (check_id,) in split_checks.items():
         declarations["p0:" + lane] = declarations[check_id]
     include = [check for check in include if [check["id"]] not in split_checks.values()]
-    # Cleanup verifies an earlier lane's leftovers. Every matrix job starts fresh.
+    # The workflow's pool gate already runs boundary. The cleanup lane verifies a previous
+    # lane's leftovers, and a fresh runner has none.
     include += [{"id": "p0:" + lane, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, *SLOT]}
-                for lane in full[0] if lane != "cleanup"]
+                for lane in full[0] if lane not in ("boundary", "cleanup")]
     # The release catalog upgrades a few baselines with agents; the rest keep an agent-free run here.
     baselines = (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
     for line in baselines:
@@ -133,23 +142,15 @@ def plan(root=ROOT, image=IMAGES[0]):
         raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
     # Every planned command leases through the hosted controller. Its image flag
     # applies to every acquisition without changing the release lane entrypoints.
+    # Catalog declarations own placement; periodic-only checks carry their own. A runner-tier
+    # job is the ubuntu-24.04 hosted runner itself, whatever image the run's leases use.
     for check in include:
-        name, command = check["id"], check["command"]
-        entry = declarations.get(name, check)
-        if name.startswith("published:") or name == "periodic:cleanup-acceptance":
-            entry = {"tier": "system-container"}
-        # A direct job is a single host for its lifetime. The core lease wrapper
-        # requests one guest; explicit singleton commands and reviewed hosted
-        # profile commands also own just one allocation. Keep pair and broker
-        # client checks on the candidate pool, including unreviewed profiles.
-        singleton = ("lease" in entry or name == "p0:newer-release"
-                     or name in module.CI_HOSTED_CHECKS
-                     or any(command[i:i+2] == ["--vm-count", "1"] for i in range(len(command))))
-        tier = module.resolve_tier(entry, hosted_singleton=singleton)
+        tier = module.resolve_tier(declarations.get(check["id"], check))
         check["tier"] = tier
-        check["command"] = ["--image", "ubuntu-24.04" if tier == "runner" else image, *command]
-    return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
-            "nested": {"include": [c for c in include if c["id"] in NESTED]}}
+        check["command"] = ["--image", "ubuntu-24.04" if tier == "runner" else image, *check["command"]]
+    nested = [check for check in include if check["id"] in NESTED and check["tier"] == "vm"]
+    return {"checks": {"include": [c for c in include if c not in nested]},
+            "nested": {"include": nested}}
 
 
 if __name__ == "__main__":

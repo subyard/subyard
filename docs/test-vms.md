@@ -5,11 +5,10 @@ inside its dedicated service container. Its configured
 pool contains one or more shared slots and defaults to two. A lease selects `subyard-pair`
 (one or two standard VMs), `android-test` (one larger VM), or `system-container`
 (one or two unprivileged Incus system containers). Each slot owns an isolated inner
-Incus project and network. VM leases use fresh disks from a versioned immutable base. Each
-system-container slot keeps a stopped, never-booted template in a separate restricted project.
-The broker clones the pinned template into the lease project and installs that lease’s keys.
-The base includes the toolchain, Incus and the Debian product container images.
-Release fences access, deletes the leased instances and verifies that the lease project is empty.
+Incus project and network. VM leases use fresh disks from a versioned immutable base.
+System-container leases create fresh containers from their own pinned base, which includes the
+toolchain, Incus and the Debian product container images. Release fences access, deletes the
+leased instances and verifies that the lease project is empty.
 
 Lease-taking commands accept `--image debian-13|ubuntu-24.04|ubuntu-26.04`; omission retains Debian 13.
 The broker allowlists these choices rather than accepting arbitrary Incus images.
@@ -74,7 +73,7 @@ slots are held, provisioning, draining or quarantined. Grants report the actual 
 
 System containers use the broker CPU limit and a 4096-process limit per guest.
 Their restricted project permits nesting with isolated ID maps. Autostart is
-disabled. Acquire pins the architecture-matched upstream container fingerprint.
+disabled. Acquire pins the current container base built from the architecture-matched upstream image.
 Release or expiry fences access and deletes the allocation. Failed deletion
 keeps the slot draining until the broker verifies that its project is empty.
 

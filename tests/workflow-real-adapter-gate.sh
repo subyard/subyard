@@ -389,7 +389,7 @@ assert f"github.ref == 'refs/heads/master' && format(' ({{0}})',\n  {lease_image
 assert f"github.ref == 'refs/heads/master' && format(':image:{{0}}',\n    {lease_image})" in workflow
 assert "inputs.origin && format('-retry-{0}', inputs.origin)" in workflow
 assert "cancel-in-progress: ${{ !inputs.origin }}" in workflow
-assert 'bash dev/ci/periodic-e2e.sh pool\n          "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"\n          --image "$LEASE_IMAGE"' in workflow
+assert '--image "$LEASE_IMAGE"\n          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1' in workflow
 assert '-f attempt="$attempt" -f image="$LEASE_IMAGE"' in workflow
 assert workflow.count('CHECK_COMMAND: ${{ toJSON(matrix.command) }}') == 2
 assert workflow.count('tar.gz" "${command[@]}"') == 2
@@ -516,7 +516,7 @@ entries = {entry["id"]: entry["command"][2:] for group in default_plan.values() 
 plan = {kind: {"include": [entry | {"command": entries[entry["id"]]} for entry in group["include"]]}
         for kind, group in default_plan.items()}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
-config_sync = {"id": "periodic:config-sync", "tier": "system-container",
+config_sync = {"id": "periodic:config-sync", "tier": "vm",
                "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                            "bash", "dev/e2e/config-sync-acceptance.sh", "--slot", "1"]}
 assert plan["checks"]["include"].count(config_sync) == 1
@@ -541,7 +541,7 @@ for name, duration, guest_env in (
     ("zabbly-download-smoke", "15m", []),
 ):
     check_id = "periodic:" + name
-    optional_vm[check_id] = {"id": check_id, "tier": "runner" if name == "cleanup-acceptance" else "vm", "optional": True, "command": [
+    optional_vm[check_id] = {"id": check_id, "tier": "vm", "optional": True, "command": [
         "timeout", "--signal=TERM", "--kill-after=600s", duration,
         "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
         "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh",
@@ -556,16 +556,21 @@ assert nm_checks == [{"id": f"periodic:nm-guard/{lane}", "tier": "vm", "optional
                                   "--lane", lane]}
                      for lane in ("fresh", "upgrade")]
 assert not {entry["id"] for entry in nm_checks} & set(commands)
+container_pool = {"id": "periodic:container-pool", "tier": "system-container",
+                  "command": ["bash", "dev/ci/container-pool.sh", "--slot", "1"]}
+# The container proof is its own matrix job: a container defect cannot skip VM checks.
+assert plan["checks"]["include"].count(container_pool) == 1
+assert container_pool["id"] not in commands
 # Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
 p.PERIODIC_ONLY = []
-added_ids = {config_sync["id"], apparmor_id, *optional_vm, *(entry["id"] for entry in nm_checks)}
+added_ids = {config_sync["id"], apparmor_id, container_pool["id"], *optional_vm, *(entry["id"] for entry in nm_checks)}
 assert {kind: {"include": [entry for entry in group["include"] if entry["id"] not in added_ids]}
         for kind, group in default_plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 plan = default_plan
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
-for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
+for only in ("", config_sync["id"], container_pool["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
              *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
@@ -604,18 +609,28 @@ import subprocess
 from unittest.mock import patch
 declared = a.check_declarations(root, a.profile_inventory(root))
 actual_tiers = {item["id"]: item["tier"] for matrix in default_plan.values() for item in matrix["include"]}
-assert {item["id"] for item in default_plan["nested"]["include"]} == p.NESTED
-assert all(actual_tiers[name] == "vm" for name in p.NESTED)
+# Placement comes only from the catalogs: each declared check keeps its declared tier, and
+# split P0 lanes take their owning catalog check's declaration.
 for name, entry in declared.items():
     if name in actual_tiers:
-        assert a.TIERS.index(actual_tiers[name]) >= a.TIERS.index(a.resolve_tier(entry))
-        assert a.resolve_tier(entry, "full", hosted_singleton=True) == "vm"
-assert actual_tiers["vm:integration-selection/default"] == "runner"
-assert actual_tiers["p0:peer"] == actual_tiers["periodic:config-sync"] == "system-container"
+        assert actual_tiers[name] == a.resolve_tier(entry)
+        assert a.resolve_tier(entry, "full") == "vm"
+assert {name for name, tier in actual_tiers.items() if tier != "vm"} == {
+    name for name, entry in declared.items() if name in actual_tiers and a.resolve_tier(entry) != "vm"} | {container_pool["id"]}
+assert {item["id"] for item in default_plan["nested"]["include"]} == {
+    name for name in p.NESTED if actual_tiers[name] == "vm"}
 declared["vm:p0-legacy-continuation"] = {"tier": "runner", "needs": ["kvm"]}
+declared["vm:staging-reliability"] = declared["vm:staging-reliability"] | {"tier": "vm"}
+declared["vm:p0-yard-maintenance"] = {"tier": "runner", "needs": ["kvm"]}
 with patch.object(p, "collector", return_value=a), patch.object(a, "check_declarations", return_value=declared):
-    tiers = {item["id"]: item["tier"] for matrix in p.plan(root).values() for item in matrix["include"]}
-    assert tiers["p0:legacy-continuation"] == "runner"
+    moved = p.plan(root)
+    tiers = {item["id"]: item["tier"] for matrix in moved.values() for item in matrix["include"]}
+    assert tiers["p0:legacy-continuation"] == tiers["vm:p0-yard-maintenance"] == "runner"
+    # A nested check on the runner tier is no longer nested and is not retried on Intel.
+    nested = {item["id"] for item in moved["nested"]["include"]}
+    assert "vm:p0-yard-maintenance" not in nested and "vm:staging-reliability" in nested
+    runner = [item for item in moved["checks"]["include"] if item["id"] == "vm:p0-yard-maintenance"]
+    assert runner[0]["command"][:2] == ["--image", "ubuntu-24.04"]
 lanes_command = ["bash", "dev/e2e/p0-acceptance.sh", "--list-lanes"]
 listing = subprocess.check_output(lanes_command, cwd=root, text=True)
 native_output = subprocess.check_output
