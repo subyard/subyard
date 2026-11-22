@@ -29,6 +29,7 @@ type fakeIncusProject struct {
 	config    map[string]string
 	instances map[string]*fakeIncusVM
 	volumes   map[string]bool
+	devices   map[string]bool
 }
 
 type fakeIncusVM struct {
@@ -164,7 +165,10 @@ func (fake *fakeIncus) incus(args []string) (string, error) {
 		if args[1] == "device" && project != nil {
 			switch args[2] {
 			case "list":
-				return "root\neth0\n", nil
+				return strings.Join(slices.Sorted(maps.Keys(project.devices)), "\n"), nil
+			case "add":
+				project.devices[args[4]] = true
+				return "", nil
 			case "set":
 				return "", nil
 			}
@@ -182,7 +186,7 @@ func (fake *fakeIncus) project(args []string) (string, error) {
 	if args[1] == "create" && project == nil {
 		fake.projects[name] = &fakeIncusProject{
 			config: incusSettings(args, "-c"), instances: make(map[string]*fakeIncusVM),
-			volumes: make(map[string]bool),
+			volumes: make(map[string]bool), devices: make(map[string]bool),
 		}
 		return "", nil
 	}
