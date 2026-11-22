@@ -27,7 +27,7 @@ func TestBaseRecipeInstallerContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, environment := range []string{"subyard-pair", "android-test"} {
+	for _, environment := range []string{"subyard-pair", "android-test", "system-container"} {
 		t.Run(environment, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			if !strings.HasPrefix(root, "/tmp/") {
@@ -109,6 +109,7 @@ esac
 set -euo pipefail
 . ./scripts/e2e-lab/base.sh
 base_update_distro() { printf 'distro\n' >> "$HOME/effects"; }
+base_prepare_nested_host() { printf 'nested base\n' >> "$HOME/effects"; }
 base_finalize_image() { printf 'finalized\n' >> "$HOME/effects"; }
 base_main
 printf 'caller-complete\n'
@@ -125,6 +126,9 @@ printf 'caller-complete\n'
 			effects, err := os.ReadFile(filepath.Join(root, "effects"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if bytes.Contains(effects, []byte("nested base\n")) != (environment == "system-container") {
+				t.Fatalf("unexpected nested image setup: %s", effects)
 			}
 			if !bytes.Contains(effects, []byte("NetworkManager --config-dir ")) {
 				t.Fatalf("recipe skipped NetworkManager preflight: %s", effects)

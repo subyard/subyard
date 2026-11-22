@@ -1,9 +1,7 @@
 package testvmsruntime
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -81,34 +79,5 @@ func TestSystemContainerPool(t *testing.T) {
 	}
 	if r := f.leaseAction("release", next); r.Status != "ok" {
 		t.Fatalf("release: %s", r.Code)
-	}
-}
-
-func TestSystemContainerGrantPinsSelectedImage(t *testing.T) {
-	f := newBrokerPoolFixture(t, 2)
-	spec, err := f.rt.Config.EnvironmentSpec(EnvironmentContainer)
-	brokerMust(t, err)
-	spec.Image = "ubuntu-24.04"
-	grant, err := f.store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "tests", "slot-001")
-	brokerMust(t, err)
-	f.rt.memoryProbe = func() (MemoryCapacity, error) { return MemoryCapacity{Available: 128 << 30}, nil }
-	f.rt.Runner = &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
-		switch strings.Join(args, " ") {
-		case "query /1.0/storage-pools/default/resources":
-			return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
-		case "image list images: ubuntu/24.04/cloud type=container --format json":
-			return []byte(`[{"fingerprint":"` + brokerFixtureBase + `","type":"container","architecture":"` +
-				imageArchitecture() + `","aliases":[{"name":"ubuntu/24.04/cloud"}]}]`), nil, nil
-		}
-		return nil, nil, fmt.Errorf("unexpected native command %q", args)
-	}}
-	child := f.rt.slotRuntime(1, "")
-	child.Config = child.Config.withEnvironment(spec)
-	grant, err = f.rt.prepareEnvironment(context.Background(), f.store, grant, child)
-	brokerMust(t, err)
-	slot := f.slot(1)
-	if !slot.Reserved || slot.BaseFingerprint != brokerFixtureBase || grant.BaseFingerprint != slot.BaseFingerprint ||
-		child.Config.Image != "images:"+slot.BaseFingerprint {
-		t.Fatal("container grant lacks reserved, immutable source")
 	}
 }

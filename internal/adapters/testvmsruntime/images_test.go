@@ -496,11 +496,13 @@ func TestCachedBaseMissingOrChangedIsExcludedWithoutDeletion(t *testing.T) {
 
 func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 	for _, image := range []string{"", "ubuntu-24.04", "ubuntu-26.04"} {
-		t.Run(normalizedImage(image), func(t *testing.T) { testWarmAcquireImage(t, image) })
+		for _, environment := range []string{EnvironmentPair, EnvironmentContainer} {
+			t.Run(environment+"/"+normalizedImage(image), func(t *testing.T) { testWarmAcquireImage(t, image, environment) })
+		}
 	}
 }
 
-func testWarmAcquireImage(t *testing.T, image string) {
+func testWarmAcquireImage(t *testing.T, image, environment string) {
 	for _, mode := range []string{"warm", "changed", "offline"} {
 		t.Run(mode, func(t *testing.T) {
 			changed := mode == "changed"
@@ -517,11 +519,11 @@ func testWarmAcquireImage(t *testing.T, image string) {
 				t.Fatal(err)
 			}
 			runtime := Runtime{Config: selected, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, Now: func() time.Time { return now }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
-			recipe, err := runtime.recipeDigest(EnvironmentPair)
+			recipe, err := runtime.recipeDigest(environment)
 			if err != nil {
 				t.Fatal(err)
 			}
-			base := BaseImage{Key: strings.Repeat("c", 64), Fingerprint: strings.Repeat("d", 64), Environment: EnvironmentPair, Recipe: recipe, Architecture: imageArchitecture(), Upstream: oldUpstream, CreatedAt: now.Add(-time.Hour)}
+			base := BaseImage{Key: strings.Repeat("c", 64), Fingerprint: strings.Repeat("d", 64), Environment: environment, Recipe: recipe, Architecture: imageArchitecture(), Upstream: oldUpstream, CreatedAt: now.Add(-time.Hour)}
 			base.Image = image
 			runtime.Config = cfg // Acquire must select the requested OS itself.
 			registry := ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("e", 32), Bases: []BaseImage{base}}
@@ -529,7 +531,7 @@ func testWarmAcquireImage(t *testing.T, image string) {
 				t.Fatal(err)
 			}
 			store := LeaseStore{Path: cfg.leaseState(), SlotCount: 1}
-			spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+			spec, err := cfg.EnvironmentSpec(environment)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -547,13 +549,13 @@ func testWarmAcquireImage(t *testing.T, image string) {
 			}
 			upstreamCalls := 0
 			buildRequired := errors.New("new base build reached")
-			metadata := incusImage{Fingerprint: base.Fingerprint, Type: "virtual-machine", Architecture: base.Architecture, Properties: map[string]string{"user.subyard.base_owner": registry.Owner, "user.subyard.base_key": base.Key, "user.subyard.base_recipe": base.Recipe}}
+			metadata := incusImage{Fingerprint: base.Fingerprint, Type: environmentImageType(environment), Architecture: base.Architecture, Properties: map[string]string{"user.subyard.base_owner": registry.Owner, "user.subyard.base_key": base.Key, "user.subyard.base_recipe": base.Recipe}}
 			runtime.Runner = &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				command := strings.Join(args, " ")
 				switch command {
 				case "query /1.0/storage-pools/default/resources":
 					return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
-				case "image list images: " + alias + " type=virtual-machine --format json":
+				case "image list images: " + alias + " type=" + environmentImageType(environment) + " --format json":
 					upstreamCalls++
 					if mode == "offline" {
 						return nil, nil, errors.New("upstream temporarily unavailable")
@@ -565,7 +567,7 @@ func testWarmAcquireImage(t *testing.T, image string) {
 					if changed {
 						fingerprint = newUpstream
 					}
-					return []byte(`[{"fingerprint":"` + fingerprint + `","architecture":"` + imageArchitecture() + `","type":"virtual-machine","aliases":[{"name":"` + alias + `"}]}]`), nil, nil
+					return []byte(`[{"fingerprint":"` + fingerprint + `","architecture":"` + imageArchitecture() + `","type":"` + environmentImageType(environment) + `","aliases":[{"name":"` + alias + `"}]}]`), nil, nil
 				case "image list local: " + base.Fingerprint + " --project default --format json":
 					payload, _ := json.Marshal([]incusImage{metadata})
 					return payload, nil, nil
@@ -581,7 +583,7 @@ func testWarmAcquireImage(t *testing.T, image string) {
 				if !errors.Is(err, buildRequired) || upstreamCalls != 2 {
 					t.Fatalf("changed alias reused stale base: calls=%d err=%v", upstreamCalls, err)
 				}
-			} else if err != nil || upstreamCalls != 1 || acquired.BaseFingerprint != base.Fingerprint {
+			} else if err != nil || upstreamCalls != 1 || acquired.BaseFingerprint != base.Fingerprint || child.Config.Image != base.Fingerprint {
 				t.Fatalf("warm base failed: calls=%d err=%v grant=%#v", upstreamCalls, err, acquired)
 			}
 		})

@@ -175,32 +175,6 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 	if grant.Environment.Name == EnvironmentAndroid && runtime.GOARCH != "amd64" {
 		return grant, errors.New("android-test requires x86_64")
 	}
-	if child.Config.systemContainer() {
-		selected := *rt
-		var err error
-		selected.Config, err = rt.Config.withImage(grant.Environment.Image)
-		if err != nil {
-			return grant, err
-		}
-		// Share admission with VM builders, whose peak reservation lasts
-		// through the build while they hold this lock.
-		err = imageBuildLock(ctx, rt.imageRegistryPath()+".lock", func() error {
-			if err := rt.checkCacheBudget(ctx); err != nil {
-				return err
-			}
-			if err := rt.reserveEnvironment(ctx, store, grant); err != nil {
-				return err
-			}
-			image, source, err := selected.upstreamImage(ctx, "container")
-			if err != nil {
-				return err
-			}
-			grant.BaseFingerprint = image.Fingerprint
-			child.Config.Image = source
-			return store.pinBase(grant)
-		})
-		return grant, err
-	}
 	pinned, err := rt.pinnedRecipeRuntime()
 	if err != nil {
 		return grant, err
@@ -244,7 +218,7 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 		if err != nil {
 			return err
 		}
-		upstream, _, upstreamErr := rt.upstreamImage(ctx, "virtual-machine")
+		upstream, _, upstreamErr := rt.upstreamImage(ctx, environmentImageType(grant.Environment.Name))
 		if upstreamErr != nil {
 			registry.LastError = "upstream_lookup_failed"
 			if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
@@ -373,7 +347,7 @@ func (rt *Runtime) verifyBase(ctx context.Context, owner string, base BaseImage)
 	if err := json.Unmarshal([]byte(body), &image); err != nil {
 		return err
 	}
-	if image.Fingerprint != base.Fingerprint || image.Type != "virtual-machine" || image.Public ||
+	if image.Fingerprint != base.Fingerprint || image.Type != environmentImageType(base.Environment) || image.Public ||
 		image.Architecture != base.Architecture || image.Properties["user.subyard.base_owner"] != owner ||
 		image.Properties["user.subyard.base_key"] != base.Key || image.Properties["user.subyard.base_recipe"] != base.Recipe {
 		return errBaseMismatch
@@ -400,7 +374,7 @@ func (rt *Runtime) cachedBaseUsable(ctx context.Context, owner string, base Base
 }
 
 func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseGrant, registry *ImageRegistry, recipe string) (result BaseImage, buildErr error) {
-	upstream, source, err := rt.upstreamImage(ctx, "virtual-machine")
+	upstream, source, err := rt.upstreamImage(ctx, environmentImageType(grant.Environment.Name))
 	if err != nil {
 		return result, err
 	}
@@ -482,19 +456,22 @@ users:
     lock_passwd: true
 ssh_pwauth: false
 `
-	args := []string{"init", source, vm, "--vm", "--project", cfg.Project,
-		"-c", "limits.cpu=" + fmt.Sprint(spec.CPU), "-c", "limits.memory=" + spec.Memory,
-		"-c", "boot.autostart=false",
+	args := []string{"init", source, vm, "--project", cfg.Project,
 		"-c", "user.subyard.managed=" + managedMarker, "-c", "user.subyard.base_owner=" + registry.Owner,
 		"-c", "user.subyard.base_key=" + buildKey, "-c", "cloud-init.user-data=" + cloud}
-	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
-		args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
+	if !cfg.systemContainer() {
+		args = append(args, "--vm")
+	}
+	for _, setting := range cfg.instanceSettings() {
+		args = append(args, "-c", setting)
 	}
 	if _, err := builder.incus(ctx, args...); err != nil {
 		return result, err
 	}
-	if err := builder.prepareBuilderCloudInit(ctx, registry); err != nil {
-		return result, err
+	if !cfg.systemContainer() {
+		if err := builder.prepareBuilderCloudInit(ctx, registry); err != nil {
+			return result, err
+		}
 	}
 	if err := builder.startVM(ctx, vm); err != nil {
 		return result, err
@@ -540,8 +517,11 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 	validationCtx, cancelValidation := context.WithTimeout(ctx, cfg.BootTimeout)
 	validationErr := builder.checkGuestTools(validationCtx, vm)
 	if validationErr == nil {
-		_, validationErr = builder.guest(validationCtx, vm, nil, "sh", "-eu", "-c",
-			`incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"`)
+		check := `incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"`
+		if cfg.systemContainer() {
+			check = `incus --version >/dev/null; cd /var/lib/subyard/product-image; sha256sum -c SHA256SUMS`
+		}
+		_, validationErr = builder.guest(validationCtx, vm, nil, "sh", "-eu", "-c", check)
 	}
 	if validationErr == nil {
 		validationErr = validationCtx.Err()

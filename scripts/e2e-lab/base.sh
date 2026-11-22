@@ -27,10 +27,31 @@ base_finalize_image() {
   apt-get clean
 }
 
+base_prepare_nested_host() {
+  install -d -m 0755 /etc/systemd/system/incus.service.d /var/lib/subyard/product-image
+  printf '%s\n' '[Service]' 'Environment=INCUS_SECURITY_APPARMOR=false' > /etc/systemd/system/incus.service.d/nested-host.conf
+  systemctl daemon-reload
+  # Retain only the public image bytes. Each new Incus daemon owns its database and keys.
+  local variant source fingerprint
+  for variant in minimal cloud; do
+    source=debian/13
+    [ "$variant" != cloud ] || source=debian/13/cloud
+    install -d -m 0755 "/var/lib/subyard/product-image/$variant"
+    (cd "/var/lib/subyard/product-image/$variant"
+     fingerprint="$(incus image list images: "$source" type=container --format json | jq -er --arg arch "$(uname -m)" --arg alias "$source" '
+       [.[] | select(.architecture == $arch and any(.aliases[]; .name == $alias)) | .fingerprint] | unique | select(length == 1) | .[0] | select(test("^[a-f0-9]{64}$"))')"
+     incus image export "images:$fingerprint" yard
+     set -- yard*
+     [ "$(cat "$@" | sha256sum | cut -d" " -f1)" = "$fingerprint" ]
+     printf '%s\n' "$fingerprint" > fingerprint)
+  done
+  (cd /var/lib/subyard/product-image && sha256sum */yard* */fingerprint > SHA256SUMS)
+}
+
 base_main() {
   [ "$(id -u)" -eq 0 ] || { echo 'base recipe requires root' >&2; exit 1; }
   case "${SUBYARD_BASE_ENVIRONMENT:-}" in
-    subyard-pair | android-test) ;;
+    subyard-pair | android-test | system-container) ;;
     *) echo 'unknown base environment' >&2; exit 2 ;;
   esac
   base_update_distro
@@ -45,6 +66,7 @@ base_main() {
   SUBYARD_DISPATCHER_PATH="$recipe_root/bin/yard-engine" MIN_INCUS_VER=6.0.7 \
     bash "$recipe_root/scripts/01-install-incus.sh" --upgrade-only --yes --zabbly
   incus --version >/dev/null
+  if [ "$SUBYARD_BASE_ENVIRONMENT" = system-container ]; then base_prepare_nested_host; fi
   base_finalize_image
 }
 

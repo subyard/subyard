@@ -51,6 +51,13 @@ func (cfg Config) environmentSpecForArch(name, arch string) (EnvironmentSpec, er
 
 const DefaultImage = "debian-13"
 
+func environmentImageType(name string) string {
+	if name == EnvironmentContainer {
+		return "container"
+	}
+	return "virtual-machine"
+}
+
 func normalizedImage(image string) string {
 	if image == "" {
 		return DefaultImage

@@ -21,9 +21,6 @@ func (rt *Runtime) RefreshBase(ctx context.Context, store LeaseStore, name strin
 	if err := ValidateImage(image); err != nil {
 		return err
 	}
-	if name == EnvironmentContainer {
-		return errors.New("system-container uses the upstream container image")
-	}
 	spec, err := rt.Config.EnvironmentSpec(name)
 	if err != nil {
 		return err
