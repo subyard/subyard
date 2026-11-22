@@ -11,13 +11,13 @@ import time
 
 
 class Client:
-    def __init__(self, state, host, port, key):
+    def __init__(self, state, endpoint, key):
         self.process = subprocess.Popen(
             [
-                "ssh", "-F", "/dev/null", "-T", "-p", port, "-i", str(state / key),
+                "ssh", "-F", "/dev/null", "-T", "-p", endpoint["port"], "-i", str(state / key),
                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes",
-                "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={state / 'known-hosts'}",
-                f"dev@{host}", "~/.local/bin/herdr-core connect",
+                "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={endpoint['known_hosts']}",
+                f"{endpoint['user']}@{endpoint['host']}", "~/.local/bin/herdr-core connect",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -87,6 +87,16 @@ class Client:
             labels={"herdr.space": space["id"]},
         )
 
+    def space_terminal(self, name):
+        """Find the one live terminal of a named space the way a client does."""
+        space = self.workspaces()[name]
+        found = [
+            terminal for terminal in self.rpc("terminal.list")["terminals"]
+            if terminal.get("labels", {}).get("herdr.space") == space["id"] and terminal["state"] == "live"
+        ]
+        assert len(found) == 1, found
+        return found[0]
+
     def await_output(self, terminal, expected):
         for _ in range(30):
             result = self.rpc("terminal.read", terminal=terminal["address"])
@@ -105,8 +115,8 @@ def remember(state, terminal):
     (state / "terminal-pid").write_text(str(terminal["pid"]))
 
 
-def reconnect(state, host, port):
-    with Client(state, host, port, "a") as first:
+def reconnect(state, fixture, discovered):
+    with Client(state, fixture, "a") as first:
         layout = first.layout()
         spaces = {space["name"]: space for space in layout["value"]["spaces"]}
         live = spaces["live"]
@@ -116,11 +126,13 @@ def reconnect(state, host, port):
         live["tabs"] = [{"id": "fixture-tab", "terminal": terminal["address"]}]
         first.rpc("doc.set", name="herdr-app", value=layout["value"], version=layout["version"])
         remember(state, terminal)
-    with Client(state, host, port, "b") as second:
-        second.assert_live(terminal)
-        second.rpc("terminal.send", terminal=terminal["address"], text="from-client-b", force=True)
-        second.await_output(terminal, f"ack:{terminal['pid']}:from-client-b")
-    with Client(state, host, port, "a") as again:
+    # Client B knows only its pairing output and the space name.
+    with Client(state, discovered, "b") as second:
+        found = second.space_terminal("live")
+        assert found["pid"] == terminal["pid"], found
+        second.rpc("terminal.send", terminal=found["address"], text="from-client-b", force=True)
+        second.await_output(found, f"ack:{terminal['pid']}:from-client-b")
+    with Client(state, fixture, "a") as again:
         again.assert_live(terminal)
         assert again.workspaces()["live"] == live
     print(f"herdr-lifecycle: A/B/A reconnect preserved tab and terminal PID {terminal['pid']}")
@@ -129,10 +141,11 @@ def reconnect(state, host, port):
 def main():
     operation, path, host, port = sys.argv[1:]
     state = Path(path)
+    fixture = dict(user="dev", host=host, port=port, known_hosts=str(state / "known-hosts"))
     if operation == "reconnect":
-        reconnect(state, host, port)
+        reconnect(state, fixture, json.loads((state / "b-endpoint.json").read_text()))
         return
-    with Client(state, host, port, "a") as client:
+    with Client(state, fixture, "a") as client:
         if operation == "live":
             client.assert_live(json.loads((state / "terminal.json").read_text()))
         elif operation == "removed":

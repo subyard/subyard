@@ -9,7 +9,7 @@ stage() { printf 'herdr-lifecycle: %s\n' "$*"; }
 fail() { stage "$*" >&2; exit 1; }
 [[ "$run_id" =~ ^[a-f0-9]+$ ]] && [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "$(id -un)" = dev ] ||
   fail 'run on VM1 through dev/agent-e2e.sh'
-for command in git incus ip jq python3 sg ssh ssh-keygen sudo timeout; do
+for command in curl git incus ip jq python3 sg ssh ssh-keygen ssh-keyscan sudo tar timeout; do
   command -v "$command" >/dev/null || fail "required VM tool is missing: $command"
 done
 sudo -n true || fail 'passwordless sudo is required on the disposable VM'
@@ -222,16 +222,75 @@ reject_key a
 for client in a b; do
   yard herdr pair --key "$(cat "$state/$client.pub")" --name "$client" --yes > "$state/pair-$client.log" 2>&1
 done
+# Client B connects with what pairing printed and trusts the host key only after comparing it.
+pairing() { sed -nE "s/^$1: (.*)$/\1/p" "$state/pair-b.log"; }
+b_host="$(pairing Host)" b_port="$(pairing Port)" b_user="$(pairing User)"
+ssh-keyscan -T 5 -t ed25519 -p "$b_port" "$b_host" > "$state/b-known-hosts" 2>/dev/null
+[ "$(ssh-keygen -E sha256 -lf "$state/b-known-hosts" | awk '{print $2}')" = "$(pairing 'Ed25519 host key')" ] ||
+  fail 'the paired host key fingerprint does not match the endpoint'
+jq -cn --arg host "$b_host" --arg port "$b_port" --arg user "$b_user" --arg known "$state/b-known-hosts" \
+  '{host:$host,port:$port,user:$user,known_hosts:$known}' > "$state/b-endpoint.json"
 client reconnect
 fingerprint="$(ssh-keygen -E sha256 -lf "$state/b.pub" | awk '{print $2}')"
 yard herdr pair --revoke "$fingerprint" --yes > "$state/revoke.log" 2>&1
 reject_key b
 
-stage 'verify update, forced pin and restart with a live terminal'
+stage 'verify up and update hand an older Core over to the pin with a live terminal'
 terminal_pid="$(cat "$state/terminal-pid")"
 core_pid() { yard herdr status | sed -nE 's/^Core: .*\(PID ([0-9]+), .*/\1/p'; }
+core_version() { yard herdr status | sed -nE 's/^Core: ([0-9.]+) \(PID .*/\1/p'; }
 before="$(core_pid)"
 [ -n "$before" ]
+# The previous published release, pinned only for this lane.
+older=0.1.20
+case "$(uname -m)" in
+  x86_64) older_sha=ac6b86890c451a37584620aaa438b71bc0d0bd430a2e7c1d7e095f052c414e74 ;;
+  aarch64) older_sha=5f3037379d15cc76cfc72d2fd1a4262ea1c5b24df278bf7cfd8adcff7b914862 ;;
+  *) fail 'no older Herdr Core release for this architecture' ;;
+esac
+curl -fsS --proto '=https' --max-time 120 -o "$state/older.tar.gz" \
+  "https://releases.herdr.dev/core/$older/herdr-core-linux-$(uname -m).tar.gz"
+printf '%s  %s\n' "$older_sha" "$state/older.tar.gz" | sha256sum -c --status
+install -d -m 0700 "$state/older"
+tar -xzf "$state/older.tar.gz" -C "$state/older" herdr-core
+downgrade() {
+  incus --project "$project" file push "$state/older/herdr-core" "$instance/tmp/herdr-core-older" \
+    --uid 1000 --gid 1000 --mode 0755
+  guest_dev /usr/local/libexec/subyard/herdr-login update --from /tmp/herdr-core-older --force \
+    > "$state/downgrade.log" 2>&1
+  [ "$(core_version)" = "$older" ] || fail "Core did not hand over to $older"
+  client live
+}
+verify_handover() {
+  local previous="$1" pid
+  pid="$(core_pid)"
+  [ "$(core_version)" = "$(. "$root/config/profiles/herdr/release.env"; printf '%s' "$HERDR_VERSION")" ] ||
+    fail 'Core does not run the pinned release'
+  [ -n "$pid" ] && [ "$pid" != "$previous" ] || fail 'Core did not hand over'
+  client live
+  guest_dev kill -0 "$terminal_pid"
+  # Exactly one Core binary remains: no staging copies, hc points at it and Core runs it.
+  [ "$(guest find /home/dev/.local/bin -maxdepth 1 -name '*herdr*')" = /home/dev/.local/bin/herdr-core ]
+  [ "$(guest readlink /home/dev/.local/bin/hc)" = herdr-core ]
+  [ "$(guest readlink "/proc/$pid/exe")" = /home/dev/.local/bin/herdr-core ]
+}
+guest_dev cp /home/dev/.local/bin/herdr-core /tmp/herdr-core-pin
+downgrade
+current="$(core_pid)"
+yard herdr up --yes > "$state/up-repair.log" 2>&1
+verify_handover "$current"
+downgrade
+current="$(core_pid)"
+yard herdr update --yes > "$state/update-older.log" 2>&1
+verify_handover "$current"
+# The disk already holds the pin but Core still runs the older binary: update must hand over.
+downgrade
+guest_dev install -m 0755 /tmp/herdr-core-pin /home/dev/.local/bin/herdr-core
+current="$(core_pid)"
+yard herdr update --force --yes > "$state/update-lagging.log" 2>&1
+verify_handover "$current"
+
+stage 'verify no-op updates and restart with a live terminal'
 yard herdr update --yes > "$state/update.log" 2>&1
 client live
 current="$(core_pid)"
@@ -282,8 +341,15 @@ verify_down() {
 yard herdr down --yes > "$state/down.log" 2>&1
 verify_down
 if guest_dev kill -0 "$terminal_pid" 2>/dev/null; then fail 'terminal survived down'; fi
+# Make the installed runtime stale so the release update really reinstalls its assets.
+guest sh -c 'printf stale > /usr/local/libexec/subyard/herdr-profile.sha256
+  printf "# stale\n" >> /usr/local/libexec/subyard/herdr-login'
 version="$("$yard_bin" version | awk '{print $2}')"
 yard update --version "$version" --offline --yes > "$state/yard-update.log" 2>&1
+guest cmp -s - /usr/local/libexec/subyard/herdr-login < "$root/config/profiles/herdr/resources/herdr/login.sh" ||
+  fail 'yard update did not reinstall the Herdr assets'
+[ "$(guest cat /usr/local/libexec/subyard/herdr-profile.sha256)" != stale ] ||
+  fail 'yard update did not refresh the Herdr runtime digest'
 verify_down
 yard herdr up --yes > "$state/up-again.log" 2>&1
 verify_ready
