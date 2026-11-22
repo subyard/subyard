@@ -23,6 +23,7 @@ subyard_require_engine_context
 
 PROJ=(--project "$INCUS_PROJECT")
 helper=/usr/local/libexec/subyard/herdr-profile
+project_hook=/usr/local/libexec/subyard/projects-changed.d/herdr
 login=/usr/local/libexec/subyard/herdr-login
 unit=subyard-herdr-core.service
 native="$profile/bin/herdr-profile"
@@ -87,7 +88,7 @@ install_assets() {
   yexec install -d -m 0755 /usr/local/libexec/subyard/projects-changed.d
   guest_file "$helper" 0755 < "$native"
   guest_file "$login" 0755 < "$here/login.sh"
-  guest_file /usr/local/libexec/subyard/projects-changed.d/herdr 0755 < "$here/projects-changed.sh"
+  guest_file "$project_hook" 0755 < "$here/projects-changed.sh"
   guest_file "/etc/systemd/system/$unit" 0644 <<EOF
 [Unit]
 Description=Start Herdr Core in the developer login environment
@@ -126,7 +127,9 @@ up() {
 up_ready() {
   yard_running && enabled && core_release check && running &&
     [ "$(yexec loginctl show-user "$DEV_USER" -p Linger --value)" = yes ] &&
-    [ "$(yexec cat "$helper.sha256" 2>/dev/null)" = "$(digest)" ]
+    [ "$(yexec cat "$helper.sha256" 2>/dev/null)" = "$(digest)" ] &&
+    yexec test -x "$project_hook" && yexec cmp -s - "$project_hook" < "$here/projects-changed.sh" &&
+    as_dev "$helper" registration-ready 2>/dev/null
 }
 
 runtime() {
@@ -149,9 +152,9 @@ runtime() {
   if [ "$mode" = apply ]; then
     [ "$#" -eq 3 ] && [ "$installed" = true ] && [ "$actual" = "$2" ] && [ "$desired" = "$3" ] || die 'Herdr runtime plan is stale'
     if enabled; then
-      up
+      up >&2
     else
-      install_assets
+      install_assets >&2
       printf '%s\n' "$desired" | guest_file "$helper.sha256" 0644
     fi
     actual="$desired"
@@ -202,7 +205,10 @@ assessment() {
       return ;;
     up)
       allowed
-      if up_ready && route_ready; then ready=true; fi
+      if yard_running; then
+        ssh_policy
+        if route_ready && up_ready; then ready=true; fi
+      fi
       desired='core ready, kick enabled and proxy published'
       consequence='install or refresh Herdr Core, enable its startup kick and publish the tailnet SSH proxy' ;;
     update|restart)
@@ -220,10 +226,11 @@ assessment() {
       fi ;;
     down)
       svc_require_yard_running
-      result=$(observe)
+      result=$(observe) || result=unknown
       if [ "$result" = null ] && ! enabled && route_absent; then ready=true; fi
       desired='core stopped, kick disabled and proxy absent'
-      count=$(jq -r '.Live // 0' <<< "$result")
+      count=unavailable
+      if [ "$result" != unknown ]; then count=$(jq -r '.Live // 0' <<< "$result"); fi
       consequence="remove the Herdr proxy and stop all Herdr terminals, including arrivals; observed live terminals: $count"
       if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
         old=$(jq -er '.[0].consequence' <<< "$SUBYARD_RESOURCE_STEPS")
@@ -246,7 +253,15 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
     if [ "$action" = pair ]; then pair_apply; exit; fi
     [ "${SUBYARD_RESOURCE_ACTION:-}" = "$action" ] || die 'typed resource apply action mismatch'
     case "$action" in
-      up) allowed; svc_require_yard_running; ssh_policy; up; ensure_route ;;
+      up)
+        allowed
+        svc_require_yard_running
+        up
+        ssh_policy
+        if ! route_ready; then
+          reload_ssh_policy
+          ensure_route
+        fi ;;
       is-up) yard_running && running && route_ready ;;
       status)
         if ! yard_running; then printf 'Herdr: yard is stopped or unavailable\n'; exit; fi
@@ -273,8 +288,11 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       down)
         remove_route "$(route_state)"
         if enabled; then yexec systemctl disable --now "$unit"; fi
-        if running; then as_dev "$helper" stop; fi
-        if running; then die 'Herdr Core is still running or was started by another client'; fi ;;
+        if yexec test -x "$helper"; then
+          as_dev "$helper" stop || die 'Herdr ingress is closed, but Core shutdown could not be verified'
+        fi
+        result=$(observe) || die 'Herdr ingress is closed, but Core status could not be verified'
+        if [ "$result" != null ]; then die 'Herdr Core is still running or was started by another client'; fi ;;
     esac ;;
   '') [ "$action" = is-up ] && yard_running && running && route_ready ;;
   *) die 'unsupported Herdr execution mode' ;;

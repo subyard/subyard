@@ -26,14 +26,8 @@ type project struct {
 }
 
 type registration struct {
-	ID       string    `json:"id"`
-	Creating *creation `json:"creating,omitempty"`
-	Pending  string    `json:"pending,omitempty"`
-}
-
-type creation struct {
-	Core    string `json:"core"`
-	Version uint64 `json:"version"`
+	ID      string `json:"id"`
+	Pending string `json:"pending,omitempty"`
 }
 
 type ownership struct {
@@ -119,12 +113,20 @@ func loadRegistrations(dir string) (map[string]registration, error) {
 	if err != nil {
 		return nil, err
 	}
-	if json.Unmarshal(data, &state) != nil || state == nil {
+	var persisted map[string]struct {
+		registration
+		Creating json.RawMessage `json:"creating"`
+	}
+	if json.Unmarshal(data, &persisted) != nil || persisted == nil {
 		return nil, errors.New("invalid Herdr registration state")
 	}
-	for id, entry := range state {
+	for id, entry := range persisted {
 		if !domain.SafeID(id) || entry.ID != spaceID(id) {
 			return nil, errors.New("invalid Herdr registration identity")
+		}
+		// An older writer could save an intent even if the CAS never succeeded.
+		if len(entry.Creating) == 0 || string(entry.Creating) == "null" {
+			state[id] = entry.registration
 		}
 	}
 	return state, nil
@@ -210,10 +212,12 @@ func liveSpaces(socket string) (map[string]bool, error) {
 	var result struct {
 		Terminals []struct {
 			Address string
+			State   string
 			Labels  map[string]string
 		}
 	}
-	if err := call(socket, "terminal.list", nil, &result); err != nil {
+	// The subscription snapshot does not prune terminal history like terminal.list.
+	if err := call(socket, "events.subscribe", nil, &result); err != nil {
 		return nil, err
 	}
 	if result.Terminals == nil {
@@ -224,16 +228,16 @@ func liveSpaces(socket string) (map[string]bool, error) {
 		if terminal.Address == "" {
 			return nil, errors.New("Core returned a terminal without an address")
 		}
-		if !strings.Contains(terminal.Address, "/") && terminal.Labels["herdr.space"] != "" {
+		if terminal.State == "live" && !strings.Contains(terminal.Address, "/") && terminal.Labels["herdr.space"] != "" {
 			live[terminal.Labels["herdr.space"]] = true
 		}
 	}
 	return live, nil
 }
 
-func planSpaces(current document, spaces []space, projects map[string]project, state map[string]registration,
-	live map[string]bool, core string, restore bool, retry map[string]bool,
-) ([]map[string]json.RawMessage, []string, bool, error) {
+func planSpaces(spaces []space, projects map[string]project, state map[string]registration,
+	live map[string]bool, restore bool,
+) ([]map[string]json.RawMessage, bool, error) {
 	rows := make([]map[string]json.RawMessage, 0, len(spaces))
 	present := make(map[string]space)
 	changed := false
@@ -255,7 +259,7 @@ func planSpaces(current document, spaces []space, projects map[string]project, s
 				case live[entry.ID]:
 					record.Pending = "space has live terminals"
 				default:
-					state[id] = record
+					delete(state, id)
 					changed = true
 					continue
 				}
@@ -265,12 +269,15 @@ func planSpaces(current document, spaces []space, projects map[string]project, s
 		rows = append(rows, entry.fields)
 	}
 	for id, record := range state {
-		if _, exists := present[record.ID]; !exists && record.Pending != "" {
-			record.Pending = ""
-			state[id] = record
+		if entry, exists := present[record.ID]; !exists || !entry.owned() {
+			if _, active := projects[id]; !active {
+				delete(state, id)
+			} else if record.Pending != "" {
+				record.Pending = ""
+				state[id] = record
+			}
 		}
 	}
-	var creates []string
 	var refusals []error
 	for _, id := range slices.Sorted(maps.Keys(projects)) {
 		spaceID := spaceID(id)
@@ -280,28 +287,34 @@ func planSpaces(current document, spaces []space, projects map[string]project, s
 			}
 			continue
 		}
-		record, seen := state[id]
-		if seen && !restore && !retry[id] && (record.Creating == nil || *record.Creating != (creation{core, current.Version})) {
+		if _, seen := state[id]; seen && !restore {
 			continue
 		}
-		state[id] = registration{ID: spaceID, Creating: &creation{core, current.Version}}
+		state[id] = registration{ID: spaceID}
 		rows = append(rows, projectSpace(id, projects[id]))
-		creates = append(creates, id)
 		changed = true
 	}
-	return rows, creates, changed, domain.CollectRefusals(refusals...)
+	return rows, changed, domain.CollectRefusals(refusals...)
+}
+
+func inspectRegistration(socket, workspaces string, hook bool) (string, bool, error) {
+	core, coreErr := readCore(socket)
+	if core == nil && coreErr == nil && !hook {
+		coreErr = errors.New("Core is stopped. Run yard herdr up first.")
+	}
+	dir, dirErr := stateDir()
+	var state map[string]registration
+	var stateErr error
+	if dirErr == nil {
+		state, stateErr = loadRegistrations(dir)
+	}
+	_, inventoryErr := projectInventory(workspaces, state)
+	return dir, core != nil, domain.CollectRefusals(coreErr, dirErr, stateErr, inventoryErr)
 }
 
 func syncProjects(socket, workspaces string, restore, hook bool) error {
-	core, err := readCore(socket)
-	if err != nil || core == nil {
-		if err == nil && !hook {
-			return errors.New("Core is stopped; run yard herdr up first")
-		}
-		return err
-	}
-	dir, err := stateDir()
-	if err != nil {
+	dir, running, err := inspectRegistration(socket, workspaces, hook)
+	if err != nil || !running {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
@@ -312,49 +325,90 @@ func syncProjects(socket, workspaces string, restore, hook bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	lock, err := safefs.Lock(ctx, filepath.Join(dir, "projects.lock"), false, 25*time.Millisecond)
+	lock, err := openProjectLock(dir)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
+	if err := lock.Acquire(ctx, false, 25*time.Millisecond); err != nil {
+		return err
+	}
 	state, stateErr := loadRegistrations(dir)
 	projects, inventoryErr := projectInventory(workspaces, state)
 	if err := domain.CollectRefusals(stateErr, inventoryErr); err != nil {
 		return err
 	}
-	return syncLayout(socket, workspaces, dir, core.Core.ID, projects, state, restore)
+	return syncLayout(socket, workspaces, dir, projects, state, restore)
 }
 
-func syncLayout(socket, workspaces, dir, core string, projects map[string]project, state map[string]registration, restore bool) error {
-	retry := make(map[string]bool)
-	for range 4 {
-		var current document
-		if err := call(socket, "doc.get", map[string]string{"name": appDocument}, &current); err != nil {
-			return err
+func openProjectLock(dir string) (*safefs.LockFile, error) {
+	path := filepath.Join(dir, "projects.lock")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		if err := safefs.WriteFile(path, nil, safefs.Options{Mode: 0o600, ParentMode: 0o700, NoReplace: true}); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, err
 		}
-		fields, spaces, err := loadLayout(current.Value)
-		if err != nil {
-			return err
-		}
-		var live map[string]bool
-		for _, space := range spaces {
-			if _, present := projects[space.Subyard.ProjectID]; space.owned() && space.pristine() && !present {
-				live, err = liveSpaces(socket)
-				if err != nil {
-					return err
-				}
-				break
+	}
+	return safefs.OpenLock(path, 0o600)
+}
+
+func inspectLayout(socket string, projects map[string]project, next map[string]registration, restore bool) (document, bool, error) {
+	var current document
+	if err := call(socket, "doc.get", map[string]string{"name": appDocument}, &current); err != nil {
+		return document{}, false, err
+	}
+	fields, spaces, err := loadLayout(current.Value)
+	if err != nil {
+		return document{}, false, err
+	}
+	var live map[string]bool
+	for _, space := range spaces {
+		if _, present := projects[space.Subyard.ProjectID]; space.owned() && space.pristine() && !present {
+			live, err = liveSpaces(socket)
+			if err != nil {
+				return document{}, false, err
 			}
+			break
 		}
-		previous := maps.Clone(state)
-		rows, creates, changed, err := planSpaces(current, spaces, projects, state, live, core, restore, retry)
+	}
+	rows, changed, err := planSpaces(spaces, projects, next, live, restore)
+	if err != nil {
+		return document{}, false, err
+	}
+	fields["spaces"] = jsonValue(rows)
+	current.Value = jsonValue(fields)
+	if len(current.Value) > documentLimit {
+		return document{}, false, errors.New("Herdr document would exceed 1 MiB")
+	}
+	return current, changed, nil
+}
+
+func registrationReady(socket, workspaces string) error {
+	dir, err := stateDir()
+	if err != nil {
+		return err
+	}
+	state, stateErr := loadRegistrations(dir)
+	projects, inventoryErr := projectInventory(workspaces, state)
+	if err := domain.CollectRefusals(stateErr, inventoryErr); err != nil {
+		return err
+	}
+	next := maps.Clone(state)
+	_, changed, err := inspectLayout(socket, projects, next, false)
+	if err != nil {
+		return err
+	}
+	if changed || !reflect.DeepEqual(state, next) {
+		return errors.New("Herdr project registration needs reconciliation")
+	}
+	return nil
+}
+
+func syncLayout(socket, workspaces, dir string, projects map[string]project, state map[string]registration, restore bool) error {
+	for range 4 {
+		next := maps.Clone(state)
+		current, changed, err := inspectLayout(socket, projects, next, restore)
 		if err != nil {
 			return err
-		}
-		fields["spaces"] = jsonValue(rows)
-		payload := jsonValue(fields)
-		if len(payload) > documentLimit {
-			return errors.New("Herdr document would exceed 1 MiB")
 		}
 		fresh, err := projectInventory(workspaces, state)
 		if err != nil {
@@ -363,29 +417,20 @@ func syncLayout(socket, workspaces, dir, core string, projects map[string]projec
 		if !reflect.DeepEqual(projects, fresh) {
 			return errors.New("project inventory changed during Herdr sync")
 		}
-		if !reflect.DeepEqual(previous, state) {
-			if err := saveRegistrations(dir, state); err != nil {
+		if changed {
+			err = call(socket, "doc.set", map[string]any{"name": appDocument, "value": current.Value, "version": current.Version}, nil)
+			var rejected *rpcError
+			if errors.As(err, &rejected) && rejected.Data.Kind == "conflict" {
+				continue
+			}
+			if err != nil {
 				return err
 			}
 		}
-		if !changed {
-			return nil
+		if !reflect.DeepEqual(state, next) {
+			return saveRegistrations(dir, next)
 		}
-		err = call(socket, "doc.set", map[string]any{"name": appDocument, "value": payload, "version": current.Version}, nil)
-		var rejected *rpcError
-		if errors.As(err, &rejected) && rejected.Data.Kind == "conflict" {
-			for _, id := range creates {
-				retry[id] = true
-			}
-			continue
-		}
-		if err != nil || len(creates) == 0 {
-			return err
-		}
-		for _, id := range creates {
-			state[id] = registration{ID: spaceID(id)}
-		}
-		return saveRegistrations(dir, state)
+		return nil
 	}
 	return errors.New("Herdr document kept changing; retry sync")
 }

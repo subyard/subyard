@@ -5,11 +5,57 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"golang.org/x/crypto/ssh"
 )
+
+func checkLiveSSH(keyFile io.Reader, user, address string) error {
+	keyBytes, err := io.ReadAll(io.LimitReader(keyFile, 16<<10))
+	if err != nil {
+		return err
+	}
+	key, err := bareKey(keyBytes)
+	if err != nil {
+		return errors.New("guest SSH host key could not be verified")
+	}
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+	if err != nil {
+		return errors.New("Herdr could not reach the SSH listener")
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return err
+	}
+	verified := errors.New("live SSH requires a public key")
+	policyErr := errors.New("running guest sshd must require public-key authentication only")
+	client, _, _, err := ssh.NewClientConn(conn, address, &ssh.ClientConfig{
+		User:              user,
+		HostKeyCallback:   ssh.FixedHostKey(key),
+		HostKeyAlgorithms: []string{key.Type()},
+		AuthCallback: func(context *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
+			if slices.Equal(context.AllowedMethods, []string{"publickey"}) {
+				return nil, verified
+			}
+			return nil, policyErr
+		},
+	})
+	switch {
+	case errors.Is(err, verified):
+		return nil
+	case err == nil:
+		client.Close()
+		return policyErr
+	case errors.Is(err, policyErr):
+		return policyErr
+	default:
+		return errors.New("could not verify the running SSH listener and guest host key")
+	}
+}
 
 func checkSSHPolicy(input io.Reader, user string) error {
 	scan := bufio.NewScanner(input)

@@ -96,22 +96,41 @@ route_ready() {
   token=$(route_receipt "$shape") || return 1
   state=$(route_state) || return 1
   jq -e --argjson shape "$shape" --arg token "$token" '
-    .live == $shape and .effective == $shape and .receipt == $token and .saved == ""' <<< "$state" >/dev/null
+    .live == $shape and .effective == $shape and .receipt == $token and .saved == ""' <<< "$state" >/dev/null || return 1
+  ssh_live "$ip:$HERDR_HOST_PORT"
 }
 
 ssh_policy() {
   yexec bash -se <<'GUEST' | "$native" ssh-policy "$DEV_USER"
 set -eu
+peer=127.0.0.1
+config=$(/usr/sbin/sshd -T)
+host=$peer
+if grep -qx 'usedns yes' <<< "$config"; then
+  candidate=$(getent hosts "$peer" | awk 'NR == 1 {print $2}')
+  if [ -n "$candidate" ] && getent ahostsv4 "$candidate" | awk '{print $1}' | grep -Fxq "$peer"; then
+    host=$candidate
+  fi
+fi
 printf 'context global\n'
-/usr/sbin/sshd -T
+printf '%s\n' "$config"
 users=$(getent passwd)
 while IFS=: read -r user _; do
   [ -n "$user" ] || continue
   case "$user" in *[!A-Za-z0-9_.-]*) exit 1 ;; esac
   printf 'context %s\n' "$user"
-  /usr/sbin/sshd -T -C "user=$user,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22"
+  /usr/sbin/sshd -T -C "user=$user,host=$host,addr=$peer,laddr=$peer,lport=22"
 done <<< "$users"
 GUEST
+}
+
+ssh_live() {
+  yexec cat /etc/ssh/ssh_host_ed25519_key.pub | "$native" ssh-live "$DEV_USER" "$1"
+}
+
+reload_ssh_policy() {
+  yexec /usr/sbin/sshd -t && yexec systemctl reload ssh.service &&
+    yexec sh -c 'cat /etc/ssh/ssh_host_ed25519_key.pub | "$1" ssh-live "$2" 127.0.0.1:22' herdr "$helper" "$DEV_USER"
 }
 
 ensure_route() {
@@ -138,7 +157,7 @@ ensure_route() {
   if jq -e '.saved != "" and .live != null' <<< "$state" >/dev/null; then
     incus config unset "$YARD_INSTANCE_NAME" "$deferred" "${PROJ[@]}" >/dev/null
   fi
-  if ! timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"; read -r banner <&3; [[ "$banner" == SSH-* ]]' herdr "$ip" "$HERDR_HOST_PORT"; then
+  if ! ssh_live "$ip:$HERDR_HOST_PORT"; then
     if [ "$created" = true ]; then remove_route "$(route_state)"; fi
     die 'Herdr owner endpoint did not reach guest SSH'
   fi
