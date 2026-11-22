@@ -1,6 +1,6 @@
 ---
 name: subyard-cleanup
-description: Inspect disk usage and clean explicitly disposable caches, or recreate a selected yard while preserving registered projects. Also use before deleting files through a variable or command-substituted path.
+description: Inspect disk usage and clean explicitly disposable caches, or recreate a selected yard while preserving registered projects. Also use before deleting any file or directory.
 ---
 
 `yard status --space` measures storage; use `yard cleanup --help` for options.
@@ -10,9 +10,10 @@ permissions and nested mounts without following symlinks. Installed toolchains, 
 and browser runtimes (e.g. `~/.cache/ms-playwright`) are not disposable caches.
 
 Before manual deletion, identify the directory's owner and purpose; path checks do not prove disposability.
-Use a literal path or an empty-safe variable (`rm -rf -- "${dir:?}"/*`).
-For command-substituted paths, verify exactly one existing directory before deletion;
-never infer safety from name/age/size or delete `/tmp` wholesale.
+Delete by literal absolute path: no globs, relative paths, variables or `$(...)`
+in `rm` targets; agent clients ask approval for those even in bypass mode.
+To empty a directory, remove it by literal path and recreate it.
+Never infer safety from name/age/size or delete `/tmp` wholesale.
 
 Review the hard-cleanup operation plan before confirming.
 Hard cleanup stops and recreates the selected yard. It backs up its native data volume
