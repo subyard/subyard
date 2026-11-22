@@ -83,7 +83,9 @@ type HistoryEvidence struct {
 
 // A verdict that is not admitted always carries at least one refusal.
 type HistoryCompatibilityVerdict struct {
-	Kind     HistoryCompatibilityKind
+	Kind HistoryCompatibilityKind
+	// Relation retains the registry topology before readability can refuse it.
+	Relation HistoryCompatibilityKind
 	Registry HistoryRegistryRelation
 	// Successor reports an Equivalent target that retires prefixes of the
 	// active registry, rather than the reverse.
@@ -108,18 +110,22 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 	case input.Active == nil && input.Target == nil:
 		// A registryless pair has no protected migration history to read.
 		verdict.Kind, verdict.Registry = HistoryIdentity, RegistryAbsent
+		verdict.Relation = verdict.Kind
 		return verdict.sealed()
 	case input.Active == nil || input.Target == nil:
 		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
+		verdict.Relation = verdict.Kind
 		return verdict.sealed()
 	}
 	path, err := PlanDownPath(*input.Active, *input.Target, input.TargetRegistryFeatures...)
 	if err != nil {
 		verdict.Kind, verdict.Registry = HistoryRefuse, RegistryDiffers
+		verdict.Relation = verdict.Kind
 		verdict.Refusals = []HistoryRefusal{{HistoryRegistryDiffers, "the migration registries cannot be identified", err}}
 		return verdict
 	}
 	verdict.Kind, verdict.Registry, verdict.Successor = path.Kind, RegistryDiffers, path.Successor
+	verdict.Relation = path.Relation
 	if path.Active == path.Target {
 		verdict.Registry = RegistryIdentical
 	}
@@ -152,7 +158,9 @@ func HistoryCompatibility(input HistoryCompatibilityInput) HistoryCompatibilityV
 // Equivalent target that retires prefixes of the active registry. Unreadable
 // explains a Refuse for a registry pair that would otherwise be Equivalent.
 type DownPath struct {
-	Kind           HistoryCompatibilityKind
+	Kind HistoryCompatibilityKind
+	// Relation is established before the target parser can override Kind.
+	Relation       HistoryCompatibilityKind
 	Active, Target Fingerprint
 	Successor      bool
 	Unreadable     error
@@ -188,6 +196,7 @@ func PlanDownPath(active, target RegistryV2, targetFeatures ...string) (DownPath
 	} else if equivalent {
 		path.Kind, path.Successor = HistoryEquivalent, true
 	}
+	path.Relation = path.Kind
 	if path.Kind != HistoryRefuse {
 		payload, err := json.Marshal(active)
 		if err != nil {
@@ -269,6 +278,13 @@ func (verdict HistoryCompatibilityVerdict) RegistryAdmitted() bool {
 		return verdict.DeclaredSuccessor
 	}
 	return verdict.Kind == HistoryIdentity || verdict.Kind == HistoryEquivalent && verdict.DeclaredPredecessor
+}
+
+// RelationAdmitted checks the underlying relation for independent diagnostics.
+// It does not prove registry readability or authorize a transition.
+func (verdict HistoryCompatibilityVerdict) RelationAdmitted() bool {
+	verdict.Kind = verdict.Relation
+	return verdict.RegistryAdmitted()
 }
 
 // Admitted reports whether the target may own the history.

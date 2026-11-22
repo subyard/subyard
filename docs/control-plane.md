@@ -1207,6 +1207,8 @@ registry before it can serve a request. `PlanDownPath` calls the registry parser
 sealed `registryFeatures`; a missing or unknown feature retains the v0.30.0 parser rules. A
 registry unreadable by that target refuses with `registry-unreadable`, together with the registry
 refusal when the pair is also undeclared.
+The underlying relation remains available so unreadability cannot hide independently determined
+declaration or first-publication refusals.
 
 The current parser first accepts every registry readable under the v0.30.0 rules unchanged.
 Otherwise, `retired-prefix-dependencies` admits only a whole registry canonically equal to the

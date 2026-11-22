@@ -181,9 +181,12 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	history.verdict = releasetransition.HistoryCompatibility(input)
 	// The target's reader facts always require a verified declaration. An
 	// Equivalent predecessor also needs the active release's declared pair.
-	declarationErr := targetDeclarationErr
-	if !history.verdict.Successor && history.verdict.Kind == releasetransition.HistoryEquivalent {
-		declarationErr = domain.CollectRefusals(activeDeclarationErr, declarationErr)
+	var declarationErr error
+	if targetDeclarationErr != nil {
+		declarationErr = fmt.Errorf("selected release's rollback declaration: %w", targetDeclarationErr)
+	}
+	if !history.verdict.Successor && history.verdict.Relation == releasetransition.HistoryEquivalent && activeDeclarationErr != nil {
+		declarationErr = domain.CollectRefusals(fmt.Errorf("active release's rollback declaration: %w", activeDeclarationErr), declarationErr)
 	}
 	if declarationErr != nil {
 		message, cause := history.refusal()
@@ -227,11 +230,11 @@ func (history historySelection) needsSourceFloor() bool {
 		(history.targetRegistry != "" && history.missingHistory)
 }
 
-// refusal is the selection's refusal. A refused registry relation is decided
-// before first-publication evidence, so that evidence's error is not reported then.
+// refusal collects first-publication findings for an admitted underlying
+// relation even when target readability separately refuses that relation.
 func (history historySelection) refusal() (string, error) {
 	message, cause := history.verdict.Refusal()
-	if history.verdict.RegistryAdmitted() {
+	if history.verdict.RelationAdmitted() {
 		cause = domain.CollectRefusals(cause, history.publicationErr)
 	}
 	return message, cause

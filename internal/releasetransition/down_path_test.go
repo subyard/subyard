@@ -229,6 +229,13 @@ func TestPlanDownPathAdmitsOnlyRetiredPrefixRepresentation(t *testing.T) {
 			if err != nil || path.Kind != test.kind || path.Successor != test.successor || (path.Unreadable != nil) != test.unreadable {
 				t.Fatalf("down path = %#v, %v", path, err)
 			}
+			wantRelation := test.kind
+			if test.unreadable {
+				wantRelation = HistoryEquivalent
+			}
+			if path.Relation != wantRelation {
+				t.Fatalf("underlying relation = %s, want %s", path.Relation, wantRelation)
+			}
 			active, _ := test.active.CanonicalDigest()
 			if target, _ := test.target.CanonicalDigest(); path.Target != target || path.Active != active {
 				t.Fatalf("down path digests %s/%s, want %s/%s", path.Active, path.Target, active, target)

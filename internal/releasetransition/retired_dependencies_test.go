@@ -135,11 +135,14 @@ func TestRetiredDependencyReaderIsClosed(t *testing.T) {
 
 func TestDownPathUsesTargetParserInBothDirections(t *testing.T) {
 	base, retired := publishedV030Registry(t), retiringCandidate(t)
-	for _, pair := range [][2]RegistryV2{{retired, base}, {retired, retired}} {
+	for index, pair := range [][2]RegistryV2{{retired, base}, {retired, retired}} {
 		for _, features := range [][]string{nil, {"unknown"}, RegistryReaderFeatures()} {
 			path, err := PlanDownPath(pair[0], pair[1], features...)
 			payload, _ := json.Marshal(pair[0])
 			_, _, parseErr := ParseRegistryV2WithFeatures(payload, BuiltinCapabilityCatalog(), features)
+			if path.Relation != []HistoryCompatibilityKind{HistoryEquivalent, HistoryIdentity}[index] {
+				t.Fatalf("readability changed underlying relation: %#v", path)
+			}
 			if err != nil || (path.Unreadable != nil) != (parseErr != nil) {
 				t.Fatalf("target features %v: path %#v, %v; parser %v", features, path, err, parseErr)
 			}
@@ -149,11 +152,11 @@ func TestDownPathUsesTargetParserInBothDirections(t *testing.T) {
 	// selected parser; a successor relation alone is not sufficient.
 	partly := retire(t, base, map[string]int{"settings": 2})
 	path, err := PlanDownPath(partly, retired)
-	if err != nil || !path.Successor || path.Unreadable == nil || path.Kind != HistoryRefuse {
+	if err != nil || !path.Successor || path.Unreadable == nil || path.Kind != HistoryRefuse || path.Relation != HistoryEquivalent {
 		t.Fatalf("unaware successor = %#v, %v", path, err)
 	}
 	path, err = PlanDownPath(partly, retired, RegistryReaderFeatures()...)
-	if err != nil || path.Kind != HistoryEquivalent || !path.Successor {
+	if err != nil || path.Kind != HistoryEquivalent || path.Relation != HistoryEquivalent || !path.Successor {
 		t.Fatalf("capable successor = %#v, %v", path, err)
 	}
 }
@@ -175,7 +178,7 @@ func TestShippedRegistryReaderFeaturesMatchCompiledParser(t *testing.T) {
 func TestUnreadableIdentityKeepsRegistryRelation(t *testing.T) {
 	registry := retiringCandidate(t)
 	verdict := HistoryCompatibility(HistoryCompatibilityInput{Active: &registry, Target: &registry})
-	if verdict.Admitted() || verdict.Registry != RegistryIdentical || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != HistoryRegistryUnreadable {
+	if verdict.Admitted() || verdict.Registry != RegistryIdentical || verdict.Relation != HistoryIdentity || len(verdict.Refusals) != 1 || verdict.Refusals[0].Reason != HistoryRegistryUnreadable {
 		t.Fatalf("unaware identity = %#v", verdict)
 	}
 }
