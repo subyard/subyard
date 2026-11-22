@@ -2012,7 +2012,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
         for tier in m.TIERS:
             self.assertEqual(m.resolve_tier({"tier": tier}), tier)
             self.assertEqual(m.resolve_tier({"tier": tier}, "full"), "vm")
-        for entry in ({"tier": "lxc"}, {"needs": "kvm"}, {"needs": ["unknown"]},
+        for entry in ({"tier": "system-container", "lease": {"type": "android-test"}}, {"tier": "lxc"}, {"needs": "kvm"}, {"needs": ["unknown"]},
                       {"tier": "runner", "needs": ["reboot"]}, {"tier": "system-container", "needs": ["kvm"]}):
             with self.assertRaises(ValueError):
                 m.resolve_tier(entry)
