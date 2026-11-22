@@ -102,6 +102,8 @@ def plan(root=ROOT, image=IMAGES[0]):
             or owners != [{checks[0] for checks in split_checks.values()}]):
         raise SystemExit("plan-periodic-checks: each P0 split lane needs exactly one release catalog check, "
                          "all required by the split-covered full check")
+    for lane, (check_id,) in split_checks.items():
+        declarations["p0:" + lane] = declarations[check_id]
     include = [check for check in include if [check["id"]] not in split_checks.values()]
     # The workflow's pool gate already runs boundary. The cleanup lane verifies a previous
     # lane's leftovers, and a fresh runner has none.

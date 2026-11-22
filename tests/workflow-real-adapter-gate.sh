@@ -617,6 +617,11 @@ for lane in ("power-systemd", "legacy-continuation"):
     assert entries["p0:" + lane] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, "--slot", "1"]
 import subprocess
 from unittest.mock import patch
+declared = a.check_declarations(root, a.profile_inventory(root))
+declared["vm:p0-legacy-continuation"] = {"tier": "runner", "needs": ["kvm"]}
+with patch.object(p, "collector", return_value=a), patch.object(a, "check_declarations", return_value=declared):
+    tiers = {item["id"]: item["tier"] for matrix in p.plan(root).values() for item in matrix["include"]}
+    assert tiers["p0:legacy-continuation"] == "runner"
 lanes_command = ["bash", "dev/e2e/p0-acceptance.sh", "--list-lanes"]
 listing = subprocess.check_output(lanes_command, cwd=root, text=True)
 native_output = subprocess.check_output
