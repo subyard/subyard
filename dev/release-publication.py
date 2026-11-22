@@ -719,13 +719,12 @@ def profile_deferrals(output, names, reason, authorization_reference, identity, 
     return deferred
 
 
-def validate_placements(root, inventory, commands, checks, level):
-    declarations = a.check_declarations(root, inventory)
+def validate_placements(root, inventory, commands, checks, level, deferred):
+    tiers = a.placement_tiers(root, inventory, level)
     refusals = []
-    for name in sorted(commands):
+    for name in sorted(commands.keys() - set(deferred)):
         if commands[name] and a.is_live(name):
-            tier = a.resolve_tier(declarations.get(name, {}), level)
-            issue = a.placement_issue(name, checks[name].get("environments"), tier)
+            issue = a.placement_issue(name, checks[name].get("environments"), tiers[name])
             if issue:
                 refusals.append(issue)
     refuse(refusals)
@@ -745,7 +744,7 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
             raise ValueError("missing or invalid release level in candidate receipt")
         checks = receipt["checks"] | accepted
         validate_placements(root, receipt["profiles"], a.commands(root, receipt["version"], receipt["profiles"]),
-                            checks, receipt["release_level"]["level"])
+                            checks, receipt["release_level"]["level"], deferred_profiles)
     if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
@@ -892,7 +891,7 @@ def validate_attestation(document, identity, root):
     if set(document["checks"]) != set(required):
         raise ValueError("acceptance attestation check inventory mismatch")
     if tiered:
-        validate_placements(root, inventory, required, document["checks"], document["release_level"])
+        validate_placements(root, inventory, required, document["checks"], document["release_level"], deferred_profiles)
     optional_vms = a.vm_checks_optional(root)
     # The ordinary-release gate even when failure acceptance or profile deferral bypasses the aggregate.
     required_vms = a.required_vm_checks(document["checks"], a.core_vm_requirements(root))
@@ -1574,6 +1573,7 @@ def collect_ci(github, directory, identity):
         return set(state["checks"])
     root, receipt = a.load_bound(output)
     commands = a.commands(root, identity["version"], receipt["profiles"])
+    tiers = a.receipt_tiers(root, receipt)
     unavailable_artifacts = set()
     for name in state["checks"]:
         if a.STOP.is_set():
@@ -1646,14 +1646,9 @@ def collect_ci(github, directory, identity):
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
-            counts, reason, environments = a.pass_counts(cached, name, result)
+            counts, reason, environments = a.pass_counts(cached, name, result, tier=tiers.get(name))
             if not counts:
                 raise ValueError("hosted evidence is not a complete PASS: " + reason)
-            if a.tiered_catalog(root):
-                declarations = a.check_declarations(root, receipt["profiles"])
-                tier = a.resolve_tier(declarations.get(name, {}), receipt.get("release_level", {}).get("level", "ordinary"))
-                if environments != result.get("environments") or a.placement_issue(name, environments, tier):
-                    raise ValueError(f"{name}: hosted environment evidence differs or does not satisfy {tier}")
             result["environments"] = environments
             # Persist the immutable original evidence before publishing the result reference.
             for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):

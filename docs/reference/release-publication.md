@@ -115,7 +115,8 @@ check's minimum tier is `system-container`, `runner` or `vm`, in ascending order
 Each lane-owned grant records the granted type, base fingerprint, guest count,
 OS image and guest architecture. The collector checks those facts against its
 lane log when loading or transferring a result. Publication checks every physical
-result against the attested level. The three mandatory smoke results cover
+result against the attested level. An explicitly authorized deferral keeps the
+original never-run profile result and requires no grant evidence for that check. The three mandatory smoke results cover
 Debian 13, Ubuntu 24.04 and Ubuntu 26.04 on the final candidate bytes.
 
 `accept --level ordinary|full [--level-reason TEXT]` records the level, its reason, the baseline tag and

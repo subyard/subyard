@@ -658,6 +658,26 @@ class Contracts(unittest.TestCase):
             self.assertEqual(document["release_level"], "full")
             self.assertEqual(document["checks"]["profile:sample"]["environments"][0]["tier"], "vm")
 
+    def test_tiered_profile_deferral_keeps_other_placement_requirements(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory, tiered=True)
+            output, root, _ = accepted(directory, prepared, identity)
+            _, receipt = m.a.load_bound(output)
+            name = "profile:sample"
+            (output / receipt["checks"][name]["log"]).unlink()
+            receipt["checks"][name] = {"status": "pending"}
+            m.a.save(output, receipt)
+            document = m.attestation(output, identity, (), [name], "Unrun fixture", "operator:fixture")
+            m.validate_attestation(document, identity, root)
+            self.assertEqual(document["checks"][name]["execution"], "operator-deferred")
+            self.assertNotIn("environments", document["checks"][name])
+            self.assertEqual(m.a.commands(root, identity["version"], receipt["profiles"])["p0-release-smoke"],
+                             ["bash", "dev/e2e/p0-acceptance.sh"])
+            document["checks"]["p0-release-smoke"].pop("environments")
+            with self.assertRaisesRegex(ValueError, "p0-release-smoke lacks complete"):
+                m.validate_attestation(document, identity, root)
+
     def test_split_requirement_refuses_unrun_required_check_in_attestation(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output, root, identity = self.split_candidate(Path(temporary), with_vms=True)
@@ -2690,9 +2710,9 @@ class HostedChecks(unittest.TestCase):
 
     def test_hosted_pass_that_fails_the_lane_rule_stays_open(self):
         counts = m.a.pass_counts
-        def hosted(directory, name, result, declared=None):
+        def hosted(directory, name, result, declared=None, tier=None):
             return ((False, "granted lease has no confirmed release", None) if result.get("execution") == "ci-hosted"
-                    else counts(directory, name, result, declared))
+                    else counts(directory, name, result, declared, tier))
         with patch.object(m.a, "pass_counts", side_effect=hosted) as counted:
             result, report = self.collect()
         self.assertEqual(result, {"status": "pending"})
