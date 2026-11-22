@@ -256,7 +256,8 @@ stage 'verify project removal and pending layout'
 yard remove pristine --yes > "$state/remove-pristine.log" 2>&1
 yard remove live --yes > "$state/remove-live.log" 2>&1
 client removed
-yard herdr status | grep -Fq 'space contains user layout'
+status="$(yard herdr status)"
+grep -Fq 'space contains user layout' <<< "$status"
 
 stage 'verify stop/start restores the proxy and starts Core from the kick'
 yard stop --yes > "$state/stop.log" 2>&1
@@ -268,12 +269,14 @@ guest_dev kill -0 "$terminal_pid"
 
 stage 'verify down with a live terminal and that yard update leaves Core stopped'
 verify_down() {
+  local status
   if incus --project "$project" config device get "$instance" herdr-ssh listen >/dev/null 2>&1; then
     fail 'Herdr proxy device is still published'
   fi
   guest test ! -e /etc/ssh/sshd_config.d/00-subyard-herdr.conf
   if guest systemctl is-enabled --quiet subyard-herdr-core.service; then fail 'kick is still enabled'; fi
-  yard herdr status | grep -Fxq 'Core: stopped'
+  status="$(yard herdr status)"
+  grep -Fxq 'Core: stopped' <<< "$status"
   if yard herdr is-up >/dev/null 2>&1; then fail 'is-up reports a downed Herdr'; fi
 }
 yard herdr down --yes > "$state/down.log" 2>&1
