@@ -73,8 +73,10 @@ type ProcessRequest struct {
 // retained runtime. Version is the engine semantic version without a v prefix;
 // an empty registry digest proves that the target predates registry v2.
 type RollbackTarget struct {
-	Version        string      `json:"version"`
-	RegistryDigest Fingerprint `json:"registryDigest,omitempty"`
+	// RegistryFeatures are internal facts read from the sealed target declaration.
+	RegistryFeatures []string    `json:"registryFeatures,omitempty"`
+	Version          string      `json:"version"`
+	RegistryDigest   Fingerprint `json:"registryDigest,omitempty"`
 }
 
 func (target RollbackTarget) Validate() error {

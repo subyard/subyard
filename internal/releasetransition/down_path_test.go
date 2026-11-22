@@ -29,8 +29,8 @@ func publishedV030Registry(t *testing.T) RegistryV2 {
 // completed v0.30.0 prefix except the newest power-metadata step
 // (testdata/retiring-candidate-registry.json, sha256 474b7158...). Its
 // surviving NM guard definition depends on a retired migration, which the
-// v0.30.0 parser and this engine's do not accept, so it is decoded without
-// validation.
+// v0.30.0 parser does not accept. Decode directly so tests can choose
+// either parser capability set.
 func retiringCandidate(t *testing.T) RegistryV2 {
 	t.Helper()
 	var registry RegistryV2

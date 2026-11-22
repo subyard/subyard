@@ -49,6 +49,7 @@ func run(arguments []string) ([]byte, error) {
 		return json.Marshal(releasetransition.RollbackDeclaration{
 			SchemaVersion: releasetransition.RollbackDeclarationSchemaV1, PredecessorRegistryDigest: digest,
 			Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{},
+			RegistryFeatures: releasetransition.RegistryReaderFeatures(),
 		})
 	case arguments[0] == "retire" && len(arguments) > 2:
 		floors := map[string]int{}

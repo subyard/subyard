@@ -151,11 +151,11 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	}
 	history.targetRegistry = identity
 	// Only an Equivalent relation depends on a declaration, so a read failure
-	// refuses only that relation. The active release's declaration is its own
-	// and parsed strictly; the target's may come from a newer release, so only
-	// its predecessor digest is read.
-	predecessor, activeDeclarationErr := declaredPredecessor(active, strictRollbackPredecessor)
+	// refuses only that relation. Both releases may have newer declarations;
+	// the running engine parses its own declaration strictly at its boundary.
+	predecessor, activeDeclarationErr := declaredPredecessor(active, releasetransition.ParseRollbackPredecessor)
 	targetPredecessor, targetDeclarationErr := declaredPredecessor(target, releasetransition.ParseRollbackPredecessor)
+	targetFeatures, _ := verifiedRegistryFeatures(target)
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -167,7 +167,9 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	if identity != "" && firstPublication {
 		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor, TargetPredecessor: targetPredecessor}
+	input := releasetransition.HistoryCompatibilityInput{
+		Predecessor: predecessor, TargetPredecessor: targetPredecessor, TargetRegistryFeatures: targetFeatures,
+	}
 	if activeIdentity != "" {
 		input.Active = &activeRegistry
 	}
@@ -192,6 +194,18 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 
 // rollbackPredecessorParser reads the predecessor digest from declaration bytes.
 type rollbackPredecessorParser func([]byte) (releasetransition.Fingerprint, error)
+
+// verifiedRegistryFeatures uses the same bounded, manifest-bound declaration
+// read as the predecessor. An absent or unreadable flag grants no capability.
+func verifiedRegistryFeatures(verified *verifiedPublishedCandidate) ([]string, error) {
+	var features []string
+	_, err := declaredPredecessor(verified, func(payload []byte) (releasetransition.Fingerprint, error) {
+		var err error
+		features, err = releasetransition.ParseRollbackRegistryFeatures(payload)
+		return "", err
+	})
+	return features, err
+}
 
 // strictRollbackPredecessor parses a release's own declaration in full.
 func strictRollbackPredecessor(payload []byte) (releasetransition.Fingerprint, error) {

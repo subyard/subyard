@@ -272,3 +272,32 @@ func TestRegistryBindingOwnsAndChecksRetiredPins(t *testing.T) {
 		t.Fatal("zero completion accepted")
 	}
 }
+
+// Retired IDs satisfy dependencies and reserve names, but never become live
+// trace indexes or applied suffix entries.
+func TestRetiredIDsReserveAndSatisfyDependencies(t *testing.T) {
+	minimum, current := map[string]int{"a": 2}, map[string]int{"a": 3}
+	migration := mh.Migration{ID: "a3", Domain: "a", FromEpoch: 2, ToEpoch: 3, Kind: "kind", DependsOn: []string{"a2"}}
+	r, err := mh.NewRegistry(minimum, current, []mh.Migration{migration}, nil, "a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := r.Baseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := r.Next(baseline)
+	if err != nil || !slices.Equal(edge.After().Domains()["a"].Applied, []string{"a3"}) {
+		t.Fatalf("next = %v, %v", edge, err)
+	}
+	if _, err := r.TraceFrom(baseline, []string{"a2"}); err == nil {
+		t.Fatal("retired migration became live trace work")
+	}
+	migration.ID = "a2"
+	if _, err := mh.NewRegistry(minimum, current, []mh.Migration{migration}, nil, "a2"); err == nil {
+		t.Fatal("retired ID reused")
+	}
+	if _, err := mh.NewRegistry(minimum, minimum, nil, nil, "a2", "a2"); err == nil {
+		t.Fatal("duplicate retired ID accepted")
+	}
+}

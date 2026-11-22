@@ -1395,6 +1395,7 @@ func VerifyRollbackTarget(ctx context.Context, runtimeRoot string, target releas
 		return nil, nil, errors.New("rollback target identity does not match its sealed version")
 	}
 	facts := &releasetransition.RollbackTarget{Version: verified.version, RegistryDigest: verified.registryDigest}
+	facts.RegistryFeatures, _ = verifiedRegistryFeatures(verified)
 	if err := facts.Validate(); err != nil {
 		return nil, nil, err
 	}

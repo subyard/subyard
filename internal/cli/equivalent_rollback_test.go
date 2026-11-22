@@ -32,7 +32,7 @@ type equivalentRollbackFixture struct {
 	v030Canonical           releasetransition.Fingerprint
 }
 
-func newEquivalentRollbackFixture(t *testing.T, successorRegistry []byte, predecessor releasetransition.Fingerprint) equivalentRollbackFixture {
+func newEquivalentRollbackFixture(t *testing.T, successorRegistry []byte, predecessor releasetransition.Fingerprint, targetFeatures ...string) equivalentRollbackFixture {
 	t.Helper()
 	root := t.TempDir()
 	fixture := equivalentRollbackFixture{runtimeRoot: filepath.Join(root, "runtime"), configHome: filepath.Join(root, "config")}
@@ -47,8 +47,18 @@ func newEquivalentRollbackFixture(t *testing.T, successorRegistry []byte, predec
 			`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[]}`+"\n", predecessor))
 	}
 	writeSealedEquivalentRelease(t, fixture.runtimeRoot, equivalentSuccessor, "0.31.0", successorFiles)
-	digest := writeSealedEquivalentRelease(t, fixture.runtimeRoot, equivalentPredecessor, "0.30.0",
-		map[string][]byte{"config/release-transition.json": fixture.v030})
+	targetFiles := map[string][]byte{"config/release-transition.json": fixture.v030}
+	if len(targetFeatures) != 0 {
+		declaration, err := json.Marshal(releasetransition.RollbackDeclaration{
+			SchemaVersion: 1, PredecessorRegistryDigest: fixture.v030Canonical,
+			Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}, RegistryFeatures: targetFeatures,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targetFiles["config/release-rollback.json"] = declaration
+	}
+	digest := writeSealedEquivalentRelease(t, fixture.runtimeRoot, equivalentPredecessor, "0.30.0", targetFiles)
 	for link, release := range map[string]string{"current": equivalentSuccessor, "previous": equivalentPredecessor} {
 		if err := os.Symlink("releases/"+release, filepath.Join(fixture.runtimeRoot, link)); err != nil {
 			t.Fatal(err)
@@ -153,16 +163,10 @@ func rollbackIncompatible(response releasetransition.ProcessResponse) bool {
 	})
 }
 
-// The v0.30.0 engine verb validates the active registry with CheckSourcePolicy
-// and then inspects the rollback it owns. At this commit the registry parser,
-// CheckSourcePolicy's registry rule and this engine's registry are those of
-// v0.30.0 (internal/migrationhistory is unchanged since the tag, and
-// config/release-transition.json has the tag bytes), so the same entry point
-// reproduces it. A successor that retires only project-state passes it;
-// a successor whose surviving definition depends on retired history does not,
-// and the active release cannot even verify its own registry to select that
-// rollback.
-func TestV030RollbackEntryPointAdmitsOnlyParseableRetirement(t *testing.T) {
+// The current source reader can parse both retirement forms, while the
+// undeclared v0.30 reader still refuses rollback when dependencies are retired.
+
+func TestRollbackEntryPointUsesSealedTargetReader(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -191,17 +195,14 @@ func TestV030RollbackEntryPointAdmitsOnlyParseableRetirement(t *testing.T) {
 				request := fixture.request
 				request.Mode = mode
 				err := releaseruntime.CheckSourcePolicy(context.Background(), request)
-				if test.admitted && err != nil || !test.admitted && (err == nil || !strings.Contains(err.Error(), "invalid or foreign V2 registry provenance")) {
+				if err != nil {
 					t.Fatalf("%s source policy = %v", mode, err)
 				}
 			}
 			report, err := releaseruntime.InspectHistoryCompatibility(fixture.runtimeRoot, fixture.configHome, equivalentPredecessor)
 			if !test.admitted {
-				// The active release's own registry parse refuses it before
-				// PlanDownPath relates the pair, so registry-unreadable is not
-				// reachable through the runtime or the verb.
-				if err == nil || !strings.Contains(err.Error(), "the active release's sealed migration registry cannot be verified") ||
-					!strings.Contains(err.Error(), `dependency "complete-registered-guest-disk-tmp-v3" is unknown, cyclic or not ordered before it`) {
+				if err != nil || report.Admitted || len(report.Refusals) != 1 ||
+					report.Refusals[0].Reason != releasetransition.HistoryRegistryUnreadable {
 					t.Fatalf("active release selection = %#v, %v", report, err)
 				}
 				return
@@ -261,5 +262,29 @@ func TestEngineRollbackAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
 				t.Fatalf("rollback-incompatible = %v", refused)
 			}
 		})
+	}
+}
+
+// The engine's own rollback boundary re-reads manifest-bound target features;
+// outer selection alone cannot authorize the retired-dependent registry.
+func TestEngineRollbackToSealedRetiredDependencyReader(t *testing.T) {
+	retired, err := os.ReadFile(filepath.Join("..", "releasetransition", "testdata", "retiring-candidate-registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, features := range [][]string{nil, {"future"}, releasetransition.RegistryReaderFeatures()} {
+		fixture := newEquivalentRollbackFixture(t, retired, v030CanonicalDigest(t), features...)
+		root := t.TempDir()
+		writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), retired, 0o600)
+		declaration := []byte(fmt.Sprintf(`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[]}`, fixture.v030Canonical))
+		writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-rollback.json"), declaration, 0o600)
+		want := slices.Contains(features, releasetransition.RegistryFeatureRetiredPrefixDependencies)
+		report, err := releaseruntime.InspectHistoryCompatibility(fixture.runtimeRoot, fixture.configHome, equivalentPredecessor)
+		if err != nil || report.Admitted != want {
+			t.Fatalf("features %v: report %#v, %v", features, report, err)
+		}
+		if refused := rollbackIncompatible(inspectEquivalentRollback(t, root, fixture.request)); refused == want {
+			t.Fatalf("features %v: engine rollback refused = %v", features, refused)
+		}
 	}
 }
