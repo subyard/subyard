@@ -899,7 +899,15 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			return err
 		}
-		if !runtime.Config.systemContainer() {
+		if runtime.Config.systemContainer() {
+			kind, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "t")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(kind) != "CONTAINER" {
+				return fmt.Errorf("%s is not a container in this allocation", vm)
+			}
+		} else {
 			state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 			if err != nil {
 				return err
