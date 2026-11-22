@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import pty
 import queue
 import shlex
 import signal
@@ -36,6 +37,43 @@ from spool_fixture import prepare
 
 
 class NativeSignalsTest(unittest.TestCase):
+    def test_terminal_quit_waits_for_exit_flush_and_rejects_timeout_or_failure(self):
+        terminal = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_quit_fixture').Terminal
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            flushed = Path(directory)/'flushed'
+            for mode in ('flush', 'timeout', 'failure'):
+                with self.subTest(mode=mode):
+                    client = terminal.__new__(terminal)
+                    client.pid, client.fd = pty.fork()
+                    if client.pid == 0:
+                        code = '''import pathlib,sys,time
+print('Fixture complete.', flush=True)
+assert input().strip() == '/quit'
+if sys.argv[1] == 'timeout':
+    time.sleep(60)
+if sys.argv[1] == 'failure':
+    sys.exit(7)
+time.sleep(.15)
+# More than a PTY buffer: shutdown must keep draining terminal output.
+print('x'*200000, flush=True)
+pathlib.Path(sys.argv[2]).write_text('export acknowledged')
+'''
+                        os.execl(sys.executable, sys.executable, '-c', code, mode, str(flushed))
+                    client.buffer = ''
+                    try:
+                        client.wait('Fixture complete.')
+                        self.assertFalse(flushed.exists())
+                        if mode == 'flush':
+                            fixture.quit_codex_terminal(client, timeout=5)
+                            self.assertEqual(flushed.read_text(), 'export acknowledged')
+                            flushed.unlink()
+                        else:
+                            message = 'graceful exit timed out' if mode == 'timeout' else 'did not exit cleanly'
+                            with self.assertRaisesRegex(AssertionError, message):
+                                fixture.quit_codex_terminal(client, timeout=.2 if mode == 'timeout' else 5)
+                    finally:
+                        client.close()
+
     def test_native_agent_delivery_uses_verified_fixture_archives(self):
         def package(files):
             archive = io.BytesIO()

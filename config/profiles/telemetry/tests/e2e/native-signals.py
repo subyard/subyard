@@ -3,6 +3,7 @@
 import argparse
 import base64
 from contextlib import closing
+import errno
 import hashlib
 import http.server
 import importlib.util
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import select
 import shutil
 import shlex
 import sqlite3
@@ -767,6 +769,36 @@ def exercise(args):
     print('ok: native Codex and Claude tools acquired distinct '+args.kind+' allocations with explicit exported session bindings')
 
 
+def quit_codex_terminal(client, timeout=60):
+    """Wait for normal exit, which drains Codex's embedded server and exporters.
+
+    Leave the child waitable for Terminal.close() to reap during cleanup.
+    """
+    client.settle()
+    client.send('/quit')
+    client.settle()
+    client.send('\r')
+    deadline = time.monotonic()+timeout
+    readable = True
+    while True:
+        exited = os.waitid(os.P_PID, client.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if exited is not None:
+            assert exited.si_code == os.CLD_EXITED and exited.si_status == 0, 'Codex did not exit cleanly'
+            return
+        remaining = deadline-time.monotonic()
+        assert remaining > 0, 'Codex graceful exit timed out before exporter flush completed'
+        if readable:
+            if select.select([client.fd], [], [], min(.1, remaining))[0]:
+                try:
+                    readable = bool(os.read(client.fd, 65536))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    readable = False
+        else:
+            time.sleep(min(.05, remaining))
+
+
 def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
     """A running shared daemon must not take a managed run's tools or their identity."""
     import fcntl, pty, struct, termios
@@ -813,15 +845,12 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         try:
             client.wait('Fixture complete.', provider)
             tool_run = (project/(name+'.run')).read_text().strip()
-            # The response can appear before the SDK exports the completed
-            # span. The terminal fixture's close() sends SIGTERM, so keep
-            # servicing the PTY until the collector observes the span.
-            deadline = time.monotonic()+30
-            while tool_run and traces(tool_run) <= counts.get(tool_run, 0) and time.monotonic() < deadline:
-                client.read(0.5)
+            # Rendering the answer is not an exporter completion signal. Quit
+            # normally so Codex drains its embedded server and flushes OTLP;
+            # close() alone sends SIGTERM and can discard pending spans.
+            quit_codex_terminal(client)
         finally:
             client.close()
-        time.sleep(4)
         new = runs()-known
         grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
         result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
