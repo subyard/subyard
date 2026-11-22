@@ -5,6 +5,9 @@ umask 0022
 PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$PROFILE/../../.." && pwd)"
 export PYTHONDONTWRITEBYTECODE=1 TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
+# Host-free contracts run the real client against fakes; the check's lease tier must not
+# select the hosted runner adapter for them.
+unset SUBYARD_E2E_TIER
 preflight=0
 case "$#:${1:-}" in 0:) ;; 1:--preflight) preflight=1 ;; *) printf 'Usage: tests/run.sh [--preflight]\n' >&2; exit 2 ;; esac
 if [ "$preflight" = 1 ] && [ -n "${SUBYARD_E2E_LOCAL_EVIDENCE:-}" ]; then
