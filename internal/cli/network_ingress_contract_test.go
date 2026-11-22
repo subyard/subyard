@@ -100,7 +100,7 @@ func TestRegisteredMigrationRetainsCurrentNetworkInventoryWithoutPowerScope(t *t
 	options := program.options
 	options.InitPlatform, options.Incus = nil, native
 	options.NetworkPolicy = &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}
-	program = newFixture(t, withWorkingDir("")).New(options)
+	program = mustNew(t, options)
 	native.Instances = map[string]ports.InstanceInfo{execution.loaded.Context.IncusProject + "/" + execution.loaded.Context.YardInstanceName: native.Reconcile.Instance}
 	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", execution.loaded.Context.Paths.ConfigHome)
 	if err != nil {

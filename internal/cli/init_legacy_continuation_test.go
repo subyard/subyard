@@ -511,7 +511,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 	program, _, configHome := completedSelectionAuthoringFixture(t)
 	options := program.options
 	options.Environment = environmentList(program.configSourceEnvironment(), nil)
-	program = newFixture(t, withWorkingDir("")).New(options)
+	program = mustNew(t, options)
 	program.options.Stdin = strings.NewReader("no\n")
 	program.promptInputTerminal = func() bool { return true }
 	loaded, err := program.loadContext("default")
@@ -795,7 +795,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 				t.Error("runtime guard accepted changed policy", change, nativeErr)
 			}
 			for _, optIn := range []bool{false, true} {
-				fresh := newFixture(t, withWorkingDir("")).New(program.options)
+				fresh := mustNew(t, program.options)
 				loaded, err := fresh.loadContext("default")
 				if err != nil {
 					t.Fatal(err)
@@ -1012,7 +1012,7 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 						t.Fatal("native reuse guard", err)
 					}
 					for _, optIn := range []bool{false, true} {
-						fresh := newFixture(t, withWorkingDir("")).New(program.options)
+						fresh := mustNew(t, program.options)
 						loaded, err := fresh.loadContext("default")
 						if err != nil {
 							t.Fatal(err)
@@ -1161,7 +1161,7 @@ func TestLegacyContinuationDeclaredPublication(t *testing.T) {
 				t.Fatal("runtime publication policy result", scenario, err)
 			}
 			for _, optIn := range []bool{false, true} {
-				fresh := newFixture(t, withWorkingDir("")).New(program.options)
+				fresh := mustNew(t, program.options)
 				loaded, err := fresh.loadContext("default")
 				if err != nil {
 					t.Fatal(err)

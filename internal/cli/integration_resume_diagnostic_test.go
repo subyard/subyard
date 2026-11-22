@@ -73,7 +73,7 @@ func TestCompletedReleaseObservationPreservesPendingInitTail(t *testing.T) {
 			var before releasetransition.V2ActivationObservation
 			for _, pending := range []bool{false, true} {
 				e.pending = pending
-				program := newFixture(t, withWorkingDir("")).New(options)
+				program := mustNew(t, options)
 				actor := &materializedConfigActivationReconciler{cli: program.releaseActivationOperation(request), configHome: request.ConfigHome,
 					goal: journal.Goal, artifactDigest: journal.ArtifactDigest, registryDigest: journal.RegistryDigest}
 				observed, err := actor.Observe(ctx, journal.Releases, releasetransition.ReleaseLinks{})

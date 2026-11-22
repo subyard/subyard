@@ -191,7 +191,7 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 			executor.guest = map[string]string{"ENVIRONMENT_PROFILES": definition.Name, "DEV_USER": "dev", "DEV_UID": "1000", "ALLOWS_CODING_TOOLS": "true"}
 			fixture.cli.options.Executor = executor
 			testkit.WriteFile(t, fail, nil, 0o600)
-			program := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+			program := mustNew(t, fixture.cli.options)
 			request, _ := repairRequest(t, fixture)
 			activation := program.profileActivationReconciler(request, definition.Runtime.ActivationID).(*profileRuntimeActivationReconciler)
 			if !activation.cli.activation.repair {
@@ -212,7 +212,7 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 			}
 
 			// A fresh init repeats the same apply from the new actual and converges.
-			fresh := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+			fresh := mustNew(t, fixture.cli.options)
 			initRuntime := prepareRuntimeOwnerInit(t, fresh)
 			if err := initRuntime.ApplyStage(context.Background(), ports.ReconcileStageProfileRuntimes); err != nil {
 				t.Fatalf("init after failed activation: %v", err)
@@ -262,7 +262,7 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 			path := filepath.Join(request.ConfigHome, "yards", "default", "config.env")
 			content := strings.ReplaceAll(string(mustReadConfigFixture(t, path)), "ENVIRONMENT_PROFILES="+definition.Name+"\n", "ENVIRONMENT_PROFILES=\n")
 			testkit.WriteFile(t, path, []byte(content), 0o600)
-			deselected := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+			deselected := mustNew(t, fixture.cli.options)
 			if err := prepareRuntimeOwnerInit(t, deselected).ApplyStage(context.Background(), ports.ReconcileStageProfileRuntimes); err != nil {
 				t.Fatalf("init after deselection: %v", err)
 			}

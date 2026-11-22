@@ -365,7 +365,7 @@ func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *t
 		})
 		before := []byte("CODING_TOOL_INTEGRATIONS='wrapper'\n")
 		testkit.WriteFile(t, path, before, 0o640)
-		program := newFixture(t, withWorkingDir("")).New(Options{RepositoryRoot: root, Environment: environment})
+		program := mustNew(t, Options{RepositoryRoot: root, Environment: environment})
 		loaded, err := program.loadSelectionRepair("default")
 		if err != nil || !slices.Equal(loaded.Integrations.Requested, []string{"wrapper"}) || !slices.Contains(loaded.Integrations.Effective, "base") {
 			t.Fatalf("dependency-only fixture: %#v %v", loaded.Integrations, err)
@@ -628,7 +628,7 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 	f.cli.options.RepositoryRoot, f.cli.options.Environment = root, env
 	platform := newInitPlatformFixture()
 	f.cli.options.InitPlatform = platform
-	program := newFixture(t, withWorkingDir("")).New(f.cli.options)
+	program := mustNew(t, f.cli.options)
 	return program, f.readyMarker, home
 }
 

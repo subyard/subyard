@@ -217,7 +217,7 @@ func TestReleaseTransitionIngressBindsServiceRecreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program := newFixture(t, withWorkingDir("")).New(Options{RepositoryRoot: fixture.options.RepositoryRoot, Environment: fixture.options.Environment,
+	program := mustNew(t, Options{RepositoryRoot: fixture.options.RepositoryRoot, Environment: fixture.options.Environment,
 		Incus: fixture.options.Incus, Stdin: bytes.NewReader(payload), Stdout: io.Discard, Stderr: &stderr})
 	executor := releaseTransitionExecutor
 	t.Cleanup(func() { releaseTransitionExecutor = executor })

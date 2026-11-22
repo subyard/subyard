@@ -94,7 +94,7 @@ func TestQueuedSourceRepairCannotRecreateRetiredConfiguration(t *testing.T) {
 
 func runAliasRepairFixture(t *testing.T, options Options) int {
 	t.Helper()
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	return program.Run(context.Background())
 }
 

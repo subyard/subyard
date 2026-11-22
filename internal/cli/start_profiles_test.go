@@ -61,7 +61,7 @@ printf '%%s\n' '%s'
 			native.Instances[key] = instance
 			runner := &testkit.ScriptedAdapter{}
 			options.AdapterRunner = runner
-			program := newFixture(t, withWorkingDir("")).New(options)
+			program := mustNew(t, options)
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -132,7 +132,7 @@ printf '%%s\n' '{"state":"ready"}'
 `, checked), 0700)
 	options.InitPlatform = &appliedProfilesPlatformFixture{appliedSelectionPlatformFixture: &appliedSelectionPlatformFixture{
 		initPlatformFixture: newInitPlatformFixture(), settings: map[string]string{"DEV_USER": "dev", "DEV_UID": "1000"}}, profiles: []string{"sample"}, known: true}
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

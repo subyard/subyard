@@ -47,7 +47,7 @@ func blockedGateAdmissionFixture(t *testing.T, extra ...string) configApplyRepai
 // operationSession is an RPC session of the default yard of fixture.
 func operationSession(t *testing.T, fixture configApplyRepairFixture) *rpcHandler {
 	t.Helper()
-	program := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+	program := mustNew(t, fixture.cli.options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			options.Arguments, options.Stdout, options.Stderr = test.arguments, &stdout, &stderr
 			options.Prompt = &testkit.Prompt{}
-			program := newFixture(t, withWorkingDir("")).New(options)
+			program := mustNew(t, options)
 			program.releaseTransitionChild = test.child
 			code := program.Run(context.Background())
 			want := strings.ReplaceAll(test.stderr, "ROOT", options.RepositoryRoot)
@@ -288,7 +288,7 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 		t.Helper()
 		prompt = &testkit.Prompt{Answers: []bool{false}}
 		var stdout, stderr bytes.Buffer
-		program := newFixture(t, withWorkingDir("")).New(Options{
+		program := mustNew(t, Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: append(append([]string(nil), environment...), extra...), WorkingDir: root,
 			Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
@@ -307,7 +307,7 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	// The direct resume entrypoint is exempt like teardown --full: its prepared
 	// command must not reach execution without an admission.
 	var discard bytes.Buffer
-	resumed := newFixture(t, withWorkingDir("")).New(Options{
+	resumed := mustNew(t, Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", pending},
 		Environment: append(append([]string(nil), environment...), "SUBYARD_HOME="+home), WorkingDir: root,
 		Stdin: strings.NewReader(""), Stdout: &discard, Stderr: &discard,
@@ -449,7 +449,7 @@ func TestRunAdmissionSelectorPaths(t *testing.T) {
 			t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
 				program, _, _, _, environment := pendingSourceRenameFixture(t, false)
 				var stdout, stderr bytes.Buffer
-				retry := newFixture(t, withWorkingDir("")).New(Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: test.arguments,
+				retry := mustNew(t, Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: test.arguments,
 					Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: &testkit.Prompt{}})
 				if code := retry.Run(context.Background()); code != test.code || stdout.String() != test.stdout || stderr.String() != test.stderr {
 					t.Fatalf("exit=%d want %d stdout=%q stderr=%q", code, test.code, stdout.String(), stderr.String())

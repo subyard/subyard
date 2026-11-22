@@ -162,7 +162,7 @@ func TestPendingPersistAdoptionInitCommandCompletes(t *testing.T) {
 		t.Fatalf("gate after init: %#v %v", outcome, err)
 	}
 	output.Reset()
-	repeat := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+	repeat := mustNew(t, fixture.cli.options)
 	if code := repeat.Run(context.Background()); code != 0 || runtime.applied != 1 || len(platform.applied) != 1 {
 		t.Fatalf("repeat init was not a no-op: code=%d applied=%d stages=%v output=%s", code, runtime.applied, platform.applied, output.String())
 	}

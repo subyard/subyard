@@ -258,7 +258,7 @@ func preparationHeldTestVMSlot(
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	probe := preparationParityProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
-	program := newFixture(t, withWorkingDir("")).New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
+	program := mustNew(t, Options{RepositoryRoot: root, Environment: environment, Incus: incus})
 	infrastructureFixture(t, program, incus, "test-vms")
 	return environment, incus, probe, nil
 }

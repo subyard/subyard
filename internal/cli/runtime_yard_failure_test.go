@@ -144,7 +144,7 @@ func newYardFailureScenario(t *testing.T, declared, typed bool, selected ...stri
 // invoke runs one native owner process for the release transition request.
 func (scenario yardFailureScenario) invoke(t *testing.T, mode releasetransition.ProcessMode, execution *releasetransition.Execution) releasetransition.ProcessResponse {
 	t.Helper()
-	program := newFixture(t, withWorkingDir("")).New(scenario.fixture.cli.options)
+	program := mustNew(t, scenario.fixture.cli.options)
 	request := scenario.request
 	request.Mode, request.Execution = mode, execution
 	response, err := executeReleaseTransitionRequest(context.Background(), program.options.RepositoryRoot, request,
@@ -222,7 +222,7 @@ func TestDeclaredRuntimeYardFailureCompletesActiveReleaseRepair(t *testing.T) {
 	// After the cause is fixed, the yard's init repeats the apply from the
 	// partial state and the release becomes ready.
 	scenario.runtime.failing(t, "default", false)
-	program := newFixture(t, withWorkingDir("")).New(scenario.fixture.cli.options)
+	program := mustNew(t, scenario.fixture.cli.options)
 	if err := prepareRuntimeOwnerInit(t, program).ApplyStage(context.Background(), ports.ReconcileStageProfileRuntimes); err != nil {
 		t.Fatalf("init after the fix: %v", err)
 	}
@@ -495,7 +495,7 @@ func declareYardScopedRuntimes(t *testing.T, fixture *configApplyRepairFixture) 
 		testkit.WriteFile(t, filepath.Join(root, "config/profiles", name, "runtime.sh"),
 			[]byte("#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n"), 0o700)
 	}
-	program := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
+	program := mustNew(t, fixture.cli.options)
 	fixture.cli = program
 }
 
@@ -513,7 +513,7 @@ func TestTeardownRetiresRemovedYardPendingRecords(t *testing.T) {
 	}
 	scenario := newYardFailureScenario(t, true, true, "default")
 	loaded := config.Loaded{Context: domain.Context{YardName: "named", AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{ConfigHome: home}}}
-	program := newFixture(t, withWorkingDir("")).New(scenario.fixture.cli.options)
+	program := mustNew(t, scenario.fixture.cli.options)
 	if err := program.retireTornDownActivationPending(loaded); err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +716,7 @@ func TestOnlyDeclaredPendingOwnersOpenOrdinaryCommands(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				options := fixture.cli.options
 				options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
-				program := newFixture(t, withWorkingDir("")).New(options)
+				program := mustNew(t, options)
 				program.Run(context.Background())
 				if refused := strings.Contains(stderr.String(), mutationGateRefusalPrefix); refused != test.gated {
 					t.Fatalf("yard %s gate refusal=%t want %t: %s%s", strings.Join(arguments, " "), refused, test.gated, stdout.String(), stderr.String())
@@ -757,7 +757,7 @@ func TestConfigurationCommandsOnUnpendingYardWhileAnotherIsPending(t *testing.T)
 				var stdout, stderr bytes.Buffer
 				options := fixture.cli.options
 				options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
-				program := newFixture(t, withWorkingDir("")).New(options)
+				program := mustNew(t, options)
 				code := program.Run(context.Background())
 				t.Logf("yard %s => %d %s%s", strings.Join(arguments, " "), code, stdout.String(), stderr.String())
 				if refused := strings.Contains(stderr.String(), mutationGateRefusalPrefix); refused != test.gated {

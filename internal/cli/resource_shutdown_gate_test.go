@@ -217,7 +217,7 @@ esac
 	var output bytes.Buffer
 	options := program.options
 	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "private", "relay", "down", "--yes"}, &output, &output
-	program = newFixture(t, withWorkingDir("")).New(options)
+	program = mustNew(t, options)
 	loaded, err := program.loadContext("private")
 	if err != nil {
 		t.Fatal(err)

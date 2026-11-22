@@ -214,7 +214,7 @@ func (harness *repairHarness) runWith(t *testing.T, environment []string, during
 	options.NetworkPolicy = allowTestNetworkPolicy()
 	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
 	options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	program.nestedCommand = func(context.Context, []string, io.Writer) int { return 0 }
 	program.sourceBinding = harness.bindSources
 	code := program.Run(context.Background())
@@ -294,7 +294,6 @@ func (harness *repairHarness) installIncusCLI(t *testing.T) (string, []string) {
 	cliFixture.Exec().On(testkit.Match{Tool: "incus", Args: []string{"exec", instance, "--project", "subyard-named", "--user", "0", "--group", "0", "--env", "HOME=/home/dev", "--env", "SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock", "--cwd", "/home/dev", "--", "/usr/sbin/runuser", "-u", "dev", "--", "true"}},
 		testkit.Reply{Script: "printf '%s\\n' \"$*\" >> " + shellquote.Word(log)})
 	return log, []string{"PATH=" + cliFixture.Env("PATH")}
-
 }
 
 type repairRow struct {
@@ -701,7 +700,7 @@ func TestHealthyYardStaysOpenBesideABrokenOne(t *testing.T) {
 		options := fixture.cli.options
 		options.Arguments, options.Stdout, options.Stderr = append([]string{"-Y", yard}, arguments...), &stdout, &stderr
 		options.Prompt, options.Stdin = confirmingPrompt{during: func() {}}, strings.NewReader(stdin)
-		program := newFixture(t, withWorkingDir("")).New(options)
+		program := mustNew(t, options)
 		program.operatorTerminal = func() bool { return true }
 		return program.Run(context.Background()), stdout.String() + stderr.String()
 	}
@@ -766,7 +765,7 @@ func networkRunWith(t *testing.T, scenario yardFailureScenario, configure func(*
 	options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
 	options.Prompt = confirmingPrompt{during: func() {}}
 	options.NetworkPolicy = &yardnetwork.Service{Host: host, Lock: testNetworkPolicyLock{}}
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	return program.Run(context.Background()), stdout.String() + stderr.String(), host
 }
 
@@ -943,7 +942,7 @@ func TestObservationMatrixAcrossYardScopedOwners(t *testing.T) {
 			observeFailing(t, scenario, "named", true)
 			scenario.fixture.cli.options.Executor = lostAgentExecutor{scenario.fixture.cli.options.Executor, scenario.fixture.instanceName(t, "named")}
 		}
-		program := newFixture(t, withWorkingDir("")).New(scenario.fixture.cli.options)
+		program := mustNew(t, scenario.fixture.cli.options)
 		var findings []releasetransition.V2YardAttribution
 		for _, reconciler := range program.activationReconcilers(scenario.request) {
 			if reconciler.ID() != owner {
@@ -1031,7 +1030,7 @@ func TestRPCRepairIsRecheckedAtExecute(t *testing.T) {
 	harness := newRepairHarness(t)
 	options := harness.scenario.fixture.cli.options
 	options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	program.sourceBinding = harness.bindSources
 	loaded, err := program.loadContext("named")
 	if err != nil {
@@ -1132,7 +1131,7 @@ func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 		options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
 		options.Prompt = confirmingPrompt{during: func() { t.Errorf("%v reached consent", arguments) }}
 		options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
-		program := newFixture(t, withWorkingDir("")).New(options)
+		program := mustNew(t, options)
 		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "runs only with the installed release's own tooling") ||
 			harness.effects() != 0 {
 			t.Fatalf("%v outside the installed runtime: code=%d effects=%d\n%s%s", arguments, code, harness.effects(), stdout.String(), stderr.String())
@@ -1362,7 +1361,7 @@ func (harness *repairHarness) rpcPlanExecute(t *testing.T, name string, argument
 	options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
 	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
 	options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	program.sourceBinding = harness.bindSources
 	loaded, err := program.loadContext("named")
 	if err != nil {
@@ -1512,7 +1511,7 @@ func TestShellIntoARepairOnlyYardNeedsNoInstalledTooling(t *testing.T) {
 	options := harness.scenario.fixture.cli.options
 	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "named", "shell", "--", "true"}, &stdout, &stderr
 	options.Environment = append(slices.Clone(options.Environment), environment...)
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	if code := program.Run(context.Background()); code != 0 || len(mustReadConfigFixtureOrEmpty(log)) == 0 {
 		t.Fatalf("shell without installed tooling: code=%d\n%s%s", code, stdout.String(), stderr.String())
 	}

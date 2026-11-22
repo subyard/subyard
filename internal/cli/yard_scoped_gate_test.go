@@ -353,7 +353,7 @@ func TestHostSettingWaitsForAnotherYardsPendingInit(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	options := fixture.cli.options
 	options.Arguments, options.Stdout, options.Stderr = []string{"-Y", "default", "config", "set", "LIMITS_MEMORY", "4GiB", "--scope", "host", "--local", "--yes"}, &stdout, &stderr
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "writes the desired configuration of yard named, whose pending configuration refuses it") ||
 		!strings.Contains(stderr.String(), "next: yard -Y named init") && !strings.Contains(stderr.String(), "next: 'yard' '-Y' 'named' 'init'") {
 		t.Fatalf("host setting beside a pending yard: code=%d %s%s", code, stdout.String(), stderr.String())

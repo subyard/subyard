@@ -32,7 +32,7 @@ func TestInitPersistsCommandPowerPathsForReadiness(t *testing.T) {
 	}
 	var output bytes.Buffer
 	options.Stdout, options.Stderr = &output, &output
-	program = newFixture(t, withWorkingDir("")).New(options)
+	program = mustNew(t, options)
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("init: code=%d output=%s", code, &output)
 	}

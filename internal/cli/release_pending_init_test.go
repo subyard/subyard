@@ -151,7 +151,7 @@ func (fixture pendingInitFixture) program(t *testing.T, arguments []string, prom
 	var stdout, stderr bytes.Buffer
 	options := fixture.cli.options
 	options.Arguments, options.Prompt, options.Stdout, options.Stderr = arguments, prompt, &stdout, &stderr
-	program := newFixture(t, withWorkingDir("")).New(options)
+	program := mustNew(t, options)
 	calls := &[]nestedCall{}
 	program.nestedCommand = func(_ context.Context, arguments []string, diagnostics io.Writer) int {
 		call := nestedCall{arguments: slices.Clone(arguments)}
