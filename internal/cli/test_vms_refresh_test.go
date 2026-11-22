@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -21,15 +24,21 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 				instance.Status = "Running"
 				incus.Instances["subyard/yard"] = instance
 				prompt := &testkit.Prompt{Answers: []bool{accept}}
+				if err := os.MkdirAll(filepath.Join(root, "scripts/e2e-lab"), 0o700); err != nil {
+					t.Fatal(err)
+				}
 				var stderr bytes.Buffer
 				probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}}`)}
 				arguments := []string{"test-vms", "refresh", "android-test"}
-				expected := []string{"refresh-android-test", "--yes"}
+				expected := "refresh-android-test\n--yes\n"
+				expectedArgs := []string{"refresh-android-test", "--yes"}
 				if image != "" {
 					arguments = append(arguments, "--image", image)
-					expected = append(expected, "--image", image)
+					expected += "--image\n" + image + "\n"
+					expectedArgs = append(expectedArgs, "--image", image)
 				}
-				cliFixture.Exec().On(testkit.Match{Tool: "scripts/e2e-lab/invoke.sh", Args: expected}, testkit.Reply{})
+				cliFixture.Exec().On(testkit.Match{Tool: "scripts/e2e-lab/invoke.sh", Args: expectedArgs},
+					testkit.Reply{Script: "printf '%s\\n' \"$@\" > refresh-arguments"})
 				program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, Prompt: prompt, Stderr: &stderr})
 				infrastructureFixture(t, program, incus, "test-vms")
 				code := program.Run(context.Background())
@@ -47,9 +56,16 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 						t.Fatal("refresh acquired or mutated a lease")
 					}
 				}
+				actual, err := os.ReadFile(filepath.Join(root, "refresh-arguments"))
+				if !accept && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("decline mutated broker")
+				}
+				if accept && (err != nil || string(actual) != expected) {
+					t.Fatalf("refresh arguments: %q, error: %v", actual, err)
+				}
 				var calls []testkit.Call
 				if accept {
-					calls = append(calls, testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: expected})
+					calls = append(calls, testkit.Call{Tool: "scripts/e2e-lab/invoke.sh", Args: expectedArgs})
 				}
 				cliFixture.Exec().AssertCalls(calls...)
 			})
