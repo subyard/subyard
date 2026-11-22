@@ -662,6 +662,7 @@ render_pool_status() {
        else "-" end)
     ] | @tsv
   ' <<<"$response")
+  jq -r '.pool.slots[] | select(.failure_reason != null) | "\(.slot_id): \(.failure_reason)"' <<<"$response"
   jq -r '
     select(.resources != null) | .resources |
     "Memory: available=\(.memory.available_bytes // "unknown") reserved=\(.reserved_vm_memory_bytes) bytes; L0=\(.outer_host_evidence)",

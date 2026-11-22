@@ -3180,6 +3180,9 @@ grep -Fq 'SLOT     STATE' <<<"$rendered_status" \
   || fail "human pool status omitted active-holder attribution"
 ! grep -Fq '0001-01-01' <<<"$rendered_status" \
   || fail "human pool status exposed zero timestamps"
+failed_status="$(jq '.pool.slots[1] += {state:"draining",failure_reason:"container cleanup failed"}' <<<"$status_fixture")"
+grep -Fxq 'slot-002: container cleanup failed' <<<"$(render_pool_status "$failed_status")" \
+  || fail "human pool status omitted the cleanup failure"
 long_project=Project-abcdefghijklmnopqrstuvwxyz0123456789
 long_status="$(jq -c --arg project "$long_project" \
   '.pool.slots[0].project = $project' <<<"$status_fixture")"

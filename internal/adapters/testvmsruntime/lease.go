@@ -498,6 +498,15 @@ func (store LeaseStore) BeginDrain(grant LeaseGrant) error {
 	})
 }
 
+const containerCleanupFailure = "container cleanup failed"
+
+func (slot LeaseSlot) failedDrainState() SlotState {
+	if slot.Environment != nil && slot.Environment.Name == EnvironmentContainer {
+		return SlotDraining // A later reap retries deletion of the same fenced allocation.
+	}
+	return SlotQuarantined
+}
+
 func (store LeaseStore) FinishDrain(slotID string, stopErr error) error {
 	return store.withLock(true, func(pool *LeasePool) error {
 		slot, err := findSlot(pool, slotID)
@@ -512,9 +521,13 @@ func (store LeaseStore) FinishDrain(slotID string, stopErr error) error {
 			return fmt.Errorf("slot %s is not draining", slotID)
 		}
 		if stopErr != nil {
-			slot.State = SlotQuarantined
-			slot.FailureReason = boundedReason(stopErr.Error())
-			slot.NextRecoveryAt = store.now()
+			slot.State = slot.failedDrainState()
+			if slot.State == SlotDraining {
+				slot.FailureReason = containerCleanupFailure
+			} else {
+				slot.FailureReason = boundedReason(stopErr.Error())
+				slot.NextRecoveryAt = store.now()
+			}
 			return nil
 		}
 		clearLease(slot)
