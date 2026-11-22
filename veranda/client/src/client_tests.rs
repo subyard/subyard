@@ -1646,7 +1646,13 @@ fn initial_inventory_is_used_once_and_invalidated_by_an_event_gap() {
 #[test]
 fn native_multiline_settings_preserve_values_and_reject_unsafe_controls() {
     let mut settings = fixture("settings-list");
-    for kind in ["multiline", "link-list", "mount-list", "name-list", "url-list"] {
+    for kind in [
+        "multiline",
+        "link-list",
+        "mount-list",
+        "name-list",
+        "url-list",
+    ] {
         settings["settings"][0]["type"] = json!(kind);
         settings["settings"][0]["value"] = json!("first\nsecond");
         settings["settings"][0]["default"] = json!("first\nsecond");
