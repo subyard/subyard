@@ -14,7 +14,9 @@ Each provider has a protected mode-0600 ownership receipt in
 `/var/lib/subyard/agent-skills/`. Receipts list only managed content paths and hashes.
 Writes to managed content repair drift; unexpected files, foreign links and symlinked
 parents cause a diagnostic before the provider's artifacts change. User skills remain
-outside these receipts.
+outside these receipts. The `user-skills` profile links skills from its own clones under
+`~/.local/share/subyard-user-skills/` with links it owns by exact target, never through a receipt;
+shipped skill names start with `subyard-`, which user skill sources cannot use.
 
 Profile provisioning invokes `/usr/local/libexec/subyard/agent-skills apply` only
 **after** successfully provisioning the capability. Use provider `profile-<profile>`
@@ -59,7 +61,7 @@ All providers link the same content into `~/.agents/skills` (Codex), `~/.claude/
 and `~/.config/opencode/skills`. Links are installed ahead of client installation and
 persist through client enable/disable; capability/provider removal owns retirement.
 This supports late installation without reprovisioning the capability. Core, the GitHub
-provider and the test-VM client profile additionally use pi (`~/.pi/agent/skills`) and Hermes
+provider, the test-VM client and the user-skills profiles additionally use pi (`~/.pi/agent/skills`) and Hermes
 (`~/.hermes/skills`) links. A profile requests them with `--extra` at registration; its receipt keeps
 them through static refresh, so they need no coding-tool integration. Recognized legacy `.codex/skills`
 links to the same canonical directory are removed to avoid duplicate Codex discovery.

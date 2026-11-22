@@ -314,5 +314,20 @@ class PreviewMigration(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(),changed)
 
 
+
+class ShippedNames(unittest.TestCase):
+    def test_every_shipped_skill_name_is_reserved_for_subyard(self):
+        # User skill sources may provide any other name; `subyard-` stays Subyard's.
+        root = SOURCE.parents[1]
+        names = [path.name for path in (SOURCE/'core').iterdir() if path.is_dir()]
+        for package in (root/'config/profiles').iterdir():
+            if (package/'skills').is_dir():
+                names += [path.name for path in (package/'skills').iterdir() if path.is_dir() and path.name != '__pycache__']
+            if (package/'skills.json').is_file():
+                names += list(json.loads((package/'skills.json').read_text()))
+        self.assertTrue(names)
+        self.assertEqual([name for name in names if not name.startswith('subyard-')], [])
+
+
 if __name__ == '__main__':
     unittest.main()

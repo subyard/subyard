@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "settings": [
+    {
+      "name": "USER_SKILL_SOURCES",
+      "type": "url-list",
+      "scopes": ["shipped", "shared", "host", "yard", "command"],
+      "application": "yard-init",
+      "syncable": true,
+      "optional": true,
+      "default": "https://github.com/Dmitry-Borodin/dev-flow"
+    }
+  ],
+  "default_yards": ["default"],
+  "owner_service": "owner.sh"
+}
