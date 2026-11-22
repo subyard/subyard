@@ -269,7 +269,7 @@ func (platform *grantingInitPlatform) ApplyStage(ctx context.Context, stage port
 // native owner check once its Incus stage grants access: another yard's
 // instance left behind by a deleted configuration is never taken over.
 func TestColdFirstInitRechecksNativeOwnerAfterAccessGrant(t *testing.T) {
-	root, environment, _ := migrateCLIFixture(t, false)
+	cliFixture, root, environment, _ := newMigrateCLIFixture(t, false)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeColdFile(t, filepath.Join(configHome, "config.env"), "INCUS_PROJECT=subyard-beta\nYARD_INSTANCE_NAME=yard-beta\n", 0o600)
 	if !coldInstallation(configHome, environmentValue(environment, "YARD_RUNTIME_ROOT")) {
@@ -283,11 +283,8 @@ func TestColdFirstInitRechecksNativeOwnerAfterAccessGrant(t *testing.T) {
 	platform.converged[ports.ReconcileStageIncus] = false
 	platform.converged[ports.ReconcileStageInstance] = false
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment,
 		Stdout: &output, Stderr: &output, InitPlatform: platform, Incus: native, Executor: native})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 {
 		t.Fatalf("init took over another yard's instance: %s", output.String())
 	}
@@ -316,11 +313,8 @@ func (deniedServer) Instance(context.Context, string, string) (ports.InstanceInf
 // Init's compatibility probe reports every local yard it cannot read, in
 // stable order, not only the selected one.
 func TestPlainInitMigrationProbeReportsEveryDeniedYard(t *testing.T) {
-	root, environment, _ := migrateCLIFixture(t, true)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newMigrateCLIFixture(t, true)
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
 	configHome := program.env["SUBYARD_CONFIG_HOME"]
 	seedOwnerHostID(t, configHome)
 	writeColdFile(t, filepath.Join(configHome, "yards", "beta", "config.env"), "SSH_PORT=2302\n", 0o600)
@@ -362,11 +356,8 @@ func (native *denyFirstRead) Instance(context.Context, string, string) (ports.In
 
 // A denied selected yard fails closed even when no local yard reports a denial.
 func TestPlainInitMigrationProbeFailsClosedForTheSelectedYard(t *testing.T) {
-	root, environment, _ := migrateCLIFixture(t, true)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newMigrateCLIFixture(t, true)
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
 	seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
 	native := &denyFirstRead{Incus: &testkit.Incus{}}
 	program.options.Incus, program.options.Executor = native, native

@@ -28,12 +28,10 @@ import (
 )
 
 func TestComponentRegistryIncludesProfileActivationOwner(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
 	var owners []string
 	for _, owner := range program.nonConfigActivationReconcilers(releasetransition.ProcessRequest{}) {
 		owners = append(owners, owner.ID())
@@ -47,7 +45,8 @@ func TestComponentRegistryIncludesProfileActivationOwner(t *testing.T) {
 }
 
 func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	source := filepath.Join(root, "repo.rules")
 	writeCLIFile(t, source, "allow_rule()\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"),
@@ -66,12 +65,9 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 		fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 			"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
 		}, GuestTokens: map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}}
-		program, err := New(Options{RepositoryRoot: alias, Environment: environment,
+		program := cliFixture.New(Options{RepositoryRoot: alias, Environment: environment,
 			WorkingDir: root, InitPlatform: newInitPlatformFixture(), Incus: fake, Executor: fake,
 			Stdout: io.Discard, Stderr: io.Discard})
-		if err != nil {
-			t.Fatal(err)
-		}
 		reconciler := &materializedConfigActivationReconciler{cli: program, configHome: configHome}
 		observation, err := reconciler.Observe(context.Background(),
 			releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
@@ -153,12 +149,10 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 }
 
 func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	reconcilers := program.activationReconcilers(releasetransition.ProcessRequest{})
 	sample := slices.IndexFunc(reconcilers, func(reconciler releasetransition.V2ActivationReconciler) bool {
 		return reconciler.ID() == "sample-runtime"
@@ -172,17 +166,15 @@ func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *tes
 }
 
 func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
 	settingsPath := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Incus: incus, Executor: incus, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &materializedConfigActivationReconciler{
 		cli: program, yard: "default", configHome: configHome, scopeResolved: true,
 	}
@@ -210,7 +202,8 @@ func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T)
 }
 
 func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
 	rules := filepath.Join(root, "fixture.rules")
@@ -222,11 +215,8 @@ func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
 	settingsPath := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Incus: incus, Executor: incus, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &materializedConfigActivationReconciler{
 		cli: program, yard: "default", configHome: configHome, allLocal: true, scopeResolved: true,
 	}
@@ -252,7 +242,8 @@ func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
 }
 
 func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := filepath.Join(root, "state")
 	seedOwnerHostID(t, configHome)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
@@ -265,11 +256,8 @@ func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) 
 	cause := errors.New("private transport detail")
 	fake := &testkit.Incus{Err: cause}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &materializedConfigActivationReconciler{
 		cli: program, yard: "default", configHome: configHome, scopeResolved: true,
 	}
@@ -299,7 +287,8 @@ func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) 
 }
 
 func TestMaterializedConfigActivationIgnoresGitIdentityChanges(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	if err := os.MkdirAll(configHome, 0700); err != nil {
@@ -308,11 +297,8 @@ func TestMaterializedConfigActivationIgnoresGitIdentityChanges(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
 	}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		InitPlatform: newInitPlatformFixture(), Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
 	initial, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil || !initial.Converged {
@@ -336,7 +322,8 @@ func TestMaterializedConfigActivationIgnoresGitIdentityChanges(t *testing.T) {
 }
 
 func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	seedOwnerHostID(t, configHome)
 	path := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "gitconfig")
@@ -347,11 +334,8 @@ func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T
 	cause := errors.New("independent inspection failure")
 	fake := &testkit.Incus{Err: cause}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
 	observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if observed.Converged || !errors.Is(err, cause) || !strings.Contains(err.Error(), "config set GIT_USER_NAME") ||
@@ -378,7 +362,8 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 	} {
 		path := test.path
 		t.Run(path+"/"+test.detail, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o755)
 			configHome := filepath.Join(root, "state")
@@ -398,11 +383,8 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			}
 			declareCLIInstructionFixture(t, root, "claude", "HOST_CLAUDE_MD", ".claude/CLAUDE.md", "Claude instructions")
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 				Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			reconciler := &materializedConfigActivationReconciler{
 				cli: program, yard: "default", configHome: configHome, scopeResolved: true,
 			}
@@ -448,7 +430,8 @@ func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *
 	for _, warm := range []bool{false, true} {
 		for _, scenario := range []string{"cold", "retained", "client present", "custom socket", "invalid config"} {
 			t.Run(fmt.Sprintf("warm=%t/%s", warm, scenario), func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				cliFixture := newFixture(t, withWorkingDir(""))
+				root, environment := cliFixture.Root, cliFixture.Environment
 				writeRuntimeProfileFixture(t, root)
 				home := filepath.Join(root, "state")
 				seedCurrentReleaseLedger(t, root, home)
@@ -466,16 +449,13 @@ func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *
 						t.Fatal(err)
 					}
 				case "client present":
-					writeCLIFile(t, filepath.Join(root, "incus"), "#!/bin/sh\nexit 79\n", 0700)
+					testkit.NewExecFake(t, root, "incus")
 				case "custom socket":
 					client = incusclient.New(filepath.Join(root, "unknown.socket"))
 				case "invalid config":
 					writeCLIFile(t, filepath.Join(home, "config.env"), "YARD_TEMPLATE=unknown-cold-template\n", 0600)
 				}
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: client})
 				reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
 				observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 				if scenario == "cold" || !warm && scenario != "invalid config" {
@@ -497,7 +477,8 @@ func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *
 }
 
 func TestProfileRuntimeActivationRepairsAllLocalInstalledContracts(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	unrelated := filepath.Join(root, "config", "profiles", "unrelated")
 	if err := os.MkdirAll(unrelated, 0o700); err != nil {
@@ -552,12 +533,9 @@ esac
 		"stopped-project/stopped-yard": {Status: "stopped"},
 	}}
 	var diagnostics bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: append(environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: append(environment,
 		"SUBYARD_OPERATION_ID=sample-activation-test", "PATH="+os.Getenv("PATH")),
 		Incus: incus, Executor: incus, Stderr: &diagnostics})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{Yard: "new-yard", ConfigHome: home}, "sample-runtime")
 	ctx := context.Background()
 	before, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
@@ -633,7 +611,8 @@ esac
 }
 
 func TestProfileRuntimeRecoveryRejectsRemovedPendingState(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	home := filepath.Join(root, "state")
 	seedCurrentReleaseLedger(t, root, home)
@@ -641,10 +620,7 @@ func TestProfileRuntimeRecoveryRejectsRemovedPendingState(t *testing.T) {
 	handler := filepath.Join(root, "config/profiles/sample/runtime.sh")
 	testkit.WriteFile(t, handler, []byte("#!/bin/sh\nprintf '%s\\n' '{\"state\":\"pending\",\"actual\":\""+strings.Repeat("a", 64)+"\",\"desired\":\""+strings.Repeat("b", 64)+"\"}'\n"), 0o700)
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}}}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stderr: io.Discard})
 	owner := &profileRuntimeActivationReconciler{cli: program, id: "sample-runtime", request: releasetransition.ProcessRequest{ConfigHome: home}}
 	pair, links := releasetransition.ReleasePair{From: "release-a", Target: "release-a"}, releasetransition.ReleaseLinks{Active: "release-a"}
 	if _, err := owner.PrepareActivationRecovery(context.Background(), pair, links); err == nil || !strings.Contains(err.Error(), "invalid-schema") {
@@ -653,7 +629,8 @@ func TestProfileRuntimeRecoveryRejectsRemovedPendingState(t *testing.T) {
 }
 
 func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsComplete(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	home := filepath.Join(root, "state")
@@ -662,14 +639,11 @@ func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsCom
 		t.Fatal(err)
 	}
 	writeCLIFile(t, legacy, "YARD_TEMPLATE=e2e-vms\nSSH_PORT=2234\n", 0o600)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root,
 		Environment:    append(environment, "PATH="+os.Getenv("PATH")),
 		Incus:          &testkit.Incus{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	request := releasetransition.ProcessRequest{
 		ConfigHome: home, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("c", 64)),
 	}
@@ -844,14 +818,12 @@ func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
 }
 
 func TestReleaseTransitionIngressSkipsUnboundLegacyLeaf(t *testing.T) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	home := t.TempDir()
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t),
+	program := cliFixture.New(Options{
+		RepositoryRoot: cliFixture.Root,
 		Environment:    []string{"HOME=" + home},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	request := releasetransition.ProcessRequest{
 		RuntimeRoot: filepath.Join(home, ".subyard", "runtime"),
 		ConfigHome:  filepath.Join(home, ".config", "subyard"),
@@ -1461,17 +1433,15 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 }
 
 func TestReleaseTransitionEstablishesOperationContextBeforeExecution(t *testing.T) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	home := t.TempDir()
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t),
+	program := cliFixture.New(Options{
+		RepositoryRoot: cliFixture.Root,
 		Environment:    []string{"HOME=" + home},
 		Stdin:          strings.NewReader(operationContextProtocolRequest(t, home)),
 		Stderr:         &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.runReleaseTransition(context.Background(), nil); code != 1 {
 		t.Fatalf("release transition status = %d, stderr=%q", code, stderr.String())
 	}
@@ -1481,10 +1451,11 @@ func TestReleaseTransitionEstablishesOperationContextBeforeExecution(t *testing.
 }
 
 func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	home := t.TempDir()
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t),
+	program := cliFixture.New(Options{
+		RepositoryRoot: cliFixture.Root,
 		Environment: []string{
 			"HOME=" + home,
 			"SUBYARD_OPERATION_ID=invalid/context",
@@ -1492,9 +1463,6 @@ func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) 
 		Stdin:  strings.NewReader(operationContextProtocolRequest(t, home)),
 		Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.runReleaseTransition(context.Background(), nil); code != 2 ||
 		!strings.Contains(stderr.String(), "operation context is invalid") {
 		t.Fatalf("release transition status = %d, stderr=%q", code, stderr.String())
@@ -1502,8 +1470,9 @@ func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) 
 }
 
 func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	installCanonicalOwnerInventory(t, root)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	installCanonicalOwnerInventory(t, cliFixture)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
@@ -1522,10 +1491,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, registration, "YARD_TEMPLATE=test-vms\nSSH_PORT=2224\nCODING_TOOL_INTEGRATIONS=''\n", 0o600)
-	source, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	source := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	loaded, err := source.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -1535,10 +1501,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	}
 	// Release execution forwards the active CLI's resolved environment. Each
 	// registered yard must still use its own persistent settings in the candidate.
-	program, err := New(Options{RepositoryRoot: root, Environment: environmentList(loaded.Environment, nil)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environmentList(loaded.Environment, nil)})
 	reconciler := program.powerActivationReconciler(releasetransition.ProcessRequest{Yard: "new-yard", ConfigHome: configHome}).(*activationStageReconciler)
 	platform, err := reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true})
 	if err != nil {
@@ -1570,7 +1533,8 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 }
 
 func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
-	root := repositoryRoot(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
 	environment := []string{
@@ -1580,14 +1544,11 @@ func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 		"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
 	}
 	dispatcher := "/memfd:subyard-verified-yard-engine"
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root,
 		DispatcherPath: dispatcher,
 		Environment:    environment,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler, ok := program.powerActivationReconciler(releasetransition.ProcessRequest{
 		Yard:       "default",
 		ConfigHome: configHome,
@@ -1618,14 +1579,15 @@ func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 }
 
 func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	home, configHome := testkit.TempDir(t), testkit.TempDir(t)
 	helper := filepath.Join(home, "host-helper", "power")
 	unit := filepath.Join(home, "system", "fixture-power.service")
 	path := filepath.Join(configHome, "config.env")
 	base := "CODING_TOOL_INTEGRATIONS=\nENVIRONMENT_PROFILES=\nFORWARD_SSH_AGENT=0\n"
 	testkit.WriteFile(t, path, []byte(base), 0o600)
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t),
+	program := cliFixture.New(Options{
+		RepositoryRoot: cliFixture.Root,
 		Environment: []string{
 			"HOME=" + home, "SUBYARD_CONFIG_HOME=" + configHome,
 			"SUBYARD_HOME=" + filepath.Join(home, "data"),
@@ -1633,9 +1595,6 @@ func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
 			"SUBYARD_POWER_UNIT_PATH=" + unit,
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, persisted := range []bool{false, true} {
 		if persisted {
 			testkit.WriteFile(t, path, []byte(base+
@@ -1673,7 +1632,8 @@ func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
 }
 
 func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.T) {
-	root := repositoryRoot(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
 	staleRoot := filepath.Join(home, "releases", "stale", "config")
@@ -1691,7 +1651,7 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 
 	var stdout, stderr bytes.Buffer
 	applier := &recordingConfigApplier{}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root,
 		Environment: []string{
@@ -1708,9 +1668,6 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 		},
 		Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.ensureOperationID()
 	targetLoaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 	if err != nil {
@@ -1795,16 +1752,14 @@ func TestMaterializedConfigReconcileUsesTrustedCandidateChild(t *testing.T) {
 }
 
 func TestReleaseTransitionRejectsTrailingRequestJSON(t *testing.T) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	var stderr bytes.Buffer
-	program, err := New(Options{
-		RepositoryRoot: repositoryRoot(t),
+	program := cliFixture.New(Options{
+		RepositoryRoot: cliFixture.Root,
 		Environment:    []string{"HOME=" + t.TempDir()},
 		Stdin:          strings.NewReader("{}{}"),
 		Stderr:         &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.runReleaseTransition(context.Background(), nil); code != 2 ||
 		!strings.Contains(stderr.String(), "request is invalid") {
 		t.Fatalf("release transition status = %d, stderr=%q", code, stderr.String())
@@ -1973,7 +1928,8 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 		{name: "stale-default-asset", defaults: true, stale: "asset"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			if err := os.MkdirAll(configHome, 0o700); err != nil {
 				t.Fatal(err)
@@ -2032,10 +1988,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 			run := func() releasetransition.ProcessResponse {
 				t.Helper()
 				fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
 				reconcilers := program.activationReconcilers(request)
 				materialized := reconcilers[slices.IndexFunc(reconcilers, func(owner releasetransition.V2ActivationReconciler) bool { return owner.ID() == "materialized-config" })]
 				response, err := executeReleaseTransitionRequest(context.Background(), root, request,
@@ -2110,8 +2063,9 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 }
 
 func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	installCanonicalOwnerInventory(t, root)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	installCanonicalOwnerInventory(t, cliFixture)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
 	// This fixture authors its selection in subyard.env below.
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
@@ -2201,14 +2155,11 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	}
 
 	fake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "test-yard", configHome)
 	if err != nil {
 		t.Fatal(err)
@@ -2220,15 +2171,12 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	updateProgram, err := New(Options{
+	updateProgram := cliFixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard",
 		Environment: environmentList(defaultLoaded.Environment, nil), WorkingDir: root,
 		Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	fake.GuestTokens = map[string]string{"/home/dev/.codex/rules/repo.rules": testkit.HashToken(strings.Repeat("0", 64))}
 	observe := func(
 		candidate *CLI,
@@ -2297,14 +2245,11 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	writeCLIFile(t, filepath.Join(freshConfigHome, "yards", "test-yard", "config.env"),
 		"YARD_TEMPLATE=test-vms\nSSH_PORT=2223\n", 0o600)
 	freshFake := &testkit.Incus{Instances: make(map[string]ports.InstanceInfo)}
-	freshProgram, err := New(Options{
+	freshProgram := cliFixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: freshFake, Executor: freshFake, Stdout: io.Discard, Stderr: io.Discard,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	freshLoaded, err := freshProgram.resolveReleaseTransitionContext(context.Background(),
 		"test-yard", freshConfigHome,
 	)
@@ -2399,7 +2344,8 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 }
 
 func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
@@ -2420,14 +2366,11 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 	platform := newInitPlatformFixture()
 	platform.configsConverged = false
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Environment: environment, WorkingDir: root,
 		InitPlatform: platform, Stdout: io.Discard, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	outcome, err := program.inspectMutationGate(context.Background(), "default")
 	if err != nil || outcome == nil {
 		t.Fatalf("unfinished transition gate outcome=%#v err=%v", outcome, err)
@@ -2444,7 +2387,8 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 }
 
 func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	// This fixture authors its selection in subyard.env below.
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "", 0600)
 	source := filepath.Join(root, "repo.rules")
@@ -2486,15 +2430,12 @@ exit 1
 	}}
 	platform.configsConverged = false
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, DispatcherPath: dispatcher, Program: "yard",
 		Environment: environment, WorkingDir: root,
 		InitPlatform: platform, Incus: fake, Executor: fake,
 		Stdout: io.Discard, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.resolveReleaseTransitionContext(context.Background(), "default", configHome)
 	if err != nil {
 		t.Fatal(err)
@@ -2690,11 +2631,12 @@ func (v2PublicStageTestError) ActivationDiagnostic() (string, string) {
 }
 
 func TestRegisteredMigrationIgnoresParentResolvedSettings(t *testing.T) {
-	repositoryRoot := repositoryRoot(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	repositoryRoot := cliFixture.Root
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
 	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=none\n"), 0o600)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: repositoryRoot,
 		Environment: []string{
 			"HOME=" + home,
@@ -2705,9 +2647,6 @@ func TestRegisteredMigrationIgnoresParentResolvedSettings(t *testing.T) {
 			"CODING_TOOL_INTEGRATIONS=none",
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	owner, ok := program.registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: configHome}, false, "default").(*migration.RegisteredYardMigration)
 	if !ok {
 		t.Fatal("registered yard migration owner is unavailable")
@@ -2789,41 +2728,20 @@ func TestBrokerActivationLeavesDeferredBrokerYard(t *testing.T) {
 // activeBrokerProgram runs a CLI whose registered test-yard broker is active,
 // over a fake Incus that answers only the broker observation.
 func activeBrokerProgram(t *testing.T) (*CLI, string) {
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	t.Helper()
-	repositoryRoot := repositoryRoot(t)
+	repositoryRoot := cliFixture.Root
 	home := t.TempDir()
 	configHome := filepath.Join(home, ".config", "subyard")
-	bin := filepath.Join(home, "bin")
-	incus := filepath.Join(bin, "incus")
-	writeReleaseTransitionTestFile(t, incus, []byte(`#!/bin/sh
-set -eu
-case "$*" in
-  "project list --format=json")
-    printf '%s\n' '[{"name":"subyard-test-yard"}]'
-    ;;
-  "list --all-projects --format=json")
-    printf '%s\n' '[{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.managed":"true","user.subyard.name":"test-yard"}}]'
-    ;;
-  "list yard-test-yard --project subyard-test-yard --format=json")
-    printf '%s\n' '[{"name":"yard-test-yard","status":"RUNNING","config":{"user.subyard.desired_power":"running"}}]'
-    ;;
-  "exec yard-test-yard --project subyard-test-yard -- systemctl is-active subyard-test-vms-broker.service")
-    printf '%s\n' active
-    ;;
-  *)
-    printf 'unexpected incus call: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-`), 0o700)
-	t.Setenv("PATH", bin)
+	bin := cliFixture.Bin
+	installCanonicalOwnerInventory(t, cliFixture)
 	writeReleaseTransitionTestFile(
 		t,
 		filepath.Join(configHome, "yards", "test-yard", "config.env"),
 		[]byte("YARD_TEMPLATE=test-vms\nSSH_PORT=2224\n"),
 		0o600,
 	)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: repositoryRoot,
 		Incus:          runningBrokerIncus(),
 		Environment: []string{
@@ -2842,9 +2760,6 @@ esac
 			"SSH_HOST=yard",
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	return program, configHome
 }
 
@@ -2920,7 +2835,8 @@ func (view retainedActivationSettingsView) ReadSnapshot(path string) (config.Per
 func TestMaterializedProspectiveActivationPreservesReadableRetainedFiles(t *testing.T) {
 	for _, mode := range []os.FileMode{0o640, 0o644} {
 		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
 			asset := filepath.Join(configHome, "overrides", "host", "agents", "codex", "repo.rules")
@@ -2933,10 +2849,7 @@ func TestMaterializedProspectiveActivationPreservesReadableRetainedFiles(t *test
 				}
 			}
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
 			actor := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
 			pair := releasetransition.ReleasePair{From: "a", Target: "a"}
 			ordinary, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
@@ -3062,17 +2975,10 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	// contract in tests/agent-e2e.sh; native Ready owns pending-work semantics.
 }
 
-func installCanonicalOwnerInventory(t *testing.T, root string) {
+func installCanonicalOwnerInventory(t *testing.T, cliFixture *cliFixture) {
 	t.Helper()
-	bin := filepath.Join(root, "test-owner-bin")
-	writeConfigCommandFile(t, filepath.Join(bin, "incus"), `#!/bin/sh
-case "$*" in
- 'project list --format=json') printf '[{"name":"subyard-test-yard"}]\n';;
- 'list --all-projects --format=json') printf '[{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.name":"test-yard","user.subyard.managed":"true"}}]\n';;
- *) exit 94;;
-esac
-`, 0700)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withCommands("incus").apply(cliFixture)
+
 }
 
 // runningBrokerIncus answers the broker runtime observation for test-yard.

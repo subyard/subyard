@@ -511,11 +511,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 	program, _, configHome := completedSelectionAuthoringFixture(t)
 	options := program.options
 	options.Environment = environmentList(program.configSourceEnvironment(), nil)
-	var setupErr error
-	program, setupErr = New(options)
-	if setupErr != nil {
-		t.Fatal(setupErr)
-	}
+	program = newFixture(t, withWorkingDir("")).New(options)
 	program.options.Stdin = strings.NewReader("no\n")
 	program.promptInputTerminal = func() bool { return true }
 	loaded, err := program.loadContext("default")
@@ -799,10 +795,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 				t.Error("runtime guard accepted changed policy", change, nativeErr)
 			}
 			for _, optIn := range []bool{false, true} {
-				fresh, err := New(program.options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				fresh := newFixture(t, withWorkingDir("")).New(program.options)
 				loaded, err := fresh.loadContext("default")
 				if err != nil {
 					t.Fatal(err)
@@ -834,13 +827,11 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 func TestLegacyContinuationMissingConfigHomeAssessment(t *testing.T) {
 	for _, scenario := range []string{"plain", "explicit", "unsafe-link", "unsafe-directory"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			configHome := filepath.Join(testkit.TempDir(t), "missing-config")
 			environment = append(environment, "SUBYARD_CONFIG_HOME="+configHome)
-			program, err := New(Options{RepositoryRoot: root, Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -1021,10 +1012,7 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 						t.Fatal("native reuse guard", err)
 					}
 					for _, optIn := range []bool{false, true} {
-						fresh, err := New(program.options)
-						if err != nil {
-							t.Fatal(err)
-						}
+						fresh := newFixture(t, withWorkingDir("")).New(program.options)
 						loaded, err := fresh.loadContext("default")
 						if err != nil {
 							t.Fatal(err)
@@ -1173,10 +1161,7 @@ func TestLegacyContinuationDeclaredPublication(t *testing.T) {
 				t.Fatal("runtime publication policy result", scenario, err)
 			}
 			for _, optIn := range []bool{false, true} {
-				fresh, err := New(program.options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				fresh := newFixture(t, withWorkingDir("")).New(program.options)
 				loaded, err := fresh.loadContext("default")
 				if err != nil {
 					t.Fatal(err)

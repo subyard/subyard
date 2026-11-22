@@ -14,22 +14,22 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 // Detects source deduplication and stale-preview rejection losing a concurrent copy.
 func TestProjectCopiesAllocateAfterConcurrentPreviews(t *testing.T) {
 	for _, command := range []string{"sync", "clone"} {
 		t.Run(command, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			source := filepath.Join(root, "Demo")
 			if err := os.Mkdir(source, 0700); err != nil {
 				t.Fatal(err)
 			}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -94,19 +94,17 @@ func TestProjectCopiesAllocateAfterConcurrentPreviews(t *testing.T) {
 func TestProjectPreviewSkipsPhysicalWorkspaceNames(t *testing.T) {
 	for _, command := range []string{"sync", "clone"} {
 		t.Run(command, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			source := filepath.Join(root, "Demo")
 			if err := os.Mkdir(source, 0700); err != nil {
 				t.Fatal(err)
 			}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 				ProjectData: projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 					return ports.InstanceExecResult{Stdout: []byte("Demo\x00Demo-2\x00")}, nil
 				}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -155,18 +153,25 @@ func TestRemoteCopyReservationHandlesConcurrentNamesAndLegacyOwners(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				fakeBin := t.TempDir()
-				writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\ncat <<'JSON'\n"+string(payload)+"\nJSON\n", 0o700)
-				program := &CLI{
-					options: Options{WorkingDir: t.TempDir(), Stderr: io.Discard},
-					env:     map[string]string{"PATH": os.Getenv("PATH"), "SUBYARD_OPERATION_ID": "copy-operation"},
+				cliFixture := newFixture(t, withCommands("ssh"))
+				remoteArgs := func(arguments ...string) []string {
+					line := "SUBYARD_OPERATION_ID='copy-operation' " + shellquote.Command(append([]string{"yard", "_project-state"}, arguments...))
+					return []string{"-T", "dev@owner.example", "--", "bash", "-lc", shellquote.Word(line)}
 				}
-				t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				reserveArgs := remoteArgs("reserve", "copy-operation", record.HostPath, string(mode), "Demo", "0")
+				previewArgs := remoteArgs("preview", record.HostPath, string(mode), "Demo", "0")
+				cliFixture.Exec().On(testkit.Match{Tool: "ssh", Args: reserveArgs}, testkit.Reply{Stdout: string(payload) + "\n"})
+				cliFixture.Exec().On(testkit.Match{Tool: "ssh", Args: previewArgs}, testkit.Reply{Stdout: string(payload) + "\n"})
+				program := &CLI{
+					options: Options{WorkingDir: cliFixture.Root, Stderr: io.Discard},
+					env:     map[string]string{"PATH": cliFixture.Env("PATH"), "SUBYARD_OPERATION_ID": "copy-operation"},
+				}
 				execution := &projectExecution{
 					Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@owner.example"}},
 					Record: record, Commit: projectCommitPut, OperationID: "copy-operation", RequestedName: "Demo",
 				}
 				err = program.reserveProjectExecution(context.Background(), execution)
+				cliFixture.Exec().AssertCalls(testkit.Call{Tool: "ssh", Args: reserveArgs})
 				if legacy {
 					if err == nil || !strings.Contains(err.Error(), "update the owner runtime") || execution.RemoteReserved {
 						t.Fatalf("legacy owner reservation accepted: %#v, %v", execution, err)
@@ -175,6 +180,7 @@ func TestRemoteCopyReservationHandlesConcurrentNamesAndLegacyOwners(t *testing.T
 					if err == nil || !strings.Contains(err.Error(), "update the owner runtime") {
 						t.Fatalf("legacy owner preview accepted: %v", err)
 					}
+					cliFixture.Exec().AssertCalls(testkit.Call{Tool: "ssh", Args: reserveArgs}, testkit.Call{Tool: "ssh", Args: previewArgs})
 					return
 				}
 				if err != nil || !execution.RemoteReserved || execution.Record.ProjectID != "Demo-2" ||

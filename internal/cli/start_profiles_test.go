@@ -61,10 +61,7 @@ printf '%%s\n' '%s'
 			native.Instances[key] = instance
 			runner := &testkit.ScriptedAdapter{}
 			options.AdapterRunner = runner
-			program, err := New(options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := newFixture(t, withWorkingDir("")).New(options)
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -135,10 +132,7 @@ printf '%%s\n' '{"state":"ready"}'
 `, checked), 0700)
 	options.InitPlatform = &appliedProfilesPlatformFixture{appliedSelectionPlatformFixture: &appliedSelectionPlatformFixture{
 		initPlatformFixture: newInitPlatformFixture(), settings: map[string]string{"DEV_USER": "dev", "DEV_UID": "1000"}}, profiles: []string{"sample"}, known: true}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := newFixture(t, withWorkingDir("")).New(options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -152,14 +146,12 @@ printf '%%s\n' '{"state":"ready"}'
 }
 
 func TestLifecycleStartAnchorPrecedesPhysicalEffects(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	native := lifecycleIncus()
 	runner := &testkit.ScriptedAdapter{}
-	program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, WorkingDir: root, Environment: environment,
 		Incus: native, AdapterRunner: runner, NetworkPolicy: allowTestNetworkPolicy()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

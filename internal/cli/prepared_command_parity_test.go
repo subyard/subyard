@@ -93,13 +93,13 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, stateDirectory := preparationParityFixture(t)
+			cliFixture, root, environment, stateDirectory := newPreparationParityFixture(t)
 			environment, incus, projectData, initPlatform := test.setup(t, root, environment, stateDirectory)
 			clock := testkit.NewManualClock(time.Unix(100, 0))
 			prompt := &testkit.Prompt{Answers: []bool{false}}
 			runner := &testkit.ScriptedAdapter{}
 			var directStderr bytes.Buffer
-			direct, err := New(Options{
+			direct := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments:   append([]string{test.command}, test.arguments...),
 				Environment: append(environment, "SUBYARD_OPERATION_ID=direct-parity"),
@@ -108,9 +108,6 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 				NetworkPolicy: allowTestNetworkPolicy(),
 				Stdout:        io.Discard, Stderr: &directStderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			code := direct.Run(context.Background())
 			if direct.gateAdmitted == nil {
 				t.Fatal("Run dispatched without a gate admission")
@@ -125,15 +122,12 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 					code, prompt.Requests, runner.Requests, directStderr.String())
 			}
 
-			rpcProgram, err := New(Options{
+			rpcProgram := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 				Clock: clock, Incus: incus, ProjectData: projectData, InitPlatform: initPlatform,
 				AdapterRunner: &testkit.ScriptedAdapter{}, Stdout: io.Discard, Stderr: io.Discard,
 				NetworkPolicy: allowTestNetworkPolicy(),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := rpcProgram.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -181,11 +175,8 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 }
 
 func TestCoreManifestPreparationRPCRefusalsBaseline(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newPreparationParityFixture(t)
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 
 	loaded, err := program.loadContext("default")
 	if err != nil {
@@ -210,15 +201,16 @@ func TestCoreManifestPreparationRPCRefusalsBaseline(t *testing.T) {
 	}
 }
 
-func preparationParityFixture(t *testing.T) (string, []string, string) {
+func newPreparationParityFixture(t *testing.T) (*cliFixture, string, []string, string) {
 	t.Helper()
-	root, environment, stateDirectory := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment, stateDirectory := cliFixture.Root, cliFixture.Environment, filepath.Join(cliFixture.ConfigHome, "projects")
 	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(registry), 0o600)
-	return root, environment, stateDirectory
+	return cliFixture, root, environment, stateDirectory
 }
 
 func preparationRunningYard(
@@ -266,10 +258,7 @@ func preparationHeldTestVMSlot(
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	probe := preparationParityProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := newFixture(t, withWorkingDir("")).New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
 	infrastructureFixture(t, program, incus, "test-vms")
 	return environment, incus, probe, nil
 }

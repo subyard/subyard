@@ -38,18 +38,16 @@ func (reader *sourceRepairConsent) Read(target []byte) (int, error) {
 }
 
 func TestQueuedSourceRepairCannotRecreateRetiredConfiguration(t *testing.T) {
-	_, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	home, configHome, environment := cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
 	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	testkit.WriteFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=claude\nCODING_TOOL_INTEGRATIONS=codex\n"), 0o600)
 	consent := &sourceRepairConsent{ready: make(chan struct{}), proceed: make(chan struct{})}
 	var stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 		Arguments: []string{"config", "repair-alias", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "host", "--local"}, Stdin: consent, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.promptInputTerminal = func() bool { return true }
 	dataHome := filepath.Join(home, ".subyard")
 	_, release, err := uninstall.OwnerLock(context.Background(), dataHome, nil)
@@ -96,10 +94,7 @@ func TestQueuedSourceRepairCannotRecreateRetiredConfiguration(t *testing.T) {
 
 func runAliasRepairFixture(t *testing.T, options Options) int {
 	t.Helper()
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := newFixture(t, withWorkingDir("")).New(options)
 	return program.Run(context.Background())
 }
 
@@ -152,7 +147,8 @@ func aliasRepairRuntimeFixture(t *testing.T, root string) string {
 }
 
 func TestConfigAliasRepairEarlyExplicitChoiceAndNoOp(t *testing.T) {
-	_, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	home, configHome, environment := cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
 	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
@@ -190,7 +186,8 @@ func TestConfigAliasRepairEarlyExplicitChoiceAndNoOp(t *testing.T) {
 }
 
 func TestConfigAliasRepairRejectsUnrelatedEditsAndDynamicChoice(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	program := configExactProgram(t, root, environment, nil, nil)
 	for _, content := range []string{"CODING_TOOL_INTEGRATIONS='claude'\n", "AGENTS=$SECRET_MARKER\n", "AGENTS=${SECRET_MARKER:-codex}\n"} {
 		request, err := parseConfigAliasRepair([]string{"CODING_TOOL_INTEGRATIONS", "codex", "--scope", "host", "--local"})
@@ -213,7 +210,8 @@ func TestConfigAliasRepairRejectsUnrelatedEditsAndDynamicChoice(t *testing.T) {
 }
 
 func TestConfigValidateInvalidBaseAndNamedScopesIsSafeAndReadOnly(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	testkit.WriteFile(t, filepath.Join(home, "config.env"), []byte("YARD_TEMPLATE='SECRET_MARKER'\n"), 0o600)
 	writeConfigCommandFile(t, filepath.Join(home, "yards", "sample", "config.env"), "SSH_PORT=2399\n")
 	var stdout, stderr bytes.Buffer
@@ -253,7 +251,8 @@ func TestConfigValidateInvalidBaseAndNamedScopesIsSafeAndReadOnly(t *testing.T) 
 }
 
 func TestConfigValidateAliasConflictOffersExplicitRepairWithoutValues(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	testkit.WriteFile(t, filepath.Join(home, "config.env"), []byte("YARD_PROFILES='SECRET_MARKER'\nENVIRONMENT_PROFILES=''\n"), 0o600)
 	for _, arguments := range [][]string{{"config", "validate"}, {"config", "validate", "--json"}} {
 		var stdout, stderr bytes.Buffer
@@ -268,7 +267,8 @@ func TestConfigValidateAliasConflictOffersExplicitRepairWithoutValues(t *testing
 }
 
 func TestConfigAliasRepairRejectsForeignShippedOverride(t *testing.T) {
-	_, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	home, configHome, environment := cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
 	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	path := filepath.Join(configHome, "config.env")
@@ -295,7 +295,8 @@ func mustReadConfigFixture(t *testing.T, path string) []byte {
 func TestConfigAliasRepairRejectsChangedInputsAfterConsent(t *testing.T) {
 	for _, drift := range []string{"tooling mode", "pending authorization", "affected registration"} {
 		t.Run(drift, func(t *testing.T) {
-			_, home, configHome, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			home, configHome, environment := cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 			runtimeRoot := aliasRepairRuntimeFixture(t, home)
 			root := sourceAdmissionToolingFixture(t, runtimeRoot)
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
@@ -331,7 +332,8 @@ func TestConfigAliasRepairRejectsChangedInputsAfterConsent(t *testing.T) {
 }
 
 func TestConfigAliasRepairRejectsUnsealedToolingAndSelectors(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, configHome, environment := cliFixture.Root, cliFixture.Home, cliFixture.ConfigHome, cliFixture.Environment
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	path := filepath.Join(configHome, "config.env")
@@ -354,7 +356,8 @@ func TestConfigAliasRepairRejectsUnsealedToolingAndSelectors(t *testing.T) {
 // with its replacement. config set stores it as given, for owner hosts that
 // still run an older runtime.
 func TestConfigReportsDeprecatedDevSudoAlias(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, home, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	host := filepath.Join(home, "config.env")
 	writeConfigCommandFile(t, host, "DEV_SUDO=0\n")
 	run := func(arguments ...string) (int, string) {

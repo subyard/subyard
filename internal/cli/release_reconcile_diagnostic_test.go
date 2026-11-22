@@ -38,15 +38,14 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{}), "known integration ownership conflict", "run yard migrate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 			seedOwnerHostID(t, configHome)
 			fake := &testkit.Incus{Err: test.cause}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+			var err error
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 				Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			reconciler := &materializedConfigActivationReconciler{
 				cli: program, yard: "default", configHome: configHome,
 				integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": {}},
@@ -82,7 +81,8 @@ func (activationIntegrationExecutor) Exec(_ context.Context, _, _ string, reques
 func TestIntegrationActivationRetainsApprovalAcrossSiblingDashboardPublication(t *testing.T) {
 	for _, scenario := range []string{"authorized route", "projected route", "unexpected route", "foreign baseline", "foreign device", "partial tuple", "mount drift", "identity drift", "unrelated config", "desired scope", "changed desired port", "inventory drift", "sibling not ready"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, _, _, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			loaded.Integrations = config.IntegrationSelection{Present: true}
 			profileRoot := testkit.TempDir(t)
@@ -138,10 +138,7 @@ func TestIntegrationActivationRetainsApprovalAcrossSiblingDashboardPublication(t
 			if freshErr != nil || reconcileruntime.CheckIntegrationPlan(approved, fresh) == nil {
 				t.Fatalf("ordinary integration guard admitted sibling or unrelated drift: %v", freshErr)
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
 			reconciler := &materializedConfigActivationReconciler{projectedIntegrationPlans: scenario == "projected route", integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
 			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
 			if scenario == "authorized route" || scenario == "projected route" {
@@ -220,7 +217,8 @@ func TestIntegrationActivationExplainsOnlyVerifiedNativeMigrations(t *testing.T)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, _, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			loaded.Integrations = config.IntegrationSelection{Present: true}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{
@@ -257,10 +255,7 @@ func TestIntegrationActivationExplainsOnlyVerifiedNativeMigrations(t *testing.T)
 				}
 				writeNativeMigrationJournal(t, root, configHome, journalGoal, artifact, yard, test.steps)
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
 			reconciler := &materializedConfigActivationReconciler{configHome: configHome, goal: goal, artifactDigest: artifact,
 				integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
 			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
@@ -350,7 +345,8 @@ func (changedActivationInventory) Exec(ctx context.Context, project, instance st
 func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 	for _, stage := range []string{"lock", "legacy-adoption", "observe-fresh", "compare-projected", "compare-exact", "apply"} {
 		t.Run(stage, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			loaded.Integrations = config.IntegrationSelection{Present: true}
 			instance := ports.InstanceInfo{Project: loaded.Context.IncusProject, Name: loaded.Context.YardInstanceName, Status: "Running"}
@@ -376,10 +372,7 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 				// Fail the apply observation after a successful fresh comparison.
 				runtime.Executor = &activationApplyFailureExecutor{activationIntegrationExecutor: activationIntegrationExecutor{}}
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
 			reconciler := &materializedConfigActivationReconciler{projectedIntegrationPlans: projected,
 				integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
 			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
@@ -454,7 +447,8 @@ func TestIntegrationStatusRendersOwnedCleanupCommands(t *testing.T) {
 }
 
 func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
-	root, _, _, _ := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
 	fake := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}, ExecSteps: []testkit.IncusExecStep{
 		{},
 		{Result: ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}},
@@ -477,7 +471,8 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 }
 
 func TestActivationProjectsBubblewrapPolicyRefusal(t *testing.T) {
-	root, _, _, _ := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
 	const refusal = "Bubblewrap AppArmor: the yard's Bubblewrap AppArmor policy cannot be verified or reconciled. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
 	fake := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}, ExecSteps: []testkit.IncusExecStep{
 		{},
@@ -500,7 +495,8 @@ func TestActivationProjectsBubblewrapPolicyRefusal(t *testing.T) {
 func TestMaterializedConfigObservationPreservesEarlyNativeDiagnostic(t *testing.T) {
 	for _, mode := range []os.FileMode{0, 0644} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			configHome := filepath.Join(root, "state")
 			packageRoot := filepath.Join(root, "config/agents/sample")
 			if err := os.MkdirAll(filepath.Join(packageRoot, "bin"), 0755); err != nil {
@@ -513,10 +509,7 @@ func TestMaterializedConfigObservationPreservesEarlyNativeDiagnostic(t *testing.
 			writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "CODING_TOOL_INTEGRATIONS='sample'\n")
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Executor: incus, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Executor: incus, Stdout: &stdout, Stderr: &stderr})
 			reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
 			observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }

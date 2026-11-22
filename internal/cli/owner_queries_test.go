@@ -27,7 +27,14 @@ import (
 
 func ownerQueryFixture(t *testing.T) (*rpcHandler, *testkit.ScriptedAdapter, *testkit.Incus) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	_, value0, value1, value2 := newOwnerQueryFixture(t)
+	return value0, value1, value2
+}
+
+func newOwnerQueryFixture(t *testing.T) (*cliFixture, *rpcHandler, *testkit.ScriptedAdapter, *testkit.Incus) {
+	t.Helper()
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	// Keep exact fixture permissions independent of the caller's umask.
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -45,19 +52,16 @@ func ownerQueryFixture(t *testing.T) (*rpcHandler, *testkit.ScriptedAdapter, *te
 	testkit.WriteFile(t, filepath.Join(resources, "handler.sh"), []byte("#!/bin/sh\nexit 99\n"), 0o755)
 	runner := &testkit.ScriptedAdapter{}
 	incus := lifecycleIncus()
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Incus: incus, AdapterRunner: runner})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Incus: incus, AdapterRunner: runner})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &rpcHandler{cli: program, loaded: loaded}, runner, incus
+	return cliFixture, &rpcHandler{cli: program, loaded: loaded}, runner, incus
 }
 
 func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T) {
-	handler, runner, _ := ownerQueryFixture(t)
+	_, handler, runner, _ := newOwnerQueryFixture(t)
 	initial := handler.loaded
 	var err error
 	handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"selected", "resource-only"})
@@ -121,7 +125,7 @@ func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T
 }
 
 func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
-	handler, runner, incus := ownerQueryFixture(t)
+	_, handler, runner, incus := newOwnerQueryFixture(t)
 	var err error
 	handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"selected", "legacy", "resource-only"})
 	if err != nil {
@@ -170,7 +174,7 @@ func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
 func TestOwnerProfileQueryKeepsUnsafePresetMetadataWithoutProbing(t *testing.T) {
 	for _, status := range []string{"Running", "Stopped"} {
 		t.Run(status, func(t *testing.T) {
-			handler, runner, incus := ownerQueryFixture(t)
+			_, handler, runner, incus := newOwnerQueryFixture(t)
 			var err error
 			handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"legacy"})
 			if err != nil {
@@ -209,7 +213,7 @@ func TestOwnerProfileQueryKeepsUnsafePresetMetadataWithoutProbing(t *testing.T) 
 }
 
 func TestOwnerProfileRPCChecksUseRealAdapterWithIsolatedOperationIdentity(t *testing.T) {
-	handler, _, incus := ownerQueryFixture(t)
+	_, handler, _, incus := newOwnerQueryFixture(t)
 	root := handler.cli.options.RepositoryRoot
 	yards := filepath.Join(handler.loaded.Context.Paths.ConfigHome, "yards", "default")
 	if err := os.MkdirAll(yards, 0o700); err != nil {
@@ -245,7 +249,7 @@ func TestOwnerProfileRPCChecksUseRealAdapterWithIsolatedOperationIdentity(t *tes
 }
 
 func TestOwnerSettingsQueryUsesCatalogAndRedactsPathsAndSensitiveValues(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	handler.loaded.Environment["SAMPLE_LIMIT"] = "9"
 	handler.loaded.Settings["SAMPLE_LIMIT"] = config.SettingTrace{Name: "SAMPLE_LIMIT", Resolutions: []config.SettingResolution{
 		{Scope: "default", Role: "shipped", Status: "overridden", Value: "7", Path: "/private/runtime/profile.json"},
@@ -284,7 +288,7 @@ func TestOwnerSettingsQueryUsesCatalogAndRedactsPathsAndSensitiveValues(t *testi
 }
 
 func TestOwnerHostSyncStatusIsOfflineAndMissingRootsStayMissing(t *testing.T) {
-	handler, runner, _ := ownerQueryFixture(t)
+	_, handler, runner, _ := newOwnerQueryFixture(t)
 	handler.loaded.Context.Paths.ConfigHome = filepath.Join(testkit.TempDir(t), "absent")
 	result, err := handler.hostSyncStatus(context.Background())
 	if err != nil {
@@ -308,7 +312,7 @@ func (reader ownerCredentialReader) ReadCredentialStatus(context.Context) (domai
 }
 
 func TestOwnerHostSyncStatusProjectsRegisteredGitAndCredentialsReadOnly(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	checkout := filepath.Join(testkit.TempDir(t), "source")
 	if err := os.MkdirAll(checkout, 0o700); err != nil {
 		t.Fatal(err)
@@ -364,7 +368,7 @@ func TestOwnerHostSyncStatusProjectsRegisteredGitAndCredentialsReadOnly(t *testi
 }
 
 func TestOwnerQueriesValidateParamsOwnerAndBounds(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	for _, method := range []string{"profile.list", "settings.list", "host.sync.status"} {
 		_, err := handler.Handle(context.Background(), rpc.Call{Method: method, Params: json.RawMessage(`{"unknown":true}`)}, nil)
 		var fault *rpc.Error
@@ -389,7 +393,7 @@ func TestOwnerQueriesValidateParamsOwnerAndBounds(t *testing.T) {
 }
 
 func TestOwnerRPCNegotiatesAndDispatchesTypedQueries(t *testing.T) {
-	handler, runner, _ := ownerQueryFixture(t)
+	cliFixture, handler, runner, _ := newOwnerQueryFixture(t)
 	var input, output, diagnostics bytes.Buffer
 	codec := rpc.NewCodec(nil, &input)
 	for index, method := range []string{"rpc.negotiate", "profile.list", "settings.list", "host.sync.status"} {
@@ -400,10 +404,7 @@ func TestOwnerRPCNegotiatesAndDispatchesTypedQueries(t *testing.T) {
 	handler.cli.options.Arguments = []string{"rpc", "--stdio"}
 	handler.cli.options.Stdin, handler.cli.options.Stdout = &input, &output
 	handler.cli.options.Stderr = &diagnostics
-	program, err := New(handler.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(handler.cli.options)
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("RPC exit=%d diagnostics=%s", code, &diagnostics)
 	}
@@ -441,7 +442,7 @@ func TestOwnerRPCNegotiatesAndDispatchesTypedQueries(t *testing.T) {
 }
 
 func TestOwnerQueriesReloadPersistedSettingsWithoutChangingSession(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	beforeEnvironment := make(map[string]string, len(handler.cli.env))
 	for name, value := range handler.cli.env {
 		beforeEnvironment[name] = value
@@ -505,9 +506,9 @@ func TestOwnerQueriesReloadPersistedSettingsWithoutChangingSession(t *testing.T)
 }
 
 func TestOwnerSessionPreparationUsesOwnerContextAndNativeProjectFacts(t *testing.T) {
-	handler, runner, incus := ownerQueryFixture(t)
+	_, handler, runner, incus := newOwnerQueryFixture(t)
 	tools := testkit.TempDir(t)
-	testkit.WriteFile(t, filepath.Join(tools, "htop"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	testkit.NewExecFake(t, tools, "htop")
 	t.Setenv("PATH", tools)
 	params := ownerapi.SessionParams{Kind: "shell", Scope: "host"}
 	host, err := handler.prepareSession(context.Background(), params)
@@ -579,7 +580,7 @@ func TestOwnerSessionPreparationUsesOwnerContextAndNativeProjectFacts(t *testing
 }
 
 func TestOwnerSessionPreparationRejectsInvalidSelectorsAndKeepsAbsentRootsAbsent(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	for _, params := range []ownerapi.SessionParams{{Kind: "command"}, {Kind: "shell", Scope: "other"}, {Kind: "shell", ProjectID: "../outside"}, {Kind: "shell", Scope: "host", ProjectID: "Demo"}, {Kind: "vscode", Scope: "host", ProjectID: "Demo"}, {Kind: "vscode"}, {Kind: "resources", ProjectID: "Demo"}} {
 		_, err := handler.prepareSession(context.Background(), params)
 		fault, ok := err.(*rpc.Error)
@@ -607,7 +608,7 @@ func TestOwnerSessionPreparationRejectsInvalidSelectorsAndKeepsAbsentRootsAbsent
 }
 
 func TestOwnerHostResourcesRefusesMissingOwnerToolWithoutMutation(t *testing.T) {
-	handler, runner, incus := ownerQueryFixture(t)
+	_, handler, runner, incus := newOwnerQueryFixture(t)
 	tools := testkit.TempDir(t)
 	t.Setenv("PATH", tools)
 	_, err := handler.prepareSession(context.Background(), ownerapi.SessionParams{Kind: "resources", Scope: "host"})
@@ -624,7 +625,8 @@ func TestOwnerHostResourcesRefusesMissingOwnerToolWithoutMutation(t *testing.T) 
 }
 
 func TestOwnerExactConfigPlansKeepPrivateInputsOutOfPublicOutput(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	program := configExactProgram(t, root, environment, nil, nil)
 	prepared := configExactPlan(t, program, loaded, []string{"set", "SSH_HOST", "safe-unique-input-marker", "--scope", "host"})
@@ -655,7 +657,7 @@ func TestOwnerSettingsGoldenPreservesNativeMultilineValuesAndProvenance(t *testi
 	if err := json.Unmarshal(content, &golden); err != nil {
 		t.Fatal(err)
 	}
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	var expected []ownerapi.Setting
 	for _, setting := range golden.Result.Settings {
 		if setting.Type != config.SettingMultiline && setting.Type != config.SettingLinkList {
@@ -800,7 +802,7 @@ func TestYardRPCGoldenFrames(t *testing.T) {
 }
 
 func TestOwnerProfileInventoryExcludesRequestedLifecycleOnlyPackage(t *testing.T) {
-	handler, runner, _ := ownerQueryFixture(t)
+	cliFixture, handler, runner, _ := newOwnerQueryFixture(t)
 	root := handler.cli.options.RepositoryRoot
 	directory := filepath.Join(root, "config/profiles/cleanup")
 	if err := os.MkdirAll(directory, 0700); err != nil {
@@ -809,10 +811,7 @@ func TestOwnerProfileInventoryExcludesRequestedLifecycleOnlyPackage(t *testing.T
 	testkit.WriteFile(t, filepath.Join(directory, "profile.json"), []byte(`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"cleanup.sh"}`), 0644)
 	testkit.WriteFile(t, filepath.Join(directory, "cleanup.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
 	writeConfigCommandFile(t, filepath.Join(handler.loaded.Context.Paths.ConfigHome, "config.env"), "ENVIRONMENT_PROFILES=cleanup\n")
-	program, err := New(handler.cli.options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(handler.cli.options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -842,7 +841,7 @@ func TestOwnerProfileInventoryExcludesRequestedLifecycleOnlyPackage(t *testing.T
 // Check the declared profile metadata against the real RPC projection, without
 // introducing a second general-purpose JSON Schema implementation.
 func TestOwnerProfileRPCMetadataMatchesPublishedSchema(t *testing.T) {
-	handler, _, _ := ownerQueryFixture(t)
+	_, handler, _, _ := newOwnerQueryFixture(t)
 	value, err := handler.Handle(context.Background(), rpc.Call{Method: "profile.list", Params: json.RawMessage(`{}`)}, nil)
 	if err != nil {
 		t.Fatal(err)

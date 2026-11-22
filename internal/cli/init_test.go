@@ -30,7 +30,8 @@ import (
 )
 
 func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	yardDirectory := filepath.Join(root, "state", "yards")
 	if err := os.MkdirAll(yardDirectory, 0o700); err != nil {
 		t.Fatal(err)
@@ -38,10 +39,7 @@ func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
 	writeCLIFile(t, filepath.Join(yardDirectory, "demo.env"), "SSH_PORT=2233\n", 0o600)
 	writeCLIFile(t, filepath.Join(yardDirectory, "remote.env"),
 		"ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n", 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -57,11 +55,9 @@ func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
 }
 
 func TestRealInitPlatformCarriesOnlyPreparedSudoContext(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -317,16 +313,14 @@ func TestPrepareInitConfigsUsesReadOnlyConvergence(t *testing.T) {
 		{name: "drifted", changed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			platform := newInitPlatformFixture()
 			platform.configsConverged = test.converged
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, InitPlatform: platform,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -362,7 +356,8 @@ func TestPrepareInitValidatesEffectiveIncusProject(t *testing.T) {
 		{name: "65 byte derivation", yard: strings.Repeat("a", 57), project: "subyard-" + strings.Repeat("a", 57), invalid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			if test.yard != "default" {
 				path := filepath.Join(root, "state", "yards", test.yard, "config.env")
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -378,10 +373,7 @@ func TestPrepareInitValidatesEffectiveIncusProject(t *testing.T) {
 				environment = append(environment, "INCUS_PROJECT="+test.override)
 			}
 			platform := newInitPlatformFixture()
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
 			// Existing invalid configurations must remain readable for repair.
 			loaded, err := program.loadContext(test.yard)
 			if err != nil {
@@ -405,19 +397,17 @@ func TestPrepareInitValidatesEffectiveIncusProject(t *testing.T) {
 func TestInvalidIncusProjectBlocksCLIAndRPCInitBeforeApply(t *testing.T) {
 	for _, arguments := range [][]string{nil, {"--reset"}, {"--configs"}} {
 		t.Run(fmt.Sprint(arguments), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			environment = append(environment, "INCUS_PROJECT=invalid_project")
 			platform := newInitPlatformFixture()
 			prompt := &testkit.Prompt{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
 				Arguments: append([]string{"init", "--yes"}, arguments...), InitPlatform: platform,
 				Prompt: prompt, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "invalid effective INCUS_PROJECT") {
 				t.Fatalf("CLI init: code=%d stderr=%q", code, stderr.String())
 			}
@@ -446,7 +436,8 @@ func TestInvalidIncusProjectBlocksCLIAndRPCInitBeforeApply(t *testing.T) {
 }
 
 func TestInitConfigsRechecksConvergenceAfterConsent(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -455,14 +446,11 @@ func TestInitConfigsRechecksConvergenceAfterConsent(t *testing.T) {
 	platform.configsConverged = false
 	prompt := &callbackPrompt{callback: func() { platform.configsConverged = true }}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--configs"},
 		Environment: environment, WorkingDir: root, InitPlatform: platform,
 		Prompt: prompt, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("post-consent config no-op failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -484,7 +472,8 @@ func TestInitTokenSources(t *testing.T) {
 		"consented child":       {"init", "--configs", "--yes", "--config-consent-fd"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -505,13 +494,10 @@ func TestInitTokenSources(t *testing.T) {
 			platform := newInitPlatformFixture()
 			platform.configsConverged = false
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("init: code=%d stderr=%q", code, stderr.String())
 			}
@@ -539,7 +525,8 @@ func TestInitConfigsReportsRefusedFiles(t *testing.T) {
 		"refreshed":     {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -559,13 +546,10 @@ func TestInitConfigsReportsRefusedFiles(t *testing.T) {
 			platform := newInitPlatformFixture()
 			platform.configsConverged, platform.refreshErr = false, test.refresh
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--configs", "--yes"},
 				Environment: append(slices.Clone(environment), fmt.Sprintf("%s=%d", ConfigRefusalsFDVariable, fd)), WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if _, inherited := program.baseEnv[ConfigRefusalsFDVariable]; inherited || program.env[ConfigRefusalsFDVariable] != "" {
 				t.Fatal("children inherit the report descriptor's name")
 			}
@@ -587,7 +571,8 @@ func withoutCommandSetting(environment []string, name string) []string {
 }
 
 func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -595,12 +580,9 @@ func TestLoadInitProfileUsesShippedPresetForUnknownYard(t *testing.T) {
 	}
 	content := "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n"
 	writeCLIFile(t, preset, content, 0o600)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	loaded, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "sample-service"},
@@ -642,7 +624,8 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		{name: "SSH port", override: "SSH_PORT=2299", want: "SSH_PORT"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			environment = withoutCommandSetting(environment, "SSH_PORT")
 			if test.name == "host mounts" {
 				hostSource := filepath.Join(root, "host", "fixture")
@@ -673,12 +656,9 @@ DEV_SUDO=no
 NESTED_E2E_VMS=0
 SSH_PORT=2234
 `, 0o600)
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 
 			_, bootstrap, err := program.loadInitContext(
 				"custom-name", true, []string{"--profile", "sample-service"},
@@ -696,7 +676,8 @@ SSH_PORT=2234
 // only environment profiles declare them. No operation refuses because of
 // them; readiness views report each with its exact removal command.
 func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
 		t.Fatal(err)
@@ -735,19 +716,13 @@ func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
 		if options.Environment == nil {
 			options.Environment = environment
 		}
-		program, err := New(options)
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := cliFixture.New(options)
 		code := program.Run(context.Background())
 		return code, stdout.String(), stderr.String()
 	}
 
 	// The loader keeps the hostless role and discards the assignments without an error.
-	reader, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reader := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
 	if loaded, err := reader.resolveContextWithYardSettings("default", ""); err != nil || len(loaded.IgnoredAssignments()) != 3 || loaded.Environment["ALLOWS_HOST_ACCESS"] != "false" {
 		t.Fatalf("fixture role is not hostless or lost its observations: role=%q err=%v", loaded.Environment["ALLOWS_HOST_ACCESS"], err)
 	}
@@ -809,7 +784,8 @@ func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
 }
 
 func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	environment = slices.DeleteFunc(environment, func(value string) bool {
 		return strings.HasPrefix(value, "CODING_TOOL_INTEGRATIONS=")
@@ -820,12 +796,9 @@ func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	loaded, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "sample-service"},
@@ -854,7 +827,8 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			environment = withoutCommandSetting(environment, "SSH_PORT")
 			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -866,12 +840,9 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeCLIFile(t, target, test.existing, 0o600)
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 
 			loaded, bootstrap, err := program.loadInitContext(
 				"custom-name", true, []string{"--profile", "sample-service"},
@@ -897,7 +868,8 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 	for _, location := range []string{"ignored overlay", "flat config home"} {
 		t.Run(location, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			environment = withoutCommandSetting(environment, "SSH_PORT")
 			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -913,12 +885,9 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeCLIFile(t, legacy, content, 0o600)
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 
 			loaded, bootstrap, err := program.loadInitContext(
 				"custom-name", true, []string{"--profile", "sample-service"},
@@ -936,7 +905,8 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 }
 
 func TestInitProfileIgnoresPrivateDefinitionFromEffectiveConfigDir(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -956,12 +926,9 @@ func TestInitProfileIgnoresPrivateDefinitionFromEffectiveConfigDir(t *testing.T)
 		t.Fatal(err)
 	}
 	writeCLIFile(t, legacy, content, 0o600)
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	loaded, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "sample-service"},
@@ -970,10 +937,7 @@ func TestInitProfileIgnoresPrivateDefinitionFromEffectiveConfigDir(t *testing.T)
 		t.Fatalf("init did not plan a fresh local definition: loaded=%#v bootstrap=%#v err=%v",
 			loaded.Environment, bootstrap, err)
 	}
-	plain, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
 	loaded, bootstrap, err = plain.loadInitContext("custom-name", true, nil)
 	if err != nil || bootstrap == nil || len(loaded.Integrations.Requested) != 0 {
 		t.Fatalf("plain init did not plan a fresh local yard: bootstrap=%#v err=%v", bootstrap, err)
@@ -984,7 +948,8 @@ func TestInitProfileIgnoresPrivateDefinitionFromEffectiveConfigDir(t *testing.T)
 }
 
 func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 	if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -992,12 +957,9 @@ func TestInitProfileRejectsRemoteContextBeforeBootstrap(t *testing.T) {
 	}
 	writeCLIFile(t, preset, "ENVIRONMENT_PROFILES=sample-service\nAGENTS=codex\nSSH_PORT=2234\n", 0o600)
 	environment = append(environment, "ACCESS_KIND=remote", "OWNER_ENDPOINT=operator@example.test")
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	_, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "sample-service"},
@@ -1060,7 +1022,8 @@ func (fixture *initPlatformFixture) Teardown(context.Context) error {
 }
 
 func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	dir := filepath.Join(root, "state", "yards", "default")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -1068,11 +1031,8 @@ func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
 	writeCLIFile(t, filepath.Join(dir, "config.env"), "CODING_TOOL_INTEGRATIONS=codex\nBWRAP_APPARMOR=off\n", 0600)
 	platform := newInitPlatformFixture()
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "BWRAP_APPARMOR=off requires deselecting Codex") {
 		t.Fatalf("unexpected opt-out result: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -1083,7 +1043,8 @@ func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
 
 func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
 	const conflict = "Bubblewrap AppArmor: the yard's Bubblewrap AppArmor policy cannot be verified or reconciled. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	dir := filepath.Join(root, "state", "yards", "default")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -1096,11 +1057,8 @@ func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
 		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}}},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 ||
 		strings.Count(stderr.String(), "BWRAP_APPARMOR=off requires deselecting Codex") != 1 ||
 		!strings.Contains(stderr.String(), conflict) {
@@ -1116,17 +1074,15 @@ func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
 }
 
 func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	platform := newInitPlatformFixture()
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		InitPlatform: platform,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("init failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -1152,14 +1108,11 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	platform.projectHooksErr = errors.New("optional hook failed")
-	program, err = New(Options{
+	program = cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		InitPlatform: platform,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "project hook verification failed") {
 		t.Fatalf("failed hook verification did not fail init: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -1172,10 +1125,7 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	platform.projectHooksErr = nil
-	program, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 0 || platform.projectHooks != 3 || len(platform.applied) != 2 {
 		t.Fatalf("converged init retry failed: code=%d hooks=%d applied=%v stderr=%s", code, platform.projectHooks, platform.applied, stderr.String())
 	}
@@ -1185,31 +1135,26 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	platform.hooksApplicable = false
-	program, err = New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
 	if code := program.Run(context.Background()); code != 0 || platform.projectHooks != 3 || len(platform.applied) != 2 || strings.Count(stdout.String(), "Everything is already set up") != 1 {
 		t.Fatalf("converged no-op did not report one result without native work: code=%d hooks=%d applied=%v stderr=%s", code, platform.projectHooks, platform.applied, stderr.String())
 	}
 }
 
 func TestInitProjectHookFailureRendersApprovedLabel(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	platform := newInitPlatformFixture()
 	const hook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
 	platform.projectHooksErr = &application.ProjectHookFailure{
 		Yard: "default", Reason: "exited unsuccessfully", Hooks: []string{hook},
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr,
 		InitPlatform: platform,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "yard default: project hook "+hook+" failed") ||
 		!strings.Contains(stderr.String(), "retry init") {
@@ -1230,7 +1175,8 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	// the record stays, hooks and finalize still run, and init reports it.
 	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "stopped", "stopped-full", "incus-repair", "observe-after-repair-fails", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			// A recorded yard-scoped runtime failure of this yard.
 			writeRuntimeProfileFixture(t, root)
 			writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.json"),
@@ -1279,12 +1225,9 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				arguments = append(arguments, "--yes")
 			}
 			var output bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output,
 				InitPlatform: platform, Stdin: strings.NewReader("")})
-			if err != nil {
-				t.Fatal(err)
-			}
 			code := program.Run(context.Background())
 			// Only a converged init resolves the recorded failure.
 			resolved := scenario == "repair" || scenario == "converged" || scenario == "converged-no-hooks" || scenario == "incus-repair"
@@ -1365,7 +1308,8 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 		{name: "reconcile failure is resumable", confirm: true, applyErr: errors.New("incus failed"), wantCode: 1, wantPersisted: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			environment = withoutCommandSetting(environment, "SSH_PORT")
 			preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
 			if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
@@ -1382,14 +1326,11 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 			prompt := &testkit.Prompt{Answers: []bool{test.confirm}}
 			arguments := []string{"-Y", "sample-service", "init", "--profile", "sample-service"}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				InitPlatform: platform, Prompt: prompt,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			target := filepath.Join(root, "state", "yards", "sample-service", "config.env")
 			if _, err := os.Lstat(target); !os.IsNotExist(err) {
 				t.Fatalf("definition existed before init: %v", err)
@@ -1421,15 +1362,13 @@ func TestInitProfileCreatesDefinitionOnlyAfterConfirmationAndPreflight(t *testin
 }
 
 func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"-Y", "sample-service", "init", "--profile", "missing", "--yes"},
 		Environment: environment, WorkingDir: root, InitPlatform: newInitPlatformFixture(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	definition, ok := program.manifest.Lookup("init")
 	if !ok || !slices.Contains(definition.Options, "--profile") {
 		t.Fatalf("init manifest does not advertise --profile: %#v", definition.Options)
@@ -1445,12 +1384,10 @@ func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T)
 		t.Fatalf("unknown profile wrote a definition: %v", err)
 	}
 
-	repositoryProgram, err := New(Options{
-		RepositoryRoot: repositoryRoot(t), Program: "yard", Environment: environment,
+	repositoryFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	repositoryProgram := repositoryFixture.New(Options{
+		RepositoryRoot: repositoryFixture.Root, Program: "yard", Environment: environment,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	definition, ok = repositoryProgram.manifest.Lookup("init")
 	if !ok || !slices.Contains(definition.Options, "--profile") {
 		t.Fatalf("repository init manifest does not advertise --profile: %#v", definition.Options)
@@ -1458,16 +1395,14 @@ func TestNativeInitProfileIsAdvertisedAndUnknownPresetDoesNotWrite(t *testing.T)
 }
 
 func TestNativeInitModesStayInOneConfirmedWorkflow(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	platform := newInitPlatformFixture()
 	for _, arguments := range [][]string{{"init", "--configs", "--yes"}, {"init", "--reset", "--yes"}} {
-		program, err := New(Options{
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment,
 			WorkingDir: root, InitPlatform: platform,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("%v failed with code %d", arguments, code)
 		}
@@ -1486,11 +1421,9 @@ type initRecheckPlatformFixture struct {
 }
 
 func TestInitExecutionLockScopeBelongsToOneLiveExecution(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -1556,17 +1489,14 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 		lateExpansion bool
 	}{{name: "shrink", shrink: true}, {name: "expansion"}, {name: "late expansion", lateExpansion: true}, {name: "shrink late drift", shrink: true, lateExpansion: true}} {
 		t.Run(scenario.name, func(t *testing.T) {
-			root, environment, stateDirectory := preparationParityFixture(t)
+			cliFixture, root, environment, stateDirectory := newPreparationParityFixture(t)
 			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
 			const canary = "PRIVATE_INIT_DIAGNOSTIC_CANARY"
 			environment = append(environment, "FIXTURE_PRIVATE_CANARY="+canary)
 			platform := &initRecheckPlatformFixture{initPlatformFixture: fixture.(*initPlatformFixture)}
 			platform.converged[ports.ReconcileStageProject] = !scenario.shrink
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
 				Incus: incus, ProjectData: data, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -1606,13 +1536,10 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
 	for _, scenario := range []string{"ready", "stage drift", "new owner"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, stateDirectory := preparationParityFixture(t)
+			cliFixture, root, environment, stateDirectory := newPreparationParityFixture(t)
 			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
 			platform := &initRecheckPlatformFixture{initPlatformFixture: fixture.(*initPlatformFixture)}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: incus, ProjectData: data, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: incus, ProjectData: data, InitPlatform: platform})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -1803,7 +1730,8 @@ func (prompt convergingPrompt) Confirm(context.Context, domain.ConfirmationReque
 // An approved full init that shrinks to its hooks-only remainder before it runs
 // still retires the yard's resolved pending record instead of becoming a no-op.
 func TestInitShrinkingToHooksOnlyStillRetiresResolvedRecord(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.json"),
 		`{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","failure_scope":"yard"}}`, 0o600)
@@ -1825,12 +1753,9 @@ func TestInitShrinkingToHooksOnlyStillRetiresResolvedRecord(t *testing.T) {
 	platform.converged[ports.ReconcileStageExtras] = false
 	platform.hooksApplicable = false
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"},
 		Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output,
 		InitPlatform: platform, Stdin: strings.NewReader(""), Prompt: convergingPrompt{platform: platform, stage: ports.ReconcileStageExtras}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("init failed: %d %s", code, output.String())
 	}
@@ -1845,7 +1770,8 @@ func TestInitShrinkingToHooksOnlyStillRetiresResolvedRecord(t *testing.T) {
 // Every owner whose pending record cannot be checked is reported, not only the
 // first, and init does not plan past the failed reads.
 func TestInitReportsEveryUnobservablePendingRecordOwner(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	writeRuntimeProfileFixture(t, root)
 	for _, name := range []string{"sample", "second"} {
 		directory := filepath.Join(root, "config", "profiles", name)
@@ -1873,11 +1799,8 @@ func TestInitReportsEveryUnobservablePendingRecordOwner(t *testing.T) {
 	}
 	platform.runtimeObserveErr = errors.New("injected observation failure")
 	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+	program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
 		Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output, InitPlatform: platform, Stdin: strings.NewReader("")})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 {
 		t.Fatalf("init planned past unobservable pending record owners: %s", output.String())
 	}

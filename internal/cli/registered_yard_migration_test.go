@@ -94,16 +94,14 @@ func TestRegisteredNestedBrokerRecognizesOwnedHostMemory(t *testing.T) {
 func TestPlainInitFinishesCurrentMigrationsBeforeNormalPlan(t *testing.T) {
 	for _, entry := range []string{"ordinary init", "restore prior admission"} {
 		t.Run(entry, func(t *testing.T) {
-			root, environment, marker := migrateCLIFixture(t, true)
+			cliFixture, root, environment, marker := newMigrateCLIFixture(t, true)
 			platform := newInitPlatformFixture()
 			for stage := range platform.converged {
 				platform.converged[stage] = true
 			}
 			var output bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, Stdout: &output, Stderr: &output, InitPlatform: platform})
-			if err != nil {
-				t.Fatal(err)
-			}
+			var err error
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, Stdout: &output, Stderr: &output, InitPlatform: platform})
 			loaded, loadErr := program.resolveReleaseTransitionContext(context.Background(), "default", program.env["SUBYARD_CONFIG_HOME"])
 			if loadErr != nil {
 				t.Fatal(loadErr)
@@ -148,12 +146,9 @@ func TestPlainInitFinishesCurrentMigrationsBeforeNormalPlan(t *testing.T) {
 func TestPlainInitMigrationProbePropagatesMissingNativeSocket(t *testing.T) {
 	for _, absent := range []bool{false, true} {
 		t.Run(strconv.FormatBool(absent), func(t *testing.T) {
-			root, environment, marker := migrateCLIFixture(t, true)
+			cliFixture, root, environment, marker := newMigrateCLIFixture(t, true)
 			var output bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: &output, Stderr: &output})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: &output, Stderr: &output})
 			cause := error(&os.PathError{Op: "dial", Path: "/private/socket", Err: os.ErrNotExist})
 			if absent {
 				cause = ports.ErrInstanceNotFound
@@ -176,12 +171,10 @@ func TestPlainInitMigrationProbePropagatesMissingNativeSocket(t *testing.T) {
 }
 
 func TestRegisteredMaintenanceUsesPreparedCLIContext(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	var output bytes.Buffer
-	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output, Stderr: &output})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output, Stderr: &output})
 	loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", cli.env["SUBYARD_CONFIG_HOME"])
 	if err != nil {
 		t.Fatal(err)

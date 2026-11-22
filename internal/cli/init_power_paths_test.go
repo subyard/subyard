@@ -32,10 +32,7 @@ func TestInitPersistsCommandPowerPathsForReadiness(t *testing.T) {
 	}
 	var output bytes.Buffer
 	options.Stdout, options.Stderr = &output, &output
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = newFixture(t, withWorkingDir("")).New(options)
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("init: code=%d output=%s", code, &output)
 	}
@@ -75,7 +72,8 @@ func TestInitPersistsCommandPowerPathsForReadiness(t *testing.T) {
 func TestInitCommandPowerPathsDesiredState(t *testing.T) {
 	for _, scenario := range []string{"helper only", "unit only", "late failure", "no override", "configs"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			path := filepath.Join(home, "config.env")
 			if err := os.MkdirAll(home, 0700); err != nil {
@@ -101,10 +99,7 @@ func TestInitCommandPowerPathsDesiredState(t *testing.T) {
 			if scenario == "configs" {
 				arguments = append(arguments, "--configs")
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Arguments: arguments, Stdout: &output, Stderr: &output})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: platform, Arguments: arguments, Stdout: &output, Stderr: &output})
 			code := program.Run(context.Background())
 			if scenario == "late failure" {
 				if code == 0 {
@@ -153,10 +148,7 @@ func TestInitCommandPowerPathsDesiredState(t *testing.T) {
 					}
 				}
 			}
-			repeat, err := New(repeatOptions)
-			if err != nil {
-				t.Fatal(err)
-			}
+			repeat := cliFixture.New(repeatOptions)
 			if code := repeat.Run(context.Background()); code != 0 {
 				t.Fatalf("repeat init: %d %s", code, &output)
 			}
@@ -174,7 +166,8 @@ func TestInitCommandPowerPathsDesiredState(t *testing.T) {
 func TestInitCommandPowerPathsRefuseConcurrentEdit(t *testing.T) {
 	for _, replace := range []bool{false, true} {
 		t.Run(map[bool]string{false: "changed bytes", true: "changed identity"}[replace], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			path := filepath.Join(home, "config.env")
 			if err := os.MkdirAll(home, 0700); err != nil {
@@ -183,10 +176,7 @@ func TestInitCommandPowerPathsRefuseConcurrentEdit(t *testing.T) {
 			before := []byte("SSH_PORT=2222\n")
 			testkit.WriteFile(t, path, before, 0600)
 			environment = append(environment, "SUBYARD_POWER_UNIT_PATH="+filepath.Join(home, "custom.service"))
-			program, err := New(Options{RepositoryRoot: root, Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)

@@ -151,10 +151,7 @@ func (fixture pendingInitFixture) program(t *testing.T, arguments []string, prom
 	var stdout, stderr bytes.Buffer
 	options := fixture.cli.options
 	options.Arguments, options.Prompt, options.Stdout, options.Stderr = arguments, prompt, &stdout, &stderr
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := newFixture(t, withWorkingDir("")).New(options)
 	calls := &[]nestedCall{}
 	program.nestedCommand = func(_ context.Context, arguments []string, diagnostics io.Writer) int {
 		call := nestedCall{arguments: slices.Clone(arguments)}
@@ -589,7 +586,8 @@ func TestRepairRPCListsInitWithoutRunningIt(t *testing.T) {
 // A converged init records no new snapshot; irrelevant settings must still cease
 // to be pending rather than requiring an endless series of no-op inits.
 func TestPendingInitEmptyAfterRealNoOpInit(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	// A command-scope sudo mode would be recorded and stay pending against the
 	// persistent default, as any other command-scope init input does.
 	environment = slices.DeleteFunc(environment, func(entry string) bool { return strings.HasPrefix(entry, "DEV_SUDO=") })
@@ -605,10 +603,7 @@ func TestPendingInitEmptyAfterRealNoOpInit(t *testing.T) {
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	var output bytes.Buffer
 	options := Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdout: &output, Stderr: &output, Arguments: []string{"init", "--yes"}}
-	program, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(options)
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -616,10 +611,7 @@ func TestPendingInitEmptyAfterRealNoOpInit(t *testing.T) {
 	incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{Name: loaded.Context.YardInstanceName, Status: "Running"}
 	baseline := installedSettingsExecutor{settings: loaded.Catalog.IntegrationInitSettings(loaded.Environment), selected: []string{"codex"}}
 	options.Executor = baseline
-	program, err = New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	program = cliFixture.New(options)
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "HOST_CLAUDE_MD=/tmp/unused-instructions\n")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("real init code=%d output=%s", code, &output)

@@ -26,7 +26,7 @@ func (transport latestReleaseTransport) RoundTrip(request *http.Request) (*http.
 }
 
 func TestPlainUpdateWithOlderLatestReleaseIsANoOpAtTheCLIBoundary(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "9.9.9-aaaaaaaaaaaa"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -41,14 +41,11 @@ func TestPlainUpdateWithOlderLatestReleaseIsANoOpAtTheCLIBoundary(t *testing.T) 
 	http.DefaultTransport = latestReleaseTransport{tag: "v1.2.3"}
 	t.Cleanup(func() { http.DefaultTransport = original })
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
 		Arguments: []string{"update", "--yes", "--runtime-root", runtimeRoot},
 		Stdout:    &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

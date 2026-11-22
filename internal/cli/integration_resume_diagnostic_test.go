@@ -73,10 +73,7 @@ func TestCompletedReleaseObservationPreservesPendingInitTail(t *testing.T) {
 			var before releasetransition.V2ActivationObservation
 			for _, pending := range []bool{false, true} {
 				e.pending = pending
-				program, err := New(options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := newFixture(t, withWorkingDir("")).New(options)
 				actor := &materializedConfigActivationReconciler{cli: program.releaseActivationOperation(request), configHome: request.ConfigHome,
 					goal: journal.Goal, artifactDigest: journal.ArtifactDigest, registryDigest: journal.RegistryDigest}
 				observed, err := actor.Observe(ctx, journal.Releases, releasetransition.ReleaseLinks{})
@@ -129,7 +126,8 @@ func TestIntegrationApplyFailurePreservesPublicCauseAndExecutableRetry(t *testin
 }
 
 func TestIntegrationApplyStepRendersAtActivationBoundary(t *testing.T) {
-	root, _, _, _ := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root := cliFixture.Root
 	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{"apply"},
 		Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
 		Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
@@ -180,7 +178,8 @@ func (e resumeConflictExecutor) Exec(_ context.Context, _, _ string, request por
 func TestIntegrationActivationConflictRetriesRemainInspection(t *testing.T) {
 	for _, kind := range []string{"ccusage", "persist"} {
 		t.Run(kind, func(t *testing.T) {
-			root, _, _, _ := configCommandFixture(t)
+			cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root := cliFixture.Root
 			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{kind},
 				Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
 				Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},

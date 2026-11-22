@@ -83,10 +83,7 @@ printf '%s\n' '{"state":"stale","actual":"` + strings.Repeat("a", 64) + `","desi
 	request, journal := repairRequest(t, fixture)
 	request.Mode = releasetransition.ProcessInspect
 	for process := 1; process <= 2; process++ {
-		program, err := New(fixture.cli.options)
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
 		definition, known := program.catalog.LookupSetting("SAMPLE_INIT_MODE")
 		if !known || definition.Owner != "profile:sample" || definition.Application != config.SettingYardInit || program.catalog.IntegrationInitSetting(definition.Name) {
 			t.Fatalf("fixture must declare an unrecorded profile-owned init setting: %#v", definition)
@@ -218,10 +215,7 @@ func TestActivationConfigurationBoundary(t *testing.T) {
 		if process == 1 {
 			journal.Goal.Direction = request.Direction
 			publishRepairResume(t, fixture, journal, false)
-			program, err = New(fixture.cli.options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program = newFixture(t, withWorkingDir("")).New(fixture.cli.options)
 		}
 	}
 }
@@ -343,10 +337,7 @@ func TestRepairInstalledReadUnknownOnlyForReadiness(t *testing.T) {
 			request, journal := repairRequest(t, fixture)
 			request.Mode = scenario.mode
 			fixture.cli.options.Executor = scenario.executor
-			program, err := New(fixture.cli.options)
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := newFixture(t, withWorkingDir("")).New(fixture.cli.options)
 			failures := map[string]error{}
 			for _, owner := range program.activationReconcilers(request) {
 				if _, err := owner.Observe(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {

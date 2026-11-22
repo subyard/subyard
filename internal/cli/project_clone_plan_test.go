@@ -209,16 +209,14 @@ func emptyClonePlanFixture(t *testing.T) (*CLI, *projectExecution, string, *empt
 	}
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	// Keep the synthetic guest owner distinct from the unprivileged test user.
 	environment = append(environment, "DEV_UID="+strconv.Itoa(os.Geteuid()+1))
 	source := filepath.Join(testkit.TempDir(t), "Empty.git")
 	emptyCloneGit(t, "init", "--bare", "--initial-branch=main", source)
 	data := &emptyClonePlanData{}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: data})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, ProjectData: data})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

@@ -483,10 +483,7 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 				options.Stdin = strings.NewReader("")
 				options.AdapterRunner, options.InitPlatform = harness.adapter, harness.platform
 				options.NetworkPolicy = &yardnetwork.Service{Host: networkHost, Lock: testNetworkPolicyLock{}}
-				cli, err := New(options)
-				if err != nil {
-					t.Fatal(err)
-				}
+				cli := newFixture(t, withWorkingDir("")).New(options)
 				cli.nestedCommand = func(context.Context, []string, io.Writer) int { return 0 }
 				cli.sourceBinding = harness.bindSources
 				cli.Run(ctx)

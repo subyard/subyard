@@ -16,11 +16,13 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestOwnerServiceRPCWithInvalidWorkspaceAllowsOnlyBoundServiceOperations(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	configHome := filepath.Join(root, "state")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards/fixture-runtime"), 0o700); err != nil {
 		t.Fatal(err)
@@ -37,10 +39,8 @@ func TestOwnerServiceRPCWithInvalidWorkspaceAllowsOnlyBoundServiceOperations(t *
 	}}
 	client, server := net.Pipe()
 	var diagnostics bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Arguments: []string{"rpc", "--stdio"}, Environment: environment, Incus: incus, ProjectData: probe, AdapterRunner: runner, Stdin: server, Stdout: server, Stderr: &diagnostics})
-	if err != nil {
-		t.Fatal(err)
-	}
+	var err error
+	program := cliFixture.New(Options{RepositoryRoot: root, Arguments: []string{"rpc", "--stdio"}, Environment: environment, Incus: incus, ProjectData: probe, AdapterRunner: runner, Stdin: server, Stdout: server, Stderr: &diagnostics})
 	selection := infrastructureYardFixture(t, program, incus, "test-vms", "fixture-runtime")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards/default"), 0o700); err != nil {
 		t.Fatal(err)
@@ -116,11 +116,10 @@ func TestOwnerServiceRPCWithInvalidWorkspaceAllowsOnlyBoundServiceOperations(t *
 }
 
 func TestOwnerServiceControllerSelectionDoesNotReadDefaultWorkspace(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	var err error
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment})
 	registerStructuredOwnerFixture(t, program, "fixture-owner", "owner.example")
 	if err := os.MkdirAll(filepath.Join(root, "state/yards/default"), 0o700); err != nil {
 		t.Fatal(err)
@@ -147,7 +146,8 @@ func TestOwnerServiceControllerSelectionDoesNotReadDefaultWorkspace(t *testing.T
 func TestOwnerServiceRemoteStatusUsesTransportWithoutWorkspaceAdmission(t *testing.T) {
 	for _, supported := range []bool{true, false} {
 		t.Run(map[bool]string{true: "current-owner", false: "old-owner"}[supported], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t, withWorkingDir(""), withCommands("ssh"), withEnv("SUBYARD_OPERATION_ID=owner-status-fixture"))
+			root, environment := cliFixture.Root, cliFixture.Environment
 			fakeBin := filepath.Join(root, "fake-bin")
 			if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 				t.Fatal(err)
@@ -162,16 +162,19 @@ func TestOwnerServiceRemoteStatusUsesTransportWithoutWorkspaceAdmission(t *testi
 				testkit.WriteFile(t, ownerPath, bytes.ReplaceAll(body, []byte(",'owner-services-v1'"), nil), 0o600)
 			}
 			forwarded := filepath.Join(root, "forwarded")
-			script := "#!/bin/sh\n" + trustedSSHMock(t) + "\ncase \"$*\" in *rpc*) exec python3 '" + ownerPath + "' \"$@\" ;; esac\nprintf '%s\\n' \"$*\" > '" + forwarded + "'\nprintf '%s\\n' '{\"schema_version\":1,\"status\":\"ok\"}'\n"
-			testkit.WriteFile(t, filepath.Join(fakeBin, "ssh"), []byte(script), 0o700)
-			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-			environment = append(environment, "PATH="+os.Getenv("PATH"))
+			knownHosts := cliFixture.Write("known_hosts", "owner.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture\n")
+			cliFixture.Exec().On(testkit.Match{Tool: "ssh", Args: []string{"-G", "owner.example"}},
+				testkit.Reply{Stdout: "hostname owner.example\nport 22\nuserknownhostsfile " + knownHosts + "\n"})
+			strict := []string{"-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "ControlMaster=no", "-o", "ControlPath=none"}
+			rpcArgs := []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "owner.example", "--", "bash", "-lc", shellquote.Word("exec 'yard' 'rpc' '--stdio'")}
+			cliFixture.Exec().On(testkit.Match{Tool: "ssh", Prefix: strict, Contains: rpcArgs},
+				testkit.Reply{Script: "exec python3 " + shellquote.Word(ownerPath) + " \"$@\""})
+			forwardArgs := []string{"-t", "owner.example", "--", "bash", "-lc", shellquote.Word("SUBYARD_OPERATION_ID='owner-status-fixture' 'yard' '-Y' 'default' 'test-vms' '--yes' 'status' '--json' '--expect-owner' 'fixture-owner'")}
+			cliFixture.Exec().On(testkit.Match{Tool: "ssh", Prefix: strict, Contains: forwardArgs},
+				testkit.Reply{Stdout: "{\"schema_version\":1,\"status\":\"ok\"}\n", Script: "printf '%s\\n' \"$*\" > " + shellquote.Word(forwarded)})
 			var output, diagnostics bytes.Buffer
 			incus := &testkit.Incus{}
-			program, err := New(Options{RepositoryRoot: root, Arguments: []string{"-Y", "invalid-workspace", "test-vms", "status", "--json", "--owner", "fixture-owner"}, Environment: environment, WorkingDir: root, Incus: incus, Executor: incus, Stdout: &output, Stderr: &diagnostics})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := cliFixture.New(Options{RepositoryRoot: root, Arguments: []string{"-Y", "invalid-workspace", "test-vms", "status", "--json", "--owner", "fixture-owner"}, Environment: environment, WorkingDir: root, Incus: incus, Executor: incus, Stdout: &output, Stderr: &diagnostics})
 			registerStructuredOwnerFixture(t, program, "fixture-owner", "owner.example")
 			if err := os.MkdirAll(filepath.Join(root, "state/yards/default"), 0o700); err != nil {
 				t.Fatal(err)

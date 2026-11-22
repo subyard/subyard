@@ -15,16 +15,13 @@ import (
 )
 
 func TestPreparedCommandFailureStillAuditsInvocation(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
+	cliFixture, root, environment, _ := newPreparationParityFixture(t)
 	home := filepath.Join(root, "audit")
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", WorkingDir: root,
 		Environment: append(environment, "SUBYARD_NO_AUDIT=", "SUBYARD_HOME="+home),
 		Arguments:   []string{"stop", "--invalid"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 {
 		t.Fatalf("invalid stop exit = %d", code)
 	}
@@ -35,7 +32,7 @@ func TestPreparedCommandFailureStillAuditsInvocation(t *testing.T) {
 }
 
 func TestUnknownCoreHandlerFailsStartup(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
+	_, root, environment, _ := newPreparationParityFixture(t)
 	path := filepath.Join(root, "config", "commands.registry")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -48,11 +45,8 @@ func TestUnknownCoreHandlerFailsStartup(t *testing.T) {
 }
 
 func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newPreparationParityFixture(t)
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -88,11 +82,8 @@ func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
 }
 
 func TestRPCDisconnectClosesPreparedResourcesWithoutExecution(t *testing.T) {
-	root, environment, _ := preparationParityFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cliFixture, root, environment, _ := newPreparationParityFixture(t)
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: lifecycleIncus()})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
