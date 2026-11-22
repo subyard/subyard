@@ -7,9 +7,10 @@ Herdr app and access to the tailnet. The yard runs Core without the desktop app.
 ## Enable and connect
 
 The guest OpenSSH server must allow public-key authentication and use the
-development user's `.ssh/authorized_keys`. Provisioning installs a global Herdr
-drop-in that disables password and keyboard-interactive authentication. `up`
-requires the drop-in before publishing the owner proxy. Herdr is unavailable on
+development user's `.ssh/authorized_keys`. `up` installs a global Herdr drop-in
+and verifies that password and keyboard-interactive authentication are disabled
+before publishing the owner proxy. Remove any overriding directives from the
+guest SSH configuration. Herdr is unavailable on
 VM and nested E2E yards. Alternate OpenSSH configs set through `SSHD_OPTS` are
 outside the supported setup.
 

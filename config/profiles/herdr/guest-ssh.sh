@@ -11,21 +11,34 @@ matches() {
     [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u:%a' "$policy")" = 0:644 ] &&
         printf '%s\n' "$body" | cmp -s - "$policy"
 }
-reload_ssh() { /usr/sbin/sshd -t && systemctl reload ssh.service; }
 refuse() { printf 'Herdr: %s\n' "$*" >&2; exit 1; }
+
+effective() {
+    current=$(/usr/sbin/sshd -T) || return 1
+    valid=0
+    if ! printf '%s\n' "$current" | grep -qx 'passwordauthentication no'; then
+        printf 'Herdr: Remove the overriding PasswordAuthentication directive from the guest SSH configuration before publishing Herdr.\n' >&2
+        valid=1
+    fi
+    if ! printf '%s\n' "$current" | grep -qx 'kbdinteractiveauthentication no'; then
+        printf 'Herdr: Remove the overriding KbdInteractiveAuthentication directive from the guest SSH configuration before publishing Herdr.\n' >&2
+        valid=1
+    fi
+    return "$valid"
+}
 
 case "${1:-}" in
     check) matches; exit ;;
     absent) absent; exit ;;
     ensure)
-        if matches; then exit 0; fi
+        if matches; then effective; exit; fi
         absent || refuse "SSH drop-in differs from the owned policy: $policy"
         stage=$(mktemp "${policy}.XXXXXX")
         trap 'rm -f -- "$stage"' EXIT
         printf '%s\n' "$body" > "$stage"
         chmod 0644 "$stage"
         mv -T -- "$stage" "$policy"
-        if ! reload_ssh; then
+        if ! reload_guest_sshd effective; then
             rm -f -- "$policy"
             refuse 'could not activate the Herdr SSH drop-in'
         fi ;;
@@ -34,7 +47,7 @@ case "${1:-}" in
         matches || refuse "refusing to remove a changed SSH drop-in: $policy"
         previous=$(mktemp "${policy}.XXXXXX")
         mv -T -- "$policy" "$previous"
-        if ! reload_ssh; then
+        if ! reload_guest_sshd :; then
             mv -T -- "$previous" "$policy"
             refuse 'could not retire the Herdr SSH drop-in'
         fi

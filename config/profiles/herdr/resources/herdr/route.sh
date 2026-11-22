@@ -107,7 +107,7 @@ listener_ready() {
 
 ensure_route() {
   local ip shape state token created=false
-  guest_ssh check || die 'Herdr SSH drop-in is missing or changed. Run yard init to reconcile the profile.'
+  guest_ssh check || die 'Herdr SSH drop-in is missing or changed. Run yard herdr up.'
   ip=$(endpoint)
   shape=$(route_shape "$ip")
   token=$(route_receipt "$shape")

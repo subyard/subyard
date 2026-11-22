@@ -8,6 +8,7 @@ ln -s "$PWD/scripts" "$test_root/fixture/scripts"
 cp -a config/profiles/herdr "$test_root/fixture/config/profiles/"
 mkdir -p "$test_root/fixture/config/profiles/herdr/bin"
 export PATH="$test_root/bin:$PATH" HERDR_TEST_CALLS="$test_root/calls"
+export HERDR_TEST_DROPIN_PATH="$test_root/dropin"
 unset -f incus
 cat > "$test_root/bin/incus" <<'INCUS'
 #!/usr/bin/env bash
@@ -31,11 +32,18 @@ case "$1" in
       loginctl) printf 'yes\n' ;;
       sh)
         cat >/dev/null
-        if [ "$2" = -s ]; then
-          case "$4" in
-            check) [ "${HERDR_TEST_DROPIN:-present}" = present ] ;;
-            absent) [ "${HERDR_TEST_DROPIN:-present}" = missing ] ;;
-            remove) printf 'remove SSH drop-in\n' >> "$HERDR_TEST_CALLS" ;;
+        if [ "$2:$3:$4" = '-eu:-s:--' ]; then
+          case "$5" in
+            check) [ "${HERDR_TEST_DROPIN:-present}" = present ] || [ -e "$HERDR_TEST_DROPIN_PATH" ] ;;
+            absent) [ "${HERDR_TEST_DROPIN:-present}" = missing ] && [ ! -e "$HERDR_TEST_DROPIN_PATH" ] ;;
+            ensure)
+              printf 'install SSH drop-in\n' >> "$HERDR_TEST_CALLS"
+              if [ "${HERDR_TEST_POLICY:-safe}" = overridden ]; then
+                printf 'Remove the overriding PasswordAuthentication directive\n' >&2
+                exit 1
+              fi
+              touch "$HERDR_TEST_DROPIN_PATH" ;;
+            remove) printf 'remove SSH drop-in\n' >> "$HERDR_TEST_CALLS"; rm -f -- "$HERDR_TEST_DROPIN_PATH" ;;
             *) exit 85 ;;
           esac
         fi ;;
@@ -48,8 +56,11 @@ case "$1" in
             if [ "$7" = minimum ]; then printf 'upstream Core update completed\n'; fi ;;
           */herdr-profile:observe)
             if [ "${HERDR_TEST_CORE:-up}" = down ]; then exit 1; fi
+            if [ "${HERDR_TEST_CORE:-up}" = stopped ]; then printf 'null\n'; exit 0; fi
             printf '{"PID":42,"Live":2}\n' ;;
-          */herdr-profile:stop) printf 'stop Core\n' >> "$HERDR_TEST_CALLS"; exit 1 ;;
+          */herdr-profile:stop)
+            printf 'stop Core\n' >> "$HERDR_TEST_CALLS"
+            [ "${HERDR_TEST_CORE:-up}" = stopped ] ;;
           */herdr-profile:sync) ;;
           */herdr-profile:registration-ready) [ "${HERDR_TEST_REGISTRATION:-ready}" = ready ] ;;
           */herdr-profile:keys)
@@ -75,6 +86,7 @@ printf '#!/bin/sh\nprintf "256 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 printf '#!/bin/sh\nprintf "100.100.100.100\\n"\n' > "$test_root/bin/tailscale"
 printf '#!/bin/sh\nprintf "100.100.100.100 STREAM fixture.ts.net\\n"\n' > "$test_root/bin/getent"
 printf '#!/bin/sh\nprintf "1: tailscale0 inet 100.100.100.100/32 scope global\\n"\n' > "$test_root/bin/ip"
+printf '#!/bin/sh\nexit 0\n' > "$test_root/bin/ss"
 chmod 0755 "$test_root/bin/"* "$test_root/fixture/config/profiles/herdr/bin/herdr-profile"
 
 for setting in SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_CONFIG_HOME SUBYARD_HOME \
@@ -109,6 +121,21 @@ HERDR_TEST_LISTENER=down "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_DROPIN=missing "$handler" up | jq -e '.changed == true' >/dev/null
 if HERDR_TEST_LISTENER=down "$handler" pair --key fixture >/dev/null 2>&1; then exit 1; fi
 if HERDR_TEST_DROPIN=missing "$handler" pair --key fixture >/dev/null 2>&1; then exit 1; fi
+
+(
+  export HERDR_TEST_DROPIN=missing SUBYARD_RESOURCE_MODE=apply SUBYARD_OPERATION_ID=fixture
+  : > "$HERDR_TEST_CALLS"
+  if result=$(HERDR_TEST_ROUTE='{}' HERDR_TEST_POLICY=overridden SUBYARD_RESOURCE_ACTION=up "$handler" up 2>&1); then exit 1; fi
+  [[ "$result" == *'Remove the overriding PasswordAuthentication directive'* ]]
+  if grep -q '^config device add ' "$HERDR_TEST_CALLS"; then exit 1; fi
+  : > "$HERDR_TEST_CALLS"
+  HERDR_TEST_ROUTE='{}' SUBYARD_RESOURCE_ACTION=up "$handler" up >/dev/null
+  [ -f "$HERDR_TEST_DROPIN_PATH" ]
+  grep -E '^(install SSH drop-in|config device add)' "$HERDR_TEST_CALLS" | cut -d ' ' -f1-3 > "$test_root/install-order"
+  printf 'install SSH drop-in\nconfig device add\n' | cmp - "$test_root/install-order"
+  HERDR_TEST_CORE=stopped SUBYARD_RESOURCE_ACTION=down "$handler" down
+  [ ! -e "$HERDR_TEST_DROPIN_PATH" ] && grep -Fxq 'remove SSH drop-in' "$HERDR_TEST_CALLS"
+)
 
 (
   export HERDR_TEST_DROPIN=missing HERDR_TEST_LISTENER=down HERDR_TEST_ROUTE='{}'

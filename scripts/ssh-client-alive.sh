@@ -1,5 +1,6 @@
 #!/bin/sh
 # Configure server-side liveness checks for yard SSH connections.
+# The SSH access stage supplies lib/sshd.sh for ensure. The check runs independently.
 set -eu
 
 policy=/etc/ssh/sshd_config.d/45-subyard-client-alive.conf
@@ -32,7 +33,7 @@ trap 'rm -f -- "$stage"' EXIT
 printf '%s\n' "$desired" > "$stage"
 chmod 0644 "$stage"
 mv -T -- "$stage" "$policy"
-if ! /usr/sbin/sshd -t || ! effective || ! systemctl reload ssh.service; then
+if ! reload_guest_sshd effective; then
     rm -f -- "$policy"
     printf 'Could not activate guest SSH ClientAlive policy\n' >&2
     exit 1

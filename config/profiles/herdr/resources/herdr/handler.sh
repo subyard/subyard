@@ -30,7 +30,7 @@ native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
 as_dev() { yexec runuser -u "$DEV_USER" -- "$@"; }
-guest_ssh() { yexec sh -s -- "$1" < "$profile/guest-ssh.sh"; }
+guest_ssh() { cat "$root/scripts/lib/sshd.sh" "$profile/guest-ssh.sh" | yexec sh -eu -s -- "$1"; }
 # shellcheck source=config/profiles/herdr/resources/herdr/route.sh
 . "$here/route.sh"
 # shellcheck source=config/profiles/herdr/resources/herdr/pair.sh
@@ -254,8 +254,8 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       up)
         allowed
         svc_require_yard_running
-        guest_ssh check || die 'Herdr SSH drop-in is missing or changed. Run yard init to reconcile the profile.'
         up
+        guest_ssh ensure
         if ! route_ready; then ensure_route; fi ;;
       is-up) yard_running && running && route_ready ;;
       status)
