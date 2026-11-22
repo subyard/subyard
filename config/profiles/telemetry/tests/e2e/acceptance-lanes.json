@@ -3,8 +3,8 @@
   "tier": "vm",
   "needs": [],
   "lanes": [
-    {"id": "local", "needs": ["kvm"], "arguments": ["--local"]},
-    {"id": "resources", "needs": ["kvm"], "arguments": ["--resources"]},
+    {"id": "local", "tier": "runner", "needs": ["kvm"], "arguments": ["--local"]},
+    {"id": "resources", "tier": "runner", "needs": ["kvm"], "arguments": ["--resources"]},
     {"id": "published-rollback", "arguments": ["--published-rollback"]}
   ]
 }

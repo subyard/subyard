@@ -4,8 +4,8 @@
   "needs": [],
   "preflight": ["bash", "config/profiles/test-vms/tests/run.sh", "--preflight"],
   "lanes": [
-    {"id": "broker-cold-upgrade", "needs": ["kvm"], "arguments": ["--lane", "broker-cold-upgrade"]},
+    {"id": "broker-cold-upgrade", "tier": "runner", "needs": ["kvm"], "arguments": ["--lane", "broker-cold-upgrade"]},
     {"id": "full-uninstall", "needs": ["reboot"], "arguments": ["--lane", "full-uninstall"]},
-    {"id": "memory-boundary", "needs": ["kvm"], "arguments": ["--lane", "memory-boundary"]}
+    {"id": "memory-boundary", "tier": "runner", "needs": ["kvm"], "arguments": ["--lane", "memory-boundary"]}
   ]
 }

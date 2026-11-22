@@ -390,6 +390,7 @@ jobs:
         env:
           CHECK_ID: ${{ matrix.id }}
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
+          SUBYARD_E2E_TIER: ${{ matrix.tier }}
           BUNDLE: ${{ matrix.bundle || 'candidate-bundle' }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
@@ -477,6 +478,7 @@ jobs:
         env:
           CHECK_ID: ${{ matrix.id }}
           CHECK_COMMAND: ${{ toJSON(matrix.command) }}
+          SUBYARD_E2E_TIER: ${{ matrix.tier }}
         run: |
           mapfile -t command < <(jq -r '.[]' <<<"$CHECK_COMMAND")
           bash dev/ci/periodic-e2e.sh check "$CHECK_ID" \

@@ -16,6 +16,7 @@ fixture_functions() { # source file, then function names
   for name; do sed -n "/^$name() {/,/^}$/p" "$source"; done
 }
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
+bash "$ROOT/tests/helpers/runner-lease.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
 
 grep -Fq 'SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes' \

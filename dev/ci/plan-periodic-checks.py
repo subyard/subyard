@@ -19,18 +19,13 @@ def optional_vm(name, duration, *guest_env):
                         "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh"]}
 
 
-# Checks that boot a VM inside the leased VM. On AMD hosted runners such a VM boots far too slowly
-# under the runner's hypervisor for these checks to finish, so they run only on Intel runners.
-NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
-          "profile:telemetry/local", "profile:telemetry/resources",
-          "profile:android/gradle", "profile:android/memory-lease", "profile:test-vms/broker-cold-upgrade", "profile:test-vms/memory-boundary",
-          "vm:staging-reliability",
-          "vm:p0-yard-maintenance"}
+# Only these nested checks need both a VM inside the guest and a guest reboot.
+NESTED = {"p0-release-smoke", "profile:amnezia"}
 # The release catalog runs the full P0 matrix as one check; here its lanes run on separate runners.
 SPLIT = {"vm:p0-full"}
 # A hosted run took 17 minutes; 45m leaves room for slower runners. The 10m TERM grace covers
 # two 120s guest cleanups and the 180s lease release.
-PERIODIC_ONLY = [{"id": "periodic:config-sync",
+PERIODIC_ONLY = [{"id": "periodic:config-sync", "tier": "system-container",
                   "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                               "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]},
                  # Physical regression outside the release acceptance catalog; uses the normal candidate bundle.
@@ -75,7 +70,8 @@ def veranda_short(name, options):
 def plan(root=ROOT, image=IMAGES[0]):
     module = collector()
     inventory = module.profile_inventory(root)
-    declarations = module.check_declarations(root, inventory)
+    declarations = {"p0:" + lane: {"tier": tier} for lane, tier in module.P0_LANE_TIERS.items()}
+    declarations.update(module.check_declarations(root, inventory))
     declared = module.commands(root, "0.0.0", inventory, periodic=True)
     # The same release checks the collector runs: every shipped profile lane, the core VM catalog
     # with its agent upgrade baselines, and the release smoke check, plus periodic-only lanes.
@@ -127,7 +123,7 @@ def plan(root=ROOT, image=IMAGES[0]):
     for check in include:
         if check["id"] in {"published:0.11.0", "published:0.17.3", "published:0.27.0"}:
             check["optional"] = True
-    include += PERIODIC_ONLY
+    include.extend(check.copy() for check in PERIODIC_ONLY)
     include += [veranda_short(name, options) for name, options in VERANDA.items()]
     include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]
     missing = sorted(SPLIT - set(declared))
@@ -138,8 +134,21 @@ def plan(root=ROOT, image=IMAGES[0]):
         raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
     # Every planned command leases through the hosted controller. Its image flag
     # applies to every acquisition without changing the release lane entrypoints.
-    include = [check | {"tier": module.resolve_tier(declarations.get(check["id"], {})),
-                        "command": ["--image", image, *check["command"]]} for check in include]
+    for check in include:
+        name, command = check["id"], check["command"]
+        entry = declarations.get(name, check)
+        if name.startswith("published:") or name == "periodic:cleanup-acceptance":
+            entry = {"tier": "system-container"}
+        # A direct job is a single host for its lifetime. The core lease wrapper
+        # requests one guest; explicit singleton commands and reviewed hosted
+        # profile commands also own just one allocation. Keep pair and broker
+        # client checks on the candidate pool, including unreviewed profiles.
+        singleton = ("lease" in entry or name == "p0:newer-release"
+                     or name in module.CI_HOSTED_CHECKS
+                     or any(command[i:i+2] == ["--vm-count", "1"] for i in range(len(command))))
+        tier = module.resolve_tier(entry, hosted_singleton=singleton)
+        check["tier"] = tier
+        check["command"] = ["--image", "ubuntu-24.04" if tier == "runner" else image, *command]
     return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
             "nested": {"include": [c for c in include if c["id"] in NESTED]}}
 
