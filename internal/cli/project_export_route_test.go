@@ -43,16 +43,10 @@ func (data exportRouteNativeData) Stream(ctx context.Context, yard domain.Contex
 }
 
 func TestProjectExportSameHostRemoteAliasRetainsNativeRoute(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	if err := os.MkdirAll(filepath.Join(configHome, "yards", "remote"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withYards("remote"), withEnv("SUBYARD_HOST_ID=shared-host"))
+	configHome := fixture.ConfigHome
 	testkit.WriteFile(t, filepath.Join(configHome, "yards", "remote", "config.env"), []byte("ACCESS_KIND=remote\nOWNER_ENDPOINT=dev@owner.example\nOWNER_YARD_NAME=owner-only\nSSH_HOST=owner-data\n"), 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=shared-host"), WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("remote")
 	if err != nil {
 		t.Fatal(err)
@@ -152,10 +146,7 @@ func TestProjectExportSameHostRemoteAliasRetainsNativeRoute(t *testing.T) {
 	if _, _, err := program.ownerYardRouteReadOnly(context.Background(), loaded, "shared-host", "owner-only"); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("same-host remote route conflict bypassed: %v", err)
 	}
-	localProgram, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: append(environment, "SUBYARD_HOST_ID=shared-host"), WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	localProgram := fixture.New(Options{})
 	local, err := localProgram.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -172,17 +163,11 @@ var _ ports.YardExecutor = exportRouteNativeData{}
 
 func TestLegacyRouteProjectionDefaultsAndConflicts(t *testing.T) {
 	ctx := context.Background()
-	root, environment, _ := nativeFixture(t)
-	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	if err := os.MkdirAll(filepath.Join(configHome, "yards", "remote"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFixture(t, withWorkingDir(""), withYards("remote"))
+	configHome := fixture.ConfigHome
 	path := filepath.Join(configHome, "yards", "remote", "config.env")
 	testkit.WriteFile(t, path, []byte("ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\nOWNER_YARD_NAME=inner\n"), 0o600)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

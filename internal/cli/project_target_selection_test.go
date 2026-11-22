@@ -16,16 +16,14 @@ import (
 )
 
 func TestProjectTargetAdmissionRequiresActiveProfileAndRetainsShutdown(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 	writeProvisionProfile(t, root, "sample")
 	source := filepath.Join(root, "source")
 	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -81,14 +79,12 @@ func TestProjectTargetAdmissionRequiresActiveProfileAndRetainsShutdown(t *testin
 func TestProjectAndPresetReadersRejectUnsafePackageSources(t *testing.T) {
 	for _, filename := range []string{"profile.conf", "yard.env"} {
 		t.Run(filename, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root := fixture.Root
 			writeProvisionProfile(t, root, "sample")
 			preset := filepath.Join(root, "config/profiles/sample/yard.env")
 			testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o644)
-			program, err := New(Options{RepositoryRoot: root, Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -118,7 +114,8 @@ func TestProjectBindReimportCapturesMigratedIdentityBeforeConsent(t *testing.T) 
 	for _, scenario := range []string{"reimport", "record changed after preparation", "inactive retained target"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
-			root, environment, stateDirectory := nativeFixture(t)
+			fixture := newFixture(t)
+			root, stateDirectory := fixture.Root, filepath.Join(fixture.ConfigHome, "projects")
 			source := filepath.Join(root, "Demo")
 			if err := os.Mkdir(source, 0700); err != nil {
 				t.Fatal(err)
@@ -135,10 +132,7 @@ func TestProjectBindReimportCapturesMigratedIdentityBeforeConsent(t *testing.T) 
 			if err := store.Put(ctx, legacy); err != nil {
 				t.Fatal(err)
 			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{})
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
