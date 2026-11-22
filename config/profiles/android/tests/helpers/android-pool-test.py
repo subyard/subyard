@@ -2598,7 +2598,8 @@ count.write_text(str(int(count.read_text()) + 1 if count.exists() else 1))
 image = target.joinpath(*sys.argv[2].split(';'))
 image.mkdir(parents=True)
 (image / 'system.img').write_bytes(b'base-image')
-(image / 'source.properties').write_text('AndroidVersion.ApiLevel=35\\nSystemImage.Abi=x86_64\\nSystemImage.TagId=google_apis\\nPkg.Revision=1\\n')
+(image / 'source.properties').write_text('AndroidVersion.ApiLevel = 35\\nSystemImage.Abi = x86_64\\n'
+                                         'SystemImage.TagId = google_apis\\nPkg.Revision = 1\\n')
 """)
         installer.chmod(0o755)
         images = poolmod.Images(self.root / 'real-images', sdk)
@@ -2771,6 +2772,10 @@ for package in sys.argv[2:]:
     metadata = 'Pkg.Revision=' + revision + '\\n'
     if package.startswith('platforms;'):
         metadata = 'Pkg.Revision=1\\nAndroidVersion.ApiLevel=' + revision + '\\n'
+    if package == 'platforms;android-36.1':
+        metadata = 'Pkg.Revision = 1\\nAndroidVersion.ApiLevel = ' + revision + '\\n'
+    if package.startswith('ndk;'):
+        metadata = 'Pkg.Desc = Android NDK\\nPkg.Revision = ' + revision + '\\n'
     (directory / 'source.properties').write_text(metadata)
     tool = directory / 'tool'
     tool.write_text('#!/bin/sh\\n')
@@ -2817,17 +2822,17 @@ licenses.mkdir()
         self.pool.release(token)
         # Repeats are no-ops; existing unrecognized paths are never replaced.
         self.assertEqual(self.pool.sdk_install(['platforms;android-36.1'])['already_installed'], ['platforms;android-36.1'])
-        (sdk / 'ndk/27.0.12077973').mkdir(parents=True)
-        (sdk / 'ndk/27.0.12077973/user-file').write_text('keep')
-        with self.assertRaisesRegex(poolmod.PoolError, 'refusing replacement: ndk;27.0.12077973'):
-            self.pool.sdk_install(['ndk;27.0.12077973'])
-        self.assertEqual((sdk / 'ndk/27.0.12077973/user-file').read_text(), 'keep')
+        (sdk / 'ndk/27.1.12297006').mkdir(parents=True)
+        (sdk / 'ndk/27.1.12297006/user-file').write_text('keep')
+        with self.assertRaisesRegex(poolmod.PoolError, 'refusing replacement: ndk;27.1.12297006'):
+            self.pool.sdk_install(['ndk;27.1.12297006'])
+        self.assertEqual((sdk / 'ndk/27.1.12297006/user-file').read_text(), 'keep')
         # Independent refusals are reported together, in stable order, before any installer run.
         (sdk / '.subyard-staging').write_text('not a directory')
         _disk.return_value = SimpleNamespace(free=1024**3)
         before = invocations()
         with self.assertRaises(poolmod.PoolError) as refused:
-            self.pool.sdk_install(['ndk;27.0.12077973', 'platforms;android-34', 'platforms;android-30', 'platforms;android-33'])
+            self.pool.sdk_install(['ndk;27.1.12297006', 'platforms;android-34', 'platforms;android-30', 'platforms;android-33'])
         _disk.return_value = SimpleNamespace(free=64 * 1024**3)
         (sdk / '.subyard-staging').unlink()
         self.assertEqual(refused.exception.code, 'ownership')
@@ -2837,7 +2842,7 @@ licenses.mkdir()
         # Without a vendored entry provisioning cannot repair it; it is only kept.
         self.assertEqual(parts[1], 'profile-installed SDK packages are kept without package metadata and are not '
                          'replaced: platforms;android-30')
-        self.assertIn('refusing replacement: ndk;27.0.12077973', parts[2])
+        self.assertIn('refusing replacement: ndk;27.1.12297006', parts[2])
         self.assertIn('staging path is not a pool-owned directory', parts[3])
         self.assertIn('insufficient space', parts[4])
         self.assertEqual(invocations(), before)
@@ -2883,16 +2888,24 @@ licenses.mkdir()
         self.assertEqual(listed['platforms;android-36.1']['source'], 'added')
         self.assertEqual(listed['build-tools;37.0.0-rc2']['source'], 'added')
         self.assertEqual(listed['cmdline-tools;latest']['source'], 'added')
-        self.assertNotIn('ndk;27.0.12077973', listed)
+        self.assertNotIn('ndk;27.1.12297006', listed)
         address = self.serve_control()
         with patch.object(client, 'CONTROL', address):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(client.main(['sdk', 'list']), 0)
             self.assertEqual(json.loads(output.getvalue())['packages'], self.pool.sdk_list()['packages'])
             with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as log:
-                self.assertEqual(client.main(['sdk', 'install', 'platforms;android-35']), 0)
-            self.assertEqual(json.loads(output.getvalue())['installed'], ['platforms;android-35'])
-            self.assertIn('Android: accepted Google Android SDK licenses for platforms;android-35\n', log.getvalue())
+                self.assertEqual(client.main(['sdk', 'install', 'platforms;android-35', 'ndk;27.0.12077973']), 0)
+            self.assertEqual(json.loads(output.getvalue())['installed'], ['platforms;android-35', 'ndk;27.0.12077973'])
+            self.assertIn('Android: accepted Google Android SDK licenses for platforms;android-35, ndk;27.0.12077973\n',
+                          log.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(client.main(['sdk', 'list']), 0)
+            self.assertIn(dict(package='ndk;27.0.12077973', revision='27.0.12077973', source='added', metadata=True),
+                          json.loads(output.getvalue())['packages'])
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(client.main(['sdk', 'install', 'ndk;27.0.12077973']), 0)
+            self.assertEqual(json.loads(output.getvalue())['already_installed'], ['ndk;27.0.12077973'])
             with self.assertRaisesRegex(client.Error, 'unsupported SDK package identifiers'):
                 client.main(['sdk', 'install', 'add-ons;addon-google_apis-google-24'])
         # The singleton owner removes only its interrupted marker-owned staging.

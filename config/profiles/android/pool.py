@@ -60,6 +60,15 @@ def require(ok, code, message):
         raise PoolError(code, message)
 
 
+def sdk_properties(directory):
+    properties = {}
+    for line in (directory / 'source.properties').read_text().splitlines():
+        if '=' in line and not line.startswith('#'):
+            key, value = line.split('=', 1)
+            properties[key.strip()] = value.strip()
+    return properties
+
+
 def atomic(path, value):
     path = Path(path)
     temporary = path.with_name(path.name + '.new')
@@ -325,9 +334,7 @@ class Images:
                               'allocation cancelled')
                 phase = 'metadata'
                 installed = sdk.joinpath(*image['package'].split(';'))
-                properties = dict(line.split('=', 1) for line in (installed / 'source.properties').read_text().splitlines()
-                                  if '=' in line and not line.startswith('#'))
-                properties = {key.strip(): value.strip() for key, value in properties.items()}
+                properties = sdk_properties(installed)
                 package = image['package'].split(';')
                 require(properties.get('AndroidVersion.ApiLevel') == package[1][8:]
                         and properties.get('SystemImage.Abi') == package[3]
@@ -463,11 +470,10 @@ class SdkPackages:
     @staticmethod
     def revision(directory):
         try:
-            values = dict(line.split('=', 1) for line in (directory / 'source.properties').read_text().splitlines()
-                          if '=' in line and not line.startswith('#'))
+            values = sdk_properties(directory)
         except (OSError, ValueError):
             return None
-        return values.get('Pkg.Revision', '').strip() or None
+        return values.get('Pkg.Revision') or None
 
     @staticmethod
     def declared(directory):
@@ -526,11 +532,10 @@ class SdkPackages:
         require(self.declared(directory) == package and self.revision(directory), 'download',
                 f'installed {package} does not match its requested identifier')
         if package.startswith('platforms;'):
-            values = dict(line.split('=', 1) for line in (directory / 'source.properties').read_text().splitlines()
-                          if '=' in line and not line.startswith('#'))
+            values = sdk_properties(directory)
             level, _, extension = package.removeprefix('platforms;android-').partition('-ext')
-            require(values.get('AndroidVersion.ApiLevel', '').strip() == level
-                    and (not extension or values.get('AndroidVersion.ExtensionLevel', '').strip() == extension),
+            require(values.get('AndroidVersion.ApiLevel') == level
+                    and (not extension or values.get('AndroidVersion.ExtensionLevel') == extension),
                     'download', f'installed {package} has a different API or extension level')
 
     def merge_licenses(self, staged):
