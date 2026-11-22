@@ -77,7 +77,7 @@ func TestTeardownScopeSelectionPrecedesConsent(t *testing.T) {
 }
 
 func TestFullTeardownSnapshotCanonicalizesNativePartialPeers(t *testing.T) {
-	program, loaded, incus, _ := teardownResetFixture(t)
+	program, loaded, incus, _, _ := teardownResetFixture(t)
 	execution := &fullTeardown{}
 	order := []string{"default", "neighbor", "stopped", "partial"}
 	for _, name := range order {
@@ -105,7 +105,8 @@ func TestFullTeardownSnapshotCanonicalizesNativePartialPeers(t *testing.T) {
 
 func TestTeardownPendingRecoveryRejectsOriginalInvalidFlags(t *testing.T) {
 	for _, flags := range [][]string{{"--full", "--keep-data", "--yes"}, {"--full", "--unknown", "--yes"}, {"--full", "--help", "--yes"}} {
-		root, environment, _ := nativeFixture(t)
+		fixture := newFixture(t)
+		root := fixture.Root
 		home := filepath.Join(root, "data")
 		directory := home + ".uninstall"
 		if err := os.Mkdir(directory, 0700); err != nil {
@@ -114,12 +115,9 @@ func TestTeardownPendingRecoveryRejectsOriginalInvalidFlags(t *testing.T) {
 		original := uninstall.RecoveryPlan{Schema: 1, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home, ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}, Stage: uninstall.RecoveryPrepared}
 		body, _ := json.Marshal(original)
 		path := filepath.Join(directory, ".plan-next")
-		testkit.WriteFile(t, path, body, 0600)
+		fixture.Write(path, string(body), 0600)
 		prompt := &testkit.Prompt{Answers: []bool{true}}
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"teardown"}, flags...), Environment: environment, WorkingDir: root, Prompt: prompt, Stdout: io.Discard, Stderr: io.Discard})
-		if err != nil {
-			t.Fatal(err)
-		}
+		program := fixture.New(Options{Arguments: append([]string{"teardown"}, flags...), Prompt: prompt, Stdout: io.Discard, Stderr: io.Discard})
 		want := 2
 		if slices.Contains(flags, "--help") {
 			want = 0
@@ -172,7 +170,7 @@ func (fake *fullOwnershipFixture) ReconcileState(ctx context.Context, project, i
 func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *testing.T) {
 	for _, kind := range []string{"same-uid-other-data", "same-uid-other-config", "other-operator", "unproven-legacy", "owned-partial", "owned-unregistered", "foreign-missing-roots", "adopted"} {
 		t.Run(kind, func(t *testing.T) {
-			program, loaded, incus, _ := teardownResetFixture(t)
+			program, loaded, incus, _, fixture := teardownResetFixture(t)
 			incus.Reconcile.ProjectFound = true
 			for _, name := range []string{"subyard-power-reconcile.service.in", "subyard-keys-sync.service.in", "subyard-keys-sync.timer.in"} {
 				body, err := os.ReadFile(filepath.Join("../../config/systemd", name))
@@ -183,14 +181,14 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, body, 0600)
+				fixture.Write(path, string(body), 0600)
 			}
 			installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: filepath.Join(program.options.RepositoryRoot, "runtime"), CacheRoot: filepath.Join(program.options.RepositoryRoot, "cache")}
 			if err := os.MkdirAll(installation.DataHome, 0700); err != nil {
 				t.Fatal(err)
 			}
 			body, _ := json.Marshal(installation)
-			testkit.WriteFile(t, filepath.Join(installation.DataHome, uninstall.ManifestName), body, 0600)
+			fixture.Write(filepath.Join(installation.DataHome, uninstall.ManifestName), string(body), 0600)
 			owner := ports.InstallationYard{Project: loaded.Context.IncusProject, OperatorUID: strconv.Itoa(os.Getuid()), DataHome: installation.DataHome, ConfigHome: installation.ConfigHome, HostBase: loaded.Context.Paths.HostBase}
 			partialProfile, _ := json.Marshal(map[string]any{"name": "default", "config": map[string]string{}, "devices": map[string]any{}, "description": "partial profile"})
 			switch kind {
@@ -210,12 +208,12 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 						t.Fatal(err)
 					}
-					testkit.WriteFile(t, path, body, 0700)
+					fixture.Write(path, string(body), 0700)
 				}
 				if err := os.MkdirAll(filepath.Join(loaded.Context.Paths.HostBase, "backups"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, filepath.Join(loaded.Context.Paths.HostBase, "backups", "preserved"), []byte("preserve"), 0600)
+				fixture.Write(filepath.Join(loaded.Context.Paths.HostBase, "backups", "preserved"), "preserve", 0600)
 			case "same-uid-other-data":
 				owner.DataHome += "-other"
 			case "same-uid-other-config":
@@ -235,7 +233,7 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 			case "foreign-missing-roots":
 				owner.DataHome += "-other"
 				owner.ConfigHome, owner.HostBase = "", ""
-				publicRoot, absErr := filepath.Abs("../..")
+				publicRoot, absErr := filepath.Abs(newFixture(t, withCheckoutConfig()).Root)
 				if absErr != nil {
 					t.Fatal(absErr)
 				}
@@ -274,8 +272,9 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					if yard.Context.IncusProject != owner.Project {
 						t.Fatal("capture lost native partial ownership")
 					}
-					bin := testkit.TempDir(t)
-					testkit.WriteFile(t, filepath.Join(bin, "incus"), []byte("#!/bin/sh\ncase \"$2\" in *'?project=native-partial') printf '%s' '"+string(partialProfile)+"';; *) printf '%s' '{\"name\":\"default\",\"config\":{},\"devices\":{},\"description\":\"default yard profile\"}';; esac\n"), 0700)
+					incusFake := newFixture(t, withCommands("incus"))
+					bin := incusFake.Bin
+					incusFake.Exec().On(testkit.Match{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}}, testkit.Reply{Stdout: string(partialProfile)})
 					values := structuredCommandContext(program.teardownLoaded(yard))
 					payload, _ := json.Marshal(yard.Snapshot.Resources)
 					engine, err := os.Executable()
@@ -292,6 +291,10 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					if output, err := command.CombinedOutput(); err != nil {
 						t.Fatalf("captured native partial profile routed to another project: %v: %s", err, output)
 					}
+					incusFake.Exec().AssertCalls(
+						testkit.Call{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}},
+						testkit.Call{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}},
+					)
 					for key, expected := range structuredAdapterContext(*owner.Context) {
 						if values[key] != expected {
 							t.Fatalf("native partial context lost %s", key)
@@ -365,7 +368,8 @@ func TestTeardownFullRejectsRemoteAndKeepDataBeforeConsent(t *testing.T) {
 func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T) {
 	for _, kind := range []string{"complete", "truncated", "empty", "unsafe-empty", "locked-empty"} {
 		t.Run(kind, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root := fixture.Root
 			home := filepath.Join(root, "data")
 			directory := home + ".uninstall"
 			if err := os.Rename(testkit.TempDir(t), directory); err != nil {
@@ -389,16 +393,13 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 					t.Fatal(err)
 				}
 			case "complete", "truncated":
-				testkit.WriteFile(t, filepath.Join(directory, ".plan-next"), body, 0600)
+				fixture.Write(filepath.Join(directory, ".plan-next"), string(body), 0600)
 			}
 			// Ordinary context loading must not replace the original recovery facts.
-			testkit.WriteFile(t, filepath.Join(root, "config", "subyard.env"), []byte("HOST_BASE='unterminated\n"), 0600)
+			fixture.Write(filepath.Join(root, "config", "subyard.env"), "HOST_BASE='unterminated\n", 0600)
 			prompt := &testkit.Prompt{Answers: []bool{false}}
 			stderr := &bytes.Buffer{}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"teardown", "--full"}, Environment: environment, WorkingDir: root, Prompt: prompt, Stdout: io.Discard, Stderr: stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"teardown", "--full"}, Prompt: prompt, Stdout: io.Discard, Stderr: stderr})
 			code := program.Run(context.Background())
 			if kind == "complete" {
 				if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
@@ -434,7 +435,8 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 func TestUninstallResumeRequiresSavedPlan(t *testing.T) {
 	for _, kind := range []string{"empty", "absent"} {
 		t.Run(kind, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root := fixture.Root
 			home := filepath.Join(root, "data")
 			directory := home + ".uninstall"
 			if err := os.Rename(testkit.TempDir(t), home); err != nil {
@@ -447,18 +449,15 @@ func TestUninstallResumeRequiresSavedPlan(t *testing.T) {
 				t.Fatal(err)
 			}
 			manifest := filepath.Join(home, uninstall.ManifestName)
-			testkit.WriteFile(t, manifest, body, 0600)
+			fixture.Write(manifest, string(body), 0600)
 			if kind == "empty" {
 				if err := os.Rename(testkit.TempDir(t), directory); err != nil {
 					t.Fatal(err)
 				}
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", directory, "--yes"},
-				Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Arguments: []string{"_uninstall-resume", directory, "--yes"},
+				Stdout: io.Discard, Stderr: &stderr})
 			if code := program.Run(t.Context()); code != 1 || stderr.String() != "yard: No saved full uninstall plan. Run 'yard teardown --full' again.\n" {
 				t.Fatalf("resume exit=%d stderr=%s", code, &stderr)
 			}
@@ -532,9 +531,9 @@ func (lock *teardownBatchLock) Acquire(context.Context) (func(), error) {
 }
 func TestTeardownBatchUsesOneApprovedYardSetAndOneLock(t *testing.T) {
 	ctx := context.Background()
-	program, first, _, _ := teardownResetFixture(t)
+	program, first, _, _, fixture := teardownResetFixture(t)
 	path := filepath.Join(first.Context.Paths.ConfigHome, "yards", "neighbor.env")
-	testkit.WriteFile(t, path, []byte("SSH_PORT=3334\nINCUS_PROJECT=subyard-neighbor\nYARD_INSTANCE_NAME=yard-neighbor\n"), 0600)
+	fixture.Write(path, "SSH_PORT=3334\nINCUS_PROJECT=subyard-neighbor\nYARD_INSTANCE_NAME=yard-neighbor\n", 0600)
 	second, err := program.loadInventoryLoaded("neighbor", first)
 	if err != nil {
 		t.Fatal(err)
@@ -596,20 +595,20 @@ func TestTeardownBatchUsesOneApprovedYardSetAndOneLock(t *testing.T) {
 func TestLifecycleOnlyManagedPathsWaitForInstallationCleanup(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run(fmt.Sprintf("full=%t", full), func(t *testing.T) {
-			program, loaded, _, _ := teardownResetFixture(t)
+			program, loaded, _, _, fixture := teardownResetFixture(t)
 			declaration := filepath.Join(program.options.RepositoryRoot, "config/profiles/synthetic")
 			if err := os.MkdirAll(declaration, 0700); err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, filepath.Join(declaration, "profile.json"), []byte(`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"cleanup.py","managed_paths":[{"root":"data","path":"routes/{yard}"}]}`), 0600)
-			testkit.WriteFile(t, filepath.Join(declaration, "cleanup.py"), []byte("#!/usr/bin/env python3\n"), 0700)
+			fixture.Write(filepath.Join(declaration, "profile.json"), `{"schema_version":1,"lifecycle_only":true,"full_cleanup":"cleanup.py","managed_paths":[{"root":"data","path":"routes/{yard}"}]}`, 0600)
+			fixture.Write(filepath.Join(declaration, "cleanup.py"), "#!/usr/bin/env python3\n", 0700)
 			route := filepath.Join(loaded.Context.Paths.DataHome, "routes/default/owned")
 			peer := filepath.Join(loaded.Context.Paths.DataHome, "routes/foreign/keep")
 			for _, path := range []string{route, peer} {
 				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, []byte("preserve until owning phase"), 0600)
+				fixture.Write(path, "preserve until owning phase", 0600)
 			}
 			if err := os.MkdirAll(loaded.Context.Paths.StateDir, 0700); err != nil {
 				t.Fatal(err)

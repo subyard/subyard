@@ -22,19 +22,17 @@ func TestTeardownResetConfigRejectsKeepData(t *testing.T) {
 	}
 }
 
-func teardownResetFixture(t *testing.T) (*CLI, config.Loaded, *testkit.Incus, string) {
+func teardownResetFixture(t *testing.T, options ...fixtureOption) (*CLI, config.Loaded, *testkit.Incus, string, *cliFixture) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, options...)
+	root := fixture.Root
 	if err := os.MkdirAll(filepath.Join(root, "scripts", "lib"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	incus := lifecycleIncus()
 	incus.Reconcile.InstanceFound = false
 	incus.Instances = map[string]ports.InstanceInfo{}
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Incus: incus, NetworkPolicy: allowTestNetworkPolicy()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus, NetworkPolicy: allowTestNetworkPolicy()})
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +41,8 @@ func teardownResetFixture(t *testing.T) (*CLI, config.Loaded, *testkit.Incus, st
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, path, []byte("SSH_PORT=3333\n"), 0600)
-	return program, loaded, incus, path
+	fixture.Write(path, "SSH_PORT=3333\n")
+	return program, loaded, incus, path, fixture
 }
 
 func TestTeardownModesCrossShellAndElevatedContext(t *testing.T) {
@@ -57,13 +55,13 @@ func TestTeardownModesCrossShellAndElevatedContext(t *testing.T) {
 		{name: "reset-config", reset: "1", arguments: []string{"--reset-config"}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			program, loaded, _, registration := teardownResetFixture(t)
+			program, loaded, _, registration, fixture := teardownResetFixture(t)
 			root := program.options.RepositoryRoot
 			helper, err := os.ReadFile("../../scripts/lib/engine-context.sh")
 			if err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, filepath.Join(root, "scripts", "lib", "engine-context.sh"), helper, 0600)
+			fixture.Write(filepath.Join(root, "scripts", "lib", "engine-context.sh"), string(helper), 0600)
 			leaf := strings.ReplaceAll(`#!/bin/bash
 set -e
 . "${BASH_SOURCE[0]%/*}/lib/engine-context.sh"
@@ -73,7 +71,7 @@ env -i "${SUBYARD_ELEVATED_ENV[@]}" /bin/bash -ec '
   rmdir "$SUBYARD_STATE_DIR"
 '
 `, "EXPECTED_RESET", mode.reset)
-			testkit.WriteFile(t, filepath.Join(root, "scripts", "teardown-physical.sh"), []byte(leaf), 0700)
+			fixture.Write(filepath.Join(root, "scripts", "teardown-physical.sh"), leaf, 0700)
 			if err := os.MkdirAll(loaded.Context.Paths.StateDir, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -99,7 +97,7 @@ env -i "${SUBYARD_ELEVATED_ENV[@]}" /bin/bash -ec '
 }
 
 func TestTeardownResetConfigRetainsSettingsUntilPhysicalVerifyAndRetries(t *testing.T) {
-	program, loaded, incus, path := teardownResetFixture(t)
+	program, loaded, incus, path, _ := teardownResetFixture(t)
 	incus.Reconcile.InstanceFound = true
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, Status: "ok"}}}}
 	program.options.AdapterRunner = runner
@@ -135,7 +133,7 @@ func TestTeardownResetConfigRetainsSettingsUntilPhysicalVerifyAndRetries(t *test
 }
 
 func TestTeardownResetConfigProtectsExternalStateDirectory(t *testing.T) {
-	program, loaded, _, registration := teardownResetFixture(t)
+	program, loaded, _, registration, _ := teardownResetFixture(t)
 	external := testkit.TempDir(t)
 	state := filepath.Join(external, "retained-state")
 	testkit.WriteFile(t, state, []byte("retained"), 0600)
@@ -157,19 +155,19 @@ func TestTeardownResetConfigProtectsExternalStateDirectory(t *testing.T) {
 func TestTeardownResetConfigRejectsSettingsAndNamespaceRaces(t *testing.T) {
 	for _, race := range []string{"replacement", "new-entry", "namespace", "marker"} {
 		t.Run(race, func(t *testing.T) {
-			program, loaded, _, path := teardownResetFixture(t)
+			program, loaded, _, path, fixture := teardownResetFixture(t)
 			execution, _ := prepareTeardownExecution([]string{"--reset-config"})
 			if err := program.observeTeardownExecution(context.Background(), loaded, execution); err != nil {
 				t.Fatal(err)
 			}
 			switch race {
 			case "replacement":
-				testkit.WriteFile(t, path+".next", []byte("SSH_PORT=3333\n"), 0600)
+				fixture.Write(path+".next", "SSH_PORT=3333\n", 0600)
 				if err := os.Rename(path+".next", path); err != nil {
 					t.Fatal(err)
 				}
 			case "new-entry":
-				testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "new-settings"), []byte("x"), 0600)
+				fixture.Write(filepath.Join(filepath.Dir(path), "new-settings"), "x", 0600)
 			case "namespace":
 				if err := os.Chmod(filepath.Dir(path), 0701); err != nil {
 					t.Fatal(err)
@@ -188,25 +186,25 @@ func TestTeardownResetConfigRejectsSettingsAndNamespaceRaces(t *testing.T) {
 }
 
 func TestTeardownResetConfigPreservesNeighborsAndRegistrationOnConfigFailure(t *testing.T) {
-	program, loaded, _, path := teardownResetFixture(t)
+	program, loaded, _, path, fixture := teardownResetFixture(t)
 	root := loaded.Context.Paths.ConfigHome
 	neighbor := filepath.Join(root, "yards", "neighbor", "config.env")
 	if err := os.MkdirAll(filepath.Dir(neighbor), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, neighbor, []byte("SSH_PORT=4444\n"), 0600)
+	fixture.Write(neighbor, "SSH_PORT=4444\n", 0600)
 	for _, relative := range []string{"host-id", "config.env", "credentials/sentinel", "overrides/shared/sentinel"} {
 		p := filepath.Join(root, relative)
 		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 			t.Fatal(err)
 		}
-		testkit.WriteFile(t, p, []byte(""), 0600)
+		fixture.Write(p, "", 0600)
 	}
 	override := filepath.Join(filepath.Dir(path), "overrides", "sentinel")
 	if err := os.MkdirAll(filepath.Dir(override), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, override, []byte("before"), 0600)
+	fixture.Write(override, "before", 0600)
 	execution, _ := prepareTeardownExecution([]string{"--reset-config"})
 	if err := program.observeTeardownExecution(context.Background(), loaded, execution); err != nil {
 		t.Fatal(err)
@@ -235,7 +233,7 @@ func TestTeardownResetConfigPreservesNeighborsAndRegistrationOnConfigFailure(t *
 }
 
 func TestTeardownCompletedNamedResetLoadsOnlyForExplicitRetryAndPreservesShared(t *testing.T) {
-	program, loaded, incus, _ := teardownResetFixture(t)
+	program, loaded, incus, _, _ := teardownResetFixture(t)
 	noOp := func() error { return nil }
 	if err := config.ResetYardConfiguration(loaded.Context.Paths.ConfigHome, "named", noOp, noOp, noOp); err != nil {
 		t.Fatal(err)
@@ -266,14 +264,14 @@ func TestTeardownCompletedNamedResetLoadsOnlyForExplicitRetryAndPreservesShared(
 }
 
 func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
-	program, loaded, incus, _ := teardownResetFixture(t)
+	program, loaded, incus, _, fixture := teardownResetFixture(t)
 	root := loaded.Context.Paths.ConfigHome
 	for relative, content := range map[string]string{"yards/named/config.env": "SSH_PORT=3333\n", "yards/named.env": "SSH_PORT=4444\n", ".sync/settings/yards/named/config.env": "SSH_PORT=5555\n"} {
 		path := filepath.Join(root, relative)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		testkit.WriteFile(t, path, []byte(content), 0600)
+		fixture.Write(path, content, 0600)
 	}
 	program.env = environmentMap(program.options.Environment)
 	_, err := program.loadContext("named")
@@ -307,24 +305,21 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 	options.Arguments = []string{"-Y", "named", "teardown", "--reset-config", "--yes"}
 	options.AdapterRunner = &testkit.ScriptedAdapter{}
 	options.Incus = incus
-	retry, err := New(options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	retry := fixture.New(options)
 	if code := retry.Run(context.Background()); code != 0 {
 		t.Fatalf("completed public CLI retry failed: %d", code)
 	}
 }
 
 func TestTeardownConfigArtifactRemovalKeepsTypedStaleOutcome(t *testing.T) {
-	program, _, _, path := teardownResetFixture(t)
+	program, _, _, path, fixture := teardownResetFixture(t)
 	binding, err := teardownArtifactBinding(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	payload := []ports.TeardownArtifactBinding{{Path: path, Binding: binding}}
 	// A size change is observable within one coarse filesystem timestamp tick.
-	testkit.WriteFile(t, path, []byte("SSH_PORT=44444\n"), 0600)
+	fixture.Write(path, "SSH_PORT=44444\n", 0600)
 	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != domain.ErrPlanStale {
 		t.Fatalf("changed settings removal outcome changed: %v", err)
 	}
