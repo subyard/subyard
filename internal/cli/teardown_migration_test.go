@@ -37,13 +37,14 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 			{name: "start", arguments: []string{"start"}},
 		} {
 			t.Run(state+"/"+invocation.name, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t)
+				root, environment := fixture.Root, fixture.Environment
 				registryPath := filepath.Join(root, "config", "commands.registry")
 				registry, err := os.ReadFile(registryPath)
 				if err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, registryPath, bytes.Replace(registry, []byte("teardown||"), []byte("teardown|uninstall|"), 1), 0600)
+				fixture.Write(registryPath, string(bytes.Replace(registry, []byte("teardown||"), []byte("teardown|uninstall|"), 1)))
 				runtimeRoot := filepath.Join(root, "runtime")
 				capture := filepath.Join(root, "v2-candidate-inspections")
 				environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+capture)
@@ -56,7 +57,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 					journal, _ = installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 				}
 				if strings.HasSuffix(state, "invalid") {
-					testkit.WriteFile(t, journal, []byte("{"), 0600)
+					fixture.Write(journal, "{", 0600)
 				}
 				before, err := os.ReadFile(journal)
 				if err != nil {
@@ -64,7 +65,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				}
 				var migrationsBefore []string
 				if strings.HasPrefix(state, "V1") {
-					testkit.WriteFile(t, filepath.Join(configHome, "migrations", "state.json"), []byte("retained V1 state\n"), 0600)
+					fixture.Write(filepath.Join(configHome, "migrations", "state.json"), "retained V1 state\n", 0600)
 					migrationsBefore = nativeTreeSnapshot(t, filepath.Join(configHome, "migrations"))
 				}
 				installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()),
@@ -77,7 +78,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, filepath.Join(installation.DataHome, uninstall.ManifestName), body, 0600)
+				fixture.Write(filepath.Join(installation.DataHome, uninstall.ManifestName), string(body), 0600)
 				var stderr bytes.Buffer
 				prompt := &testkit.Prompt{Answers: []bool{false}}
 				observed := false
@@ -101,8 +102,8 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 						}
 					}
 				}
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
-					Environment: environment, WorkingDir: root, Incus: native, AdapterRunner: adapter, NetworkPolicy: allowTestNetworkPolicy(), Prompt: prompt,
+				program := fixture.New(Options{Arguments: invocation.arguments,
+					Environment: environment, Incus: native, AdapterRunner: adapter, NetworkPolicy: allowTestNetworkPolicy(), Prompt: prompt,
 					Stdin: strings.NewReader(invocation.input), Stdout: io.Discard, Stderr: &stderr,
 					ObserveCoreProducers: func(config.Loaded, uninstall.RecoveryPlan, []string, int) ([]uninstall.RecoveryService, error) {
 						observed = true
@@ -112,9 +113,6 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 						return nil, nil
 					},
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				program.promptInputTerminal = func() bool { return invocation.terminal }
 				code := program.Run(context.Background())
 				if (invocation.fullRemoval || strings.HasPrefix(state, "V2")) && (code == 0 || observed != invocation.fullRemoval || len(prompt.Requests) != 0) {
@@ -159,12 +157,13 @@ func TestCanonicalTeardownMutationGatePreservesOwnerInventory(t *testing.T) {
 			name = "invalid"
 		}
 		t.Run(name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			runtimeRoot := filepath.Join(root, "runtime")
 			environment = append(environment, "SUBYARD_HOST_ID=owner-a", "YARD_RUNTIME_ROOT="+runtimeRoot)
 			journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 			if invalid {
-				testkit.WriteFile(t, journal, []byte("{"), 0600)
+				fixture.Write(journal, "{", 0600)
 			}
 			ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
 			if err := os.MkdirAll(ownerRoot, 0700); err != nil {
@@ -179,16 +178,13 @@ func TestCanonicalTeardownMutationGatePreservesOwnerInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, filepath.Join(ownerRoot, "registration.json"), pending, 0600)
+			fixture.Write(filepath.Join(ownerRoot, "registration.json"), string(pending), 0600)
 			before := nativeTreeSnapshot(t, ownerRoot)
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard",
+			program := fixture.New(Options{
 				Arguments:   []string{"-Y", "owner-a/default", "teardown", "--yes"},
-				Environment: environment, WorkingDir: root, Incus: lifecycleIncus(),
+				Environment: environment, Incus: lifecycleIncus(),
 				Stdout: io.Discard, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 {
 				t.Fatalf("canonical teardown bypassed migration gate: code=%d stderr=%s", code, stderr.String())
 			}

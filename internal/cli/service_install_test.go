@@ -36,8 +36,8 @@ func (platform *serviceInstallPlatform) ApplyStage(ctx context.Context, stage po
 func TestInfrastructureServiceInstallBootstrapsOnlyAfterParentConsent(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		t.Run(map[bool]string{false: "absent-runtime", true: "foreign-same-name"}[foreign], func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			environment = slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "SSH_PORT=") })
+			fixture := newFixture(t, withWorkingDir(""), withoutEnv("SSH_PORT"))
+			root := fixture.Root
 			profileRoot := filepath.Join(root, "config/profiles/synthetic-service")
 			presetRoot := filepath.Join(root, "config/yards/profiles")
 			for _, path := range []string{profileRoot, presetRoot, filepath.Join(root, "data/fixture-routes")} {
@@ -45,17 +45,14 @@ func TestInfrastructureServiceInstallBootstrapsOnlyAfterParentConsent(t *testing
 					t.Fatal(err)
 				}
 			}
-			testkit.WriteFile(t, filepath.Join(profileRoot, "profile.json"), []byte(`{"schema_version":1,"infrastructure_service":{"id":"fixture-service","default_yard":"fixture-runtime","required_settings":{"YARD_KIND":"container"},"route_root":"fixture-routes"}}`), 0o644)
-			testkit.WriteFile(t, filepath.Join(profileRoot, "yard.env"), []byte("YARD_TEMPLATE=synthetic-service\n"), 0o644)
-			testkit.WriteFile(t, filepath.Join(presetRoot, "synthetic-service.env"), []byte("YARD_KIND=container\nSSH_PORT=2290\nALLOWS_CODING_TOOLS=false\n"), 0o644)
+			fixture.Write(filepath.Join(profileRoot, "profile.json"), `{"schema_version":1,"infrastructure_service":{"id":"fixture-service","default_yard":"fixture-runtime","required_settings":{"YARD_KIND":"container"},"route_root":"fixture-routes"}}`, 0o644)
+			fixture.Write(filepath.Join(profileRoot, "yard.env"), "YARD_TEMPLATE=synthetic-service\n", 0o644)
+			fixture.Write(filepath.Join(presetRoot, "synthetic-service.env"), "YARD_KIND=container\nSSH_PORT=2290\nALLOWS_CODING_TOOLS=false\n", 0o644)
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 			platform := &serviceInstallPlatform{initPlatformFixture: newInitPlatformFixture()}
 			platform.converged[ports.ReconcileStageInstance] = false
 			prompt := &testkit.Prompt{Answers: []bool{true}}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Prompt: prompt})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{Incus: incus, InitPlatform: platform, Prompt: prompt})
 			definition := command.Definition{Name: "service", Handler: "@service", Remote: command.RemoteForward, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
 			yard, arguments, err := program.selectServiceInvocation(context.Background(), definition, []string{"install", "fixture-service"})
 			if err != nil || yard != "fixture-runtime" {
@@ -143,14 +140,15 @@ func TestInfrastructureServicePreparationRetainsResolvedPool(t *testing.T) {
 		transport, action := invocation.transport, invocation.action
 		for _, scope := range []string{"sole-main", "ambiguous", "explicit-main", "unregistered"} {
 			t.Run(action+"/"+transport+"/"+scope, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t, withWorkingDir(""))
+				root := fixture.Root
 				manifest := filepath.Join(root, "config/commands.registry")
 				content, err := os.ReadFile(manifest)
 				if err != nil {
 					t.Fatal(err)
 				}
 				content = append(content, []byte("\nservice||@service||forward|mutate|dynamic|public|lifecycle|simple|service <command> ID|manage synthetic service|--owner --pool --yard --yes --help|register install start stop update remove\n")...)
-				testkit.WriteFile(t, manifest, content, 0o644)
+				fixture.Write(manifest, string(content), 0o644)
 				incus := lifecycleIncus()
 				platform := newInitPlatformFixture()
 				var output, diagnostics bytes.Buffer
@@ -161,10 +159,7 @@ func TestInfrastructureServicePreparationRetainsResolvedPool(t *testing.T) {
 				if action == "register" || scope == "unregistered" {
 					arguments = append(arguments, "--yard", "default")
 				}
-				program, err := New(Options{RepositoryRoot: root, Arguments: append([]string{"service"}, append(slices.Clone(arguments), "--yes")...), Environment: environment, Incus: incus, InitPlatform: platform, Stdout: &output, Stderr: &diagnostics})
-				if err != nil {
-					t.Fatal(err)
-				}
+				program := fixture.New(Options{Arguments: append([]string{"service"}, append(slices.Clone(arguments), "--yes")...), Incus: incus, InitPlatform: platform, Stdout: &output, Stderr: &diagnostics})
 				selection := infrastructureFixture(t, program, incus, "fixture-service")
 				if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
 					t.Fatal(err)

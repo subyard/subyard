@@ -17,14 +17,12 @@ import (
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
-func declaredServiceActivationFixture(t *testing.T) (*CLI, *testkit.Incus, *serviceSelection) {
+func declaredServiceActivationFixture(t *testing.T) (*CLI, *testkit.Incus, *serviceSelection, *cliFixture) {
 	t.Helper()
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root := fixture.Root
 	incus := lifecycleIncus()
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{Incus: incus})
 	selection := infrastructureFixture(t, program, incus, "fixture-service")
 	if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
 		t.Fatal(err)
@@ -35,12 +33,9 @@ func declaredServiceActivationFixture(t *testing.T) (*CLI, *testkit.Incus, *serv
 		t.Fatal(err)
 	}
 	body = []byte(strings.Replace(string(body), `"id":"fixture-service"`, `"id":"fixture-service","registration_activation":"fixture-owner"`, 1))
-	testkit.WriteFile(t, path, body, 0o644)
-	program, err = New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return program, incus, selection
+	fixture.Write(path, string(body), 0o644)
+	program = fixture.New(Options{Incus: incus})
+	return program, incus, selection, fixture
 }
 
 func registrationStageFixture(program *CLI, id string) *activationStageReconciler {
@@ -97,7 +92,7 @@ func TestServiceRegistrationDoesNotBindSameRelease(t *testing.T) {
 func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T) {
 	for _, scenario := range []string{"one", "UUID", "publish-failure", "broken-config", "broken-config+UUID", "unobserved-unselected", "lock-held", "lock-inherited"} {
 		t.Run(scenario, func(t *testing.T) {
-			program, incus, selection := declaredServiceActivationFixture(t)
+			program, incus, selection, fixture := declaredServiceActivationFixture(t)
 			var output bytes.Buffer
 			program.options.Stderr = &output
 			home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
@@ -114,7 +109,7 @@ func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, []byte("YARD_KIND=vm\nSSH_PORT='unterminated\n"), 0o600)
+				fixture.Write(path, "YARD_KIND=vm\nSSH_PORT='unterminated\n", 0o600)
 			}
 			if scenario == "unobserved-unselected" {
 				// A yard left to its init whose desired selection does not name
@@ -123,7 +118,7 @@ func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, []byte("SSH_PORT=2299\n"), 0o600)
+				fixture.Write(path, "SSH_PORT=2299\n", 0o600)
 			}
 			request := releasetransition.ProcessRequest{ConfigHome: home, RuntimeRoot: runtimeRoot, Target: "next-release", Mode: releasetransition.ProcessInspect, Direction: releasetransition.DirectionActivateTarget}
 			operation := program.releaseActivationOperation(request)

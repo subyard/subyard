@@ -19,23 +19,20 @@ func TestTeardownSessionGuardAllowsUnfinishedAndUnavailableGuestsProtectsActive(
 	}
 	for _, state := range []string{"absent", "unavailable", "uninstalled", "idle", "active", "unsupported", "malformed", "fence-failed", "pause-failed", "probe-unavailable", "paused-active", "paused-cleared", "late-failure", "vanished", "stopped"} {
 		t.Run(state, func(t *testing.T) {
-			root := testkit.TempDir(t)
-			if err := os.Mkdir(filepath.Join(root, "lib"), 0700); err != nil {
-				t.Fatal(err)
-			}
+			fixture := newFixture(t, withCommands("scripts/profile-services.sh"))
+			root := filepath.Join(fixture.Root, "scripts")
 			for _, name := range []string{"lib/ssh-listener.sh", "lib-power.sh", "vscode-remote-maintenance.sh"} {
 				content, err := os.ReadFile(filepath.Join("../../scripts", name))
 				if err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, filepath.Join(root, name), content, 0600)
+				fixture.Write(filepath.Join(root, name), string(content))
 			}
-			profiles := filepath.Join(root, "profile-services.sh")
-			testkit.WriteFile(t, profiles, []byte(`#!/bin/sh
+			fixture.Exec().On(testkit.Match{Tool: "scripts/profile-services.sh", Args: []string{"--pause"}}, testkit.Reply{Script: `
 printf '%s\n' "$1" >> "$GUARD_LOG"
-[ "$GUARD_STATE:$1" != pause-failed:--pause ] || exit 9
-case "$GUARD_STATE:$1" in paused-*:--pause|late-failure:--pause|vanished:--pause|stopped:--pause) printf 'fixture\n' ;; esac
-`), 0700)
+[ "$GUARD_STATE" != pause-failed ] || exit 9
+case "$GUARD_STATE" in paused-*|late-failure|vanished|stopped) printf 'fixture\n' ;; esac
+`}).On(testkit.Match{Tool: "scripts/profile-services.sh", Args: []string{"--resume", "fixture"}}, testkit.Reply{Script: `printf '%s\n' "$1" >> "$GUARD_LOG"`})
 			log := filepath.Join(root, "events")
 			script := `set -euo pipefail
 have_incus=1; INCUS_PROJECT=selected; PROJ=(--project selected); SCRIPT_DIR="$1"; DEV_USER=missing-user
@@ -98,6 +95,14 @@ trap - EXIT
 			if blocked && err == nil || !blocked && err != nil {
 				t.Fatalf("state=%s err=%v output=%s", state, err, output)
 			}
+			expected := []testkit.Call{}
+			if state != "absent" && state != "unavailable" && state != "unsupported" && state != "malformed" && state != "fence-failed" {
+				expected = append(expected, testkit.Call{Tool: "scripts/profile-services.sh", Args: []string{"--pause"}})
+				if state == "paused-active" || state == "late-failure" {
+					expected = append(expected, testkit.Call{Tool: "scripts/profile-services.sh", Args: []string{"--resume", "fixture"}})
+				}
+			}
+			fixture.Exec().AssertCalls(expected...)
 			content, _ := os.ReadFile(log)
 			if strings.Contains(string(content), "delete") == blocked {
 				t.Fatalf("wrong deletion decision for %s: %s", state, content)
@@ -128,13 +133,15 @@ trap - EXIT
 // `incus list NAME` also lists every instance whose name starts with NAME; the
 // yard-running check reads exactly its own instance.
 func TestIncusCLIYardRunningReadsTheExactInstance(t *testing.T) {
-	bin := testkit.TempDir(t)
-	testkit.WriteFile(t, filepath.Join(bin, "incus"), []byte(`#!/bin/sh
-[ "$*" = "list yard --project subyard -f csv -c ns" ] || exit 9
+	fixture := newFixture(t, withCommands("incus"))
+	bin := fixture.Bin
+	fixture.Exec().On(testkit.Match{Tool: "incus", Args: []string{"list", "yard", "--project", "subyard", "-f", "csv", "-c", "ns"}}, testkit.Reply{Script: `
 printf 'yard-neighbour,RUNNING\n'
-[ ! -e "$0.present" ] || printf 'yard,%s\n' "$(cat "$0.present")"
-`), 0o700)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+if [ -e "$0.present" ]; then
+  IFS= read -r state < "$0.present" || :
+  printf 'yard,%s\n' "$state"
+fi
+`})
 	cli := &CLI{env: map[string]string{"PATH": os.Getenv("PATH")}}
 	yard := domain.Context{YardInstanceName: "yard", IncusProject: "subyard"}
 	for _, state := range []string{"", "STOPPED", "RUNNING"} {
@@ -145,4 +152,9 @@ printf 'yard-neighbour,RUNNING\n'
 			t.Fatalf("yard %q: running=%v", state, running)
 		}
 	}
+	fixture.Exec().AssertCalls(
+		testkit.Call{Tool: "incus", Args: []string{"list", "yard", "--project", "subyard", "-f", "csv", "-c", "ns"}},
+		testkit.Call{Tool: "incus", Args: []string{"list", "yard", "--project", "subyard", "-f", "csv", "-c", "ns"}},
+		testkit.Call{Tool: "incus", Args: []string{"list", "yard", "--project", "subyard", "-f", "csv", "-c", "ns"}},
+	)
 }
