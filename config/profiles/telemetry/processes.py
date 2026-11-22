@@ -162,6 +162,7 @@ class Sampler:
     def __init__(self, data_dir, run, proc=Path('/proc')):
         self.data_dir, self.run, self.proc = Path(data_dir), run, proc
         self.known, self.last, self.direct_last, self.ended = {}, {}, {}, set()
+        self.orphan_scopes = {}
         self.group = Path(run['cgroup']) if run.get('cgroup') else None
         self.workload = self.group/'workload' if self.group else None
         self.run_body = {'agent_run_id': run['agent_run_id'], 'state': 'resources_observing',
@@ -221,6 +222,60 @@ class Sampler:
             info = root.stat()
             if root.is_symlink() or info.st_uid != os.getuid() or [info.st_dev, info.st_ino] != self.run['scope_root_identity'] or not self.group.is_relative_to(root):
                 raise ValueError('scope delegation generation changed')
+
+    def nested_scopes_pending(self):
+        previous, self.orphan_scopes = self.orphan_scopes, {}
+        nested = [path for path in self.group.iterdir() if path != self.workload and (path.is_dir() or path.is_symlink())]
+        if not nested:
+            return False
+        # A journal is authoritative even when its sampler cannot finish. Read
+        # all descendants, since an orphaned parent may still have tracked children.
+        for index, journal in enumerate((self.data_dir/'runs-v5').iterdir()):
+            if index >= 65536:
+                raise ValueError('scope journal inventory limit')
+            if journal.suffix != '.json':
+                continue
+            try:
+                run = records.read_private(journal)
+            except FileNotFoundError:
+                continue
+            if not isinstance(run, dict) or not isinstance(run.get('cgroup', ''), str):
+                raise ValueError('invalid run journal')
+            group = Path(run.get('cgroup', ''))
+            if (self.group in group.parents or
+                    (run.get('manifest_state') == 'reserved' and self.group/('run-'+journal.stem) in nested)):
+                return True
+        groups = {}
+        for child in nested:
+            if child.is_symlink():
+                raise ValueError('unsafe nested scope')
+            for path in (child, *child.rglob('*')):
+                if path.is_symlink():
+                    raise ValueError('unsafe nested scope')
+                if not path.is_dir():
+                    continue
+                info = path.stat()
+                if (info.st_uid != os.getuid() or (path.name != 'workload' and not path.name.startswith('run-')) or
+                        values(path/'cgroup.events').get('populated') != '0'):
+                    raise ValueError('unknown or populated nested scope')
+                groups[path] = (info.st_dev, info.st_ino)
+                if len(groups) > 65536:
+                    raise ValueError('scope inventory limit')
+        # Missing journals must be confirmed across ticks and cgroup generations.
+        self.orphan_scopes = groups
+        if groups != previous:
+            return True
+        if not records.emit(self.data_dir, 'gap', {**self.base, 'reason': 'scope_manifest_missing', 'quality': 'partial'},
+                            event_id=self.object_id+':orphaned-scopes'):
+            return True
+        self.group_identity()
+        for path in sorted(groups, key=lambda path: len(path.parts), reverse=True):
+            info = path.stat()
+            if path.is_symlink() or (info.st_dev, info.st_ino) != groups[path] or values(path/'cgroup.events').get('populated') != '0':
+                raise ValueError('nested scope changed before cleanup')
+            path.rmdir()
+        self.orphan_scopes = {}
+        return False
 
     def poll(self):
         if not self.run_announced:
@@ -306,10 +361,9 @@ class Sampler:
                              'observed_process_count': len(chosen), 'populated': populated,
                              'quality': 'complete' if self.group else 'partial', 'final': final})
         if final and saved and direct_saved:
-            # A nested sampler may still be retrying its final emit. Keep our
-            # workload counters readable until its scope has been retired;
-            # removing workload first would strand this sampler on ENOTEMPTY.
-            if self.group and any(path != self.workload and path.is_dir() for path in self.group.iterdir()):
+            # Keep our counters readable while nested runs finish or orphaned
+            # scopes are confirmed and retired; workload-first cleanup strands us.
+            if self.group and self.nested_scopes_pending():
                 return False
             if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True, 'end_time': records.now(),
                          'quality': 'complete' if self.group else 'partial'}):

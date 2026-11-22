@@ -52,6 +52,7 @@ class ProcessTest(unittest.TestCase):
                 cg(workload, 10, 0)
                 child = group/'run-child'
                 child.mkdir()
+                processes.records.atomic_json(root/'runs-v5/child.json', dict(agent_run_id='child', cgroup=str(child)))
                 info = group.stat()
                 run = dict(agent_run_id='parent', host_id='host', boot_id='boot', pid=10, start_ticks=100,
                            cgroup=str(group), cgroup_identity=[info.st_dev, info.st_ino])
@@ -77,6 +78,74 @@ class ProcessTest(unittest.TestCase):
                 finals = {body['object_id']: body for kind, body in events if kind == 'sample' and body.get('final')}
                 self.assertEqual(finals['parent:scope']['cpu_ns'], 20000)
                 self.assertEqual(finals['parent:workload']['cpu_ns'], 10000)
+                self.assertTrue(any(body.get('resource_completed') for _, body in events))
+
+    def test_orphaned_nested_scope_is_retired_after_confirmation_and_durable_gap(self):
+        for change in ('none', 'restart', 'gap_retry', 'new_journal', 'new_generation', 'populated', 'unreadable_journal'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                group = root/'parent'
+                cg(group, 20, 0)
+                cg(group/'workload', 10, 0)
+                child = group/'run-stray'
+                cg(child, 10, 0)
+                cg(child/'workload', 10, 0)
+                journals = processes.records.private_directory(root/'runs-v5')
+                processes.records.atomic_json(journals/'unrelated.json', dict(agent_run_id='unrelated', cgroup=str(root/'other')))
+                info = group.stat()
+                run = dict(agent_run_id='parent', host_id='host', boot_id='boot', pid=10, start_ticks=100,
+                           cgroup=str(group), cgroup_identity=[info.st_dev, info.st_ino])
+                events, removed = [], []
+                blocked = change == 'gap_retry'
+                def emit(directory, kind, body, **options):
+                    if kind == 'gap' and blocked:
+                        return False
+                    events.append((kind, body))
+                    return True
+                def kernel_rmdir(path):
+                    self.assertTrue(any(kind == 'gap' and body['reason'] == 'scope_manifest_missing' for kind, body in events))
+                    if any(entry.is_dir() for entry in path.iterdir()):
+                        raise OSError(errno.ENOTEMPTY, 'nested scope remains')
+                    removed.append(path)
+                    path.rename(root/('retired-'+str(len(removed))))
+                with patch.object(processes.records, 'emit', side_effect=emit), patch.object(Path, 'rmdir', kernel_rmdir):
+                    sampler = processes.Sampler(root, run, root)
+                    self.assertFalse(sampler.poll())
+                    self.assertEqual(removed, [], 'first missing-journal observation cannot authorize removal')
+                    if change == 'restart':
+                        sampler = processes.Sampler(root, run, root)
+                        self.assertFalse(sampler.poll())
+                    elif change == 'gap_retry':
+                        self.assertFalse(sampler.poll())
+                        self.assertEqual(removed, [], 'gap must be durable before orphan removal')
+                        blocked = False
+                    elif change in ('new_journal', 'unreadable_journal'):
+                        journal = journals/'child.json'
+                        processes.records.atomic_json(journal, dict(agent_run_id='child', cgroup=str(child/'workload')))
+                        if change == 'unreadable_journal':
+                            journal.chmod(0o644)
+                            with self.assertRaises(ValueError):
+                                sampler.poll()
+                        else:
+                            for _ in range(3):
+                                self.assertFalse(sampler.poll())
+                        self.assertEqual(removed, [])
+                        journal.unlink()
+                        self.assertFalse(sampler.poll(), 'journal appearance or read failure resets orphan confirmation')
+                    elif change == 'new_generation':
+                        child.rename(root/'previous-child')
+                        cg(child, 10, 0)
+                        cg(child/'workload', 10, 0)
+                        self.assertFalse(sampler.poll(), 'replacement cgroups need a fresh confirmation')
+                    elif change == 'populated':
+                        (child/'cgroup.events').write_text('populated 1')
+                        with self.assertRaisesRegex(ValueError, 'populated nested scope'):
+                            sampler.poll()
+                        self.assertEqual(removed, [])
+                        (child/'cgroup.events').write_text('populated 0')
+                        self.assertFalse(sampler.poll(), 'populated groups reset orphan confirmation')
+                    self.assertTrue(sampler.poll())
+                self.assertEqual(removed, [child/'workload', child, group/'workload', group])
                 self.assertTrue(any(body.get('resource_completed') for _, body in events))
 
     def test_nested_final_diagnostic_identifies_each_missing_condition(self):
