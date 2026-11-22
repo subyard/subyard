@@ -47,13 +47,13 @@ type initArguments struct {
 }
 
 type initBootstrap struct {
-	source     *profile.Source
-	profile    string
+	source  *profile.Source
+	profile string
 	// environmentProfiles is the creation selection; empty means none.
 	environmentProfiles string
-	sourcePath string
-	targetPath string
-	content    []byte
+	sourcePath          string
+	targetPath          string
+	content             []byte
 }
 
 type initExecution struct {
