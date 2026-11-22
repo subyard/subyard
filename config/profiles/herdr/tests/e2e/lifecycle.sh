@@ -247,8 +247,10 @@ verify_ready
 client live
 guest_dev kill -0 "$terminal_pid"
 stage "terminal PID $terminal_pid survived the handovers (initial Core PID $before)"
-yard herdr logs > "$state/core-journal.txt" 2>&1
-grep -Eq "core .* running, pid $before" "$state/core-journal.txt" || fail 'logs lack the Core startup line'
+yard herdr logs > "$state/core-journal.log" 2>&1
+# The kick records Core's startup status: human text on a terminal, JSON otherwise.
+grep -Eq "running, pid $before|\"pid\":${before}[,}]" "$state/core-journal.log" ||
+  fail 'logs lack the Core startup status'
 
 stage 'verify project removal and pending layout'
 yard remove pristine --yes > "$state/remove-pristine.log" 2>&1
