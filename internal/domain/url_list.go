@@ -39,7 +39,7 @@ func ValidateURLList(value string) error {
 		}
 		seen[normalized] = index + 1
 	}
-	return CollectOrderedRefusals(causes...)
+	return CollectRefusals(causes...)
 }
 
 // NormalizeRemoteURL returns the comparison form of one remote Git URL: lowercase

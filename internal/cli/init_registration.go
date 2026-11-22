@@ -41,7 +41,7 @@ func validateCreationProfileNames(value string) error {
 		}
 		seen[name] = true
 	}
-	return domain.CollectOrderedRefusals(refusals...)
+	return domain.CollectRefusals(refusals...)
 }
 
 // creationProfileEligibility reports every requested profile that is unknown or
@@ -60,7 +60,7 @@ func (cli *CLI) creationProfileEligibility(loaded config.Loaded, names []string)
 			refusals = append(refusals, fmt.Errorf("--environment-profiles: profile %q is not eligible for this yard (%s)", name, reason))
 		}
 	}
-	return domain.CollectOrderedRefusals(refusals...)
+	return domain.CollectRefusals(refusals...)
 }
 
 // resumedCreationSelection lets a rerun after an interrupted creation continue
