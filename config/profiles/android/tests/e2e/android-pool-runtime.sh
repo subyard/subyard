@@ -61,6 +61,7 @@ project=''
 instance=''
 monitor_pid=''
 monitor_stop=''
+console_dropin=''
 definition_checksum=''
 sdk_pool=''
 sdk_volume=''
@@ -69,6 +70,8 @@ init_attempted=0
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 android_start_monitor() {
+  local args=()
+  [ "$lane" != gradle ] || args=(--host-only)
   monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
   monitor_log="$state/first-boot-monitor.log"
   incus_binary=(/usr/bin/incus)
@@ -83,7 +86,7 @@ android_start_monitor() {
       [ "$monitor_seconds" -gt 0 ] || break
       monitor_status=0
       timeout --foreground --kill-after=10 "$monitor_seconds" "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-        python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
+        python3 -u - "$monitor_stop" "${args[@]}" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
         || monitor_status=$?
       [ ! -e "$monitor_host_stop" ] || break
       if [ "$last_monitor_status" != "$monitor_status" ]; then
@@ -102,6 +105,31 @@ android_start_monitor() {
   grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
     || { printf 'android boot monitor did not start\n' >&2; return 1; }
 }
+android_remove_gradle_console() {
+  [ -n "$console_dropin" ] || return 0
+  timeout --kill-after=5 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    sh -ec 'rm -f -- "$1"; systemctl daemon-reload' _ "$console_dropin" || {
+      printf 'android-gradle: failed to remove or reload the kernel console drop-in\n' >&2
+      return 1
+    }
+  console_dropin=''
+}
+android_require_gradle_console() {
+  local sample capture_status=0 kernel_record='^\[[[:space:]]*[0-9]+\.[0-9]+\]'
+  printf 'android-gradle evidence: guest kernel console sample\n' >&2
+  sample="$(android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    journalctl --no-pager -q -n 8 -o cat -u 'subyard-android-slot-*' --grep="$kernel_record" 2>&1)" || capture_status=$?
+  printf '%s\n' "$sample" >&2
+  if [ "$capture_status" -ne 0 ] || ! grep -Eq "$kernel_record" <<< "$sample"; then
+    printf 'android-gradle: could not verify guest kernel console records in the slot journal\n' >&2
+    return 1
+  fi
+}
+android_gradle_boot_evidence() {
+  android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+    journalctl --no-pager -q -n 8 -o cat -u subyard-android-pool.service \
+      --grep='^android boot readiness ' || true
+}
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -109,6 +137,10 @@ cleanup() {
   android_phase_end "$status"
   android_phase_begin cleanup
   cleanup_status=0
+  if ! android_remove_gradle_console; then
+    cleanup_status=3
+    [ "$status" -ne 0 ] || status=3
+  fi
   touch "$monitor_host_stop"
   if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-budget ] || [ "$lane" = memory-lease ] || [ "$lane" = gradle ]; } \
     && [ "$failed_phase" = images ] && { [ "$sdk_api" = 35 ] || [ "$sdk_api" = 36 ]; } \
@@ -117,10 +149,11 @@ cleanup() {
       < "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" \
       || printf 'android-sdk-diagnostic retry=unavailable original_failure_preserved=true\n' >&2
   fi
-  # The emulator journal survives lease release; collect it as root before teardown.
+  # The emulator journal includes the guest console and survives lease release.
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
-    printf 'android-gradle evidence: emulator\n' >&2
+    android_gradle_boot_evidence
+    printf 'android-gradle evidence: emulator journal with guest kernel console\n' >&2
     android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' || true
   fi
@@ -416,6 +449,7 @@ if [ "$lane" = projects ]; then
 fi
 # Retain slot cgroup samples before the connected lease is released.
 if [ "$lane" = gradle ]; then
+  printf 'android gradle fixture lease_cpus=%s\n' "${SUBYARD_E2E_CPU_PER_VM:-unknown}"
   android_start_monitor || true
   incus --project "$project" exec "$instance" -- timeout 30 sh -c '
     until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do
@@ -427,11 +461,28 @@ if [ "$lane" = gradle ]; then
   yard emu cache prepare --api 36
   android_phase_end 0
   android_phase_begin gradle
+  # Apply only in this disposable yard, before the broker creates the transient slot unit.
+  console_dropin=/run/systemd/system/subyard-android-slot-.service.d/gradle-kernel-console.conf
+  incus --project "$project" exec "$instance" -- bash -se -- "$console_dropin" <<'SH'
+install -d -m 0755 "${1%/*}"
+cat > "$1" <<'CONF'
+[Service]
+Environment=SUBYARD_ANDROID_E2E_SHOW_KERNEL=1
+StandardOutput=journal
+StandardError=journal
+CONF
+systemctl daemon-reload
+SH
   # Default-package build, broker SDK addition and connected tests through one lease.
-  gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh" \
-    "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
+  # The guest receives the script on stdin; the watcher travels inside it.
+  gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh"
+    printf 'android_gradle_watch_source=%q\n' "$(cat "$root/config/profiles/android/tests/e2e/android-gradle-watch.py")"
+    cat "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
+  android_remove_gradle_console
+  android_gradle_boot_evidence
+  android_require_gradle_console
   android_phase_end 0
   android_phase_begin relay-owner
   # The loopback relay refuses a connection owned by another local account.

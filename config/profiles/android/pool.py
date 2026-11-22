@@ -32,6 +32,11 @@ import xml.etree.ElementTree as ET
 TTL = 1200
 HEARTBEAT = 300
 BOOT_TIMEOUT = 1200
+BOOT_SAMPLE_INTERVAL = 2
+BOOT_SAMPLE_GAP_MARGIN = 2  # Consecutive probes can take different amounts of time.
+BOOT_SETTLE_SECONDS = 20
+BOOT_CPU_PRESSURE_LIMIT = 20.0
+BOOT_MEMORY_PRESSURE_LIMIT = 5.0
 SCHEMA = 'subyard.android-pool.v1'
 VERSIONS = {34: '14', 35: '15', 36: '16'}
 # Emulator 37.1.11 raised the tested phone to 2.5GiB. The current upstream
@@ -1068,8 +1073,9 @@ class Runtime:
         avd = avds / 'managed.avd'
         avd.mkdir()
         (avds / 'managed.ini').write_text(f'avd.ini.encoding=UTF-8\npath={avd}\ntarget=android-{request["api"]}\n')
+        cores = 2
         config = {'AvdId': 'managed', 'avd.ini.displayname': 'Managed disposable emulator',
-                  'abi.type': 'x86_64', 'hw.cpu.arch': 'x86_64', 'hw.cpu.ncore': '2',
+                  'abi.type': 'x86_64', 'hw.cpu.arch': 'x86_64', 'hw.cpu.ncore': cores,
                   'hw.lcd.width': width, 'hw.lcd.height': height, 'hw.lcd.density': density,
                   'hw.ramSize': memory, 'hw.keyboard': 'yes', 'hw.gpu.enabled': 'yes',
                   'hw.gpu.mode': 'host' if self.config.get('gpu', 'host') == 'host' else 'swiftshader', 'hw.mainKeys': 'no', 'hw.device.name': request['device'],
@@ -1083,6 +1089,7 @@ class Runtime:
                 os.chown(Path(parent) / name, account.pw_uid, account.pw_gid)
         require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
         namespace = self.create_namespace(slot, directory)
+        launched = time.monotonic()
         run(['systemd-run', '--quiet', '--collect', '--unit', self.unit(slot), '--service-type=exec',
              '--property=User=' + account.pw_name, '--property=KillMode=control-group',
              '--property=Slice=system.slice', '--property=CPUAccounting=yes', '--property=IOAccounting=yes',
@@ -1092,7 +1099,7 @@ class Runtime:
              '--property=BindReadOnlyPaths=' + str(image) + ':' + str(base_image)
              + ' ' + str(resolver) + ':/etc/resolv.conf',
              '--property=TimeoutStopSec=30',
-             '--property=MemoryMax=' + str(memory + RUNTIME_OVERHEAD_MIB) + 'M', '--property=OOMPolicy=kill',
+             '--property=MemoryMax=' + str(self.budget(request) // 1024**2) + 'M', '--property=OOMPolicy=kill',
              '--property=Restart=no', '--property=BindsTo=subyard-android-pool.service',
              '--property=After=subyard-android-pool.service',
              '--setenv=HOME=' + str(home), '--setenv=ANDROID_AVD_HOME=' + str(avds),
@@ -1101,20 +1108,30 @@ class Runtime:
              '--setenv=EMULATOR_GPU=' + self.config.get('gpu', 'host'),
              '/usr/local/lib/subyard-android/runtime.sh'])
         self.start_network(slot, directory, cancel, namespace)
-        deadline = time.monotonic() + BOOT_TIMEOUT
+        self.wait_for_boot(slot, cancel, cores, launched)
+
+    def wait_for_boot(self, slot, cancel, cores, launched):
+        started = time.monotonic()
+        deadline = started + BOOT_TIMEOUT
         wifi_state = {}
-        while time.monotonic() < deadline:
+        stable_since = stable_framework = first_package = peak_pressure = peak_memory_pressure = None
+        framework = pressure = memory_pressure = last_sample = None
+        settled = False
+        while (probe_started := time.monotonic()) < deadline:
             require(not cancel.is_set(), 'cancelled', 'allocation cancelled')
-            pid = self.pid(slot)
-            require(pid > 0, 'boot', 'Android runtime exited before readiness')
             # Probe the existing ADB server directly. An adb CLI here could auto-start an
             # unowned root daemon outside the runtime cgroup when the server is not ready yet.
             process = None
-            ready = False
+            framework = None
+            probe_deadline = min(deadline, probe_started + 5)
             try:
-                process = self.connect(slot)
-                ready, _ = self.adb_ready(process, wifi_state=wifi_state)
-            except (subprocess.SubprocessError, OSError, PoolError):
+                require(self.pid(slot, deadline=probe_deadline) > 0, 'boot', 'Android runtime exited before readiness')
+                process = self.connect(slot, deadline=probe_deadline)
+                framework, _ = self.adb_ready(process, timeout=probe_deadline - time.monotonic(), wifi_state=wifi_state)
+            except PoolError as exc:
+                if exc.code == 'boot':
+                    raise
+            except (subprocess.SubprocessError, OSError):
                 pass
             finally:
                 if process is not None:
@@ -1124,17 +1141,60 @@ class Runtime:
                         with contextlib.suppress(OSError, ProcessLookupError):
                             process.kill()
                     with contextlib.suppress(OSError, subprocess.SubprocessError):
-                        process.wait(timeout=5)
+                        process.wait(timeout=min(5, max(0, deadline - time.monotonic())))
                     with contextlib.suppress(OSError):
                         process.stdout.close()
-            if ready:
-                return
-            cancel.wait(1)
-        raise PoolError('boot_timeout', f'Android boot did not complete within {BOOT_TIMEOUT} seconds')
+            now = time.monotonic()
+            if framework is not None and first_package is None:
+                first_package = round(now - started, 1)
+            # The emulator cgroup covers the runtime and renderer, and can be read without guest privileges.
+            pressure = self.boot_pressure(slot, 'cpu')
+            memory_pressure = self.boot_pressure(slot, 'memory')
+            if pressure is not None:
+                peak_pressure = pressure if peak_pressure is None else max(pressure, peak_pressure)
+            if memory_pressure is not None:
+                peak_memory_pressure = (memory_pressure if peak_memory_pressure is None
+                                        else max(peak_memory_pressure, memory_pressure))
+            now = time.monotonic()
+            if (framework is None or pressure is None or pressure > BOOT_CPU_PRESSURE_LIMIT
+                    or memory_pressure is None or memory_pressure > BOOT_MEMORY_PRESSURE_LIMIT):
+                stable_since = None
+            elif (stable_since is None or stable_framework != framework
+                  or now - last_sample > BOOT_SAMPLE_INTERVAL + BOOT_SAMPLE_GAP_MARGIN):
+                stable_since, stable_framework = now, framework
+            elif now - stable_since >= BOOT_SETTLE_SECONDS and now < deadline:
+                settled = True
+                break
+            last_sample = now
+            cancel.wait(max(0, min(deadline, probe_started + BOOT_SAMPLE_INTERVAL) - now))
+        finished = time.monotonic()
+        print(f'android boot readiness cores={cores} settled={str(settled).lower()} '
+              f'boot_to_ready_seconds={finished - launched:.1f} elapsed_seconds={finished - started:.1f} '
+              f'first_package_seconds={first_package} peak_cpu_some_avg10={peak_pressure} '
+              f'peak_memory_some_avg10={peak_memory_pressure}', file=sys.stderr, flush=True)
+        if not settled:
+            cpu = 'unavailable' if pressure is None else f'{pressure:g}%'
+            memory = 'unavailable' if memory_pressure is None else f'{memory_pressure:g}%'
+            guest = 'passed' if framework is not None else 'did not pass'
+            raise PoolError('boot_timeout', f'Android boot did not settle within {BOOT_TIMEOUT} seconds. '
+                            f'The last boot, network and package manager probe {guest}. '
+                            f'Cgroup CPU PSI was {cpu} (limit {BOOT_CPU_PRESSURE_LIMIT:g}%) and memory PSI was '
+                            f'{memory} (limit {BOOT_MEMORY_PRESSURE_LIMIT:g}%). Readiness needs '
+                            f'{BOOT_SETTLE_SECONDS} consecutive seconds with a responsive framework and low pressure.')
+
+    def boot_pressure(self, slot, resource):
+        try:
+            path = self.CGROUP_ROOT / 'system.slice' / self.unit(slot) / f'{resource}.pressure'
+            match = re.search(r'^some avg10=([0-9]{1,3}\.[0-9]{2}) ', path.read_text(), re.M)
+        except OSError:
+            return None
+        if match and float(match[1]) <= 100:
+            return float(match[1])
+        return None
 
     @staticmethod
     def adb_ready(process, timeout=5, wifi_state=None):
-        """Return (ready, connection submitted) through the existing private ADB server."""
+        """Return (ready framework PID or None, Wi-Fi submission)."""
         if wifi_state is None:
             wifi_state = {}
         deadline = time.monotonic() + timeout
@@ -1160,7 +1220,7 @@ class Runtime:
 
         request('host:transport:emulator-5554')
         if read(4) != b'OKAY':
-            return False, False
+            return None, False
         # Android can report boot completion while its initial Wi-Fi setting is still off.
         # Initialize the guest radio explicitly, then wait for local IPv4 configuration.
         # A clean image can retain a disabled default network even after radio enable.
@@ -1179,31 +1239,32 @@ class Runtime:
                 '"Service wifi: found") ;; *) exit 1;; esac; '
                 'if [ "$(settings get global wifi_on)" = 0 ]; then svc wifi enable >/dev/null || exit 1; fi; '
                 'if ip -4 addr show scope global | grep -q " inet "; then '
-                'printf "%s:ready\\n" "$framework"; '
+                'if package=$(cmd package path android 2>/dev/null); then '
+                'case "$package" in package:/*) printf "%s:ready\\n" "$framework";; esac; fi; '
                 f'elif [ "$framework" != "{submitted_for}" ] && '
                 'cmd wifi status 2>/dev/null | { IFS= read -r radio; [ "$radio" = "Wifi is enabled" ]; } && '
                 'cmd wifi connect-network AndroidWifi open >/dev/null 2>&1; then '
                 'printf "%s:submitted\\n" "$framework"; '
                 'else printf "%s:pending\\n" "$framework"; fi; fi')
         if read(4) != b'OKAY':
-            return False, False
+            return None, False
         line = bytearray()
         while len(line) < 1024:
             byte = read(1)
             if byte is None:
-                return False, False
+                return None, False
             line.extend(byte)
             if byte == b'\n':
                 match = re.fullmatch(rb'([1-9][0-9]{0,9}):(ready|submitted|pending|missing)', line.strip())
                 if not match:
-                    return False, False
+                    return None, False
                 framework, state = match.groups()
                 if state == b'missing':
                     wifi_state.pop('submitted_for', None)
                 elif state == b'submitted':
                     wifi_state['submitted_for'] = framework.decode('ascii')
-                return state == b'ready', state == b'submitted'
-        return False, False
+                return (framework if state == b'ready' else None), state == b'submitted'
+        return None, False
 
     def start_network(self, slot, directory, cancel, namespace):
         pid = self.pid(slot)
@@ -1243,8 +1304,9 @@ class Runtime:
             cancel.wait(0.1)
         raise PoolError('network', 'Android egress did not become ready')
 
-    def pid(self, slot):
-        result = run(['systemctl', 'show', self.unit(slot), '--property=MainPID', '--value'])
+    def pid(self, slot, *, deadline=None):
+        timeout = 60 if deadline is None else max(0, deadline - time.monotonic())
+        result = run(['systemctl', 'show', self.unit(slot), '--property=MainPID', '--value'], timeout=timeout)
         return int(result.stdout.strip() or '0')
 
     def observe(self, slot, *, cgroup_root=Path('/sys/fs/cgroup'), proc_root=Path('/proc')):
@@ -1350,12 +1412,12 @@ class Runtime:
         require(all(path.name in expected for path in self.root.iterdir()),
                 'ownership', 'unrecorded Android data requires operator resolution')
 
-    def connect(self, slot):
-        pid = self.pid(slot)
+    def connect(self, slot, *, deadline=None):
+        pid = self.pid(slot, deadline=deadline)
         require(pid > 0, 'unavailable', 'Android runtime is not running')
         directory = self.root / self.unit(slot).removesuffix('.service')
         namespace = self.namespace_path(slot)
-        require(self.unit(slot) in Path(f'/proc/{pid}/cgroup').read_text() and self.pid(slot) == pid,
+        require(self.unit(slot) in Path(f'/proc/{pid}/cgroup').read_text() and self.pid(slot, deadline=deadline) == pid,
                 'unavailable', 'runtime identity changed')
         self.verify_namespace(slot, pid, namespace, directory)
         return subprocess.Popen(['nsenter', '--net=' + str(namespace), 'socat', '-', 'TCP:127.0.0.1:5037'],
@@ -1375,6 +1437,7 @@ class Pool:
         self.changed = threading.Condition(self.lock)
         self.closed = False
         self.cancelled = {}
+        self.boot_failures = {}
         self.runtime = runtime or Runtime(config)
         self.images = images or Images(self.root / 'images', config['sdk_root'],
                                       config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3, config.get('image_policy', 'latest-stable'))
@@ -1505,7 +1568,7 @@ class Pool:
             for key in ('acquired_at', 'ready_at', 'last_heartbeat_at', 'expires_at'):
                 result[key] = utc(slot.get(key))
         if 'request' in slot:
-            result['reserved_memory_bytes'] = (PRESETS[slot['request']['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
+            result['reserved_memory_bytes'] = Runtime.budget(slot['request'])
         result['lease'] = dict(contract='resource-lease/v1', resource_type='android-emulator',
                                resource_id='emulator', slot_id=slot['slot_id'],
                                generation=slot['generation'], state=('draining' if slot['state'] in ('provisioning', 'held')
@@ -1552,12 +1615,19 @@ class Pool:
         require(isinstance(token, str) and re.fullmatch('[a-f0-9]{64}', token), 'credential', 'invalid lease credential')
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def find(self, token):
-        digest = self.digest(token)
+    def find(self, digest):
         for slot in self.slots:
             if secrets.compare_digest(slot.get('credential', ''), digest):
                 return slot
         raise PoolError('stale', 'lease is expired, released or unknown')
+
+    def boot_failure(self, digest):
+        failure = self.boot_failures.get(digest)
+        if failure is not None:
+            expires, message = failure
+            if self.clock() < expires:
+                return message
+        return None
 
     def reserve(self, request, token, owner):
         request = self.normalize(request)
@@ -1578,7 +1648,8 @@ class Pool:
             self.cancelled = {key: expiry for key, expiry in self.cancelled.items() if expiry > self.clock()}
             require(digest not in self.cancelled, 'cancelled', 'allocation was cancelled before reservation')
             require(not self.closed, 'unavailable', 'Android pool is stopping')
-            require(not any(s.get('credential') == digest for s in self.slots), 'credential', 'credential already used')
+            require(self.boot_failure(digest) is None and not any(s.get('credential') == digest for s in self.slots),
+                    'credential', 'credential already used')
             slot = next((s for s in self.slots if s['state'] == 'available' and s['slot_id'] not in self.workers), None)
             require(any(s['state'] != 'quarantined' for s in self.slots),
                     'unavailable', 'all Android emulator slots are quarantined')
@@ -1633,7 +1704,10 @@ class Pool:
 
     def allocation(self, token, renew=False):
         with self.lock:
-            slot = self.find(token)
+            digest = self.digest(token)
+            if (message := self.boot_failure(digest)) is not None:
+                raise PoolError('boot_timeout', message)
+            slot = self.find(digest)
             if slot['state'] in ('draining', 'available') and slot.get('failure'):
                 message = slot.get('failure_message', 'Android provisioning failed')
                 if slot['state'] == 'available':
@@ -1674,6 +1748,11 @@ class Pool:
             with self.lock:
                 stopped = dict(slot, state='available')
                 self.record_observation(stopped, 'stopped')
+                if slot.get('failure') == 'boot_timeout':
+                    # A new reservation can reuse the slot before the client polls.
+                    message = slot.pop('failure_message', 'Android boot timed out') + '; runtime was stopped'
+                    self.boot_failures[slot['credential']] = self.clock() + TTL, message
+                    del slot['failure']
                 # Keep last credential hash solely for idempotent release until next allocation.
                 for key in list(slot):
                     if key not in ('slot_id', 'generation', 'credential', 'failure', 'failure_message'):
@@ -1711,12 +1790,13 @@ class Pool:
 
     def release(self, token):
         with self.lock:
+            digest = self.digest(token)
             try:
-                slot = self.find(token)
+                slot = self.find(digest)
             except PoolError as exc:
                 if exc.code == 'stale':
                     # A cancellation can overtake a reserve while it resolves repository metadata.
-                    self.cancelled[self.digest(token)] = self.clock() + TTL
+                    self.cancelled[digest] = self.clock() + TTL
                     return dict(released=True)
                 raise
             generation = slot['generation']
@@ -1756,8 +1836,10 @@ class Pool:
 
     def reap(self, recovery=False):
         with self.lock:
+            now = self.clock()
+            self.boot_failures = {digest: failure for digest, failure in self.boot_failures.items() if failure[0] > now}
             victims = [(s, s['generation']) for s in self.slots if s['state'] != 'available'
-                       and (recovery or s.get('expires_at', 0) <= self.clock())]
+                       and (recovery or s.get('expires_at', 0) <= now)]
             for slot, _ in victims:
                 self.fence(slot)
         for slot, generation in victims:
@@ -1801,7 +1883,7 @@ class Pool:
 
     def tunnel(self, token, connection):
         with self.lock:
-            slot = self.find(token)
+            slot = self.find(self.digest(token))
             require(slot['state'] == 'held' and self.clock() < slot['expires_at'], 'stale', 'lease is no longer active')
             process = self.runtime.connect(slot)
             connections = self.connections.setdefault(slot['slot_id'], {})

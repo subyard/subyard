@@ -489,7 +489,7 @@ func TestIntegrationSettingsPublicationRetry(t *testing.T) {
 	}
 }
 func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T) {
-	for _, scenario := range []string{"ready", "legacy-prompt", "source-drift", "runtime-drift"} {
+	for _, scenario := range []string{"ready", "legacy-prompt", "legacy-off", "source-drift", "runtime-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
@@ -500,10 +500,10 @@ func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T)
 			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}}}
 			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"AGENT_sample_COMMAND=old-command"}}
-			if scenario == "legacy-prompt" {
+			if approval, legacy := strings.CutPrefix(scenario, "legacy-"); legacy {
 				runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION="+source)
 				installed := runtime
-				installed.Environment = append(slices.Clone(runtime.Environment), "CODING_TOOL_GIT_APPROVAL=prompt")
+				installed.Environment = append(slices.Clone(runtime.Environment), "CODING_TOOL_GIT_APPROVAL="+approval)
 				entries, err := installed.integrationPackageArtifacts("observe", nil)
 				if err != nil || len(entries) != 1 {
 					t.Fatalf("legacy package receipt: %#v, error: %v", entries, err)
@@ -512,6 +512,13 @@ func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T)
 				runtime.Environment = append(runtime.Environment, "CODING_TOOL_GIT_APPROVAL=off")
 			}
 			capture, err := runtime.PrepareAppliedIntegrationSettings(context.Background())
+			if scenario == "legacy-off" {
+				const refusal = "legacy integration settings have no verified applied baseline; reconcile the existing settings with yard init before editing them"
+				if err == nil || err.Error() != refusal || capture != nil || executor.captures != 0 {
+					t.Fatalf("legacy off receipt must be refused: capture=%v error=%v publications=%d", capture, err, executor.captures)
+				}
+				return
+			}
 			if err != nil || capture == nil {
 				t.Fatalf("legacy capture preparation: %v", err)
 			}

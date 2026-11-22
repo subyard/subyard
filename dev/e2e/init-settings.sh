@@ -101,6 +101,7 @@ YARD_KIND=container
 YARD_IMAGE=images:debian/13/cloud
 YARD_IMAGE_FALLBACK=images:debian/13/cloud
 CODING_TOOL_INTEGRATIONS=
+CODING_TOOL_GIT_APPROVAL=prompt
 AGENT_claude_PROVISION=$STATE/provision.sh
 AGENT_claude_CONFIG=$STATE/claude.json
 AGENT_claude_COMMAND=fixture-agent

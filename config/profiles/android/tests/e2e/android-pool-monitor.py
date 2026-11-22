@@ -307,7 +307,7 @@ def yard_observation(proc=Path('/proc')):
     return result
 
 
-def metrics(slot):
+def metrics(slot, *, include_smaps=True):
     unit = Runtime.unit(slot)
     result = subprocess.run(['systemctl', 'show', unit,
                              '--property=ControlGroup,MainPID,ActiveState'],
@@ -345,17 +345,18 @@ def metrics(slot):
         key: memory_stat.get(key) for key in ('anon', 'file', 'shmem', 'kernel', 'active_file', 'inactive_file')
         if type(memory_stat.get(key)) is int and 0 <= memory_stat[key] <= 1 << 60}
     values['main_process_memory_kb'] = dict(rss=None, pss=None)
-    try:
-        with Path(f'/proc/{pid}/smaps_rollup').open('rb') as source:
-            raw = source.read(8193)
-        if len(raw) <= 8192:
-            for key, field in ((b'Rss', 'rss'), (b'Pss', 'pss')):
-                lines = re.findall(rb'^' + key + rb':[^\n]*$', raw, re.M)
-                match = re.fullmatch(key + rb': +([0-9]{1,20}) kB', lines[0]) if len(lines) == 1 else None
-                if match and int(match[1]) <= 1 << 60:
-                    values['main_process_memory_kb'][field] = int(match[1])
-    except OSError:
-        pass
+    if include_smaps:
+        try:
+            with Path(f'/proc/{pid}/smaps_rollup').open('rb') as source:
+                raw = source.read(8193)
+            if len(raw) <= 8192:
+                for key, field in ((b'Rss', 'rss'), (b'Pss', 'pss')):
+                    lines = re.findall(rb'^' + key + rb':[^\n]*$', raw, re.M)
+                    match = re.fullmatch(key + rb': +([0-9]{1,20}) kB', lines[0]) if len(lines) == 1 else None
+                    if match and int(match[1]) <= 1 << 60:
+                        values['main_process_memory_kb'][field] = int(match[1])
+        except OSError:
+            pass
     values['cpu.stat'] = pairs(group / 'cpu.stat')
     for name in ('memory.pressure', 'cpu.pressure'):
         try:
@@ -451,6 +452,7 @@ def main():
         return
     global stop
     stop = Path(sys.argv[1])
+    host_only = sys.argv[2:] == ['--host-only']
     if not re.fullmatch(r'/run/subyard-e2e-android-monitor-[a-z0-9]+\.stop', str(stop)):
         raise SystemExit('android-boot-monitor: invalid stop marker')
     print('android-boot-monitor ready', flush=True)
@@ -469,7 +471,7 @@ def main():
                 key = (slot['slot_id'], slot['generation'])
                 if status == 'provisioning':
                     provisioning_since.setdefault(key, time.monotonic())
-                current = metrics(slot)
+                current = metrics(slot, include_smaps=False) if host_only else metrics(slot)
                 if current is not None:
                     last_metrics[key] = current
                 samples.append((slot, status, current or last_metrics.get(key)))
@@ -486,7 +488,7 @@ def main():
                     report = {'sampled_at': time.time(), 'slot': slot['slot_id'], 'generation': slot['generation'],
                               'yard_visible': yard_observation(),
                               'state': status, 'cgroup': cgroup}
-                    if status in ('provisioning', 'held'):
+                    if not host_only and status in ('provisioning', 'held'):
                         report['display'] = display_observation(slot)
                         for name in ('sys.boot_completed', 'init.svc.bootanim', 'ro.build.version.sdk'):
                             report[name] = property_value(slot, name)
@@ -521,18 +523,18 @@ def main():
                                 if startup is not None:
                                     report['startup_crash'] = startup
                     print('android-boot-monitor ' + json.dumps(report, sort_keys=True), flush=True)
-                    if (not stopping and status == 'provisioning' and key not in diagnosed
+                    if (not host_only and not stopping and status == 'provisioning' and key not in diagnosed
                             and time.monotonic() - provisioning_since[key] >= 450
                             and re.fullmatch(r'[0-9]{1,3}', report.get('ro.build.version.sdk', ''))
                             and report.get('sys.boot_completed') in ('', '0')):
                         diagnosed.add(key)
                         print('android-display-observation ' + json.dumps(dict(slot=slot['slot_id'], generation=slot['generation'], **display_observation(slot)), sort_keys=True), flush=True)
-                    if not stopping and status == 'provisioning' and report.get('sys.boot_completed') == '1':
+                    if not host_only and not stopping and status == 'provisioning' and report.get('sys.boot_completed') == '1':
                         network_wait_since.setdefault(key, time.monotonic())
                         if key not in network_diagnosed and time.monotonic() - network_wait_since[key] >= 120:
                             network_diagnosed.add(key)
                             print('android-display-observation ' + json.dumps(dict(slot=slot['slot_id'], generation=slot['generation'], **display_observation(slot)), sort_keys=True), flush=True)
-                next_report, last_state = now + 30, identity
+                next_report, last_state = now + (5 if host_only else 30), identity
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             print('android-boot-monitor error=' + type(exc).__name__, flush=True)
         if stopping:

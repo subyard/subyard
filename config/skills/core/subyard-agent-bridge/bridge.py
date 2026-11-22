@@ -31,8 +31,6 @@ CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
                    'danger-full-access': 'dangerFullAccess'}
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
           'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
-STANDALONE = ('You are a standalone worker with no parent agent. Put your full report in your final '
-              'message. Do not send it to a parent.\n\n')
 SECRET_NAME = r'token|secret|password|passwd|passphrase|credentials?|cookie|api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key'
 SECRET_ENV = re.compile(rf'(?:^|_)(?:{SECRET_NAME})(?:_|$)', re.IGNORECASE)
 SECRET_HEADER = re.compile(r'(?i)(\b(?:(?:proxy-)?authorization[ \t]*[:=]|(?:set-)?cookie[ \t]*:))[^\r\n]*')
@@ -85,6 +83,19 @@ def codex_arguments(args):
         else:
             arguments.append(arg)
     return arguments, sandbox
+
+
+# Each CLI sets its own session marker for its tools; a worker must not inherit its parent's
+# marker, or a nested start would name the grandparent instead of its own parent.
+SESSION_MARKERS = ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID')
+
+
+def worker_preamble(own):
+    """Name the parent like a native subagent knows it; replies reach it only as the final message."""
+    parent = ('a Claude Code session' if own.get('CLAUDE_CODE_SESSION_ID') else
+              'a Codex session' if own.get('CODEX_THREAD_ID') else 'another agent session')
+    return (f'You are a worker started by {parent}, your parent agent, through a bridge. Its messages '
+            'arrive as user messages; it reads only your final message, so put your full report there.\n\n')
 
 
 def parent_session_hint(env, own):
@@ -460,8 +471,9 @@ class Worker:
             self.task = 'Review read-only. Do not modify the repository. Write test/build outputs only in /tmp or TMPDIR.\n' + self.task
         elif self.config.get('role') == 'observer':
             self.task = 'Observe the assigned checks. Do not change repository sources.\n' + self.task
-        self.task = STANDALONE + self.task
-        self.env = parent_session_hint({**os.environ, **self.config.get('env', {})}, os.environ)
+        self.task = worker_preamble(os.environ) + self.task
+        inherited = {key: value for key, value in os.environ.items() if key not in SESSION_MARKERS}
+        self.env = parent_session_hint({**inherited, **self.config.get('env', {})}, os.environ)
         self.redact = event_redactor(self.env)
         self.pending = {}
         self.replying = set()
