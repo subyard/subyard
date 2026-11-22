@@ -14,6 +14,13 @@ if [ "$*" = 'enable --now ssh docker' ]; then
   [ "${TEST_SERVICE_FAIL:-0}" = 0 ] || exit 1
   : >"$TEST_STARTED"
 fi
+case "$*" in
+  'is-active --quiet ssh.service') exit 3 ;;
+  'is-active --quiet docker.service') exit 0 ;;
+  'show ssh.service --property=Result --value')
+    printf '%s\n' exit-code
+    exit "${TEST_COMPARE_EXIT:-0}" ;;
+esac
 if [ "${1:-}" = show ]; then
   printf '%s\n' 'Type=notify' 'LoadState=loaded' 'ActiveState=active' \
     'SubState=running' 'Result=success' 'MainPID=123' 'ExecMainStatus=0' \
@@ -58,7 +65,25 @@ cat >"$TMP/bin/timeout" <<'SH'
 printf 'timeout %s\n' "$*" >>"$TEST_LOG"
 exec /usr/bin/timeout "$@"
 SH
-chmod +x "$TMP/bin/systemctl" "$TMP/bin/iptables" "$TMP/bin/docker" "$TMP/bin/timeout"
+cat >"$TMP/bin/journalctl" <<'SH'
+#!/bin/sh
+printf 'journalctl %s\n' "$*" >>"$TEST_LOG"
+i=0
+while [ "$i" -lt 30 ]; do
+  printf 'sshd[1]: line %s %0300d\n' "$i" 0
+  i=$((i + 1))
+done
+SH
+cat >"$TMP/bin/sshd" <<'SH'
+#!/bin/sh
+printf 'sshd %s\n' "$*" >>"$TEST_LOG"
+case "$1" in
+  -t) printf '%s\n' 'sshd: no hostkeys available -- exiting.' >&2; exit 1 ;;
+  -G) printf '%s\n' 'port 22' 'PRIVATE_PAYLOAD'; printf '%s\n' 'sshd -G warning' >&2 ;;
+esac
+SH
+chmod +x "$TMP/bin/systemctl" "$TMP/bin/iptables" "$TMP/bin/docker" "$TMP/bin/timeout" \
+  "$TMP/bin/journalctl" "$TMP/bin/sshd"
 PATH="$TMP/bin:/usr/bin:/bin"
 export PATH
 
@@ -101,9 +126,26 @@ for TEST_SERVICE_FAIL in 0 1; do
     if [ "$TEST_SERVICE_FAIL" = 0 ]; then
       [ "$(grep -Fxc 'docker container ls -a --format {{.Names}}' "$TEST_LOG")" = 1 ] \
         || { printf 'FAIL: service start did not issue one inventory query\n' >&2; exit 1; }
+      ! grep -Eq '^(journalctl|sshd) ' "$TEST_LOG" \
+        || { printf 'FAIL: successful service start ran failure diagnostics\n' >&2; exit 1; }
     else
       ! grep -Fq 'docker ' "$TEST_LOG" \
         || { printf 'FAIL: failed service start reached Docker API\n' >&2; exit 1; }
+      python3 - "$TMP" <<'PY'
+import os, pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+lines = (root / "stderr").read_text().splitlines()
+result = "exit-code" if os.environ["TEST_COMPARE_EXIT"] == "0" else "unknown"
+assert lines[0] == f"yard service ssh.service failed to start: result={result}", lines
+assert not any("docker.service" in line for line in lines), lines
+journal = lines[lines.index("ssh.service journal for this start:") + 1:lines.index("sshd -t errors:")]
+assert len(journal) == 20 and all(len(line) == 240 for line in journal), journal
+assert lines[lines.index("sshd -t errors:") + 1] == "sshd: no hostkeys available -- exiting."
+assert lines[lines.index("sshd -G errors:") + 1] == "sshd -G warning"
+assert re.fullmatch(r"sshd -G hostkey entries: 0, host key files: [0-9]+", lines[-1]), lines
+calls = (root / "log").read_text()
+assert re.search(r"^journalctl --no-pager --quiet -o cat -u ssh.service --since @[0-9]+ -n 20$", calls, re.M), calls
+PY
     fi
     python3 - "$TMP" <<'PY'
 import json
@@ -120,7 +162,8 @@ failed_api = os.environ["TEST_SERVICE_FAIL"] == "0" and os.environ["TEST_API_EXI
 commands = (root / "log").read_text()
 if not failed_api:
     assert not records, records
-    assert "docker info" not in commands and "docker version" not in commands and "systemctl show" not in commands
+    assert "docker info" not in commands and "docker version" not in commands
+    assert "systemctl show docker.service" not in commands and "systemctl show containerd.service" not in commands
     sys.exit(0)
 assert stderr.splitlines()[-1] == "Docker API is unavailable after service startup"
 probes = {r['probe']: r for r in records if r['probe'] != 'service-state'}
