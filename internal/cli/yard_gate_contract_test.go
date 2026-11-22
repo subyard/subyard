@@ -153,7 +153,7 @@ func flags(names ...string) map[string]string {
 
 var goldenCommands = map[string]goldenCommand{
 	"network":     {prepared: true, verbs: map[string]string{"status": "read", "link": "write", "unlink": "write", "isolation": "write", "reconcile": "write"}, options: flags("--json")},
-	"init":        {prepared: true, verbs: map[string]string{"": "init"}, options: flags("--configs", "--reset", "value:--profile", "--continue-legacy", "--adopt")},
+	"init":        {prepared: true, verbs: map[string]string{"": "init"}, options: flags("--configs", "--reset", "value:--profile", "value:--environment-profiles", "--continue-legacy", "--adopt")},
 	"start":       {prepared: true, verbs: map[string]string{"": "start"}, options: flags()},
 	"stop":        {prepared: true, verbs: map[string]string{"": "stop"}, options: flags("--force")},
 	"cleanup":     {prepared: true, verbs: map[string]string{"": "write"}, options: flags("--soft", "--hard")},

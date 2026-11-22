@@ -40,6 +40,8 @@ type initArguments struct {
 	continueLegacy bool
 	mode           initMode
 	profile        string
+	// environmentProfiles is the selection for a named yard that init creates.
+	environmentProfiles *string
 	// consentFD carries a config apply parent's consent to init --configs.
 	consentFD int
 }
@@ -47,6 +49,8 @@ type initArguments struct {
 type initBootstrap struct {
 	source     *profile.Source
 	profile    string
+	// environmentProfiles is the creation selection; empty means none.
+	environmentProfiles string
 	sourcePath string
 	targetPath string
 	content    []byte
@@ -212,8 +216,26 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 			if !domain.SafeName(request.profile) {
 				return initArguments{}, fmt.Errorf("invalid profile %q", request.profile)
 			}
+		case "--environment-profiles":
+			if index+1 >= len(arguments) {
+				return initArguments{}, errors.New("--environment-profiles needs a value")
+			}
+			index++
+			if request.environmentProfiles != nil {
+				return initArguments{}, errors.New("--environment-profiles may be specified only once")
+			}
+			value := arguments[index]
+			request.environmentProfiles = &value
 		default:
 			return initArguments{}, fmt.Errorf("unknown option %q", argument)
+		}
+	}
+	if request.environmentProfiles != nil {
+		if request.mode != initReconcile || request.profile != "" || request.adopt || request.continueLegacy {
+			return initArguments{}, errors.New("--environment-profiles cannot be combined with --configs, --reset, --profile, --adopt or --continue-legacy")
+		}
+		if err := validateCreationProfileNames(*request.environmentProfiles); err != nil {
+			return initArguments{}, err
 		}
 	}
 	if request.consentFD >= 0 && request.mode != initConfigs {
@@ -237,10 +259,22 @@ func (cli *CLI) loadInitContext(
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
+	if request.environmentProfiles != nil && (!explicit || yard == "" || yard == "default") {
+		return config.Loaded{}, nil, errors.New("--environment-profiles requires selecting a new non-default yard with -Y")
+	}
 	if request.profile == "" {
 		loaded, err := cli.loadContext(yard)
 		if errors.Is(err, config.ErrUnknownYard) && explicit && yard != "" && yard != "default" && request.mode == initReconcile && !request.continueLegacy && !request.adopt {
-			return cli.loadEmptyNamedYard(yard)
+			creation := ""
+			if request.environmentProfiles != nil {
+				creation = strings.Join(strings.Fields(*request.environmentProfiles), " ")
+			}
+			return cli.loadEmptyNamedYard(yard, creation)
+		}
+		if err == nil && request.environmentProfiles != nil {
+			if err := resumedCreationSelection(loaded, *request.environmentProfiles); err != nil {
+				return config.Loaded{}, nil, err
+			}
 		}
 		if err == nil && (request.continueLegacy || request.adopt) && loaded.Context.AccessKind != domain.AccessLocal {
 			flag := "--continue-legacy"
