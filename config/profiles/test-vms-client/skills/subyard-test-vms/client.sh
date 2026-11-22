@@ -435,10 +435,11 @@ lease_acquire_request() {
 
 resolve_vm_count() {
   case "$ENVIRONMENT_TYPE" in
-    subyard-pair) VM_COUNT=2 ;;
+    subyard-pair|system-container) VM_COUNT=2 ;;
     android-test) VM_COUNT=1 ;;
-    *) die "--type must be subyard-pair or android-test" ;;
+    *) die "--type must be subyard-pair, system-container or android-test" ;;
   esac
+  [ "$ENVIRONMENT_TYPE" != system-container ] || [ -z "$DISK_REQUESTED" ] || die "system-container has no disk limit"
   if [ -n "$VM_COUNT_REQUESTED" ]; then
     case "$VM_COUNT_REQUESTED" in 1|2) ;; *) die '--vm-count must be 1 or 2' ;; esac
     [ "$ENVIRONMENT_TYPE" != android-test ] || [ "$VM_COUNT_REQUESTED" = 1 ] \
@@ -767,8 +768,12 @@ parse_lease_grant() {
     .grant.environment.type == $environment and .grant.environment.vm_count == $count and
     .grant.environment.lifecycle == "disposable-v1" and
     (.grant.environment.cpu_per_vm | type == "number" and . >= 1 and . == floor) and
-    (.grant.environment.memory_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$")) and
-    (.grant.environment.disk_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$")) and
+    (if $environment == "system-container" then
+       .grant.environment.memory_per_vm == "" and .grant.environment.disk_per_vm == ""
+     else
+       (.grant.environment.memory_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$")) and
+       (.grant.environment.disk_per_vm | type == "string" and test("^[1-9][0-9]*(MiB|GiB|MB|GB)$"))
+     end) and
     (.grant.base_fingerprint | type == "string" and test("^[a-f0-9]{64}$")) and
     (.grant.targets | type == "array" and length == $count)
   ' <<<"$response" >/dev/null 2>&1 \
@@ -842,7 +847,7 @@ capacity_refusal_snapshot() {
            $snapshot.limiting_source == "visible_cgroup" or
            $snapshot.limiting_source == "verified_physical_meminfo") |
     select(($snapshot | has("type") | not) or
-           $snapshot.type == "subyard-pair" or $snapshot.type == "android-test") |
+           $snapshot.type == "subyard-pair" or $snapshot.type == "android-test" or $snapshot.type == "system-container") |
     select(($snapshot | has("vm_count") | not) or
            $snapshot.vm_count == 1 or $snapshot.vm_count == 2) |
     select(($snapshot | has("slot_state") | not) or $snapshot.slot_state == "provisioning") |
@@ -1389,7 +1394,7 @@ allocation_option() {
       [ "$#" -ge 2 ] || die '--slot needs a number from 1 to 999'
       [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot may be specified only once'
       set_requested_slot "$2" --slot ;;
-    --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair or android-test'; ENVIRONMENT_TYPE="$2" ;;
+    --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair, system-container or android-test'; ENVIRONMENT_TYPE="$2" ;;
     --image)
       [ "$#" -ge 2 ] && [ -z "$IMAGE_REQUESTED" ] || die '--image requires one image'
       case "$2" in debian-13|ubuntu-24.04|ubuntu-26.04) IMAGE_REQUESTED="$2" ;; *) die '--image must be debian-13, ubuntu-24.04 or ubuntu-26.04' ;; esac ;;
@@ -1857,7 +1862,7 @@ Usage: subyard-test-vms COMMAND [OPTIONS]
 
   status [--json]                       show slots, their state and holders
   acquire --slot N [--wait 20m] [--purpose LABEL] [--project NAME] [--idle 20m]
-          [--vm-count 1|2] [--type subyard-pair|android-test] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--disk 50GiB]
+          [--vm-count 1|2] [--type subyard-pair|system-container|android-test] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--disk 50GiB]
                                         take a lease; prints its HANDLE on stdout
   exec HANDLE [--vm 1|2] [--stdin] -- COMMAND [ARG...]
                                         run a command as root in the leased VM

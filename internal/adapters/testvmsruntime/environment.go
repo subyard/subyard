@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	EnvironmentPair     = "subyard-pair"
-	EnvironmentAndroid  = "android-test"
-	DisposableLifecycle = "disposable-v1"
+	EnvironmentPair      = "subyard-pair"
+	EnvironmentAndroid   = "android-test"
+	EnvironmentContainer = "system-container"
+	DisposableLifecycle  = "disposable-v1"
 )
 
 // EnvironmentSpec is resolved by the broker's trusted configuration. Clients
@@ -35,6 +36,8 @@ func (cfg Config) environmentSpecForArch(name, arch string) (EnvironmentSpec, er
 	switch name {
 	case EnvironmentPair:
 		spec.Count, spec.Memory, spec.Disk = 2, cfg.Memory, cfg.Disk
+	case EnvironmentContainer:
+		spec.Count = 2
 	case EnvironmentAndroid:
 		if arch != "amd64" {
 			return EnvironmentSpec{}, errors.New("android-test requires x86_64")
@@ -86,9 +89,15 @@ func (spec EnvironmentSpec) Validate() error {
 	if spec.Lifecycle != DisposableLifecycle || spec.CPU < 1 {
 		refusals = append(refusals, errors.New("invalid environment lifecycle or CPU limit"))
 	}
-	if (spec.Name != EnvironmentPair || (spec.Count != 1 && spec.Count != 2)) &&
+	if ((spec.Name != EnvironmentPair && spec.Name != EnvironmentContainer) || (spec.Count != 1 && spec.Count != 2)) &&
 		(spec.Name != EnvironmentAndroid || spec.Count != 1) {
 		refusals = append(refusals, errors.New("invalid named environment composition"))
+	}
+	if spec.Name == EnvironmentContainer {
+		if spec.Memory != "" || spec.Disk != "" {
+			refusals = append(refusals, errors.New("system-container does not accept memory or disk limits"))
+		}
+		return domain.CollectRefusals(refusals...)
 	}
 	if _, err := sizeMiB(spec.Memory); err != nil {
 		refusals = append(refusals, errors.New("invalid environment memory limit"))
@@ -97,6 +106,10 @@ func (spec EnvironmentSpec) Validate() error {
 		refusals = append(refusals, errors.New("environment disk must be at least 10GiB"))
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+func (cfg Config) systemContainer() bool {
+	return cfg.Environment != nil && cfg.Environment.Name == EnvironmentContainer
 }
 
 func (cfg Config) guestCount() int {

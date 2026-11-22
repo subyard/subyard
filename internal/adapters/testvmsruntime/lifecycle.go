@@ -308,12 +308,25 @@ func (runtime *Runtime) finishDrainingSlot(
 	child.useLeaseSlot(slot)
 	runtime.recordObservation(ctx, slot, "pre_stop")
 	started := runtime.Now()
-	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
-	if stopErr != nil {
-		stopErr = fmt.Errorf("drain step fence-and-stop: %w", stopErr)
-	} else if slot.Environment != nil {
-		if deleteErr := child.deleteAllocation(ctx); deleteErr != nil {
-			stopErr = fmt.Errorf("drain step delete-allocation: %w", deleteErr)
+	var evidence stopEvidence
+	var stopErr error
+	if child.Config.systemContainer() {
+		if err := child.restrictAgentAccess("released"); err != nil {
+			return err
+		}
+		// Leave a failed deletion fenced and draining. GC retries the same
+		// epoch, without quarantining an expired container or recycling it.
+		if err := child.deleteAllocation(ctx); err != nil {
+			return err
+		}
+	} else {
+		evidence, stopErr = child.stopRetainedWithEvidence(ctx)
+		if stopErr != nil {
+			stopErr = fmt.Errorf("drain step fence-and-stop: %w", stopErr)
+		} else if slot.Environment != nil {
+			if deleteErr := child.deleteAllocation(ctx); deleteErr != nil {
+				stopErr = fmt.Errorf("drain step delete-allocation: %w", deleteErr)
+			}
 		}
 	}
 	if evidence.duration = runtime.Now().Sub(started); evidence.duration < 0 {
@@ -886,16 +899,22 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			return err
 		}
-		state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(state) != "STOPPED" {
-			return fmt.Errorf("VM %q is not stopped before deletion", vm)
+		if !runtime.Config.systemContainer() {
+			state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(state) != "STOPPED" {
+				return fmt.Errorf("VM %q is not stopped before deletion", vm)
+			}
 		}
 	}
 	for _, vm := range names {
-		if _, err := runtime.incus(ctx, "delete", vm, "--project", runtime.Config.Project); err != nil {
+		args := []string{"delete", vm, "--project", runtime.Config.Project}
+		if runtime.Config.systemContainer() {
+			args = append(args, "--force")
+		}
+		if _, err := runtime.incus(ctx, args...); err != nil {
 			return err
 		}
 	}
@@ -910,6 +929,14 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 	}
 	if len(remaining) != 0 {
 		return errors.New("allocation instances remain after deletion")
+	}
+	if runtime.Config.systemContainer() {
+		// Retire nested permissions before the same project may receive a VM.
+		for _, key := range []string{"restricted.containers.lowlevel", "restricted.containers.nesting", "restricted.containers.privilege"} {
+			if _, err := runtime.incus(ctx, "project", "set", runtime.Config.Project, key, ""); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

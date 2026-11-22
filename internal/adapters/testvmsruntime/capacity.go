@@ -251,6 +251,11 @@ func (runtime *Runtime) storageCapacity(ctx context.Context) (StorageCapacity, e
 }
 
 func environmentCommitment(spec EnvironmentSpec, overhead uint64) (memory, disk uint64) {
+	if spec.Name == EnvironmentContainer {
+		// No virtual disk or VM RAM promise. Admission still checks measured
+		// physical usage, cache budget and the configured host reserves.
+		return 0, 0
+	}
 	return uint64(spec.Count) * (budgetBytes(spec.Memory, "4GiB") + overhead),
 		uint64(spec.Count) * budgetBytes(spec.Disk, "20GiB")
 }

@@ -306,6 +306,16 @@ func (store LeaseStore) AcquireV3Slot(spec EnvironmentSpec, clientID, fingerprin
 	return store.acquireSlot(clientID, fingerprint, contextDisplayLabel(attribution), purpose, &attribution, slotID, &spec)
 }
 
+func (store LeaseStore) pinBase(grant LeaseGrant) error {
+	return store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error {
+		if slot.State != SlotProvisioning {
+			return ErrLeaseLost
+		}
+		slot.BaseFingerprint = grant.BaseFingerprint
+		return nil
+	})
+}
+
 // AbortProvisioning is only for a rejected admission before any working VM was created.
 func (store LeaseStore) AbortProvisioning(grant LeaseGrant) error {
 	return store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error {

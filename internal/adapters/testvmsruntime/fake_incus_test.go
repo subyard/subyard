@@ -208,7 +208,7 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 			return "", nil
 		}
 	case "delete":
-		if vm.status != "STOPPED" {
+		if vm.status != "STOPPED" && !slices.Contains(args, "--force") {
 			return "", fmt.Errorf("instance %s is still running", name)
 		}
 		delete(project.instances, name)
