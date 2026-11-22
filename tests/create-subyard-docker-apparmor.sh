@@ -221,6 +221,12 @@ grep -Fxq \
   || fail 'yard did not hide the unavailable AppArmor indicator from Docker'
 
 [ -f "$SUBYARD_HOME/docker-apparmor-disabled" ] && [ ! -s "$SUBYARD_HOME/docker-apparmor-disabled" ] || fail 'mask must be an empty regular file'
+unlink "$SUBYARD_HOME/docker-apparmor-disabled"
+MOCK_POWER_STATE=RUNNING MOCK_INCUS_DEVICES=subyard-docker-apparmor run_create
+[ ! -e "$SUBYARD_HOME/docker-apparmor-disabled" ] || fail 'legacy yard created an unused mask file'
+! grep -Eq '^(stop |config device (add|remove) yard subyard-docker-apparmor )' "$MOCK_INCUS_LOG" \
+  || fail 'legacy yard was stopped or its working mask was replaced'
+! grep -Fq 'guarded yard restart' "$TMP/output" || fail 'converged legacy mask requested a restart'
 MOCK_INCUS_APPARMOR_ENV=''
 MOCK_INCUS_DEVICES='subyard-docker-apparmor'
 run_create

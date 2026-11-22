@@ -733,20 +733,24 @@ func (runtime Runtime) instanceConverged(ctx context.Context, diagnostics *[]str
 	if appArmorDisabled {
 		if !dockerAppArmorPresent ||
 			dockerAppArmor["type"] != "disk" ||
-			dockerAppArmor["source"] != filepath.Join(runtime.Yard.Paths.DataHome, "docker-apparmor-disabled") ||
 			dockerAppArmor["path"] != "/sys/module/apparmor/parameters/enabled" ||
 			dockerAppArmor["readonly"] != "true" {
 			return false, nil
 		}
-		info, err := os.Lstat(dockerAppArmor["source"])
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if !info.Mode().IsRegular() || info.Size() != 0 {
-			return false, nil
+		if source := dockerAppArmor["source"]; source != "/dev/null" {
+			if source != filepath.Join(runtime.Yard.Paths.DataHome, "docker-apparmor-disabled") {
+				return false, nil
+			}
+			info, err := os.Lstat(source)
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			if !info.Mode().IsRegular() || info.Size() != 0 {
+				return false, nil
+			}
 		}
 	} else if dockerAppArmorPresent {
 		return false, nil

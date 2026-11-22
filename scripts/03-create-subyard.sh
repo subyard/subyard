@@ -285,18 +285,21 @@ docker_apparmor_device=subyard-docker-apparmor
 docker_apparmor_source="$SUBYARD_HOME/docker-apparmor-disabled"
 docker_apparmor_drift=0
 if [ "$docker_apparmor_required" = 1 ]; then
-  # An empty regular file can be bind-mounted read-only inside an unprivileged host.
-  if [ ! -e "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ]; then
-    (set -C; umask 022; : > "$docker_apparmor_source") 2>/dev/null || true
-  fi
-  [ -f "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ] && [ ! -s "$docker_apparmor_source" ] \
-    || die "invalid Docker AppArmor mask source at $docker_apparmor_source"
+  existing_source="$(device_get "$docker_apparmor_device" source)"
   device_exists "$docker_apparmor_device" \
     && [ "$(device_get "$docker_apparmor_device" type)" = disk ] \
-    && [ "$(device_get "$docker_apparmor_device" source)" = "$docker_apparmor_source" ] \
+    && { [ "$existing_source" = /dev/null ] || [ "$existing_source" = "$docker_apparmor_source" ]; } \
     && [ "$(device_get "$docker_apparmor_device" path)" = /sys/module/apparmor/parameters/enabled ] \
     && [ "$(device_get "$docker_apparmor_device" readonly)" = true ] \
     || docker_apparmor_drift=1
+  if [ "$docker_apparmor_drift" = 1 ] || [ "$existing_source" != /dev/null ]; then
+    # An empty regular file can be bind-mounted read-only inside an unprivileged host.
+    if [ ! -e "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ]; then
+      (set -C; umask 022; : > "$docker_apparmor_source") 2>/dev/null || true
+    fi
+    [ -f "$docker_apparmor_source" ] && [ ! -L "$docker_apparmor_source" ] && [ ! -s "$docker_apparmor_source" ] \
+      || die "invalid Docker AppArmor mask source at $docker_apparmor_source"
+  fi
 elif device_exists "$docker_apparmor_device"; then
   docker_apparmor_drift=1
 fi
