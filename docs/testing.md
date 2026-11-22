@@ -739,7 +739,10 @@ only once unlocked, otherwise the next run does.
 The next invocation removes abandoned sibling roots only after taking their lock and
 validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
 mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks
-are preserved. Profile runners use separate process groups so cancellation reaches their children.
+are preserved. Profile runners share the caller's process group, so group signals reach
+their children directly. A PID-only INT or TERM stops dispatch without signalling running
+profiles or other group members; the dispatcher waits for those profiles and exits with
+130 or 143. The shell wrapper forwards these signals only to the dispatcher and waits.
 
 A descendant that closes inherited fds and outlives its runner cannot retain the lock;
 it may lose its scratch at the next run. SIGKILL before receipt publication leaves an

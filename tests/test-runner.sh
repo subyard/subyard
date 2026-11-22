@@ -469,7 +469,7 @@ SUBYARD_PROFILE_TESTS_SERIAL=1 PROFILE_MARKER="$tmp/serial-started" \
   bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/serial.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] && [ ! -e "$tmp/serial-started" ] || fail 'serial opt-out lost fail-fast execution'
 
-# Interrupt realistic shell runners whose foreground children finish slow cleanup.
+# PID-only signals drain running profiles without forwarding; group signals reach children.
 env -u SUBYARD_PROFILE_TESTS_SERIAL python3 - "$tmp" "$fixture/dev/test-profiles.sh" <<'PYCASE'
 import os
 from pathlib import Path
@@ -509,8 +509,26 @@ signal.signal(signal.SIGTERM, stop)
 pending = marker.with_suffix('.pending')
 pending.write_text(f"{os.getppid()} {os.getpid()}")
 pending.replace(marker)
-while True:
-    time.sleep(30)
+while not (marker.parent / 'release').exists():
+    assert scratch.is_dir(), 'running profile lost scratch'
+    time.sleep(.02)
+(scratch / marker.name).write_text('finished')
+marker.with_suffix('.verdict').write_text('finished')
+''')
+bystander = root / 'bystander.py'
+bystander.write_text('''import os
+from pathlib import Path
+import signal
+import sys
+import time
+marker = Path(sys.argv[1])
+def stop(signum, _frame):
+    marker.with_suffix('.signal').write_text(str(signum))
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+marker.write_text(str(os.getpid()))
+while not marker.with_suffix('.release').exists():
+    time.sleep(.02)
 ''')
 for index in range(5):
     profile = root / "config" / "profiles" / str(index) / "tests"
@@ -551,19 +569,28 @@ for label, sig, target, expected, serial in (
         ("term-dispatcher", signal.SIGTERM, "dispatcher", 143, False),
         ("serial-term", signal.SIGTERM, "wrapper", 143, True),
         ("serial-dispatcher", signal.SIGTERM, "dispatcher", 143, True),
+        ("serial-int-group", signal.SIGINT, "group", 130, True),
         ("kill-group", signal.SIGKILL, "group", -signal.SIGKILL, False),
         ("hup-group", signal.SIGHUP, "group", -signal.SIGHUP, False)):
     marked = tmp / ("interrupt-started-" + label)
     marked.mkdir()
     output = tmp / ("profile-interrupt-" + label + ".out")
+    command = ["bash", str(root / "dev/test-profiles.sh"), str(marked)]
+    sibling = marked / 'bystander'
+    if target != 'group':
+        # Start an unrelated caller-group member before the wrapper owns any locks.
+        command = ['python3', '-c', '''import os, subprocess, sys
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+os.execvp(sys.argv[3], sys.argv[3:])
+''', str(bystander), str(sibling), *command]
     with output.open("wb") as log:
-        process = subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
+        process = subprocess.Popen(command,
                                    stdout=log, stderr=log, start_new_session=True,
                                    env={**environment, 'SUBYARD_PROFILE_TESTS_SERIAL': str(int(serial))})
         try:
             deadline = time.monotonic() + 10
             wanted = 1 if serial else 3
-            while len(list(marked.glob('[0-9]'))) < wanted:
+            while len(list(marked.glob('[0-9]'))) < wanted or (target != 'group' and not sibling.exists()):
                 assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
                 time.sleep(.01)
             pids = [int(pid) for marker in marked.glob('[0-9]') for pid in marker.read_text().split()]
@@ -587,6 +614,18 @@ for label, sig, target, expected, serial in (
             else:
                 pid = int(state(pids[0])[1]) if target == "dispatcher" else process.pid
                 os.kill(pid, sig)
+                # Longer than the worker's signal cleanup: a forwarded signal must fail.
+                time.sleep(.75)
+                assert process.poll() is None, f'{label}: wrapper did not wait for running profiles'
+                assert all(alive(pid) for pid in pids), f'{label}: PID signal killed a runner'
+                assert not list(marked.glob('*.verdict')), f'{label}: PID signal reached a runner'
+                assert not sibling.with_suffix('.signal').exists(), f'{label}: signal reached unrelated process'
+                assert alive(int(sibling.read_text())), f'{label}: unrelated process died'
+                assert roots() == live_roots, f'{label}: running profiles lost scratch'
+                sweep()
+                assert roots() == live_roots, f'{label}: sweep removed live scratch'
+                assert sorted(p.name for p in marked.glob('[0-9]')) == [str(i) for i in range(wanted)]
+                (marked / 'release').touch()
             code = process.wait(timeout=5)
             assert time.monotonic() - started < 5, label
             assert code == expected, f"profile runner returned {code} after {label}"
@@ -608,9 +647,17 @@ for label, sig, target, expected, serial in (
             else:
                 assert all(not alive(pid) for pid in pids), f'runner survived {label}'
                 verdicts = list(marked.glob('*.verdict'))
-                assert len(verdicts) == wanted and all(p.read_text() == 'ok' for p in verdicts), (
+                verdict = 'ok' if target == 'group' else 'finished'
+                assert len(verdicts) == wanted and all(p.read_text() == verdict for p in verdicts), (
                     f'{label}: children lost scratch during cleanup: {verdicts}'
                 )
+            if target != 'group':
+                assert not sibling.with_suffix('.signal').exists(), f'{label}: signal reached unrelated process'
+                sibling.with_suffix('.release').touch()
+                deadline = time.monotonic() + 5
+                while alive(int(sibling.read_text())):
+                    assert time.monotonic() < deadline, f'{label}: unrelated process did not finish'
+                    time.sleep(.01)
             # The wrapper and dispatcher group must be drained at wrapper exit.
             for stat in Path('/proc').glob('[0-9]*/stat'):
                 fields = state(stat.parent.name)

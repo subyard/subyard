@@ -21,13 +21,10 @@ def main():
     launch_lock = Lock()
 
     def stop(signum, _frame):
-        # Include foreground children without changing the caller's process group.
-        # Mark stopped first so our re-delivered signal cannot broadcast again.
+        # Stop dispatch only. Group signals already reach runners and their children;
+        # a PID-only signal must leave them and unrelated caller-group members alone.
         if not stopped:
             stopped.append(signum)
-            # Finish any in-flight launch before signalling; no runner may start later.
-            with launch_lock:
-                os.killpg(os.getpgrp(), signum)
 
     # Bash background children inherit SIGINT ignored; restore cancellation.
     signal.signal(signal.SIGINT, stop)
@@ -60,7 +57,7 @@ def main():
         return code
 
     if os.environ.get("SUBYARD_PROFILE_TESTS_SERIAL") == "1":
-        # Launch on a worker here too: the main-thread handler can wait for launch_lock.
+        # Use the same guarded launch path in both modes.
         with ThreadPoolExecutor(max_workers=1) as pool:
             for runner in runners:
                 result = pool.submit(run, runner).result()
