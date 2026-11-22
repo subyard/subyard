@@ -3,7 +3,6 @@
 import argparse
 import base64
 from contextlib import closing
-import errno
 import hashlib
 import http.server
 import importlib.util
@@ -780,21 +779,33 @@ def quit_codex_terminal(client, timeout=60):
     client.send('\r')
     deadline = time.monotonic()+timeout
     readable = True
+
+    def read_output(seconds):
+        nonlocal readable
+        try:
+            client.read(seconds)
+        except RuntimeError as error:
+            if not str(error).startswith('Codex terminal closed:'):
+                raise
+            readable = False
+
+    def diagnostic(exited=None):
+        return json.dumps(dict(
+            exit_code=exited.si_status if exited is not None and exited.si_code == os.CLD_EXITED else None,
+            signal=exited.si_status if exited is not None and exited.si_code != os.CLD_EXITED else None,
+            terminal_tail=client.text()[-1800:]), sort_keys=True)
+
     while True:
         exited = os.waitid(os.P_PID, client.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         if exited is not None:
-            assert exited.si_code == os.CLD_EXITED and exited.si_status == 0, 'Codex did not exit cleanly'
+            while readable and select.select([client.fd], [], [], 0)[0]:
+                read_output(0)
+            assert exited.si_code == os.CLD_EXITED and exited.si_status == 0, 'Codex did not exit cleanly: '+diagnostic(exited)
             return
         remaining = deadline-time.monotonic()
-        assert remaining > 0, 'Codex graceful exit timed out before exporter flush completed'
+        assert remaining > 0, 'Codex graceful exit timed out before exporter flush completed: '+diagnostic()
         if readable:
-            if select.select([client.fd], [], [], min(.1, remaining))[0]:
-                try:
-                    readable = bool(os.read(client.fd, 65536))
-                except OSError as error:
-                    if error.errno != errno.EIO:
-                        raise
-                    readable = False
+            read_output(min(.1, remaining))
         else:
             time.sleep(min(.05, remaining))
 
@@ -844,17 +855,21 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
         try:
             client.wait('Fixture complete.', provider)
-            tool_run = (project/(name+'.run')).read_text().strip()
             # Rendering the answer is not an exporter completion signal. Quit
             # normally so Codex drains its embedded server and flushes OTLP;
             # close() alone sends SIGTERM and can discard pending spans.
             quit_codex_terminal(client)
         finally:
-            client.close()
-        new = runs()-known
-        grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
-        result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
-        print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
+            try:
+                client.close()
+            finally:
+                new = runs()-known
+                grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
+                def receipt(suffix):
+                    path = project/(name+suffix)
+                    return path.read_text().strip() if path.exists() else ''
+                result = dict(new=sorted(new), tool_run=receipt('.run'), tool_exe=receipt('.exe'), traces_grew_for=sorted(grown))
+                print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
         return result
 
     telemetry = ['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--project-id', 'attribution', '--']
