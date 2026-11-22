@@ -892,28 +892,34 @@ func writeRollbackFixtureLedgerEpoch(t *testing.T, configHome string, epoch int)
 func TestRollbackPreparationFailuresNameTheirNextStep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	for name, test := range map[string]struct {
-		arrange func(*preparedRollbackFixture)
+		arrange func(*testing.T, *preparedRollbackFixture)
 		cause   error
 		retry   string
 	}{
-		"apply failure": {func(fixture *preparedRollbackFixture) { fixture.applyErr = errors.New("conversion failed") }, nil, rollbackRetry},
-		"gate refusal": {func(fixture *preparedRollbackFixture) {
+		"apply failure": {func(_ *testing.T, fixture *preparedRollbackFixture) {
+			fixture.applyErr = errors.New("conversion failed")
+		}, nil, rollbackRetry},
+		"gate refusal": {func(_ *testing.T, fixture *preparedRollbackFixture) {
 			fixture.apply = func() { fixture.gateErr = errors.New("rejected") }
 		}, nil, migrateRetry},
-		"cancellation": {func(fixture *preparedRollbackFixture) { fixture.apply = cancel; fixture.applyErr = context.Canceled }, context.Canceled, rollbackRetry},
-		"changed effect": {func(fixture *preparedRollbackFixture) {
+		"cancellation": {func(_ *testing.T, fixture *preparedRollbackFixture) {
+			fixture.apply = cancel
+			fixture.applyErr = context.Canceled
+		}, context.Canceled, rollbackRetry},
+		"changed effect": {func(_ *testing.T, fixture *preparedRollbackFixture) {
 			fixture.apply = func() { fixture.consequence["default"] = "other" }
 		}, domain.ErrPlanStale, rollbackRetry},
 		// A hook that reports success without converting fails the gate.
-		"unconverted owner": {func(fixture *preparedRollbackFixture) {
+		"unconverted owner": {func(_ *testing.T, fixture *preparedRollbackFixture) {
 			fixture.runtime.config.ProfileRuntimeRollbackApply = func(context.Context, string, config.Loaded, string, string, string, string, string) error { return nil }
 		}, nil, rollbackRetry},
 		// The gate reads the history afresh.
-		"changed history": {func(fixture *preparedRollbackFixture) {
+		"changed history": {func(t *testing.T, fixture *preparedRollbackFixture) {
 			apply := fixture.runtime.config.ProfileRuntimeRollbackApply
 			fixture.runtime.config.ProfileRuntimeRollbackApply = func(ctx context.Context, root string, loaded config.Loaded, id, operation, actual, desired, consequence string) error {
 				err := apply(ctx, root, loaded, id, operation, actual, desired, consequence)
-				return errors.Join(err, os.WriteFile(filepath.Join(fixture.home, "release-transition/v2/ledger.json"), []byte(`{"schemaVersion":2,"domains":{"settings":{"epoch":2,"applied":[]}}}`), 0o600))
+				testkit.WriteFile(t, filepath.Join(fixture.home, "release-transition/v2/ledger.json"), []byte(`{"schemaVersion":2,"domains":{"settings":{"epoch":2,"applied":[]}}}`), 0o600)
+				return err
 			}
 		}, nil, rollbackRetry},
 	} {
@@ -923,7 +929,7 @@ func TestRollbackPreparationFailuresNameTheirNextStep(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			test.arrange(fixture)
+			test.arrange(t, fixture)
 			run := context.Background()
 			if test.cause == context.Canceled {
 				run = ctx
