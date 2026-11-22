@@ -133,8 +133,8 @@ type historySelection struct {
 const rollbackDeclarationRefusal = "a rollback declaration of the release pair cannot be verified"
 
 // assembleHistorySelection is shared by captureTransitionSelection and the
-// verb. A non-empty refusal reports a registry that cannot be verified, or an
-// Equivalent relation whose rollback declaration cannot be verified.
+// verb. A non-empty refusal reports an unverifiable registry or declaration,
+// collected with any independently determined history refusals.
 func assembleHistorySelection(request releasetransition.ProcessRequest, links runtimeLinkSnapshot, state currentSnapshot,
 	active, target *verifiedPublishedCandidate,
 ) (historySelection, string, error) {
@@ -150,12 +150,11 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		return history, "the selected release's sealed migration registry cannot be verified", err
 	}
 	history.targetRegistry = identity
-	// Only an Equivalent relation depends on a declaration, so a read failure
-	// refuses only that relation. The active release's declaration is its own
-	// and parsed strictly; the target's may come from a newer release, so only
-	// its predecessor digest is read.
-	predecessor, activeDeclarationErr := declaredPredecessor(active, strictRollbackPredecessor)
-	targetPredecessor, targetDeclarationErr := declaredPredecessor(target, releasetransition.ParseRollbackPredecessor)
+	// Both releases may have newer declarations. Only an Equivalent relation
+	// needs the active predecessor digest; the target's sealed reader facts
+	// must always be verified. The engine parses its own declaration strictly.
+	predecessor, activeDeclarationErr := declaredPredecessor(active, releasetransition.ParseRollbackPredecessor)
+	targetPredecessor, targetFeatures, targetDeclarationErr := verifiedRollbackReader(target)
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -167,7 +166,9 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 	if identity != "" && firstPublication {
 		history.firstPublication, history.publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
 	}
-	input := releasetransition.HistoryCompatibilityInput{Predecessor: predecessor, TargetPredecessor: targetPredecessor}
+	input := releasetransition.HistoryCompatibilityInput{
+		Predecessor: predecessor, TargetPredecessor: targetPredecessor, TargetRegistryFeatures: targetFeatures,
+	}
 	if activeIdentity != "" {
 		input.Active = &activeRegistry
 	}
@@ -178,20 +179,42 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
 	}
 	history.verdict = releasetransition.HistoryCompatibility(input)
-	// The older release of an Equivalent pair is named by the newer one's
-	// declaration, so only that declaration can refuse it.
-	declarationErr := activeDeclarationErr
-	if history.verdict.Successor {
-		declarationErr = targetDeclarationErr
+	// The target's reader facts always require a verified declaration. An
+	// Equivalent predecessor also needs the active release's declared pair.
+	var declarationErr error
+	if targetDeclarationErr != nil {
+		declarationErr = fmt.Errorf("selected release's rollback declaration: %w", targetDeclarationErr)
 	}
-	if declarationErr != nil && history.verdict.Kind == releasetransition.HistoryEquivalent {
-		return history, rollbackDeclarationRefusal, declarationErr
+	if !history.verdict.Successor && history.verdict.Relation == releasetransition.HistoryEquivalent && activeDeclarationErr != nil {
+		declarationErr = domain.CollectRefusals(fmt.Errorf("active release's rollback declaration: %w", activeDeclarationErr), declarationErr)
+	}
+	if declarationErr != nil {
+		message, cause := history.refusal()
+		if message != "" {
+			message += "; "
+		}
+		return history, message + rollbackDeclarationRefusal, domain.CollectRefusals(cause, declarationErr)
 	}
 	return history, "", nil
 }
 
 // rollbackPredecessorParser reads the predecessor digest from declaration bytes.
 type rollbackPredecessorParser func([]byte) (releasetransition.Fingerprint, error)
+
+// verifiedRollbackReader reads the predecessor and reader flags from the same
+// bounded, manifest-bound declaration. Failed verification grants no capability.
+func verifiedRollbackReader(verified *verifiedPublishedCandidate) (releasetransition.Fingerprint, []string, error) {
+	var features []string
+	predecessor, err := declaredPredecessor(verified, func(payload []byte) (releasetransition.Fingerprint, error) {
+		predecessor, err := releasetransition.ParseRollbackPredecessor(payload)
+		if err != nil {
+			return "", err
+		}
+		features, err = releasetransition.ParseRollbackRegistryFeatures(payload)
+		return predecessor, err
+	})
+	return predecessor, features, err
+}
 
 // strictRollbackPredecessor parses a release's own declaration in full.
 func strictRollbackPredecessor(payload []byte) (releasetransition.Fingerprint, error) {
@@ -207,11 +230,11 @@ func (history historySelection) needsSourceFloor() bool {
 		(history.targetRegistry != "" && history.missingHistory)
 }
 
-// refusal is the selection's refusal. A refused registry relation is decided
-// before first-publication evidence, so that evidence's error is not reported then.
+// refusal collects first-publication findings for an admitted underlying
+// relation even when target readability separately refuses that relation.
 func (history historySelection) refusal() (string, error) {
 	message, cause := history.verdict.Refusal()
-	if history.verdict.RegistryAdmitted() {
+	if history.verdict.RelationAdmitted() {
 		cause = domain.CollectRefusals(cause, history.publicationErr)
 	}
 	return message, cause

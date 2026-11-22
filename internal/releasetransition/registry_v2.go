@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
@@ -45,6 +46,12 @@ func (registry RegistryV2) CanonicalDigest() (Fingerprint, error) {
 }
 
 func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fingerprint, error) {
+	return ParseRegistryV2WithFeatures(payload, catalog, RegistryReaderFeatures())
+}
+
+// ParseRegistryV2WithFeatures applies the selected release's sealed reader
+// capabilities. No features means the strict v0.30 registry rules.
+func ParseRegistryV2WithFeatures(payload []byte, catalog CapabilityCatalog, features []string) (RegistryV2, Fingerprint, error) {
 	var registry RegistryV2
 	if err := decodeBoundedRecord(payload, MaxRegistryV2Bytes, &registry); err != nil {
 		return RegistryV2{}, "", fmt.Errorf(
@@ -52,7 +59,7 @@ func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fin
 			ErrRegistryInvalid, ErrInvalid, err,
 		)
 	}
-	if err := registry.Validate(catalog); err != nil {
+	if err := registry.validateWithFeatures(catalog, features); err != nil {
 		return RegistryV2{}, "", fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
 	}
 	return registry, fingerprintPayload(payload), nil
@@ -61,6 +68,10 @@ func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fin
 // historyRegistry validates semantics independently of the adapter's compiled
 // capability policy. Every public DTO boundary reconstructs a checked owner.
 func (registry RegistryV2) historyRegistry() (migrationhistory.Registry, error) {
+	return registry.historyRegistryWithFeatures(RegistryReaderFeatures())
+}
+
+func (registry RegistryV2) historyRegistryWithFeatures(features []string) (migrationhistory.Registry, error) {
 	if registry.SchemaVersion != RegistrySchemaV2 {
 		return migrationhistory.Registry{}, invalid("unsupported registry schema %d", registry.SchemaVersion)
 	}
@@ -78,13 +89,24 @@ func (registry RegistryV2) historyRegistry() (migrationhistory.Registry, error) 
 		retired[domain] = string(prefix.Digest)
 	}
 	owner, err := migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired)
+	if err != nil && slices.Contains(features, RegistryFeatureRetiredPrefixDependencies) {
+		ids, proofErr := registry.closedRetiredMigrationIDs()
+		if proofErr != nil {
+			return migrationhistory.Registry{}, fmt.Errorf("%w: %w (retired dependency proof: %v)", ErrInvalid, err, proofErr)
+		}
+		owner, err = migrationhistory.NewRegistry(registry.MinimumEpochs, registry.CurrentEpochs, registry.Migrations, retired, ids...)
+	}
 	if err != nil {
 		return migrationhistory.Registry{}, invalid("%v", err)
 	}
 	return owner, nil
 }
 func (registry RegistryV2) Validate(catalog CapabilityCatalog) error {
-	if _, err := registry.historyRegistry(); err != nil {
+	return registry.validateWithFeatures(catalog, RegistryReaderFeatures())
+}
+
+func (registry RegistryV2) validateWithFeatures(catalog CapabilityCatalog, features []string) error {
+	if _, err := registry.historyRegistryWithFeatures(features); err != nil {
 		return err
 	}
 	for _, migration := range registry.Migrations {

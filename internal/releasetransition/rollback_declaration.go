@@ -1,21 +1,37 @@
 package releasetransition
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 const (
 	RollbackDeclarationSchemaV1 = 1
 	MaxRollbackDeclarationBytes = 64 << 10
 )
 
+// RegistryFeatureRetiredPrefixDependencies is the closed frozen-v0.30 reader,
+// not permission to satisfy dependencies from arbitrary retired prefixes.
+// Its meaning is frozen while any release declaring it can be a rollback target.
+const RegistryFeatureRetiredPrefixDependencies = "retired-prefix-dependencies"
+
+// RegistryReaderFeatures is bound to the shipped declaration by a repository
+// test. Packaging does not infer or negotiate compiled parser capabilities.
+func RegistryReaderFeatures() []string {
+	return []string{RegistryFeatureRetiredPrefixDependencies}
+}
+
 // RollbackDeclaration is a release's sealed config/release-rollback.json. It
 // names the one predecessor registry the release prepares rollback to, by
 // canonical digest. Schema 1 defines no migration or profile-format entries yet,
-// so both lists must be present and empty.
+// so both lists must be present and empty. RegistryFeatures names the compiled
+// reader forms sealed into this release; absent flags select the v0.30 rules.
 type RollbackDeclaration struct {
 	SchemaVersion             int               `json:"schemaVersion"`
 	PredecessorRegistryDigest Fingerprint       `json:"predecessorRegistryDigest"`
 	Migrations                []json.RawMessage `json:"migrations"`
 	ProfileFormats            []json.RawMessage `json:"profileFormats"`
+	RegistryFeatures          []string          `json:"registryFeatures,omitempty"`
 }
 
 func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
@@ -35,7 +51,35 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 	if len(declaration.Migrations) != 0 || len(declaration.ProfileFormats) != 0 {
 		return RollbackDeclaration{}, invalid("rollback declaration schema 1 defines no migration or profile-format entries")
 	}
+	for i, feature := range declaration.RegistryFeatures {
+		if !slices.Contains(RegistryReaderFeatures(), feature) || i > 0 && declaration.RegistryFeatures[i-1] >= feature {
+			return RollbackDeclaration{}, invalid("rollback declaration registry features must be known, sorted and unique")
+		}
+	}
 	return declaration, nil
+}
+
+// ParseRollbackRegistryFeatures reads another release's sealed reader flags.
+// Unknown features (including future entry shapes) are ignored. Malformed
+// declarations grant no capability; predecessor validation stays shared.
+func ParseRollbackRegistryFeatures(payload []byte) ([]string, error) {
+	if _, err := ParseRollbackPredecessor(payload); err != nil {
+		return nil, err
+	}
+	var declaration struct {
+		RegistryFeatures []json.RawMessage `json:"registryFeatures"`
+	}
+	if err := decodeBounded(payload, MaxRollbackDeclarationBytes, &declaration, false); err != nil {
+		return nil, invalid("decode registry features: %v", err)
+	}
+	var features []string
+	for _, entry := range declaration.RegistryFeatures {
+		var feature string
+		if json.Unmarshal(entry, &feature) == nil && slices.Contains(RegistryReaderFeatures(), feature) && !slices.Contains(features, feature) {
+			features = append(features, feature)
+		}
+	}
+	return features, nil
 }
 
 // ParseRollbackPredecessor reads only the predecessor registry digest from

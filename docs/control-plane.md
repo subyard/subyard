@@ -1203,15 +1203,25 @@ migration history. It compares the parsed registries by canonical digest (`ident
 `equivalent` when one registry is the other with completed prefixes retired: the unretired registry
 retired through the other's floors (`RegistryV2.RetirePrefixes`) has the retired one's canonical
 digest, so the unretired registry's own `MigrationPrefixDigest` proves every retired digest and
-later definitions are unchanged. When the active registry is the retired one, the target must also
-parse it: a release engine validates the active registry before it serves any request, and parsers
-up to v0.30.0 require every `dependsOn` to name a migration defined earlier in the same registry.
-A surviving definition that depends on retired history therefore refuses with `registry-unreadable`,
-together with the registry refusal when the pair is also undeclared. The current registry parser
-applies the same rule, so today the runtime and the verb refuse such an active registry earlier, as
-one whose sealed registry cannot be verified, and do not reach `registry-unreadable`.
-For the v0.30.0 registry this admits only retirements that also retire the NM guard step, or the
-definition-free `project-state` prefix. Any other relation is `refuse`; `steps` is not produced
+later definitions are unchanged. In either direction the selected target must parse the active
+registry before it can serve a request. `PlanDownPath` calls the registry parser with the target's
+sealed `registryFeatures`; a missing or unknown feature retains the v0.30.0 parser rules. A
+registry unreadable by that target refuses with `registry-unreadable`, together with the registry
+refusal when the pair is also undeclared.
+The underlying relation remains available so unreadability cannot hide independently determined
+declaration or first-publication refusals.
+
+The current parser first accepts every registry readable under the v0.30.0 rules unchanged.
+Otherwise, `retired-prefix-dependencies` admits only a whole registry canonically equal to the
+frozen v0.30.0 registry retired through its own floors. Every dependency of a retired migration
+must also be retired; an unclosed set refuses entirely. The same proved retired IDs reserve names
+and satisfy surviving dependencies. Foreign definitions, reused IDs and foreign prefix digests
+cannot expand this closed language.
+The feature's meaning is frozen while any release declaring it can be a rollback target.
+Of the 71 nonempty v0.30.0 retirements, the golden enumerates
+25 accepted forms: 5 strict forms and 20 additional dependency-closed forms. This release keeps
+all historical definitions and handlers; their removal belongs to a later release.
+Any other relation is `refuse`; `steps` is not produced
 yet. For an admitted relation it then reads the authoritative ledger or checkpoint through the
 target registry and its checkpoint-reader marker. Checkpoint reading checks prefix digests and
 epochs, not the writer's registry digest, so either release of an equivalent pair reads history
@@ -1224,18 +1234,19 @@ equivalent target, such as an older release, keeps the registry refusal and is n
 that decide by the registry read `RegistryAdmitted`, so an admitted equivalent target behaves like
 identical registries for source-floor advice, first-publication evidence and bootstrap
 publication, and an undeclared one like differing registries. Only an equivalent relation depends
-on a declaration, the newer release's, so one that cannot be verified refuses only an equivalent
-target: the runtime selection and the verb report a verification error, and the engine treats it as
-no declared predecessor. The engine applies the same verdict to its own and the rollback target's
+on the newer release's predecessor declaration. The target's reader declaration must also be
+verified; a failure is collected with independently known registry and history refusals at the
+runtime boundary. The engine applies the same verdict to its own and the rollback target's
 parsed registries and its own declaration; identical sealed bytes stand in for a target registry it
 cannot parse. The sealed
 [`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry
 digest of the release's one rollback predecessor. Its migration and profile-format lists are empty
-in schema 1. It is verified from the sealed manifest like the checkpoint marker, and a release
+in schema 1. Its optional `registryFeatures` declares compiled registry readers, bound by a repository
+test to `RegistryReaderFeatures`; packaging adds no capability check. It is verified from the sealed manifest like the checkpoint marker, and a release
 without it declares no predecessor. A release parses its own declaration strictly. Another
-release's declaration, which can come from a newer release, is read only for
-`predecessorRegistryDigest`: unknown fields, list entries and schema versions above 1 are
-tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
+release's declaration, which can come from a newer release, is read for
+`predecessorRegistryDigest` and known `registryFeatures`: unknown features, fields, list entries
+and schema versions above 1 are tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
 well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
 Release selection compares the profile runtime formats that the active release and an older or

@@ -29,8 +29,8 @@ func publishedV030Registry(t *testing.T) RegistryV2 {
 // completed v0.30.0 prefix except the newest power-metadata step
 // (testdata/retiring-candidate-registry.json, sha256 474b7158...). Its
 // surviving NM guard definition depends on a retired migration, which the
-// v0.30.0 parser and this engine's do not accept, so it is decoded without
-// validation.
+// v0.30.0 parser does not accept. Decode directly so tests can choose
+// either parser capability set.
 func retiringCandidate(t *testing.T) RegistryV2 {
 	t.Helper()
 	var registry RegistryV2
@@ -228,6 +228,13 @@ func TestPlanDownPathAdmitsOnlyRetiredPrefixRepresentation(t *testing.T) {
 			path, err := PlanDownPath(test.active, test.target)
 			if err != nil || path.Kind != test.kind || path.Successor != test.successor || (path.Unreadable != nil) != test.unreadable {
 				t.Fatalf("down path = %#v, %v", path, err)
+			}
+			wantRelation := test.kind
+			if test.unreadable {
+				wantRelation = HistoryEquivalent
+			}
+			if path.Relation != wantRelation {
+				t.Fatalf("underlying relation = %s, want %s", path.Relation, wantRelation)
 			}
 			active, _ := test.active.CanonicalDigest()
 			if target, _ := test.target.CanonicalDigest(); path.Target != target || path.Active != active {

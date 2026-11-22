@@ -1378,12 +1378,12 @@ fi
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'failed inspection changed stable runtime links'
 
-# A release whose registry only retires the definition-free project-state
-# prefix rolls back to its declared predecessor and forward again without
+# A release whose registry retires all six historical definitions while the
+# surviving NM guard step depends on retired history rolls back to its declared predecessor and forward again without
 # rewriting history. The engine's registry code derives its inputs.
 retired_release="$TMP/release-retired"
 go build -buildvcs=false -o "$TMP/registry-fixture" "$ROOT/tests/helpers/registry-fixture"
-"$TMP/registry-fixture" retire "$ROOT/config/release-transition.json" project-state=1 > "$TMP/retired-release-transition.json"
+"$TMP/registry-fixture" retire "$ROOT/config/release-transition.json" owner-registration=3 power-metadata=3 settings=3 > "$TMP/retired-release-transition.json"
 "$TMP/registry-fixture" declare "$ROOT/config/release-transition.json" > "$TMP/retired-release-rollback.json"
 "$ROOT/dev/package-engine.sh" --output-dir "$retired_release" --version 1.2.0-test \
   --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" \

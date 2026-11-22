@@ -29,6 +29,7 @@ type DomainState struct {
 type registryData struct {
 	minimum, current map[string]int
 	retired          map[string]string
+	retiredIDs       map[string]bool
 	migrations       []Migration
 	ids              map[string]int
 }
@@ -63,11 +64,20 @@ type Trace struct {
 // about activation, resource freshness, authorization or runtime readiness.
 type Completion struct{ terminal Authority }
 
-func NewRegistry(minimum, current map[string]int, migrations []Migration, retired map[string]string) (Registry, error) {
+// NewRegistry builds a checked history owner. The caller proves retiredIDs
+// against its trusted registry policy; these IDs reserve names and satisfy
+// dependencies but never enter executable paths or applied suffixes.
+func NewRegistry(minimum, current map[string]int, migrations []Migration, retired map[string]string, retiredIDs ...string) (Registry, error) {
 	if len(minimum) == 0 || len(minimum) != len(current) {
 		return Registry{}, fmt.Errorf("registry domain epochs are required and must match")
 	}
-	data := &registryData{minimum: maps.Clone(minimum), current: maps.Clone(current), retired: maps.Clone(retired), ids: map[string]int{}}
+	data := &registryData{minimum: maps.Clone(minimum), current: maps.Clone(current), retired: maps.Clone(retired), ids: map[string]int{}, retiredIDs: map[string]bool{}}
+	for _, id := range retiredIDs {
+		if !safeID(id) || data.retiredIDs[id] {
+			return Registry{}, fmt.Errorf("invalid or duplicate retired migration ID %q", id)
+		}
+		data.retiredIDs[id] = true
+	}
 	expected := maps.Clone(minimum)
 	for name, pin := range retired {
 		if _, ok := minimum[name]; !ok || !validPin(pin) {
@@ -88,7 +98,7 @@ func NewRegistry(minimum, current map[string]int, migrations []Migration, retire
 		if !safeID(m.ID) || !safeID(m.Kind) {
 			return Registry{}, fmt.Errorf("migration ID or kind is not a safe ID")
 		}
-		if _, ok := data.ids[m.ID]; ok {
+		if _, ok := data.ids[m.ID]; ok || data.retiredIDs[m.ID] {
 			return Registry{}, fmt.Errorf("duplicate migration ID %q", m.ID)
 		}
 		if _, ok := minimum[m.Domain]; !ok {
@@ -102,7 +112,7 @@ func NewRegistry(minimum, current map[string]int, migrations []Migration, retire
 			if !safeID(dep) || seen[dep] {
 				return Registry{}, fmt.Errorf("migration %q has invalid or duplicate dependency %q", m.ID, dep)
 			}
-			if _, ok := data.ids[dep]; !ok {
+			if _, ok := data.ids[dep]; !ok && !data.retiredIDs[dep] {
 				return Registry{}, fmt.Errorf("migration %q dependency %q is unknown, cyclic or not ordered before it", m.ID, dep)
 			}
 			seen[dep] = true
@@ -150,7 +160,7 @@ func (r Registry) History(domains map[string]DomainState) (Authority, error) {
 	for _, m := range r.data.migrations {
 		if completed[m.ID] {
 			for _, dep := range m.DependsOn {
-				if !completed[dep] {
+				if !completed[dep] && !r.data.retiredIDs[dep] {
 					return Authority{}, fmt.Errorf("ledger migration %q is applied before dependency %q", m.ID, dep)
 				}
 			}

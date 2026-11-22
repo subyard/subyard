@@ -43,3 +43,26 @@ func TestRollbackPredecessorToleratesNewerDeclarations(t *testing.T) {
 		})
 	}
 }
+
+func TestRollbackRegistryFeaturesAreSealedAndForwardTolerant(t *testing.T) {
+	for _, test := range []struct {
+		features        string
+		strict, capable bool
+	}{
+		{features: `[]`, strict: true},
+		{features: `["retired-prefix-dependencies"]`, strict: true, capable: true},
+		{features: `["future"]`},
+		{features: `["future", "retired-prefix-dependencies", {"future":true}, 7]`, capable: true},
+		{features: `["retired-prefix-dependencies", "retired-prefix-dependencies"]`, capable: true},
+	} {
+		payload := []byte(fmt.Sprintf(`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[],"registryFeatures":%s}`, strings.Repeat("a", 64), test.features))
+		_, err := ParseRollbackDeclaration(payload)
+		if (err == nil) != test.strict {
+			t.Fatalf("features %s: strict error %v", test.features, err)
+		}
+		features, err := ParseRollbackRegistryFeatures(payload)
+		if err != nil || (len(features) == 1 && features[0] == RegistryFeatureRetiredPrefixDependencies) != test.capable || len(features) > 1 {
+			t.Fatalf("features %s: external %v, %v", test.features, features, err)
+		}
+	}
+}

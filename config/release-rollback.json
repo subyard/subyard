@@ -2,5 +2,6 @@
   "schemaVersion": 1,
   "predecessorRegistryDigest": "aa4007773efe0e9862479442a5cb2eb4f6f528f86b9047502167d03568f1768b",
   "migrations": [],
-  "profileFormats": []
+  "profileFormats": [],
+  "registryFeatures": ["retired-prefix-dependencies"]
 }

@@ -1738,6 +1738,7 @@ func (transition *V2Transition) rollbackRegistryRefused() bool {
 	}
 	return !HistoryCompatibility(HistoryCompatibilityInput{
 		Active: &transition.registry, Target: registry, Predecessor: transition.options.RollbackPredecessor,
+		TargetRegistryFeatures: target.RegistryFeatures,
 	}).Admitted()
 }
 
