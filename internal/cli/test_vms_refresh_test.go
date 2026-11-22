@@ -24,9 +24,6 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 				instance.Status = "Running"
 				incus.Instances["subyard/yard"] = instance
 				prompt := &testkit.Prompt{Answers: []bool{accept}}
-				if err := os.MkdirAll(filepath.Join(root, "scripts/e2e-lab"), 0o700); err != nil {
-					t.Fatal(err)
-				}
 				var stderr bytes.Buffer
 				probe := &testVMStatusProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":2,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":0,"state":"available"}]}}`)}
 				arguments := []string{"test-vms", "refresh", "android-test"}

@@ -33,17 +33,10 @@ const (
 // command manifest and a synthetic profile resource. Release-gate inspection fails with a
 // distinctive configuration error, so consulting it is observable without side effects.
 func TestRunAdmissionStages(t *testing.T) {
-	cliFixture, _ := newResourceCommandFixture(t)
-	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
-	environment = append(environment,
-		"YARD_RUNTIME_ROOT=relative-admission-probe",
-		"SUBYARD_YARD=admission-missing",
-	)
 	cases := []struct {
 		arguments []string
 		want      runStage
@@ -142,6 +135,13 @@ func TestRunAdmissionStages(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
+			cliFixture, _ := newResourceCommandFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
+			writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
+			environment = append(environment,
+				"YARD_RUNTIME_ROOT=relative-admission-probe",
+				"SUBYARD_YARD=admission-missing",
+			)
 			var stdout, stderr bytes.Buffer
 			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
@@ -172,22 +172,22 @@ func TestRunAdmissionStages(t *testing.T) {
 }
 
 func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
-	cliFixture, _ := newResourceCommandFixture(t)
-	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0600)
-	home := filepath.Join(root, "recovery-owner")
-	directory := filepath.Join(home, "cleanup", "pending")
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(directory, "journal.json"), []byte("protected pending recovery\n"), 0600)
-	environment = append(environment, "SUBYARD_HOME="+home)
 	for _, arguments := range [][]string{{"update", "--yes"}, {"migrate", "--yes"}, {"host", "rename", "other"}, {"config", "apply", "--all-local", "--yes"}, {"teardown", "--full", "--yes"}} {
 		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			cliFixture, _ := newResourceCommandFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
+			writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0600)
+			home := filepath.Join(root, "recovery-owner")
+			directory := filepath.Join(home, "cleanup", "pending")
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(directory, "journal.json"), []byte("protected pending recovery\n"), 0600)
+			environment = append(environment, "SUBYARD_HOME="+home)
 			var stdout, stderr bytes.Buffer
 			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}})
 			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "hard cleanup is pending") {
@@ -201,17 +201,10 @@ func TestHardCleanupFencesEarlyMutationPaths(t *testing.T) {
 // context loading. Each case requires the exit code and a diagnostic or output owned by the
 // expected path, so an unrelated early exit cannot satisfy it.
 func TestRunAdmissionEarlyPaths(t *testing.T) {
-	cliFixture, _ := newResourceCommandFixture(t)
-	root, environment := cliFixture.Root, cliFixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
-	environment = append(environment,
-		"YARD_RUNTIME_ROOT=relative-admission-probe",
-		"SUBYARD_YARD=admission-missing",
-	)
 	cases := []struct {
 		arguments []string
 		stdin     string
@@ -241,6 +234,13 @@ func TestRunAdmissionEarlyPaths(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {
+			cliFixture, _ := newResourceCommandFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
+			writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), string(shipped), 0o600)
+			environment = append(environment,
+				"YARD_RUNTIME_ROOT=relative-admission-probe",
+				"SUBYARD_YARD=admission-missing",
+			)
 			var stdout, stderr bytes.Buffer
 			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,

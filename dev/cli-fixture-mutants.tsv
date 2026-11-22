@@ -524,7 +524,7 @@ internal/cli/admission_test.go	^TestRunAdmissionEarlyPaths$	internal/cli/admissi
 internal/cli/admission_test.go	^TestAdmissionPolicy$	internal/cli/admission.go	"--complete-profiles"	"--complete-missing-profiles"
 # admission_test: constructor and setup errors
 internal/cli/admission_test.go	^TestRunAdmissionStages$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
-internal/cli/admission_test.go	^TestRunAdmissionStages$	internal/cli/admission_test.go	func TestRunAdmissionStages(t *testing.T) {\n\tcliFixture, _ := newResourceCommandFixture(t)	func TestRunAdmissionStages(t *testing.T) {\n\tcliFixture, _ := newResourceCommandFixture(t, withEnv("HOME=/nonexistent"))
+internal/cli/admission_test.go	^TestRunAdmissionStages$	internal/cli/admission_test.go	\t\t{[]string{"config", "repair-registration", "default"}, stageLoad, ""},\n\t}\n\tfor _, test := range cases {\n\t\tt.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {\n\t\t\tcliFixture, _ := newResourceCommandFixture(t)	\t\t{[]string{"config", "repair-registration", "default"}, stageLoad, ""},\n\t}\n\tfor _, test := range cases {\n\t\tt.Run(strings.Join(test.arguments, "_"), func(t *testing.T) {\n\t\t\tcliFixture, _ := newResourceCommandFixture(t, withEnv("HOME=/nonexistent"))
 # cleanup_soft_test: product behavior
 internal/cli/cleanup_soft_test.go	^TestCleanupSoftCommandUsesRegisteredDestructiveAction$	internal/cli/cleanup.go	return "yard.cleanup.soft",	return "yard.cleanup.missing",
 # cleanup_soft_test: constructor and setup errors
