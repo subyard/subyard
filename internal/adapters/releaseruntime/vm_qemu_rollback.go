@@ -143,6 +143,9 @@ func (runtime *Runtime) rollbackCompatibility(ctx context.Context, target *verif
 		if formatOnly {
 			reason = "rollback requires prepared profile runtimes in every local yard"
 		}
+		if selection != nil && selection.rollbackBoundary {
+			reason = "rollback is blocked by a declared release boundary requiring manual recovery"
+		}
 		command := "yard update --version " + target.version
 		if request.Direction == releasetransition.DirectionActivatePrevious {
 			command = "yard update --rollback"

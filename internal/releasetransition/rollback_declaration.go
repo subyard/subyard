@@ -3,6 +3,9 @@ package releasetransition
 import (
 	"encoding/json"
 	"slices"
+	"strings"
+
+	"github.com/blang/semver/v4"
 )
 
 const (
@@ -26,12 +29,58 @@ func RegistryReaderFeatures() []string {
 // canonical digest. Schema 1 defines no migration or profile-format entries yet,
 // so both lists must be present and empty. RegistryFeatures names the compiled
 // reader forms sealed into this release; absent flags select the v0.30 rules.
+// Boundaries declare installed state that requires manual recovery instead of rollback.
 type RollbackDeclaration struct {
-	SchemaVersion             int               `json:"schemaVersion"`
-	PredecessorRegistryDigest Fingerprint       `json:"predecessorRegistryDigest"`
-	Migrations                []json.RawMessage `json:"migrations"`
-	ProfileFormats            []json.RawMessage `json:"profileFormats"`
-	RegistryFeatures          []string          `json:"registryFeatures,omitempty"`
+	SchemaVersion             int                `json:"schemaVersion"`
+	PredecessorRegistryDigest Fingerprint        `json:"predecessorRegistryDigest"`
+	Migrations                []json.RawMessage  `json:"migrations"`
+	ProfileFormats            []json.RawMessage  `json:"profileFormats"`
+	RegistryFeatures          []string           `json:"registryFeatures,omitempty"`
+	Boundaries                []RollbackBoundary `json:"boundaries,omitempty"`
+}
+
+// RollbackBoundary belongs to the release introducing incompatible state. It
+// blocks targets at or below ThroughVersion, including explicit version selection.
+// Agent boundaries bind the reviewed source tree and list surviving yard files.
+type RollbackBoundary struct {
+	Component      string      `json:"component"`
+	ThroughVersion string      `json:"throughVersion"`
+	Reason         string      `json:"reason"`
+	Recovery       string      `json:"recovery"`
+	SourceDigest   Fingerprint `json:"sourceDigest,omitempty"`
+	Files          []string    `json:"files,omitempty"`
+}
+
+func (boundary RollbackBoundary) validate() error {
+	if boundary.Component != "registry" && boundary.Component != "agents" &&
+		!(strings.HasPrefix(boundary.Component, "profile:") && validateSafeID(strings.TrimPrefix(boundary.Component, "profile:"), "profile runtime ID") == nil) {
+		return invalid("unknown rollback boundary component %q", boundary.Component)
+	}
+	if _, err := semver.Parse(boundary.ThroughVersion); err != nil {
+		return invalid("rollback boundary requires a semantic throughVersion")
+	}
+	for _, text := range []string{boundary.Reason, boundary.Recovery} {
+		if validateText(text, "rollback boundary explanation", maxDiagnosticText, true) != nil {
+			return invalid("rollback boundary requires a single-line reason and manual recovery instruction")
+		}
+	}
+	if boundary.Component == "agents" {
+		if err := validateFingerprint(boundary.SourceDigest, "agent boundary source digest"); err != nil {
+			return err
+		}
+		if len(boundary.Files) == 0 {
+			return invalid("agent rollback boundary must list surviving yard files")
+		}
+	} else if boundary.SourceDigest != "" || len(boundary.Files) != 0 {
+		return invalid("only agent boundaries declare source digests and yard files")
+	}
+	for i, path := range boundary.Files {
+		if !(strings.HasPrefix(path, "/") || strings.HasPrefix(path, "~/")) || validateText(path, "agent boundary file", maxDiagnosticText, true) != nil ||
+			strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") || i > 0 && boundary.Files[i-1] >= path {
+			return invalid("agent boundary files must be yard paths, sorted and unique")
+		}
+	}
+	return nil
 }
 
 func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
@@ -54,6 +103,14 @@ func ParseRollbackDeclaration(payload []byte) (RollbackDeclaration, error) {
 	for i, feature := range declaration.RegistryFeatures {
 		if !slices.Contains(RegistryReaderFeatures(), feature) || i > 0 && declaration.RegistryFeatures[i-1] >= feature {
 			return RollbackDeclaration{}, invalid("rollback declaration registry features must be known, sorted and unique")
+		}
+	}
+	for i, boundary := range declaration.Boundaries {
+		if err := boundary.validate(); err != nil {
+			return RollbackDeclaration{}, err
+		}
+		if i > 0 && declaration.Boundaries[i-1].ThroughVersion+"/"+declaration.Boundaries[i-1].Component >= boundary.ThroughVersion+"/"+boundary.Component {
+			return RollbackDeclaration{}, invalid("rollback boundaries must be sorted and unique by throughVersion/component")
 		}
 	}
 	return declaration, nil

@@ -3,5 +3,26 @@
   "predecessorRegistryDigest": "aa4007773efe0e9862479442a5cb2eb4f6f528f86b9047502167d03568f1768b",
   "migrations": [],
   "profileFormats": [],
-  "registryFeatures": ["retired-prefix-dependencies"]
+  "registryFeatures": [
+    "retired-prefix-dependencies"
+  ],
+  "boundaries": [
+    {
+      "component": "agents",
+      "throughVersion": "0.30.0",
+      "reason": "Agent approval policies and hooks installed after 0.30.0 survive a release rollback.",
+      "recovery": "Keep this release active. Stop agent sessions; back up the listed files in each affected yard, remove only Subyard-managed policy and hook files, and restore the 0.30.0 agent configuration before manually installing 0.30.0 and running yard init.",
+      "sourceDigest": "3f1dc9850acf9f11357f0b960c6682c93bffee06c04750ccddb8b342c1e9e796",
+      "files": [
+        "/etc/claude-code/managed-settings.d/50-subyard-git-approval.json",
+        "/etc/claude-code/subyard-git-approval-hook",
+        "/etc/codex/requirements.toml",
+        "/etc/codex/subyard-git-approval-hook",
+        "/usr/local/bin/claude-policy-check",
+        "/usr/local/bin/codex-policy-check",
+        "~/.codex/config.toml",
+        "~/.config/opencode/opencode.jsonc"
+      ]
+    }
+  ]
 }

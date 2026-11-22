@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -64,5 +65,40 @@ func TestRollbackRegistryFeaturesAreSealedAndForwardTolerant(t *testing.T) {
 		if err != nil || (len(features) == 1 && features[0] == RegistryFeatureRetiredPrefixDependencies) != test.capable || len(features) > 1 {
 			t.Fatalf("features %s: external %v, %v", test.features, features, err)
 		}
+	}
+}
+
+func TestRollbackBoundaryValidation(t *testing.T) {
+	base := RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: Fingerprint(strings.Repeat("a", 64)),
+		Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}}
+	for _, test := range []struct {
+		name     string
+		boundary RollbackBoundary
+		valid    bool
+	}{
+		{name: "registry", boundary: RollbackBoundary{Component: "registry", ThroughVersion: "0.30.0", Reason: "unreadable registry", Recovery: "keep current release active"}, valid: true},
+		{name: "profile", boundary: RollbackBoundary{Component: "profile:sample-runtime", ThroughVersion: "0.30.0", Reason: "unreadable state", Recovery: "restore saved state"}, valid: true},
+		{name: "agents", boundary: RollbackBoundary{Component: "agents", ThroughVersion: "0.30.0", Reason: "surviving policy", Recovery: "remove the listed managed files", SourceDigest: Fingerprint(strings.Repeat("b", 64)), Files: []string{"/etc/sample/policy.json", "~/.sample/config"}}, valid: true},
+		{name: "unknown component", boundary: RollbackBoundary{Component: "future", ThroughVersion: "0.30.0", Reason: "state", Recovery: "restore"}},
+		{name: "invalid version", boundary: RollbackBoundary{Component: "registry", ThroughVersion: "v0.30", Reason: "state", Recovery: "restore"}},
+		{name: "missing recovery", boundary: RollbackBoundary{Component: "registry", ThroughVersion: "0.30.0", Reason: "state"}},
+		{name: "control character", boundary: RollbackBoundary{Component: "registry", ThroughVersion: "0.30.0", Reason: "state\x1b", Recovery: "restore"}},
+		{name: "missing agent files", boundary: RollbackBoundary{Component: "agents", ThroughVersion: "0.30.0", Reason: "state", Recovery: "restore", SourceDigest: Fingerprint(strings.Repeat("b", 64))}},
+		{name: "unsafe agent files", boundary: RollbackBoundary{Component: "agents", ThroughVersion: "0.30.0", Reason: "state", Recovery: "restore", SourceDigest: Fingerprint(strings.Repeat("b", 64)), Files: []string{"/etc/../policy"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base.Boundaries = []RollbackBoundary{test.boundary}
+			payload, err := json.Marshal(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseRollbackDeclaration(payload)
+			if (err == nil) != test.valid {
+				t.Fatalf("validation = %v", err)
+			}
+			if _, err := ParseRollbackPredecessor(payload); err != nil {
+				t.Fatalf("external predecessor reader rejected future fields: %v", err)
+			}
+		})
 	}
 }

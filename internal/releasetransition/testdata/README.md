@@ -14,3 +14,11 @@ of future live registries. `v0.30.0-readable-retirements.txt` enumerates its com
 set: each row lists owner-registration, power-metadata and settings floors, whether the
 definition-free project-state prefix is declared, and the accepting rule. The 25 rows cover
 5 strictly readable and 20 additional dependency-closed retirements out of 71 candidates.
+
+`published-rollback-baseline.json` pins profile runtime declarations, the registry-reader flags,
+and a SHA-256 inventory of non-test agent integration sources from the latest published release
+in `dev/e2e/published-upgrade-baselines.tsv`. Its version and bundle checksum must match that
+source of truth. `python3 dev/update-rollback-baseline.py` regenerates it and the exact registry
+fixture from the local published tag. The agent inventory hashes sorted relative paths,
+executable bits and file SHA-256 values; it excludes `tests/` directories. The repository gate
+reads the current filesystem, including uncommitted and untracked source files.

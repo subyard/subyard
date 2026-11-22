@@ -53,6 +53,11 @@ coordinator, and do not create or close shared task files or start another full 
    The developer names the shared primitive for each invariant (writes, private directories,
    refusal collection, resume); a hand-written substitute is a first-round review finding.
    The interruption harness and the refusal table test run before review.
+   Changes to profile runtime formats, migration registries, or agent integration sources must
+   pass `TestPublishedRollbackGate` against the latest published baseline. Provide the existing
+   rollback hooks/down path, or seal a rollback boundary in the introducing release's
+   `config/release-rollback.json`; agent changes require surviving yard files and manual cleanup.
+   See [rollback boundaries](../../../docs/control-plane.md#declared-rollback-boundaries).
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
    For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes;
