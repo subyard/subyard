@@ -19,7 +19,7 @@ fi
 # Python helpers imported by tests must not leave bytecode in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 
-trap 'rc=$?; python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }; exit "$rc"' EXIT
+trap 'rc=$?; exec {SUBYARD_RUN_TEMP_FD}<&-; python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }; exit "$rc"' EXIT
 
 mkdir -p "$ROOT/.build/test-runs"
 RUN_DIR="$(mktemp -d "$ROOT/.build/test-runs/run.XXXXXX")"
@@ -75,6 +75,7 @@ finish() {
     "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
   printf 'SUMMARY status=%s checks=%s duration_seconds=%s exit_code=%s results=%s\n' \
     "$status" "$CHECK_COUNT" "$((SECONDS - RUN_STARTED))" "$rc" "$SUMMARY"
+  exec {SUBYARD_RUN_TEMP_FD}<&-
   python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }
   exit "$rc"
 }

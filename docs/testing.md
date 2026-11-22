@@ -734,11 +734,12 @@ a check fails.
 The two top-level host-free runners (`tests/run.sh`, `dev/test-profiles.sh`) and their
 Makefile entrypoints give each invocation a private root under `/tmp`, with `TMPDIR`
 and `GOTMPDIR` pointing into it. Nested runners reuse that root. The runner holds an
-exclusive flock on the directory itself, inherited by children, and removes it on exit.
+exclusive flock on the directory itself, inherited by children; the owner removes its root
+only once unlocked, otherwise the next run does.
 The next invocation removes abandoned sibling roots only after taking their lock and
 validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
 mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks
-are preserved. There is no background supervisor or process-group change.
+are preserved. Profile runners use separate process groups so cancellation reaches their children.
 
 A descendant that closes inherited fds and outlives its runner cannot retain the lock;
 it may lose its scratch at the next run. SIGKILL before receipt publication leaves an

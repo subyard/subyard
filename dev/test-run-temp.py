@@ -7,10 +7,13 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import time
 
 # Subyard run roots: a distinct prefix within the Unix socket pathname budget.
 PREFIX = "syr."
 RECEIPT = ".test-run.json"
+# Interrupted descendants get this long to exit before the root is left to the next sweep.
+GRACE = 5
 
 
 def identity(fd):
@@ -167,11 +170,33 @@ def main():
         return
     if sys.argv[1] == "clean":
         if os.environ.get("SUBYARD_RUN_TEMP_OWNER") == str(os.getppid()):
-            fd, path = inherited()
+            path = Path(os.environ["SUBYARD_RUN_TEMP"])
+            if path.parent != Path("/tmp") or not path.name.startswith(PREFIX):
+                raise ValueError("invalid inherited test root")
             parent = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            fd = None
             try:
+                # The wrapper closed its descriptor; the lock frees when the last user exits.
+                fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                deadline = time.monotonic() + GRACE
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            print(f"test temporary root {path} is still in use; the next run removes it",
+                                  file=sys.stderr)
+                            return
+                        time.sleep(.05)
+                if not valid(fd):
+                    raise ValueError("invalid test root")
                 remove(parent, path.name, fd)
+            except FileNotFoundError:
+                pass  # A concurrent run's sweep already removed the released root.
             finally:
+                if fd is not None:
+                    os.close(fd)
                 os.close(parent)
         return
     if sys.argv[1] != "enter":

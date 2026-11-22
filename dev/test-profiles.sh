@@ -59,7 +59,15 @@ if [ "$suite" = run.sh ]; then
   if ! python3 "$ROOT/dev/test-run-temp.py" check; then
     exec python3 "$ROOT/dev/test-run-temp.py" enter bash "$0" "${original_args[@]}"
   fi
-  trap 'rc=$?; python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }; exit "$rc"' EXIT
+  finish() {
+    local rc="$1"
+    trap - EXIT
+    # Release this shell's lock reference; the root goes only when no user remains.
+    exec {SUBYARD_RUN_TEMP_FD}<&-
+    python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }
+    exit "$rc"
+  }
+  trap 'finish "$?"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   umask 0022
@@ -95,8 +103,8 @@ if [ "$suite" = run.sh ]; then
   [ "$permissions" != only ] || exit 0
   python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@" &
   profile_pid=$!
-  trap 'kill -INT "$profile_pid" 2>/dev/null || :; exit 130' INT
-  trap 'kill -TERM "$profile_pid" 2>/dev/null || :; exit 143' TERM
+  trap 'kill -INT "$profile_pid" 2>/dev/null || :; wait "$profile_pid" || :; exit 130' INT
+  trap 'kill -TERM "$profile_pid" 2>/dev/null || :; wait "$profile_pid" || :; exit 143' TERM
   wait "$profile_pid"
   exit 0
 fi
