@@ -45,8 +45,9 @@ pair_assessment() {
   local local_action result changed fingerprint consequence=''
   allowed
   svc_require_yard_running
-  ssh_policy
-  route_ready || die 'Herdr SSH ingress is not ready. Run yard herdr up.'
+  if [ "$pair_operation" = add ]; then
+    route_ready || die 'Herdr SSH ingress is not ready. Run yard herdr up.'
+  fi
   if [ "$pair_operation" = list ]; then
     local_action=pair-list
     changed=false
@@ -70,11 +71,10 @@ pair_assessment() {
 pair_apply() {
   allowed
   svc_require_yard_running
-  ssh_policy
-  route_ready || die 'Herdr SSH ingress is not ready. Run yard herdr up.'
   case "$SUBYARD_RESOURCE_ACTION:$pair_operation" in
     pair-list:list) key_operation apply list; return ;;
     pair-add:add|pair-existing:add)
+      route_ready || die 'Herdr SSH ingress is not ready. Run yard herdr up.'
       if [ "$SUBYARD_RESOURCE_ACTION" = pair-existing ]; then
         key_operation apply existing >/dev/null
       else

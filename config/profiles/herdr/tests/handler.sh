@@ -21,7 +21,6 @@ case "$1" in
     shift 5
     case "$1" in
       uname) printf 'x86_64\n' ;;
-      bash) cat >/dev/null; printf 'context test\n' ;;
       cat) printf '%s\n' "${HERDR_TEST_ACTUAL:-$HERDR_TEST_DIGEST}" ;;
       cmp) cat >/dev/null ;;
       install) ;;
@@ -30,7 +29,16 @@ case "$1" in
           [ "${HERDR_TEST_HOOK:-ready}" = ready ]
         fi ;;
       loginctl) printf 'yes\n' ;;
-      sh) cat >/dev/null ;;
+      sh)
+        cat >/dev/null
+        if [ "$2" = -s ]; then
+          case "$4" in
+            check) [ "${HERDR_TEST_DROPIN:-present}" = present ] ;;
+            absent) [ "${HERDR_TEST_DROPIN:-present}" = missing ] ;;
+            remove) printf 'remove SSH drop-in\n' >> "$HERDR_TEST_CALLS" ;;
+            *) exit 85 ;;
+          esac
+        fi ;;
       systemctl) printf '%s\n' "$*" >> "$HERDR_TEST_CALLS" ;;
       runuser)
         shift 4
@@ -44,6 +52,13 @@ case "$1" in
           */herdr-profile:stop) printf 'stop Core\n' >> "$HERDR_TEST_CALLS"; exit 1 ;;
           */herdr-profile:sync) ;;
           */herdr-profile:registration-ready) [ "${HERDR_TEST_REGISTRATION:-ready}" = ready ] ;;
+          */herdr-profile:keys)
+            case "$3:$4" in
+              apply:list) printf '1  fixture-client\n' ;;
+              prepare:revoke) printf '{"changed":true,"digest":"%064d"}\n' 1 ;;
+              apply:revoke) printf 'revoke client key\n' >> "$HERDR_TEST_CALLS" ;;
+              *) exit 84 ;;
+            esac ;;
           *) exit 89 ;;
         esac ;;
       *) exit 88 ;;
@@ -51,14 +66,12 @@ case "$1" in
   *) exit 87 ;;
 esac
 INCUS
-cat > "$test_root/fixture/config/profiles/herdr/bin/herdr-profile" <<'NATIVE'
-#!/usr/bin/env bash
-case "$1" in
-  ssh-live) cat >/dev/null; [ "${HERDR_TEST_LISTENER:-up}" = up ] ;;
-  ssh-policy) cat >/dev/null; [ "${HERDR_TEST_POLICY:-safe}" = safe ] ;;
-  *) exit 86 ;;
-esac
-NATIVE
+printf '#!/bin/sh\nexit 86\n' > "$test_root/fixture/config/profiles/herdr/bin/herdr-profile"
+cat > "$test_root/bin/timeout" <<'TIMEOUT'
+#!/bin/sh
+[ "$1:$2:$6:$7" = '5:bash:100.100.100.100:6768' ] && [ "${HERDR_TEST_LISTENER:-up}" = up ]
+TIMEOUT
+printf '#!/bin/sh\nprintf "256 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture (ED25519)\\n"\n' > "$test_root/bin/ssh-keygen"
 printf '#!/bin/sh\nprintf "100.100.100.100\\n"\n' > "$test_root/bin/tailscale"
 printf '#!/bin/sh\nprintf "100.100.100.100 STREAM fixture.ts.net\\n"\n' > "$test_root/bin/getent"
 printf '#!/bin/sh\nprintf "1: tailscale0 inet 100.100.100.100/32 scope global\\n"\n' > "$test_root/bin/ip"
@@ -93,9 +106,22 @@ HERDR_TEST_ROUTE=$(jq -cn --arg token "$token" '{devices:{"herdr-ssh":{bind:"hos
 HERDR_TEST_REGISTRATION=missing "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_HOOK=missing "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_LISTENER=down "$handler" up | jq -e '.changed == true' >/dev/null
-if HERDR_TEST_POLICY=unsafe "$handler" up >/dev/null; then exit 1; fi
-if HERDR_TEST_LISTENER=down "$handler" pair --list >/dev/null 2>&1; then exit 1; fi
-if HERDR_TEST_POLICY=unsafe "$handler" pair --list >/dev/null; then exit 1; fi
+HERDR_TEST_DROPIN=missing "$handler" up | jq -e '.changed == true' >/dev/null
+if HERDR_TEST_LISTENER=down "$handler" pair --key fixture >/dev/null 2>&1; then exit 1; fi
+if HERDR_TEST_DROPIN=missing "$handler" pair --key fixture >/dev/null 2>&1; then exit 1; fi
+
+(
+  export HERDR_TEST_DROPIN=missing HERDR_TEST_LISTENER=down HERDR_TEST_ROUTE='{}'
+  key=SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+  "$handler" pair --list | jq -e '.action == "pair-list"' >/dev/null
+  "$handler" pair --revoke "$key" | jq -e '.action == "pair-revoke" and .changed' >/dev/null
+  export SUBYARD_CONFIG_HOME="$test_root/config" SUBYARD_RESOURCE_MODE=apply SUBYARD_OPERATION_ID=fixture
+  mkdir -p "$SUBYARD_CONFIG_HOME/generated/integration-locks"
+  install -m 0600 /dev/null "$SUBYARD_CONFIG_HOME/generated/integration-locks/default.lock"
+  SUBYARD_RESOURCE_ACTION=pair-list "$handler" pair --list | grep -Fxq '1  fixture-client'
+  SUBYARD_RESOURCE_ACTION=pair-revoke "$handler" pair --revoke "$key"
+  grep -Fxq 'revoke client key' "$HERDR_TEST_CALLS"
+)
 
 HERDR_TEST_CORE=down "$handler" down | jq -e '.changed and (.consequences[0] | contains("unavailable"))' >/dev/null
 : > "$HERDR_TEST_CALLS"

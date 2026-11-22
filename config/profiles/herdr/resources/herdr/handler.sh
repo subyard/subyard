@@ -30,6 +30,7 @@ native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
 as_dev() { yexec runuser -u "$DEV_USER" -- "$@"; }
+guest_ssh() { yexec sh -s -- "$1" < "$profile/guest-ssh.sh"; }
 # shellcheck source=config/profiles/herdr/resources/herdr/route.sh
 . "$here/route.sh"
 # shellcheck source=config/profiles/herdr/resources/herdr/pair.sh
@@ -205,12 +206,9 @@ assessment() {
       return ;;
     up)
       allowed
-      if yard_running; then
-        ssh_policy
-        if route_ready && up_ready; then ready=true; fi
-      fi
+      if yard_running && route_ready && up_ready; then ready=true; fi
       desired='core ready, kick enabled and proxy published'
-      consequence='install or refresh Herdr Core, enable its startup kick and publish the tailnet SSH proxy' ;;
+      consequence='install or refresh Herdr Core and publish its tailnet proxy with password and keyboard-interactive SSH disabled' ;;
     update|restart)
       allowed
       svc_require_yard_running
@@ -227,11 +225,11 @@ assessment() {
     down)
       svc_require_yard_running
       result=$(observe) || result=unknown
-      if [ "$result" = null ] && ! enabled && route_absent; then ready=true; fi
-      desired='core stopped, kick disabled and proxy absent'
+      if [ "$result" = null ] && ! enabled && route_absent && guest_ssh absent; then ready=true; fi
+      desired='core stopped, kick disabled, proxy and SSH drop-in absent'
       count=unavailable
       if [ "$result" != unknown ]; then count=$(jq -r '.Live // 0' <<< "$result"); fi
-      consequence="remove the Herdr proxy and stop all Herdr terminals, including arrivals; observed live terminals: $count"
+      consequence="remove the Herdr proxy and SSH drop-in and stop all Herdr terminals, including arrivals. Observed live terminals: $count"
       if [ -n "${SUBYARD_RESOURCE_STEPS:-}" ]; then
         old=$(jq -er '.[0].consequence' <<< "$SUBYARD_RESOURCE_STEPS")
         consequence="$old"
@@ -256,12 +254,9 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       up)
         allowed
         svc_require_yard_running
+        guest_ssh check || die 'Herdr SSH drop-in is missing or changed. Run yard init to reconcile the profile.'
         up
-        ssh_policy
-        if ! route_ready; then
-          reload_ssh_policy
-          ensure_route
-        fi ;;
+        if ! route_ready; then ensure_route; fi ;;
       is-up) yard_running && running && route_ready ;;
       status)
         if ! yard_running; then printf 'Herdr: yard is stopped or unavailable\n'; exit; fi
@@ -292,7 +287,8 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
           as_dev "$helper" stop || die 'Herdr ingress is closed, but Core shutdown could not be verified'
         fi
         result=$(observe) || die 'Herdr ingress is closed, but Core status could not be verified'
-        if [ "$result" != null ]; then die 'Herdr Core is still running or was started by another client'; fi ;;
+        if [ "$result" != null ]; then die 'Herdr Core is still running or was started by another client'; fi
+        guest_ssh remove ;;
     esac ;;
   '') [ "$action" = is-up ] && yard_running && running && route_ready ;;
   *) die 'unsupported Herdr execution mode' ;;

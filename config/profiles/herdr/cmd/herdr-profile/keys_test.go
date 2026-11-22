@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
-	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -41,28 +40,5 @@ func TestClientKeysPreserveOwnerAndManualLines(t *testing.T) {
 	}
 	if _, err := bareKey(append([]byte(`no-agent-forwarding `), key...)); err == nil {
 		t.Fatal("supplied authorization options accepted")
-	}
-}
-
-func TestSSHPolicyReportsIndependentFailures(t *testing.T) {
-	const keyOnly = `authenticationmethods any
-passwordauthentication no
-kbdinteractiveauthentication no
-hostbasedauthentication no
-gssapiauthentication no
-permitemptypasswords no
-pubkeyauthentication yes
-authorizedkeysfile .ssh/authorized_keys
-`
-	allowed := "context global\n" + keyOnly + "context dev\n" + keyOnly
-	if err := checkSSHPolicy(strings.NewReader(allowed), "dev"); err != nil {
-		t.Fatal(err)
-	}
-	bad := strings.ReplaceAll(strings.ReplaceAll(allowed, "passwordauthentication no", "passwordauthentication yes"), "kbdinteractiveauthentication no", "kbdinteractiveauthentication yes")
-	err := checkSSHPolicy(strings.NewReader(bad), "dev")
-	for _, finding := range []string{"passwordauthentication for global", "kbdinteractiveauthentication for dev"} {
-		if err == nil || !strings.Contains(err.Error(), finding) {
-			t.Fatalf("missing %s: %v", finding, err)
-		}
 	}
 }

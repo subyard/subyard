@@ -7,9 +7,11 @@ Herdr app and access to the tailnet. The yard runs Core without the desktop app.
 ## Enable and connect
 
 The guest OpenSSH server must allow public-key authentication and use the
-development user's `.ssh/authorized_keys`. Configure the effective guest
-authentication policy for public keys only. `up` checks this policy before it
-publishes the owner proxy. Herdr is unavailable on VM and nested E2E yards.
+development user's `.ssh/authorized_keys`. Provisioning installs a global Herdr
+drop-in that disables password and keyboard-interactive authentication. `up`
+requires the drop-in before publishing the owner proxy. Herdr is unavailable on
+VM and nested E2E yards. Alternate OpenSSH configs set through `SSHD_OPTS` are
+outside the supported setup.
 
 ```sh
 yard herdr up
@@ -22,7 +24,8 @@ copy the public key from the app for pairing, then enter the printed host, port
 and user. Verify the host-key fingerprint when prompted. Use a separate key per
 client. `yard herdr pair --list` lists non-owner SSH grants and distinguishes
 Herdr labels from unmanaged lines. `yard herdr pair --revoke SHA256:...` removes
-matching Herdr grants for future authentication. Connected sessions can persist.
+matching Herdr grants for future authentication. Both commands work after `down`
+while the yard is running. Connected sessions can persist.
 
 The preferred owner port is `6768`. The allocator can choose a different port.
 Use `yard herdr status` to find the endpoint and grant TCP access to that port in
@@ -42,7 +45,8 @@ handover. `yard herdr update --force` restores Subyard's pinned release. `up`
 repairs a Core below the supported minimum. The startup marker in `status` is a
 hint. Use `yard herdr restart` to refresh Core's login environment.
 
-`yard herdr down` removes the managed listener and stops the whole Core,
+`yard herdr down` removes the managed listener and SSH drop-in, then leaves the
+yard's SSH configuration to its remaining settings. It stops the whole Core,
 including running programs. Project layout and authorization lines are retained.
 A local Herdr command or a separately authorized SSH connection can start Core
 again. A guest reboot loses running processes. Kept panes can return as shells.
