@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import json
 import hashlib
 import importlib.util
@@ -37,6 +38,7 @@ class LifecycleTest(unittest.TestCase):
             source = Path(name)
             shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            shutil.copyfile(guest.safefs.__file__, source/'safefs.py')
             account = types.SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir=name)
             for budget, flag in (('2147483648', ' --disk-bytes 2147483648'), ('', ''), ('2G', '')):
                 with patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=budget):
@@ -50,6 +52,7 @@ class LifecycleTest(unittest.TestCase):
             source, units = root/'source', root/'units'
             shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            shutil.copyfile(guest.safefs.__file__, source/'safefs.py')
             (source/'subyard-telemetry').write_bytes(b'\x7fELF')
             for directory in ('control', 'units'):
                 (root/directory).mkdir()
@@ -230,6 +233,7 @@ class LifecycleTest(unittest.TestCase):
             source, data = Path(name), Path(name)/'store'
             shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            shutil.copyfile(guest.safefs.__file__, source/'safefs.py')
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
             runtime = guest.Runtime(source, 'dev', False, [], data=data, account=account)
             marker = data/'raw-otlp-refused'
@@ -320,6 +324,7 @@ class LifecycleTest(unittest.TestCase):
             source = root/'source'
             shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            shutil.copyfile(guest.safefs.__file__, source/'safefs.py')
             binary = source/'subyard-telemetry'
             shutil.copyfile(records.collector_binary(), binary)
             binary.chmod(0o755)
@@ -579,42 +584,6 @@ assert launcher.launch(args) == 0
             self.assertEqual(list(data.glob('archive*')), [archive.parent])
             self.assertNotIn('disable', invoked)
 
-    def developer_elsewhere(self, runtime):
-        """Make the developer another account than the deploying one, as for guest root.
-
-        Ownership changes are recorded instead of applied, so this runs unprivileged."""
-        runtime.uid, runtime.gid = os.getuid()+1, os.getgid()+1
-        owners, fstat = {}, os.fstat
-
-        def changed(fd):
-            info = fstat(fd)
-            return info, (info.st_dev, info.st_ino)
-
-        def fchown(fd, uid, gid):
-            info, key = changed(fd)
-            owners[key] = (info.st_uid if uid == -1 else uid, info.st_gid if gid == -1 else gid)
-
-        def owned(fd):
-            info, key = changed(fd)
-            if key not in owners:
-                return info
-            fields = list(info)
-            fields[stat.ST_UID], fields[stat.ST_GID] = owners[key]
-            return os.stat_result(fields)
-
-        def owner(path):
-            fd = os.open(path, os.O_RDONLY)
-            try:
-                return owned(fd).st_uid
-            finally:
-                os.close(fd)
-
-        stack = ExitStack()
-        stack.owner = owner
-        stack.enter_context(patch.object(guest.os, 'fchown', side_effect=fchown))
-        stack.enter_context(patch.object(guest.os, 'fstat', side_effect=owned))
-        return stack
-
     def test_interrupted_private_directory_creation_is_finished_on_retry(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             runtime = object.__new__(guest.Runtime)
@@ -627,11 +596,11 @@ assert launcher.launch(args) == 0
             runtime.operational.mkdir(mode=0o500)
             runtime.prepare_auth()
             self.assertEqual(stat.S_IMODE(runtime.operational.stat().st_mode), 0o700)
-            # Anything else is not our half-made directory.
+            before = runtime.auth.read_bytes()
             runtime.operational.chmod(0o500)
-            with self.assertRaisesRegex(ValueError, refusal):
-                runtime.prepare_auth()
-            runtime.operational.chmod(0o700)
+            runtime.prepare_auth()
+            self.assertEqual(stat.S_IMODE(runtime.operational.stat().st_mode), 0o700)
+            self.assertEqual(runtime.auth.read_bytes(), before)
             runtime.auth.unlink()
             runtime.operational.chmod(0o750)
             with self.assertRaisesRegex(ValueError, refusal):
@@ -641,14 +610,79 @@ assert launcher.launch(args) == 0
             runtime.data.mkdir(mode=0o700)
             with self.assertRaisesRegex(ValueError, refusal):
                 runtime.prepare_auth()
-            # Guest root stopped between mkdir and chown: the leftover belongs to the deployer.
-            runtime.operational.unlink()
-            with self.developer_elsewhere(runtime) as elsewhere:
-                runtime.private_directory(runtime.operational, refusal)
-                self.assertEqual(elsewhere.owner(runtime.operational), runtime.uid)
-                (runtime.data/'foreign').touch()
-                with self.assertRaisesRegex(ValueError, 'foreign data directory'):
-                    runtime.private_directory(runtime.data, 'foreign data directory')
+            runtime.uid += 1
+            with self.assertRaisesRegex(ValueError, 'foreign data directory'):
+                runtime.private_directory(runtime.data, 'foreign data directory')
+            self.assertEqual(runtime.data.stat().st_uid, os.geteuid())
+
+    def test_private_directory_preserves_storage_error(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = os.geteuid(), os.getegid()
+            with patch.object(guest.safefs.os, 'mkdir', side_effect=OSError(errno.ENOSPC, 'no space')):
+                try:
+                    runtime.private_directory(Path(name)/'data', 'foreign data directory')
+                except OSError as error:
+                    self.assertEqual(error.errno, errno.ENOSPC)
+                    self.assertIn('(OSError at guest.py:', guest.failure_diagnostic(error))
+                else:
+                    self.fail('directory creation ignored ENOSPC')
+
+    @unittest.skipUnless(os.geteuid() == 0, 'creating a directory as another UID needs root')
+    def test_staged_developer_directory_recovers_without_changing_a_directory_uid(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = 65534, 65534
+            path = Path(name)/'developer'
+            refusal = 'foreign data directory'
+
+            def fault(point):
+                if point == guest.safefs.AFTER_DIR_CREATE:
+                    raise guest.safefs.SimulatedCrash(point)
+
+            with patch.object(guest.safefs, 'FAULT', fault), self.assertRaises(guest.safefs.SimulatedCrash):
+                runtime.private_directory(path, refusal)
+            self.assertFalse(path.exists())
+
+            runtime.private_directory(path, refusal)
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), (runtime.uid, runtime.gid, 0o700))
+            path.rmdir()
+            path.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError, refusal):
+                runtime.private_directory(path, refusal)
+            self.assertEqual(path.stat().st_uid, 0)
+
+    @unittest.skipUnless(os.geteuid() == 0, 'creating a directory as another UID needs root')
+    def test_concurrent_developer_directory_creation_validates_the_winner(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = 65534, 65534
+            publish = guest.safefs.rename_noreplace
+            for mode in (0o700, 0o750):
+                with self.subTest(mode=oct(mode)):
+                    path = root/str(mode)
+                    winner = None
+
+                    def publish_with_winner(src, dst, *, src_dir_fd, dst_dir_fd):
+                        nonlocal winner
+                        with patch.object(guest.safefs, 'rename_noreplace', publish):
+                            runtime.create_developer_directory(dst_dir_fd, dst)
+                        path.chmod(mode)
+                        winner = path.stat()
+                        return publish(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+                    with patch.object(guest.safefs, 'rename_noreplace', side_effect=publish_with_winner):
+                        if mode == 0o700:
+                            runtime.private_directory(path, 'foreign data directory')
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'foreign data directory'):
+                                runtime.private_directory(path, 'foreign data directory')
+                    info = path.stat()
+                    self.assertTrue(os.path.samestat(info, winner))
+                    self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), (runtime.uid, runtime.gid, mode))
+            self.assertEqual(list(root.glob('.telemetry-dir-*')), [])
 
     def test_apply_finishes_or_refuses_the_data_directory_before_the_bearer(self):
         class Reached(Exception):
@@ -660,6 +694,7 @@ assert launcher.launch(args) == 0
             runtime.uid, runtime.gid, runtime.selected = os.getuid(), os.getgid(), True
             runtime.control, runtime.library, data = root/'control', root/'library', root/'state/data'
             runtime.data = data
+            runtime.safefs_path, runtime.safefs_content = root/'support/safefs.py', b'support'
             runtime.reconcile_native = lambda check: True
             runtime.manager = lambda unit: {}
 
@@ -674,17 +709,20 @@ assert launcher.launch(args) == 0
             data.mkdir(mode=0o500)
             apply()
             self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o700)
-            for refused in ('file', 'shared', 'kept'):
+            history = data/'history'
+            history.touch()
+            data.chmod(0o500)
+            apply()
+            self.assertTrue(history.is_file())
+            history.unlink()
+            for refused in ('file', 'shared'):
                 with self.subTest(refused=refused):
                     data.rmdir()
                     if refused == 'file':
                         data.touch(mode=0o700)
                     else:
-                        data.mkdir(mode=0o750 if refused == 'shared' else 0o500)
-                        if refused == 'kept':
-                            data.chmod(0o700)
-                            (data/'history').touch()
-                            data.chmod(0o500)
+                        data.mkdir(mode=0o750)
+                        data.chmod(0o750)
                     with self.assertRaisesRegex(ValueError, 'foreign data directory'):
                         runtime.apply()
                     if data.is_dir():
@@ -699,11 +737,11 @@ assert launcher.launch(args) == 0
             with self.assertRaisesRegex(ValueError, 'unsafe data directory'):
                 runtime.apply()
             data.unlink()
-            # Guest root stopped between mkdir and chown: the leftover belongs to the deployer.
             data.mkdir(mode=0o700)
-            with self.developer_elsewhere(runtime) as elsewhere:
+            runtime.uid += 1
+            with self.assertRaisesRegex(ValueError, 'foreign data directory'):
                 apply()
-                self.assertEqual(elsewhere.owner(data), runtime.uid)
+            self.assertEqual(data.stat().st_uid, os.geteuid())
 
     def test_v030_and_bearer_policy_migrations_resume_after_every_interruption(self):
         profile = Path(guest.__file__).parent
@@ -722,6 +760,7 @@ assert launcher.launch(args) == 0
             source = base/'source'
             shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            shutil.copyfile(guest.safefs.__file__, source/'safefs.py')
             binary = source/'subyard-telemetry'
             shutil.copyfile(records.collector_binary(), binary)
             binary.chmod(0o755)
@@ -957,7 +996,7 @@ for path, value in (
                 remove(root)
                 remove(pristine)
 
-    def test_runtime_diagnostics_name_changed_asset_without_contents(self):
+    def test_runtime_diagnostics_name_asset_and_receipt_drift_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
             path.write_bytes(b'private observed content')
@@ -970,6 +1009,10 @@ for path, value in (
             runtime.reconcile_native = lambda check: True
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
+            runtime.safefs_path = Path(name)/'support/safefs.py'
+            runtime.safefs_content = b'expected support'
+            runtime.safefs_state = lambda: types.SimpleNamespace(before=runtime.safefs_content, mode=0o644,
+                                                                 receipt=b'd', current=True, digest=b'd', wanted=b'd')
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
@@ -980,6 +1023,86 @@ for path, value in (
             observation = runtime.observe()
             self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
             self.assertNotIn('private observed content', str(observation))
+
+            path.write_bytes(b'desired content')
+            path.chmod(0o644)
+            runtime.policy_status = lambda: 'present'
+            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
+            for receipt, status in ((None, 'missing'), (b'd\nd\n', 'pending')):
+                with self.subTest(status=status), patch.object(runtime, 'safefs_state', return_value=types.SimpleNamespace(
+                        before=runtime.safefs_content, mode=0o644, receipt=receipt, wanted=b'd', digest=b'd', current=False)):
+                    self.assertEqual(runtime.observe()['diagnostics'], [
+                        {'parameter': 'telemetry.receipt.safefs.py', 'installed': status, 'desired': 'current'},
+                    ])
+
+    def test_shared_module_refuses_unmanaged_bytes_and_adopts_exact_bytes(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.control = root/'control'
+            runtime.safefs_path, runtime.safefs_content = root/'support/safefs.py', b'support'
+            runtime.assets = runtime.retained = {}
+            runtime.selected = True
+            runtime.owned = lambda: False
+            runtime.reconcile_native = lambda check: True
+            runtime.safefs_path.parent.mkdir()
+            runtime.safefs_path.parent.chmod(0o2755)
+            runtime.safefs_path.write_bytes(b'unmanaged')
+            runtime.safefs_path.chmod(0o644)
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(ValueError, 'managed asset changed'):
+                    operation()
+            self.assertEqual(runtime.safefs_path.read_bytes(), b'unmanaged')
+            self.assertFalse(runtime.control.exists())
+
+            runtime.control.mkdir(mode=0o700)
+            runtime.safefs_path.write_bytes(runtime.safefs_content)
+            state = runtime.safefs_state()
+            self.assertEqual(state.mode, 0o644)
+            self.assertFalse(state.publish)
+            pending = runtime.publish_safefs(state)
+            guest.native.publish(state.receipt_path, state.wanted, pending)
+            self.assertTrue(runtime.safefs_state().current)
+            self.assertEqual(stat.S_IMODE(runtime.safefs_path.parent.stat().st_mode), 0o2755)
+
+    def test_observe_and_apply_combine_module_and_native_refusals(self):
+        runtime = object.__new__(guest.Runtime)
+        runtime.selected = True
+        runtime.owned = lambda: True
+        policy = guest.native.Refusal([('unsafe-policy', 'codex'), ('unreadable-policy', 'claude')])
+        for operation in (runtime.observe, runtime.apply):
+            with self.subTest(operation=operation.__name__), \
+                    patch.object(runtime, 'safefs_state', side_effect=ValueError('managed asset changed')) as support, \
+                    patch.object(runtime, 'reconcile_native', side_effect=policy) as native_check:
+                with self.assertRaises(guest.native.Refusal) as raised:
+                    operation()
+                support.assert_called_once_with()
+                native_check.assert_called_once_with(check=True)
+                self.assertEqual(str(raised.exception), 'managed asset changed; '+str(policy))
+                self.assertEqual(raised.exception.reasons[1:], policy.reasons)
+
+    def test_observe_and_apply_keep_each_combined_errno(self):
+        runtime = object.__new__(guest.Runtime)
+        runtime.selected = True
+        runtime.owned = lambda: True
+        native_io = OSError(errno.ENOTDIR, 'private error text', '/private/native')
+        errno_reason = ('check-errno', 'native', errno.ENOTDIR)
+        cases = (
+            (ValueError('managed asset changed'), ('check-refusal', 'managed asset changed')),
+            (OSError(errno.EACCES, 'private module error', '/private/module'), ('check-errno', 'safefs', errno.EACCES)),
+        )
+        for operation in (runtime.observe, runtime.apply):
+            for module_error, module_reason in cases:
+                with self.subTest(operation=operation.__name__, module=module_reason[0]), \
+                        patch.object(runtime, 'safefs_state', side_effect=module_error), \
+                        patch.object(runtime, 'reconcile_native', side_effect=native_io) as native_check:
+                    with self.assertRaises(guest.native.Refusal) as raised:
+                        operation()
+                    native_check.assert_called_once_with(check=True)
+                    self.assertEqual(raised.exception.reasons, [module_reason, errno_reason])
+                    self.assertEqual(str(raised.exception), '; '.join(guest.native.refusal_messages(raised.exception.reasons)))
+                    self.assertIn(f'[Errno {errno.ENOTDIR}]', str(raised.exception))
+                    self.assertNotIn('/private/', str(raised.exception))
 
     def test_running_child_no_new_privs_uses_actual_kernel_status_and_uid(self):
         process=subprocess.Popen(['/usr/bin/setpriv','--no-new-privs',sys.executable,'-c',
@@ -1208,6 +1331,41 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
+                self.assertEqual(runtime.safefs_path.read_bytes(), Path(guest.safefs.__file__).read_bytes())
+                self.assertNotIn(str(runtime.safefs_path), runtime.saved_inventory())
+                subprocess.run([sys.executable, '-IBc', "import sys; sys.path.insert(0, sys.argv[1]); "
+                                "import records; assert records.safefs.__file__ == sys.argv[2]",
+                                str(runtime.library), str(runtime.safefs_path)], check=True, timeout=5)
+                # Stop after publishing only the module. Both the receipt and
+                # restart decision must survive a retry of the same update.
+                original_support = runtime.safefs_content
+                runtime.safefs_content += b'\n# replacement module\n'
+                publish = guest.native.publish
+
+                def interrupt_support(path, *args, **kwargs):
+                    publish(path, *args, **kwargs)
+                    if path == runtime.safefs_path:
+                        raise InterruptedError('module published')
+
+                inventory = runtime.saved_inventory()
+                start = len(calls)
+                with patch.object(guest.native, 'publish', side_effect=interrupt_support):
+                    with self.assertRaisesRegex(InterruptedError, 'module published'):
+                        runtime.apply()
+                self.assertIn(('stop', guest.MANAGER), calls[start:])
+                self.assertFalse(any(call[0] == 'stop' and guest.COLLECTOR in call for call in calls[start:]))
+                support = runtime.safefs_state()
+                self.assertFalse(support.current)
+                self.assertFalse(support.publish)
+                self.assertEqual(len(support.receipt.splitlines()), 2)
+                start = len(calls)
+                runtime.apply()
+                self.assertIn(('enable', '--now', guest.COLLECTOR, guest.MANAGER), calls[start:])
+                self.assertTrue(runtime.safefs_state().current)
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertEqual(runtime.saved_inventory(), inventory)
+                runtime.safefs_content = original_support
+                runtime.apply()
                 installed_native = root/'library/native.py'
                 receipt_path = root/'control/assets.json'
                 legacy_fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
@@ -1465,9 +1623,10 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
                 self.assertEqual(states[guest.MANAGER]['ActiveState'],'inactive')
                 original_replace=guest.native.os.replace
-                def cut_after_unit_replace(source,path):
-                    original_replace(source,path)
-                    if Path(path)==runtime.units/guest.COLLECTOR:
+                def cut_after_unit_replace(source,path,**fds):
+                    original_replace(source,path,**fds)
+                    parent = Path(f"/proc/self/fd/{fds['dst_dir_fd']}").resolve()
+                    if parent/path==runtime.units/guest.COLLECTOR:
                         raise InterruptedError('after first identity unit publication')
                 with patch.object(guest.native.os,'replace',side_effect=cut_after_unit_replace):
                     with self.assertRaises(InterruptedError):runtime.identity_apply(recipe,'rebind')

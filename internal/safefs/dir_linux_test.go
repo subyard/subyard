@@ -65,6 +65,10 @@ func TestEnsureDirPolicies(t *testing.T) {
 		t.Fatalf("broad directory refusal = %v, state = %+v", err, state)
 	}
 	checkMode(t, path, 0o750)
+	if err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Accept}); err != nil {
+		t.Fatal(err)
+	}
+	checkMode(t, path, 0o750)
 	if err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Repair}); err != nil {
 		t.Fatal(err)
 	}

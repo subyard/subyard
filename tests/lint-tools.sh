@@ -104,6 +104,32 @@ grep -q term file
     name: producer {pipe} head -1
 """, [3, 6])
 
+    def test_python_safefs_rules_scope_and_exemptions(self):
+        for name in ("lint-python-safefs.py", "ruff-safefs.toml"):
+            shutil.copy2(source / "dev" / name, self.root / "dev" / name)
+        ruff = subprocess.check_output(["bash", str(source / "dev/pinned-tool.sh"), "ruff"],
+                                       cwd=source, text=True).strip()
+        migrated = "config/profiles/telemetry/records.py"
+        excluded = "config/profiles/telemetry/sources.py"
+        ruff_check = [ruff, "check", "--force-exclude", "--no-cache", "--config", "dev/ruff-safefs.toml"]
+        ast_check = ["python3", "-I", "dev/lint-python-safefs.py"]
+        code = "from os import replace\npath.rename(target)\npath.replace(target)\n"
+        self.write(excluded, code)
+        self.write(migrated, code)
+        for command, findings in ((ruff_check, 1), (ast_check, 2)):
+            with self.subTest(command=command[-1]):
+                result = subprocess.run([*command, migrated, excluded], cwd=self.root,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                diagnostics = result.stdout + result.stderr
+                self.assertNotIn(excluded, diagnostics)
+                self.assertEqual(diagnostics.count("Publish files with safefs."), findings)
+        self.write(migrated, "from os import replace  # noqa: TID251\n"
+                            "path.rename(target)  # safefs: allow archive of existing state\n"
+                            '"state".replace("s", "")\n')
+        for command in (ruff_check, ast_check):
+            subprocess.run([*command, migrated, excluded], cwd=self.root, check=True)
+
     def audit(self, payload, exit_code, entries=()):
         report = self.root / "payload"
         report.write_bytes(payload)

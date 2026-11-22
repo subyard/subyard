@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]/'internal/adapters/configmaterial'))
 import native
+from records import safefs
 import tomli_w
 
 
@@ -99,22 +100,68 @@ class NativeTest(unittest.TestCase):
                 self.assertRaisesRegex(native.Refusal, 'developer cannot read telemetry policy'):
             self.reconcile(['codex'], check=True)
 
-    def test_policy_stage_is_private_until_rename_and_permissions_retry(self):
+    def test_policy_publish_has_final_permissions_and_private_staging(self):
         path = self.paths['codex']
-        replace = os.replace
-        def verify_stage(source, target):
-            self.assertEqual(target, path)
-            self.assertEqual(stat.S_IMODE(Path(source).stat().st_mode), 0o600)
-            replace(source, target)
 
-        with patch.object(native.os, 'replace', side_effect=verify_stage), \
-                patch.object(native.os, 'fchown', side_effect=InterruptedError('after rename')), \
-                self.assertRaises(InterruptedError):
+        def fault(point):
+            if point == safefs.BEFORE_PUBLISH:
+                stage, = path.parent.glob('.telemetry-*')
+                self.assertEqual(stat.S_IMODE(stage.stat().st_mode), 0o700)
+                pending, = stage.iterdir()
+                self.assertEqual(stat.S_IMODE(pending.stat().st_mode), native.POLICY_MODE)
+                self.assertEqual(pending.stat().st_gid, self.gid)
+                self.assertFalse(path.exists())
+            if point == safefs.AFTER_PUBLISH:
+                raise InterruptedError('after publish')
+
+        with patch.object(safefs, 'FAULT', fault), self.assertRaises(InterruptedError):
             self.reconcile(['codex'])
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), native.POLICY_MODE)
+        self.assertTrue(self.reconcile(['codex'], check=True))
+        # Releases that published before setting the final mode can still be repaired.
+        path.chmod(0o600)
         self.assertFalse(self.reconcile(['codex'], check=True))
         self.reconcile(['codex'])
         self.assertTrue(self.reconcile(['codex'], check=True))
+
+    def test_publish_compares_against_pinned_destination_with_separate_staging(self):
+        for can_replace in (False, True):
+            with self.subTest(can_replace=can_replace):
+                parent = self.root/f'policy-{can_replace}'
+                parent.mkdir()
+                moved = parent.with_suffix('.moved')
+                path = parent/'settings'
+                original = b'expected' if can_replace else b'other'
+                replacement = b'other' if can_replace else b'expected'
+                path.write_bytes(original)
+
+                def move_parent(point):
+                    if point == safefs.AFTER_STAGE:
+                        parent.rename(moved)
+                        parent.mkdir()
+                        path.write_bytes(replacement)
+
+                with patch.object(safefs, 'FAULT', move_parent):
+                    if can_replace:
+                        native.publish(path, b'new', b'expected', policy_gid=self.gid)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'native configuration changed'):
+                            native.publish(path, b'new', b'expected', policy_gid=self.gid)
+                self.assertEqual((moved/path.name).read_bytes(), b'new' if can_replace else original)
+                self.assertEqual(path.read_bytes(), replacement)
+
+    @unittest.skipIf(os.geteuid() == 0, 'user-file symlink case runs as the developer')
+    def test_legacy_cleanup_keeps_user_symlink(self):
+        legacy = self.legacy()
+        legacy(self.home, self.receipt, ['codex'], self.endpoint, self.token, tomli_w, self.uid, self.gid)
+        codex = self.documents['codex']
+        target = self.home/'managed-by-user.toml'
+        codex.rename(target)
+        codex.symlink_to(target)
+        self.assertIn(self.token.encode(), target.read_bytes())
+        self.reconcile(['codex'])
+        self.assertTrue(codex.is_symlink())
+        self.assertNotIn(self.token.encode(), target.read_bytes())
 
     def test_template_conflicts_compare_desired_fields_without_home_or_secret_output(self):
         agents = list(self.paths)

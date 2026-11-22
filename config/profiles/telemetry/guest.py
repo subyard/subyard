@@ -23,6 +23,7 @@ import tempfile
 import time
 
 import native
+from records import safefs
 import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
@@ -117,6 +118,12 @@ class Runtime:
             raise ValueError('developer account required')
         self.endpoint = 'http://127.0.0.1:14318'
         self.assets = {}
+        # Shared support is outside the telemetry inventory. An older runtime
+        # can roll back its assets while leaving this file in place.
+        self.safefs_path = library.parent/'subyard-python/safefs.py'
+        self.safefs_content = native.snapshot(Path(safefs.__file__).resolve())
+        if self.safefs_content is None:
+            raise ValueError('missing profile asset')
         # Paths whose contents an unselected run neither needs nor installs. They
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
@@ -297,31 +304,89 @@ class Runtime:
         return token
 
     def private_directory(self, path, refusal):
-        """Create a developer-owned 0700 directory, or finish creating our own.
-
-        mkdir, chmod and chown are separate steps. Only the deploying account can
-        create entries in the root-owned parent, so an empty directory it owns
-        without group or other access is one an interrupted run left behind."""
         try:
-            path.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except OSError:
+            parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                if self.uid != os.geteuid():
+                    try:
+                        os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        self.create_developer_directory(parent, path.name)
+                fd, _ = safefs.open_dir(path.name, dir_fd=parent, owner=(self.uid, self.gid))
+                try:
+                    info = os.fstat(fd)
+                    if stat.S_IMODE(info.st_mode) != 0o700 or info.st_gid != self.gid:
+                        raise ValueError(refusal)
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(parent)
+        except safefs.Unsafe:
             raise ValueError(refusal) from None
-        try:
-            info = os.fstat(fd)
-            if info.st_uid in (os.getuid(), self.uid) and not info.st_mode & 0o077 and not os.listdir(fd):
-                os.fchmod(fd, 0o700)
-                os.fchown(fd, self.uid, self.gid)
-                info = os.fstat(fd)
-            if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
-                raise ValueError(refusal)
-            if info.st_gid != self.gid:
-                os.fchown(fd, self.uid, self.gid)
-        finally:
-            os.close(fd)
+
+    def create_developer_directory(self, parent, name):
+        # The developer cannot write the destination parent. Give it access
+        # through a descriptor to an empty staging directory on the same mount.
+        # The outer directory keeps staging inaccessible by pathname.
+        with tempfile.TemporaryDirectory(prefix='.telemetry-dir-', dir=f'/proc/self/fd/{parent}') as staging:
+            path = Path(staging)/'create'
+            os.mkdir(path, 0o700)
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fchown(fd, -1, self.gid)
+                os.fchmod(fd, 0o770)
+                with native.developer_files(self.uid, self.gid):
+                    safefs.ensure_dir(name, dir_fd=fd)
+                try:
+                    safefs.rename_noreplace(name, name, src_dir_fd=fd, dst_dir_fd=parent)
+                except FileExistsError:
+                    # private_directory checks the winner through the pinned parent.
+                    pass
+            finally:
+                os.close(fd)
+
+    def safefs_state(self):
+        path = self.safefs_path
+        native.safe(path)
+        directory_mode = None
+        if path.parent.exists():
+            directory = path.parent.stat()
+            if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid() or directory.st_mode & 0o022:
+                raise ValueError('foreign control directory')
+            directory_mode = directory.st_mode & 0o777
+        receipt_path = self.control/'safefs.sha256'
+        receipt = native.snapshot(receipt_path, max_bytes=130)
+        if receipt is not None:
+            info = receipt_path.lstat()
+            if (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+                    or not re.fullmatch(rb'(?:[a-f0-9]{64}\n){1,2}', receipt)):
+                raise ValueError('managed asset changed')
+        before = native.snapshot(path)
+        wanted = hashlib.sha256(self.safefs_content).hexdigest().encode() + b'\n'
+        digest, mode = None, None
+        if before is not None:
+            info = path.lstat()
+            digest = hashlib.sha256(before).hexdigest().encode() + b'\n'
+            if (info.st_uid != os.geteuid() or info.st_mode & 0o022
+                    or (digest != wanted and digest not in (receipt or b'').splitlines(keepends=True))):
+                raise ValueError('managed asset changed')
+            if directory_mode == 0o755:
+                mode = stat.S_IMODE(info.st_mode)
+        publish = digest != wanted or mode != 0o644
+        return SimpleNamespace(before=before, mode=mode, digest=digest, wanted=wanted, publish=publish,
+                               receipt_path=receipt_path, receipt=receipt, current=not publish and receipt == wanted)
+
+    def publish_safefs(self, state):
+        # Retain both digests until the manager is restarted. Each intermediate
+        # state is owned and still needs reconciliation if apply is interrupted.
+        pending = (state.digest or state.wanted) + state.wanted
+        if pending != state.receipt:
+            native.publish(state.receipt_path, pending, state.receipt, no_replace=state.receipt is None)
+        if state.publish:
+            safefs.ensure_dir(self.safefs_path.parent, mode=0o755)
+            native.publish(self.safefs_path, self.safefs_content, state.before, mode=0o644,
+                           no_replace=state.before is None)
+        return pending
 
     def prepare_auth(self):
         self.private_directory(self.operational, 'foreign telemetry operational directory')
@@ -427,11 +492,28 @@ class Runtime:
                                 self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check,
                                 helper=str(self.helper))
 
+    def check_support_and_native(self):
+        failures = []
+        try:
+            support = self.safefs_state()
+        except (OSError, ValueError) as error:
+            failures.append(error)
+        try:
+            native_current = self.reconcile_native(check=True)
+        except (OSError, ValueError) as error:
+            failures.append(error)
+        if len(failures) == 2:
+            raise native.combined_check_refusal(*failures)
+        if failures:
+            raise failures[0]
+        return support, native_current
+
     def observe(self):
         installed = self.owned()
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
-        native_current = self.reconcile_native(check=True) if installed or self.selected else True
+        if installed or self.selected:
+            support, native_current = self.check_support_and_native()
         if not installed:
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
@@ -439,12 +521,14 @@ class Runtime:
             return result
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
-        ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
+        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
+        ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
+        files[str(self.safefs_path)] = (hashlib.sha256(support.before or b'').hexdigest(), support.mode)
+        ready = ready and support.current
         cutover_pending = self.selected and (self.data/CUTOVER).exists()
         policy_status = self.policy_status() if self.selected else 'present'
         policy_current = policy_status == 'present'
-        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
         ready = ready and not cutover_pending and not (self.data/'auth.token').exists() and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
@@ -460,7 +544,8 @@ class Runtime:
             converged = False
         converged = converged and native_current
         skill_current = not self.selected or self.skill_delivery('check-registered')
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': native_current, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
+        actual = hashlib.sha256(json.dumps({'files': files, 'safefs_receipt': hashlib.sha256(support.receipt or b'').hexdigest(),
+                                            'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': native_current, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
         converged = converged and skill_current and policy_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
@@ -480,6 +565,13 @@ class Runtime:
                     diagnostics.append({'parameter': 'telemetry.asset.' + path.name, 'installed': 'missing' if snapshot is None else 'changed', 'desired': 'current'})
                 elif stat.S_IMODE(path.stat().st_mode) != mode:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
+            if support.digest != support.wanted:
+                diagnostics.append({'parameter': 'telemetry.asset.safefs.py', 'installed': 'missing' if support.before is None else 'changed', 'desired': 'current'})
+            elif support.mode != 0o644:
+                diagnostics.append({'parameter': 'telemetry.mode.safefs.py', 'installed': 'mismatch', 'desired': 'matched'})
+            if support.receipt != support.wanted:
+                diagnostics.append({'parameter': 'telemetry.receipt.safefs.py',
+                                    'installed': 'missing' if support.receipt is None else 'pending', 'desired': 'current'})
             if not native_current:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             if not skill_current:
@@ -522,6 +614,7 @@ class Runtime:
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
+                 'safefs': hashlib.sha256(self.safefs_content).hexdigest(),
                  'selected': self.selected, 'agents': self.agents,
                  'templates': {agent: hashlib.sha256(content).hexdigest() for agent, content in self.templates.items()}}
         if self.retained:
@@ -764,7 +857,7 @@ class Runtime:
             # Reserve a generated destination so an interrupted retry cannot
             # overwrite the previous operational state.
             archive = Path(tempfile.mkdtemp(prefix='legacy-', dir=target))
-            old.rename(archive/name)
+            old.rename(archive/name)  # safefs: allow archive of existing state
             records.sync_directory(archive)
             records.sync_directory(target)
         records.sync_directory(self.data)
@@ -783,7 +876,7 @@ class Runtime:
         installed = self.owned()
         if not self.selected and not installed:
             return
-        self.reconcile_native(check=True)
+        support, _ = self.check_support_and_native()
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -832,6 +925,7 @@ class Runtime:
         self.reconcile_native(check=False, token=token)
         stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
                 and (retiring or changed or not self.running_no_new_privs(fields)
+                     or (unit == MANAGER and not support.current)
                      or (unit == COLLECTOR and (old_auth.exists() or (self.selected and not prepared))))]
         if retiring:
             for path in (self.commands/'subyard-telemetry-run', self.library/'broker-correlation.py'):
@@ -846,6 +940,8 @@ class Runtime:
             self.as_developer(self.retire_operational_state)
         if old_auth.exists() or old_auth.is_symlink():
             self.as_developer(lambda: self.remove_auth(old_auth))
+        if not support.current:
+            support_pending = self.publish_safefs(support)
         if self.selected and not prepared:
             binary = self.library/'subyard-telemetry'
             self.publish_asset(binary, saved)
@@ -892,6 +988,8 @@ class Runtime:
             (self.data/CUTOVER).unlink()
             with records.directory_lock(self.data, fcntl.LOCK_SH) as directory:
                 os.fsync(directory)
+        if not support.current:
+            native.publish(support.receipt_path, support.wanted, support_pending)
 
     def rollback_state(self):
         """Observed facts and the parts not yet in runtime format 1.
@@ -1095,7 +1193,7 @@ def failure_diagnostic(error):
         if filename in ('guest.py', 'native.py'):
             location = filename+':'+str(trace.tb_lineno)
         trace = trace.tb_next
-    kind = 'ValueError' if isinstance(error, native.Refusal) else type(error).__name__
+    kind = 'ValueError' if isinstance(error, (native.Refusal, safefs.Unsafe)) else type(error).__name__
     return 'telemetry: local reconciliation failed ('+kind+' at '+location+')'
 
 

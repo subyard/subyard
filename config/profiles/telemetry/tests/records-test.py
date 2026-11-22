@@ -16,6 +16,40 @@ from spool_fixture import prepare, spooled
 
 
 class RecordsTest(unittest.TestCase):
+    def test_dot_data_directory_keeps_relative_paths_usable(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            data = root/'data'
+            data.mkdir(mode=0o700)
+            data.chmod(0o700)
+            program = '''
+import sys
+from pathlib import Path
+from unittest import TestCase
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import launcher
+import records
+with patch.object(sys, 'argv', ['launcher.py', 'manager', '--data-dir', '.']), \
+        patch.object(launcher, 'run_manager', return_value=0) as run:
+    assert launcher.main() == 0
+    run.assert_called_once_with('.', 5)
+assert records.private_directory('.').name == ''
+records.atomic_json('current.json', {'ready': True})
+assert records.operational_directory('.') == records.Path(sys.argv[2])
+Path('file').touch()
+with TestCase().assertRaises(NotADirectoryError):
+    records.private_directory('file/../unintended')
+assert not Path('unintended').exists()
+Path('.').chmod(0o500)
+with TestCase().assertRaisesRegex(ValueError, 'private directory required'):
+    records.private_directory('.')
+assert Path('.').stat().st_mode & 0o777 == 0o500
+'''
+            subprocess.run([sys.executable, '-B', '-c', program, str(Path(records.__file__).parent),
+                            str(root/'data-private')], cwd=data, check=True, timeout=5)
+            self.assertEqual(records.read_private(data/'current.json'), {'ready': True})
+
     def test_concurrent_streams_respect_quota_and_preserve_reserved_loss(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = prepare(Path(directory))

@@ -1,0 +1,15 @@
+[
+  {"target":"absent", "mode":384, "umask":191, "outcome":"published"},
+  {"target":"regular", "mode":420, "umask":63, "outcome":"published"},
+  {"target":"symlink", "mode":384, "umask":18, "outcome":"symlink"},
+  {"target":"directory", "mode":384, "umask":2, "outcome":"not regular"},
+  {"target":"fifo", "mode":384, "umask":18, "outcome":"not regular"},
+  {"target":"absent", "mode":416, "umask":18, "no_replace":true, "outcome":"published"},
+  {"target":"regular", "mode":384, "umask":18, "no_replace":true, "outcome":"exists"},
+  {"target":"symlink", "mode":384, "umask":18, "no_replace":true, "outcome":"exists"},
+  {"operation":"finish-directory", "target":"sticky", "initial_mode":832, "mode":448, "umask":18, "outcome":"0700", "python_outcome":"1700"},
+  {"operation":"finish-directory", "target":"setgid", "initial_mode":1344, "mode":448, "umask":18, "outcome":"0700", "python_outcome":"2700"},
+  {"operation":"finish-directory", "target":"setuid", "initial_mode":2368, "mode":448, "umask":18, "outcome":"0700", "python_outcome":"4700"},
+  {"operation":"finish-directory", "target":"all-special-bits", "initial_mode":3904, "mode":448, "umask":18, "outcome":"0700", "python_outcome":"7700"},
+  {"operation":"resolve-file", "target":"dangling-final-link", "umask":18, "outcome":"resolved missing target", "python_outcome":"dangling target refused"}
+]

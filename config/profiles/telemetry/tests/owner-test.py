@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exact generic release observations use the declared owning transport."""
+import errno
 import json
 import io
 import os
@@ -15,11 +16,14 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def copy_skill_assets(repository, profile):
+def copy_shared_assets(repository, profile):
     shutil.copytree(repository/'config/profiles/telemetry/skills', profile/'skills')
     helper = profile.parents[1]/'skills/deliver.py'
     helper.parent.mkdir(parents=True)
     shutil.copyfile(repository/'config/skills/deliver.py', helper)
+    helper = profile.parents[2]/'internal/safefs/safefs.py'
+    helper.parent.mkdir(parents=True)
+    shutil.copyfile(repository/'internal/safefs/safefs.py', helper)
 
 
 class OwnerTest(unittest.TestCase):
@@ -33,7 +37,7 @@ class OwnerTest(unittest.TestCase):
             for path in source.glob('*.py'):
                 shutil.copyfile(path,profile/path.name)
             shutil.copyfile(source/'profile.sh',profile/'profile.sh')
-            copy_skill_assets(repository, profile)
+            copy_shared_assets(repository, profile)
             (root/'scripts/lib').mkdir(parents=True)
             shutil.copyfile(repository/'scripts/lib/engine-context.sh',root/'scripts/lib/engine-context.sh')
             (root/'internal/adapters/configmaterial').mkdir(parents=True)
@@ -60,7 +64,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             destination = stage/member.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(archive.extractfile(member).read())
-    assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file()
+    assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file() and (stage/'safefs.py').is_file()
     if os.environ.get('TELEMETRY_DISK_BUDGET')=='2GiB':
         assert args[args.index('SUBYARD_TELEMETRY_DISK_BYTES=2147483648')-1]=='--env'
     if arguments[0]=='startup':
@@ -164,7 +168,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         profile.mkdir(parents=True)
         for path in source.glob('*.py'):
             shutil.copyfile(path, profile/path.name)
-        copy_skill_assets(repository, profile)
+        copy_shared_assets(repository, profile)
         for name in ('profile.sh', 'runtime.sh'):
             shutil.copyfile(source/name, profile/name)
             (profile/name).chmod(0o755)
@@ -308,6 +312,9 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 ('telemetry-native-refusal-v1 PRIVATE_CREDENTIAL', ''),
                 ('telemetry-native-refusal-v2 [["template-conflict","codex","PRIVATE_CREDENTIAL"]]', ''),
                 ('telemetry-native-refusal-v2 [["unsafe-policy","PRIVATE_CREDENTIAL"]]', ''),
+                ('telemetry-native-refusal-v2 [["check-refusal","PRIVATE_CREDENTIAL"]]', ''),
+                ('telemetry-native-refusal-v2 [["check-errno","PRIVATE_CREDENTIAL",20]]', ''),
+                ('telemetry-native-refusal-v2 [["check-errno","native","PRIVATE_CREDENTIAL"]]', ''),
                 (safe.replace('PermissionError','PRIVATE_CREDENTIAL'), '')]:
             with self.subTest(message_class=bool(expected)):
                 stderr = io.StringIO()
@@ -316,13 +323,24 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 self.assertEqual(stderr.getvalue(), expected)
                 self.assertNotIn('PRIVATE', stderr.getvalue())
 
-    def test_policy_refusal_reports_the_system_path(self):
+    def test_module_and_policy_refusals_reach_the_owner_in_order(self):
         owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
         path = '/etc/codex/managed_config.toml'
-        with self.assertRaisesRegex(owner['Refusal'], path):
+        with self.assertRaisesRegex(owner['Refusal'], 'managed asset changed; unsafe or foreign telemetry policy '+path):
             owner['run']([sys.executable, '-c',
                           "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
-                          'telemetry-native-refusal-v2 [["unsafe-policy","codex"]]'])
+                          'telemetry-native-refusal-v2 [["check-refusal","managed asset changed"],["unsafe-policy","codex"]]'])
+
+    def test_combined_module_and_native_errnos_reach_the_owner_in_order(self):
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        reasons = [('check-errno', 'safefs', errno.EACCES), ('check-errno', 'native', errno.ENOTDIR)]
+        with self.assertRaises(owner['Refusal']) as raised:
+            owner['run']([sys.executable, '-c',
+                          "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
+                          'telemetry-native-refusal-v2 '+json.dumps(reasons)])
+        self.assertEqual(str(raised.exception),
+                         f'shared safefs module check failed ([Errno {errno.EACCES}] {os.strerror(errno.EACCES)}); '
+                         f'native telemetry check failed ([Errno {errno.ENOTDIR}] {os.strerror(errno.ENOTDIR)})')
 
     def test_all_exact_absent_release_observations_are_declared(self):
         from unittest.mock import patch

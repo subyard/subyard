@@ -116,16 +116,13 @@ class PrivacyCanary(unittest.TestCase):
                           'password': PASSWORD, EMAIL: PROMPT, 'output': OUTPUT})])
             self.assertTrue(launcher.admit_manifest(data, baseline, reserve=True))
             manifest = launcher.manifest_path(data/launcher.RUNS, baseline_id)
-            replace = os.replace
-
-            def interrupted(temporary, target):
-                if target == manifest:
-                    self.assertTrue(Path(temporary).is_file())
+            def interrupted(point):
+                if point == records.safefs.BEFORE_PUBLISH:
+                    self.assertTrue(any(manifest.parent.glob('.*.tmp')))
                     self.scan(data, 'interrupted manifest before rename')
                     raise OSError('synthetic interrupted publication')
-                replace(temporary, target)
 
-            with patch.object(records.os, 'replace', side_effect=interrupted):
+            with patch.object(records.safefs, 'FAULT', interrupted):
                 with self.assertRaises(OSError):
                     launcher.finish_manifest(data, baseline)
             self.assertEqual(records.read_private(manifest)['manifest_state'], 'reserved')
