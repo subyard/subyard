@@ -174,10 +174,11 @@ class WindowTest(unittest.TestCase):
             for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
                 with self.subTest(signal=number), tempfile.TemporaryDirectory() as directory:
                     target = Path(directory)/'pids.json'
-                    body = BASE + GRACEFUL + "import subprocess,json,pathlib; child=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(30)']); " + f"pathlib.Path({str(target)!r}).write_text(json.dumps([os.getpid(),child.pid])); " + MARKER + 'time.sleep(30)'
+                    body = BASE + GRACEFUL + "import subprocess,json,pathlib; child=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(30)']); " + f"pathlib.Path({str(target)!r}+'.tmp').write_text(json.dumps([os.getpid(),child.pid])); os.replace({str(target)!r}+'.tmp',{str(target)!r}); " + MARKER + 'time.sleep(30)'
                     command = [sys.executable,'-I','-B',str(HELPER),'--',sys.executable,'-I','-B','-c',body]
                     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     try:
+                        # The child renames a complete file into place, so existence means readable JSON.
                         deadline = time.monotonic()+3
                         while not target.exists() and time.monotonic()<deadline:
                             time.sleep(.01)
