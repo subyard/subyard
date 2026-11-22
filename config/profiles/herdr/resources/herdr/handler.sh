@@ -147,7 +147,9 @@ runtime() {
     if yexec test -x "$helper"; then
       installed=true
       desired=$(digest)
-      actual=$(yexec cat "$helper.sha256" 2>/dev/null) || actual=$(printf '' | sha256sum | cut -d ' ' -f1)
+      actual=$(yexec cat "$helper.sha256" 2>/dev/null) || actual=''
+      # A missing or corrupted record is stale: apply reinstalls the assets and rewrites it.
+      [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || actual=$(printf '' | sha256sum | cut -d ' ' -f1)
       state=stale
       if [ "$actual" = "$desired" ]; then state=current; fi
     fi

@@ -239,5 +239,14 @@ old=$(printf '%064d' 0)
 HERDR_TEST_ACTUAL="$old" "$handler" _runtime apply fixture "$old" "$HERDR_TEST_DIGEST" > "$test_root/runtime" 2> "$test_root/runtime.log"
 jq -se --arg desired "$HERDR_TEST_DIGEST" 'length == 1 and .[0].state == "current" and .[0].actual == $desired' "$test_root/runtime" >/dev/null
 printf 'systemctl daemon-reload\n' | cmp - "$HERDR_TEST_CALLS"
+empty=$(printf '' | sha256sum | cut -d ' ' -f1)
+for corrupted in stale "$(printf '%063d' 0)" "$(printf '%064d' 0 | tr 0 A)"; do
+  HERDR_TEST_ACTUAL="$corrupted" "$handler" _runtime observe |
+    jq -e --arg empty "$empty" '.state == "stale" and .actual == $empty' >/dev/null
+done
+: > "$HERDR_TEST_CALLS"
+HERDR_TEST_ACTUAL=stale "$handler" _runtime apply fixture "$empty" "$HERDR_TEST_DIGEST" |
+  jq -e '.state == "current"' >/dev/null
+grep -Fxq 'systemctl daemon-reload' "$HERDR_TEST_CALLS"
 printf '\n# New SSH policy revision\n' >> "$profile/guest-ssh.sh"
 "$handler" _runtime observe | jq -e '.state == "stale" and .actual != .desired' >/dev/null
