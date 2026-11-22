@@ -11,8 +11,8 @@
       "component": "agents",
       "throughVersion": "0.30.0",
       "reason": "Agent approval policies and hooks installed after 0.30.0 survive a release rollback.",
-      "recovery": "Keep this release active. Stop agent sessions; back up the listed files in each affected yard, remove only Subyard-managed policy and hook files, and restore the 0.30.0 agent configuration before manually installing 0.30.0 and running yard init.",
-      "sourceDigest": "3f1dc9850acf9f11357f0b960c6682c93bffee06c04750ccddb8b342c1e9e796",
+      "recovery": "Stop agent sessions before rollback. After rollback, back up the listed files, remove only Subyard-managed approval hook and policy files, restore the target release's agent configuration, and run yard init in each affected yard before restarting agents. Preserve operator-owned content.",
+      "sourceDigest": "daf57c06254cd309291629b5816f6f48a92ff0dd77a86501ed23fee0d28ae230",
       "files": [
         "/etc/claude-code/managed-settings.d/50-subyard-git-approval.json",
         "/etc/claude-code/subyard-git-approval-hook",

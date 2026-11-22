@@ -1252,23 +1252,30 @@ well-formed digest are still required. Later schemas therefore keep that field a
 ### Declared rollback boundaries
 
 The newer active release performs rollback. Its sealed `config/release-rollback.json` may add
-`boundaries` to declare installed state that a previous release cannot handle. Each entry has:
+`boundaries` to declare blocking state changes or accepted agent integration cleanup limitations.
+Each entry has:
 
 - `component`: `registry`, `profile:ACTIVATION_ID`, or `agents`.
-- `throughVersion`: the last incompatible published version, without `v`.
+- `throughVersion`: the last affected published version, without `v`.
 - `reason` and `recovery`: single-line explanations, at most 512 bytes each. Recovery describes
-  the manual next step while keeping the active release available; it grants no cleanup authority.
+  the manual next step; it grants no automatic cleanup authority.
 - For `agents`, `sourceDigest` binds the reviewed integration sources and `files` lists the
   surviving yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
 
 Sort entries by `throughVersion/component`. Retain a boundary while incompatible releases remain
-possible targets. An older target at or below the declared version is refused with
-`rollback-incompatible`, the reason, affected files and manual recovery instructions. This applies
-both to `yard update --rollback` and explicit older version selection, before profile preparation
-or release mutation. Independent registry, configuration, VM and profile findings remain visible.
-A boundary does not make incompatible history readable or authorize automatic cleanup. After
+possible targets. For `registry` and `profile:ACTIVATION_ID`, an older target at or below the
+version is refused with `rollback-incompatible`, the reason and a manual recovery hint. This
+applies both to `yard update --rollback` and explicit older version selection, before profile
+preparation or release mutation. Independent registry, configuration, VM and profile findings
+remain visible. These blocking boundaries do not make incompatible history readable. After
 manual recovery the operator installs the older release explicitly; rerunning rollback still
-refuses the declared boundary. Newer targets and same-release repair are unaffected.
+refuses a blocking boundary. Newer targets and same-release repair are unaffected.
+
+An `agents` entry is a **non-blocking accepted limitation**. Rollback and profile preparation
+proceed through their existing compatibility checks. The operator-facing plan output and result
+show the surviving yard files and manual cleanup instructions, also documented in release notes.
+Agent declarations neither authorize automatic removal nor add integration rollback hooks. Stop
+agent sessions before rollback and complete the documented cleanup before restarting them.
 
 `TestPublishedRollbackGate` compares the current source to the latest version in
 `dev/e2e/published-upgrade-baselines.tsv`. Its checked-in snapshot keeps this check offline and
@@ -1281,7 +1288,7 @@ reader features and predecessor declaration, or a `registry` boundary. A changed
 removed runtime format needs its existing `prepares_rollback_to` contract (whose handler owns
 `rollback-observe` and `rollback-apply`) or a `profile:ACTIVATION_ID` boundary. Agent integrations
 have no rollback hooks: any change in non-test `config/agents/` sources requires a reviewed
-`agents` boundary with manual cleanup. This deliberately conservative source check includes
+non-blocking `agents` declaration with manual cleanup. This source review check includes
 shared helpers, provisioning, integration metadata and configuration templates. It excludes
 `tests/` directories. Its failure prints the current source digest; a later source edit requires
 renewed review and an updated digest, so an old declaration cannot silently cover new files.
@@ -1290,10 +1297,12 @@ For example, an integration that replaces the shared Claude policy with drop-ins
 `48-`, `49-` and `51-` adds their exact paths under
 `/etc/claude-code/managed-settings.d/` to `files`, updates `sourceDigest`, and documents stopping
 Claude, backing up and removing those Subyard-owned drop-ins, then restoring the previous
-release's policy before manual downgrade. List complete filenames, not globs; preserve
+release's policy after rollback and before restarting agents. List complete filenames, not globs; preserve
 operator-owned policy. The current declaration covers the approval hooks and managed agent
 configuration introduced since 0.30.0. Review cleanup inside each affected yard, including
-custom installation paths, before manually installing that predecessor.
+custom installation paths. This declaration belongs to the introducing unreleased 0.31.0
+candidate; `throughVersion: "0.30.0"` describes affected rollback targets, not its owning release.
+It does not refuse the supported rollback to v0.30.0.
 
 Release selection compares the profile runtime formats that the active release and an older or
 equal target declare for each activation ID. A newer target is exempt only when both versions are

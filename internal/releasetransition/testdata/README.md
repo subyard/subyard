@@ -20,5 +20,6 @@ and a SHA-256 inventory of non-test agent integration sources from the latest pu
 in `dev/e2e/published-upgrade-baselines.tsv`. Its version and bundle checksum must match that
 source of truth. `python3 dev/update-rollback-baseline.py` regenerates it and the exact registry
 fixture from the local published tag. The agent inventory hashes sorted relative paths,
-executable bits and file SHA-256 values; it excludes `tests/` directories. The repository gate
+the Git executable flag (owner execute, independent of group/other permissions) and file
+SHA-256 values; it excludes `tests/` directories. The repository gate
 reads the current filesystem, including uncommitted and untracked source files.

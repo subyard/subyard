@@ -57,10 +57,12 @@ type Config struct {
 }
 
 type Prepared struct {
-	Request        releasetransition.ProcessRequest `json:"-"`
-	Action         domain.ActionID
-	Changed        bool
-	Consequences   []string
+	Request      releasetransition.ProcessRequest `json:"-"`
+	Action       domain.ActionID
+	Changed      bool
+	Consequences []string
+	// AgentCleanup reports accepted rollback limitations, without authorizing cleanup.
+	AgentCleanup   []releasetransition.RollbackBoundary `json:",omitempty"`
 	RefreshConfigs bool
 	ActiveLauncher string
 	SourceRelease  string
@@ -1626,6 +1628,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
+			if parsed.selection != nil {
+				prepared.AgentCleanup = slices.Clone(parsed.selection.agentCleanup)
+				prepared.Consequences = append(prepared.Consequences, prepared.AgentCleanupConsequences()...)
+			}
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks)
 			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
 		}

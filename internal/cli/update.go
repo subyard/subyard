@@ -295,6 +295,14 @@ func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Or
 	return result, runErr
 }
 
+// Cleanup notices accompany the operation plan even with --yes, and remain in
+// the result after switching releases. They never grant automatic file removal.
+func (cli *CLI) printUpdateAgentCleanup(execution *releaseExecution) {
+	for _, note := range execution.prepared.AgentCleanupConsequences() {
+		fmt.Fprintln(cli.options.Stdout, note)
+	}
+}
+
 func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	preparation := execution.prepared.Action == releaseruntime.PrepareRollbackAction
 	if _, update := updateDirection(execution.prepared.Action); !update && !preparation {
@@ -323,6 +331,7 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	} else {
 		fmt.Fprintln(output, "\n  [FAIL] Update did not complete successfully")
 	}
+	cli.printUpdateAgentCleanup(execution)
 	outcome := execution.outcome
 	if execution.inspection != nil {
 		if execution.repairPending {

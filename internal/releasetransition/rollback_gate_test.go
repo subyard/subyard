@@ -15,6 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/blang/semver/v4"
 )
 
@@ -184,7 +185,13 @@ func agentSourcesDigest(t *testing.T, root string) Fingerprint {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(hash, "%s %03o %x\n", filepath.ToSlash(relative), info.Mode().Perm()&0o111, sha256.Sum256(data))
+		// Git stores one executable flag, based on owner execute, rather than
+		// group/other permissions. Managed worktrees may use 0744 instead of 0755.
+		mode := 0
+		if info.Mode().Perm()&0o100 != 0 {
+			mode = 0o111
+		}
+		fmt.Fprintf(hash, "%s %03o %x\n", filepath.ToSlash(relative), mode, sha256.Sum256(data))
 		return nil
 	})
 	if err != nil {
@@ -245,5 +252,21 @@ func TestRollbackGateRequiresCoverageForEveryChange(t *testing.T) {
 	current.declaration.Boundaries = []RollbackBoundary{{Component: "agents", ThroughVersion: "0.30.0", SourceDigest: old.agents}}
 	if err := rollbackGate(current, old, "0.30.0"); err == nil {
 		t.Fatal("stale agent source review passed")
+	}
+}
+
+func TestAgentSourcesDigestUsesGitExecutableFlag(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, "provision.sh")
+	source := []byte("#!/bin/sh\nexit 0\n")
+	testkit.WriteFile(t, path, source, 0o744)
+	ownerOnly := agentSourcesDigest(t, root)
+	testkit.WriteFile(t, path, source, 0o755)
+	if got := agentSourcesDigest(t, root); got != ownerOnly {
+		t.Fatalf("Git-equivalent executable modes changed digest: 0744=%s 0755=%s", ownerOnly, got)
+	}
+	testkit.WriteFile(t, path, source, 0o644)
+	if got := agentSourcesDigest(t, root); got == ownerOnly {
+		t.Fatal("removing the executable flag did not change the source digest")
 	}
 }

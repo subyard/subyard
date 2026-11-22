@@ -29,7 +29,7 @@ func RegistryReaderFeatures() []string {
 // canonical digest. Schema 1 defines no migration or profile-format entries yet,
 // so both lists must be present and empty. RegistryFeatures names the compiled
 // reader forms sealed into this release; absent flags select the v0.30 rules.
-// Boundaries declare installed state that requires manual recovery instead of rollback.
+// Boundaries declare blocking state changes or accepted agent cleanup limitations.
 type RollbackDeclaration struct {
 	SchemaVersion             int                `json:"schemaVersion"`
 	PredecessorRegistryDigest Fingerprint        `json:"predecessorRegistryDigest"`
@@ -40,8 +40,9 @@ type RollbackDeclaration struct {
 }
 
 // RollbackBoundary belongs to the release introducing incompatible state. It
-// blocks targets at or below ThroughVersion, including explicit version selection.
-// Agent boundaries bind the reviewed source tree and list surviving yard files.
+// blocks targets at or below ThroughVersion, including explicit version selection,
+// except agents: these accepted limitations are notices and never refuse rollback.
+// Agent entries bind the reviewed source tree and list surviving yard files.
 type RollbackBoundary struct {
 	Component      string      `json:"component"`
 	ThroughVersion string      `json:"throughVersion"`

@@ -469,6 +469,9 @@ func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
 	if prepared.assess != nil {
 		if prepared.steps != nil {
 			delta.Consequences = domain.OperationStepConsequences(steps)
+			if prepared.release != nil {
+				delta.Consequences = append(delta.Consequences, prepared.release.prepared.AgentCleanupConsequences()...)
+			}
 		}
 		prepared.Plan, err = orchestrator.PrepareAction(prepared.Loaded.Context, prepared.policy.Name, prepared.policy.RemotePolicy, action, delta)
 	} else {

@@ -96,6 +96,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	} else if prepared.preview != nil {
 		prepared.preview()
 	}
+	if prepared.release != nil {
+		cli.printUpdateAgentCleanup(prepared.release)
+	}
 	if prepared.readiness != nil {
 		prepared.readiness()
 	}
