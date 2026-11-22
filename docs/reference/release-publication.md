@@ -478,8 +478,7 @@ Agents preparing a release apply the
   pushed branch whose head is the candidate is selected automatically, as described in
   [workflow ref selection](#workflow-ref-selection). As soon as the release branch has the fixes,
   the agent opens a PR returning them to the default branch and asks for the operator's OK once
-  its CI checks pass; the release is complete only after it merges. Publication, attestation and
-  their confirmations stay with the operator.
+  its CI checks pass; the release is complete only after it merges.
 
 - After publication, open a PR to the default branch pinning the new release's verified installer
   and archive SHA-256 values as a `direct` row in
