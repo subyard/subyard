@@ -382,6 +382,13 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			return fmt.Errorf("managed project %s has no approved installation ownership; preserve it and repair its registration before full removal", instance.Project)
 		}
 	}
+	mask, err := unusedDockerMask(installation.DataHome, instances, func(project string) bool { return knownProjects[project] })
+	if err != nil {
+		return err
+	}
+	if mask != nil {
+		execution.ManagedRoots = append(execution.ManagedRoots, mask.Path)
+	}
 	profileContext := structuredCommandContext(current)
 	profileContext["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	profileContext["YARD_RUNTIME_ROOT"] = installation.RuntimeRoot
@@ -620,6 +627,11 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		}
 		if err != nil {
 			return fmt.Errorf("inspect full uninstall root %s: %w", root, err)
+		}
+		if root == installation.DataHome && mask != nil {
+			if err := uninstall.Tree(*mask).Check(); err != nil {
+				return err
+			}
 		}
 		for _, entry := range tree.Entries {
 			if filepath.Base(entry.Path) == ".git" && !slices.Contains(execution.OwnedGitDirectories, filepath.Join(root, entry.Path)) {

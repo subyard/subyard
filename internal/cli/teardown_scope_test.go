@@ -76,6 +76,50 @@ func TestTeardownScopeSelectionPrecedesConsent(t *testing.T) {
 	}
 }
 
+func TestTeardownBindsUnusedDockerMask(t *testing.T) {
+	for _, test := range []struct {
+		name                                string
+		keepData, neighbor, invalid, remove bool
+	}{
+		{name: "last user", remove: true},
+		{name: "stopped neighbor", neighbor: true},
+		{name: "keep data", keepData: true},
+		{name: "non-empty file", invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			program, loaded, incus, _, fixture := teardownResetFixture(t)
+			mask := filepath.Join(loaded.Context.Paths.DataHome, "docker-apparmor-disabled")
+			contents := ""
+			if test.invalid {
+				contents = "foreign file"
+			}
+			fixture.Write(mask, contents, 0644)
+			devices := map[string]map[string]string{"mask": {"source": mask}}
+			incus.Instances["yard"] = ports.InstanceInfo{Project: loaded.Context.IncusProject, Devices: devices}
+			if test.neighbor {
+				incus.Instances["neighbor"] = ports.InstanceInfo{Project: "peer", Status: "Stopped", Devices: devices}
+			}
+			execution := &teardownExecution{keepData: test.keepData}
+			if err := program.observeTeardownExecution(context.Background(), loaded, execution); err != nil {
+				t.Fatal(err)
+			}
+			artifacts := execution.snapshot().Artifacts
+			bound := slices.ContainsFunc(artifacts, func(a ports.TeardownArtifact) bool { return a.Path == mask && a.Binding != "" })
+			if bound != test.remove {
+				t.Fatalf("mask selected = %t, want %t", bound, test.remove)
+			}
+			if bound {
+				if err := uninstall.RemoveArtifact(context.Background(), mask, ports.ArtifactBindings(artifacts)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(mask); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("last user's mask survived teardown: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestFullTeardownSnapshotCanonicalizesNativePartialPeers(t *testing.T) {
 	program, loaded, incus, _, _ := teardownResetFixture(t)
 	execution := &fullTeardown{}

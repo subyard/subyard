@@ -38,6 +38,23 @@ printf 'outer log\n' > "$data_home/logs/yard.log"
 [ -f "$data_home/workspaces/active.code-workspace" ] || fail 'outer workspace descriptor was removed'
 [ -f "$data_home/logs/yard.log" ] || fail 'outer log was removed'
 
+(
+  mask="$data_home/docker-apparmor-disabled"
+  SUBYARD_TEARDOWN_ARTIFACTS="$(jq -nc --arg path "$mask" '[{Path:$path}]')"
+  incus() { [ "$*" = 'list --all-projects --format json' ] && printf '%s' "$instances"; }
+  teardown_guard() { [ "$1" = remove-artifact ] && [ "$2" = "$mask" ] && unlink "$mask"; }
+  touch "$mask"
+  instances="$(jq -nc --arg path "$mask" '[{status:"Stopped",expanded_devices:{disk:{source:$path}}}]')"
+  if subyard_remove_unused_docker_mask "$mask" 1; then fail 'removed a mask attached to a stopped instance'; fi
+  instances=''
+  if subyard_remove_unused_docker_mask "$mask" 1; then fail 'removed a mask with unreadable Incus inventory'; fi
+  instances='[]'
+  SUBYARD_TEARDOWN_ARTIFACTS='[]' subyard_remove_unused_docker_mask "$mask" 1
+  [ -f "$mask" ] || fail 'removed an unapproved mask'
+  subyard_remove_unused_docker_mask "$mask" 1
+  [ ! -e "$mask" ] || fail 'last yard left its approved mask behind'
+)
+
 empty_home="$TMP/empty-home"
 install -d "$empty_home"
 [ "$(subyard_home_remove_if_empty "$empty_home")" = removed ] && [ ! -e "$empty_home" ] \

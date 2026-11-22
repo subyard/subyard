@@ -79,6 +79,18 @@ subyard_home_remove_if_empty() {
 # Native teardown guard of the running engine; the dispatcher may be pinned below /proc.
 teardown_guard() { "${SUBYARD_DISPATCHER_PATH:-${BASH_SOURCE[0]%/*}/../../bin/yard}" _teardown-guard "$@"; }
 
+subyard_remove_unused_docker_mask() {
+  local mask="$1" have_incus="$2"
+  jq -e --arg path "$mask" 'any(.[]; .Path == $path)' <<<"$SUBYARD_TEARDOWN_ARTIFACTS" >/dev/null || return 0
+  # A failed deletion or a newly attached disk must keep its backing file.
+  if [ "$have_incus" = 1 ]; then
+    incus list --all-projects --format json | jq -se --arg path "$mask" \
+      'length == 1 and (.[0] | type == "array" and all(.[]; all((.expanded_devices // .devices)[]; .source != $path)))' >/dev/null \
+      || { printf 'could not verify the Docker AppArmor mask is unused\n' >&2; return 75; }
+  fi
+  teardown_guard remove-artifact "$mask" || return 75
+}
+
 subyard_state_remove_canonical() {
   local state_dir="${1:-}" config_home="${2:-}" yard_name="${3:-}" expected
   case "$state_dir:$config_home" in /*:/*) ;; *) return 2 ;; esac
