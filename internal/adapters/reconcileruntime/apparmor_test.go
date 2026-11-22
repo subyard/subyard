@@ -42,6 +42,7 @@ exit "${PROBE_EXIT:-0}"
 		},
 	}
 	if mask {
+		testkit.WriteFile(t, filepath.Join(root, "docker-apparmor-disabled"), nil, 0644)
 		instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{
 			"type": "disk", "source": filepath.Join(root, "docker-apparmor-disabled"),
 			"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
