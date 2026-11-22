@@ -1261,7 +1261,8 @@ only a long yard list; the confirmation binds every yard. A preparation with mor
 can show is refused before any conversion. Before the first conversion, execution reruns the same
 rollback admission, which must offer exactly the confirmed plan; a refusal converts nothing and keeps
 its own next step, such as `yard -Y NAME start`. It then runs each `rollback-apply` that this
-admission observed, under the yard's integration lock. The apply assessment also binds the confirmed
+admission observed from the verified active root, with each yard's settings read again there and
+still naming the confirmed instance, under the yard's integration lock. The apply assessment also binds the confirmed
 consequence. Afterwards the admission runs once more as the gate,
 and must offer the ordinary rollback that the second command would plan. The command keeps no journal
 or update history and stops with the active release active. It reports `migration-required` with the

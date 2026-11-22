@@ -189,6 +189,18 @@ func (runtime *Runtime) inspectProfileFormatRollback(ctx context.Context, target
 	return runtime.observeFormatOwners(ctx, active, target, request.ConfigHome, selection.formatOwners)
 }
 
+// rollbackYardLoader reads one yard's settings with a release root. What it
+// loads resolves that release's files, hook handlers included, under that
+// root, so the root must stay open while they are used.
+func (runtime *Runtime) rollbackYardLoader(configHome string) func(root, name string) (config.Loaded, error) {
+	environment := runtime.config.Inputs.environment(runtime.config.Context)
+	environment["SUBYARD_CONFIG_HOME"] = configHome
+	operator := first(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"])
+	return func(root, name string) (config.Loaded, error) {
+		return config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: operator, YardName: name, Environment: environment})
+	}
+}
+
 // observeFormatOwners runs rollback-observe for each owner in every local
 // yard, and reads each local yard's settings with the target release. absent
 // and stale pass; current passes once the target's own observe accepts the
@@ -202,12 +214,7 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 		return observation, nil
 	}
 	activeRoot, targetRoot := pinnedReleaseRoot(active), pinnedReleaseRoot(target)
-	environment := runtime.config.Inputs.environment(runtime.config.Context)
-	environment["SUBYARD_CONFIG_HOME"] = configHome
-	operator := first(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"])
-	load := func(root, name string) (config.Loaded, error) {
-		return config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: operator, YardName: name, Environment: environment})
-	}
+	load := runtime.rollbackYardLoader(configHome)
 	names, err := config.YardNames(configHome)
 	if err != nil {
 		observation.refuse("cannot safely list yards for rollback preparation", rollbackRetry, err)
@@ -511,18 +518,34 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 		if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 			return err
 		}
-		// The hooks run from this pinned root.
+		// The hooks and their handlers resolve under this pinned root, open
+		// until the last hook and the gate return. The admission's own roots
+		// are closed, so each bound yard is read again here before any
+		// conversion, and must still be the confirmed instance.
 		activeNow, err := runtime.verifySelectedActive(selection, &selection.activeArtifact)
 		if err != nil {
 			return staleRetainedSelection(request.RuntimeRoot, request.Target)
 		}
 		defer activeNow.Close()
+		hookRoot, load := pinnedReleaseRoot(activeNow), runtime.rollbackYardLoader(request.ConfigHome)
+		loaded := map[string]config.Loaded{}
+		for _, item := range now.pending() {
+			if _, read := loaded[item.yard]; read {
+				continue
+			}
+			yard, err := load(hookRoot, item.yard)
+			if err != nil || yard.Context.AccessKind != domain.AccessLocal || yard.Context.IncusProject+"/"+yard.Context.YardInstanceName != item.instance {
+				changed := staleReleaseState(request.RuntimeRoot, request.Target, fmt.Sprintf("yard %s settings changed after confirmation; nothing was converted", item.yard), rollbackRetry)
+				return domain.CollectOrderedRefusals(changed, err)
+			}
+			loaded[item.yard] = yard
+		}
 		var operation [12]byte
 		if _, err := crand.Read(operation[:]); err != nil {
 			return err
 		}
 		for _, item := range now.pending() {
-			if err := runtime.config.ProfileRuntimeRollbackApply(ctx, pinnedReleaseRoot(activeNow), now.loaded[item.yard], item.owner,
+			if err := runtime.config.ProfileRuntimeRollbackApply(ctx, hookRoot, loaded[item.yard], item.owner,
 				"rollback-prep-"+hex.EncodeToString(operation[:]), item.actual, item.desired, item.consequence); err != nil {
 				return partialPreparation(links, request.Target, fmt.Errorf("prepare profile runtime %s in yard %s: %w", item.owner, item.yard, err))
 			}
