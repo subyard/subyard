@@ -225,6 +225,7 @@ fi
 for cache in "$YARD_SPACE_CACHE" "$YARD_SPACE_CACHE.lock" "$YARD_SPACE_CACHE.tmp"; do
   teardown_guard remove-artifact "$cache" || exit 75
 done
+subyard_remove_unused_docker_mask "$SUBYARD_HOME/docker-apparmor-disabled" "$have_incus" || exit "$?"
 if [ "$KEEP_DATA" = 1 ]; then
   ok "kept data: $STORAGE_PATH (and $SUBYARD_HOME)"
 elif [ "$pool_gone" = 1 ]; then

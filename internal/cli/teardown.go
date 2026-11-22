@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
@@ -251,6 +253,37 @@ func (execution *teardownExecution) actionPlan(
 	return action, delta, nil
 }
 
+// The read-only AppArmor indicator is shared by all container yards on this host.
+func unusedDockerMask(dataHome string, instances []ports.InstanceInfo, removingProject func(string) bool) (*ports.TeardownArtifact, error) {
+	path := filepath.Join(dataHome, "docker-apparmor-disabled")
+	for _, instance := range instances {
+		if removingProject(instance.Project) {
+			continue
+		}
+		for _, device := range instance.Devices {
+			if device["source"] == path {
+				return nil, nil
+			}
+		}
+	}
+	root, err := uninstall.CaptureRoot(path)
+	if err != nil || len(root.Entries) == 0 {
+		return nil, err
+	}
+	entry := root.Entries[0]
+	if entry.Mode&syscall.S_IFMT != syscall.S_IFREG || entry.Size != 0 {
+		return nil, nil
+	}
+	artifact, err := uninstall.CaptureArtifact(path)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Equal(artifact.Entries, root.Entries) {
+		return nil, domain.ErrPlanStale
+	}
+	return &artifact, nil
+}
+
 func (cli *CLI) observeTeardownExecution(ctx context.Context, loaded config.Loaded, execution *teardownExecution) error {
 	return cli.observeTeardownYard(ctx, loaded, execution, true)
 }
@@ -328,6 +361,18 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 		others, err := incusPort.ListInstances(ctx)
 		if err != nil {
 			return err
+		}
+		if !execution.keepData {
+			mask, err := unusedDockerMask(loaded.Context.Paths.DataHome, others, func(project string) bool {
+				return project == loaded.Context.IncusProject
+			})
+			if err != nil {
+				return err
+			}
+			if mask != nil {
+				snapshot.Artifacts = append(snapshot.Artifacts, *mask)
+				execution.changed = true
+			}
 		}
 		managedNeighbor := hasOtherRegisteredLocalYard(loaded.Context.YardName, snapshot.Registered)
 		for _, instance := range others {
