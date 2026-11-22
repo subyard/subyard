@@ -221,6 +221,22 @@ trap - EXIT`
 		}
 		fmt.Fprintf(runtime.Stdout, "  [ ok ] %s test toolchain is ready\n", vm)
 	}
+	if runtime.Config.systemContainer() && runtime.allocation != nil {
+		const seed = `set -eu
+for variant in minimal cloud; do
+  cd "/var/lib/subyard/product-image/$variant"
+  fingerprint=$(cat fingerprint)
+  alias=subyard-e2e-debian-13-$variant-container
+  if ! incus image info "$alias" --project default >/dev/null 2>&1; then
+    incus image import yard* --project default --alias "$alias"
+  fi
+  incus image list "$alias" --project default --format json | jq -e --arg fp "$fingerprint" \
+    'length == 1 and .[0].fingerprint == $fp and .[0].type == "container"' >/dev/null
+done`
+		if _, err := runtime.guest(ctx, vm, nil, "sh", "-c", seed); err != nil {
+			return err
+		}
+	}
 	return runtime.configureGuestSSH(ctx, vm)
 }
 
