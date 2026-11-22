@@ -306,6 +306,11 @@ class Sampler:
                              'observed_process_count': len(chosen), 'populated': populated,
                              'quality': 'complete' if self.group else 'partial', 'final': final})
         if final and saved and direct_saved:
+            # A nested sampler may still be retrying its final emit. Keep our
+            # workload counters readable until its scope has been retired;
+            # removing workload first would strand this sampler on ENOTEMPTY.
+            if self.group and any(path != self.workload and path.is_dir() for path in self.group.iterdir()):
+                return False
             if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True, 'end_time': records.now(),
                          'quality': 'complete' if self.group else 'partial'}):
                 return False

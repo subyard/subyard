@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from contextlib import closing
+import errno
 import importlib.util
 import json
 from pathlib import Path
@@ -41,6 +42,123 @@ def cg(path, cpu, populated):
 
 
 class ProcessTest(unittest.TestCase):
+    def test_parent_cleanup_waits_for_nested_scope_retirement(self):
+        for restart in (False, True):
+            with self.subTest(restart=restart), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                group = root/'parent'
+                cg(group, 20, 0)
+                workload = group/'workload'
+                cg(workload, 10, 0)
+                child = group/'run-child'
+                child.mkdir()
+                info = group.stat()
+                run = dict(agent_run_id='parent', host_id='host', boot_id='boot', pid=10, start_ticks=100,
+                           cgroup=str(group), cgroup_identity=[info.st_dev, info.st_ino])
+                events = []
+                def emit(directory, kind, body, **options):
+                    events.append((kind, body))
+                    return True
+                def kernel_rmdir(path):
+                    # Cgroup pseudo-files do not prevent removal, child groups do.
+                    if any(entry.is_dir() for entry in path.iterdir()):
+                        raise OSError(errno.ENOTEMPTY, 'nested scope remains')
+                    path.rename(root/('retired-'+path.name))
+                with patch.object(processes.records, 'emit', side_effect=emit), patch.object(Path, 'rmdir', kernel_rmdir):
+                    sampler = processes.Sampler(root, run, root)
+                    self.assertFalse(sampler.poll())
+                    self.assertTrue(workload.is_dir(), 'parent must remain sampleable while child finalization retries')
+                    self.assertFalse(any(body.get('resource_completed') for _, body in events))
+                    child.rename(root/'retired-child')
+                    if restart:
+                        sampler = processes.Sampler(root, run, root)
+                    self.assertTrue(sampler.poll())
+                    self.assertFalse(group.exists())
+                finals = {body['object_id']: body for kind, body in events if kind == 'sample' and body.get('final')}
+                self.assertEqual(finals['parent:scope']['cpu_ns'], 20000)
+                self.assertEqual(finals['parent:workload']['cpu_ns'], 10000)
+                self.assertTrue(any(body.get('resource_completed') for _, body in events))
+
+    def test_nested_final_diagnostic_identifies_each_missing_condition(self):
+        conditions = ('parent_final', 'parent_journal_removed', 'child_final',
+                      'child_journal_removed', 'child_scope_present', 'child_run_present')
+        cases = [(), *[(condition,) for condition in conditions], conditions]
+        for missing in cases:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                data = Path(name)
+                journals = data/'runs-v5'
+                journals.mkdir(mode=0o700)
+                with closing(sqlite3.connect(data/'telemetry.sqlite')) as writer:
+                    writer.executescript('''CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT);
+                        CREATE TABLE objects(object_id TEXT,parent_object_id TEXT);
+                        CREATE TABLE runs(agent_run_id TEXT,body TEXT);''')
+                    for role in ('parent', 'child'):
+                        writer.execute('INSERT INTO samples VALUES(?,?,?)', (role+':scope', 1, json.dumps(dict(
+                            final=True, populated=role+'_final' in missing, cpu_ns=123, monotonic_ns=456,
+                            private='PRIVATE_SAMPLE'))))
+                        if role+'_journal_removed' in missing:
+                            (journals/(role+'.json')).write_text('{"private":"PRIVATE_JOURNAL"}')
+                    if 'child_scope_present' not in missing:
+                        writer.execute('INSERT INTO objects VALUES(?,?)', ('child:scope', 'parent:scope'))
+                    if 'child_run_present' not in missing:
+                        writer.execute('INSERT INTO runs VALUES(?,?)', ('child', json.dumps(dict(
+                            parent_run_id='parent', private='PRIVATE_RUN'))))
+                    writer.commit()
+                clock = [0]
+                def sleep(_seconds):
+                    clock[0] += 40
+                with patch.object(scope_fixture.time, 'monotonic', side_effect=lambda: clock[0]), \
+                     patch.object(scope_fixture.time, 'sleep', side_effect=sleep) as pause:
+                    if not missing:
+                        scope_fixture.wait_for_nested_finals(data, dict(parent='parent', child='child'))
+                        pause.assert_not_called()
+                        continue
+                    with self.assertRaisesRegex(AssertionError, 'nested scope final counters were not committed: ') as raised:
+                        scope_fixture.wait_for_nested_finals(data, dict(parent='parent', child='child'))
+                message = str(raised.exception)
+                self.assertNotIn('PRIVATE_', message)
+                report = json.loads(message.split(': ', 1)[1])
+                self.assertEqual(report['missing'], list(missing))
+                self.assertEqual(report['elapsed_seconds'], 40)
+                self.assertEqual(report['budget_seconds'], 40)
+                self.assertEqual(report['polls'], 1)
+                self.assertEqual(report['first_observed_seconds'], {key: 0 for key in conditions if key not in missing})
+                for role in ('parent', 'child'):
+                    state = report['runs'][role]
+                    self.assertEqual(state['sample_count'], 1)
+                    self.assertEqual(state['last_sample']['cpu_ns'], 123)
+                    self.assertEqual(state['journal_present'], role+'_journal_removed' in missing)
+
+    def test_nested_wait_observes_separate_final_commit_and_journal_cleanup(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            journals = data/'runs-v5'
+            journals.mkdir(mode=0o700)
+            manifest = journals/'child.json'
+            manifest.write_text('{}')
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as writer:
+                writer.executescript('''CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT);
+                    CREATE TABLE objects(object_id TEXT,parent_object_id TEXT);
+                    CREATE TABLE runs(agent_run_id TEXT,body TEXT);
+                    INSERT INTO objects VALUES('child:scope','parent:scope');
+                    INSERT INTO runs VALUES('child','{"parent_run_id":"parent"}');''')
+                def commit_final(role):
+                    writer.execute('INSERT INTO samples VALUES(?,?,?)',
+                                   (role+':scope', 1, json.dumps(dict(final=True, populated=False))))
+                    writer.commit()
+                commit_final('parent')
+                clock = [0]
+                def progress(_seconds):
+                    clock[0] += 5
+                    if clock[0] == 5:
+                        commit_final('child')
+                    else:
+                        manifest.unlink()
+                with patch.object(scope_fixture.time, 'monotonic', side_effect=lambda: clock[0]), \
+                     patch.object(scope_fixture.time, 'sleep', side_effect=progress) as pause:
+                    scope_fixture.wait_for_nested_finals(data, dict(parent='parent', child='child'))
+                self.assertEqual(pause.call_count, 2)
+
     def test_short_run_waits_for_both_objects_baseline_and_final_samples(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             data = prepare(Path(name))
