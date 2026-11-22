@@ -115,23 +115,12 @@ func TestPublishedRollbackGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, relative := range paths {
-		if !strings.HasPrefix(relative, "config/profiles/") || !strings.HasSuffix(relative, "/profile.json") {
-			continue
-		}
-		path := filepath.Join(root, relative)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			continue
-		}
-		var definition struct {
-			Runtime *profile.RuntimeHook `json:"runtime"`
-		}
-		readJSONTest(t, path, &definition)
-		if definition.Runtime != nil {
-			current.profiles[definition.Runtime.ActivationID] = *definition.Runtime
-		}
+	inventory, err := integrationassets.Inspect(root, paths)
+	if err != nil {
+		t.Fatal(err)
 	}
-	current.agents = agentSourcesDigest(t, root)
+	current.profiles = inventory.Profiles
+	current.agents = rt.Fingerprint(inventory.Digest)
 	if err := rollbackGate(current, previous, baseline.Version); err != nil {
 		t.Fatal(err)
 	}
@@ -159,19 +148,6 @@ func readJSONTest(t *testing.T, path string, target any) {
 	if err := json.Unmarshal(data, target); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func agentSourcesDigest(t *testing.T, root string) rt.Fingerprint {
-	t.Helper()
-	files, err := integrationassets.TrackedFiles(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest, _, err := integrationassets.Digest(root, files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rt.Fingerprint(digest)
 }
 
 func TestRollbackGateRequiresCoverageForEveryChange(t *testing.T) {

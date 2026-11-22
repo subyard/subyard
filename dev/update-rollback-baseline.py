@@ -22,14 +22,6 @@ def main():
             (ROOT / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()]
     version, _, bundle, _ = max(rows, key=lambda row: tuple(map(int, row[0].split("."))))
     tag = f"v{version}"
-    profiles = {}
-    for record in git("ls-tree", "-r", tag, "config/agents", "config/profiles").decode().splitlines():
-        metadata, path = record.split("\t")
-        mode, kind, _ = metadata.split()
-        if path.startswith("config/profiles/") and path.endswith("/profile.json"):
-            runtime = json.loads(git("show", f"{tag}:{path}")).get("runtime")
-            if runtime:
-                profiles[runtime["activation_id"]] = runtime
     declaration = (json.loads(git("show", f"{tag}:config/release-rollback.json"))
                    if git("ls-tree", tag, "config/release-rollback.json").strip() else {})
     # The same Go inventory and canonical record ordering serve both readers.
@@ -45,7 +37,7 @@ def main():
         inventory = json.loads(subprocess.check_output(
             ["go", "run", "./dev/rollback-inventory", str(source), str(manifest)], cwd=ROOT))
     snapshot = {"version": version, "bundleSHA256": bundle,
-                "agentSourcesDigest": inventory["digest"], "profiles": profiles,
+                "agentSourcesDigest": inventory["digest"], "profiles": inventory["profiles"],
                 "registryFeatures": declaration.get("registryFeatures", []),
                 "predecessorRegistryDigest": declaration.get("predecessorRegistryDigest", "")}
     fixtures = ROOT / "internal/releasetransition/testdata"

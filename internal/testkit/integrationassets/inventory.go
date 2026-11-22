@@ -53,12 +53,18 @@ func DigestFiles(root string, files []string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// Digest uses a tracked source mirror so untracked metadata cannot influence
+type Inventory struct {
+	Digest   string                         `json:"digest"`
+	Sources  []string                       `json:"sources"`
+	Profiles map[string]profile.RuntimeHook `json:"profiles"`
+}
+
+// Inspect uses a tracked source mirror so untracked metadata cannot influence
 // discovery. The same operation handles a published tag and a dirty checkout.
-func Digest(root string, tracked []string) (string, []string, error) {
+func Inspect(root string, tracked []string) (Inventory, error) {
 	mirror, err := os.MkdirTemp("/tmp", "subyard-integration-inventory-")
 	if err != nil {
-		return "", nil, err
+		return Inventory{}, err
 	}
 	defer os.RemoveAll(mirror)
 	for _, path := range tracked {
@@ -68,43 +74,53 @@ func Digest(root string, tracked []string) (string, []string, error) {
 			continue
 		}
 		if err != nil {
-			return "", nil, err
+			return Inventory{}, err
 		}
 		destination := filepath.Join(mirror, path)
 		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			return "", nil, err
+			return Inventory{}, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(filepath.Join(root, path))
 			if err != nil {
-				return "", nil, err
+				return Inventory{}, err
 			}
 			if err := os.Symlink(link, destination); err != nil {
-				return "", nil, err
+				return Inventory{}, err
 			}
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			return "", nil, fmt.Errorf("unsupported tracked input %s", path)
+			return Inventory{}, fmt.Errorf("unsupported tracked input %s", path)
 		}
 		data, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil {
-			return "", nil, err
+			return Inventory{}, err
 		}
 		mode := os.FileMode(0o644)
 		if info.Mode().Perm()&0o100 != 0 {
 			mode = 0o755
 		}
 		if err := os.WriteFile(destination, data, mode); err != nil {
-			return "", nil, err
+			return Inventory{}, err
 		}
 		if err := os.Chmod(destination, mode); err != nil {
-			return "", nil, err
+			return Inventory{}, err
+		}
+	}
+	profiles, err := profile.Load(mirror)
+	if err != nil {
+		return Inventory{}, err
+	}
+	formats := map[string]profile.RuntimeHook{}
+	for _, definition := range profiles {
+		if definition.Runtime != nil {
+			formats[definition.Runtime.ActivationID] = *definition.Runtime
 		}
 	}
 	definitions, err := profile.LoadIntegrations(mirror)
 	if err != nil {
-		return "", nil, err
+		return Inventory{}, err
 	}
 	var ids []string
 	for _, definition := range definitions {
@@ -116,7 +132,7 @@ func Digest(root string, tracked []string) (string, []string, error) {
 		"ENVIRONMENT_PROFILES": "", "CODING_TOOL_INTEGRATIONS": strings.Join(ids, " "), "DEV_USER": "dev", "DEV_UID": "1000", "DEV_GID": "1000",
 	}})
 	if err != nil {
-		return "", nil, err
+		return Inventory{}, err
 	}
 	var environment []string
 	for key, value := range loaded.Environment {
@@ -125,14 +141,14 @@ func Digest(root string, tracked []string) (string, []string, error) {
 	runtime := reconcileruntime.Runtime{RepositoryRoot: mirror, Integrations: definitions, Environment: environment}
 	sources, err := runtime.IntegrationAssetSources()
 	if err != nil {
-		return "", nil, err
+		return Inventory{}, err
 	}
 	sources = append(sources, filepath.Join(mirror, "config", "agents.env"))
 	var files []string
 	for _, source := range sources {
 		relative, err := filepath.Rel(mirror, source)
 		if err != nil {
-			return "", nil, err
+			return Inventory{}, err
 		}
 		if slices.Contains(tracked, relative) {
 			files = append(files, relative)
@@ -141,5 +157,5 @@ func Digest(root string, tracked []string) (string, []string, error) {
 	slices.Sort(files)
 	files = slices.Compact(files)
 	digest, err := DigestFiles(root, files)
-	return digest, files, err
+	return Inventory{Digest: digest, Sources: files, Profiles: formats}, err
 }

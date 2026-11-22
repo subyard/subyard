@@ -32,12 +32,9 @@ func run() error {
 	if err := json.Unmarshal(data, &files); err != nil {
 		return err
 	}
-	digest, sources, err := integrationassets.Digest(root, files)
+	inventory, err := integrationassets.Inspect(root, files)
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(struct {
-		Digest  string   `json:"digest"`
-		Sources []string `json:"sources"`
-	}{digest, sources})
+	return json.NewEncoder(os.Stdout).Encode(inventory)
 }

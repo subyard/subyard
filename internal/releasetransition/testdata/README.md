@@ -25,5 +25,6 @@ SHA-256 values. The updater and gate share `internal/testkit/integrationassets`:
 integration package/materialization inventory plus shipped defaults, the usage provisioner and
 project dispatcher. All declared artifact variants are included, even below `tests/`; unrelated
 files are excluded. The gate reads tracked filesystem contents, including uncommitted edits,
-and ignores untracked scratch files. The baseline also pins the target predecessor declaration
+and ignores untracked scratch files. Profile runtimes come from `profile.Load` on the same tracked mirror, including package
+validation and native discovery rules. The baseline also pins the target predecessor declaration
 needed for directional registry admission.
