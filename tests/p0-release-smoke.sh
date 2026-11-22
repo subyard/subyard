@@ -6,9 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/helpers/test-lib.sh"
 eval "$(sed -n '/^write_retired_release_inputs() {/,/^}/p' "$ROOT/dev/e2e/p0-release-smoke.sh")"
 
-# Retain the small archives and diagnostics as test evidence.
-mkdir -p "$ROOT/.build"
-STATE_ROOT="$(mktemp -d "$ROOT/.build/p0-release-smoke.XXXXXX")"
+STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/p0-release-smoke.XXXXXX")"
+trap 'rm -rf -- "$STATE_ROOT"' EXIT
 RELEASE_ROOT="$STATE_ROOT/release assets"
 CANDIDATE_VERSION=0.31.0-test
 RETIRED_REGISTRY="$STATE_ROOT/retired.json"
