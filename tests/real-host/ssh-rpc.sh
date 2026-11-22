@@ -12,7 +12,7 @@ command -v go >/dev/null 2>&1 || { printf 'ssh-rpc: Go is required to build the 
 "$ROOT/dev/build-engine.sh" >/dev/null
 ENGINE="$ROOT/.build/yard"
 
-TMP="$(mktemp -d /tmp/subyard-ssh-rpc.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-ssh-rpc.XXXXXX")"
 sshd_pid=''
 occupied_sshd_pid=''
 cleanup() {

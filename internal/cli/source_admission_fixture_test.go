@@ -183,38 +183,40 @@ func completedRuntimeSourceFixture(t *testing.T, migrateSSH bool, extraAssets ma
 }
 
 // keepFailedFixturesEnv=1 keeps a failed test's detached fixture for diagnosis.
-const keepFailedFixturesEnv = "SUBYARD_TEST_KEEP_FAILED_FIXTURES"
+const keepFailedFixturesEnv = "SUBYARD_KEEP_FAILED"
 
 func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string, directions ...releasetransition.Direction) (*CLI, string, string, *testkit.IncusServer) {
 	t.Helper()
 	toolingVersion := sourceAuthoringToolingVersion(t)
 	original, environment, _ := nativeFixture(t)
-	// The constructor lives outside t.TempDir only so that an explicit
-	// diagnostic request can keep it; by default it is always removed.
-	detached, err := os.MkdirTemp("/tmp", "subyard-current-source-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if t.Failed() && os.Getenv(keepFailedFixturesEnv) == "1" {
-			t.Logf("retained failed source constructor (%s=1): %s", keepFailedFixturesEnv, detached)
-			return
-		}
-		if err := os.RemoveAll(detached); err != nil {
-			t.Error("remove source constructor:", err)
-		}
-	})
-	if err := os.Remove(detached); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(original, detached); err != nil {
-		t.Fatal(err)
-	}
-	for i := range environment {
-		environment[i] = strings.ReplaceAll(environment[i], original, detached)
-	}
 	oldRoot := original
-	original = detached
+	if os.Getenv(keepFailedFixturesEnv) == "1" {
+		// The constructor lives outside t.TempDir only so that an explicit
+		// diagnostic request can keep it; by default it is always removed.
+		detached, err := os.MkdirTemp("/tmp", "subyard-current-source-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if t.Failed() && os.Getenv(keepFailedFixturesEnv) == "1" {
+				t.Logf("retained failed source constructor (%s=1): %s", keepFailedFixturesEnv, detached)
+				return
+			}
+			if err := os.RemoveAll(detached); err != nil {
+				t.Error("remove source constructor:", err)
+			}
+		})
+		if err := os.Remove(detached); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(original, detached); err != nil {
+			t.Fatal(err)
+		}
+		for i := range environment {
+			environment[i] = strings.ReplaceAll(environment[i], original, detached)
+		}
+		original = detached
+	}
 	home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	data := environmentValue(environment, "SUBYARD_HOME")
 	runtimeRoot := filepath.Join(original, "runtime-source-authoring")

@@ -43,7 +43,7 @@ fi
   && [ -f "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ] && [ ! -L "$SUBYARD_E2E_CANDIDATE_BUNDLE" ] \
   || { printf 'release-activation: frozen candidate bundle and SHA256 required\n' >&2; exit 2; }
 [ "$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | cut -d' ' -f1)" = "$SUBYARD_E2E_CANDIDATE_SHA256" ]
-WORK="$(mktemp -d /tmp/subyard-activation-controller.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/subyard-activation-controller.XXXXXX")"
 printf '%s\n' subyard-activation-controller-v1 > "$WORK/.marker"
 cleanup() {
   local original=$?

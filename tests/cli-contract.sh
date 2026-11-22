@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 export SUBYARD_NO_AUDIT=1
-CLI_TMP="$(mktemp -d)"
+CLI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cli-contract.XXXXXX")"
 trap 'rm -rf "$CLI_TMP"' EXIT
 
 commands="$($ROOT/bin/yard --list)"
@@ -187,7 +187,7 @@ printf 'ok: CLI help, globals and profile completion contract\n'
 # Shared-only onboarding uses the real CLI and a terminal, without a VM/SSH server.
 (
   set -euo pipefail
-  shared_root="$(mktemp -d /tmp/subyard-shared-source.XXXXXX)"
+  shared_root="$(mktemp -d "${TMPDIR:-/tmp}/subyard-shared-source.XXXXXX")"
   trap 'rm -rf -- "$shared_root"' EXIT
   source="$shared_root/source" operator="$shared_root/operator" asset_root="$shared_root/tooling"
   config_home="$operator/.config/subyard" data_home="$operator/.subyard"

@@ -84,7 +84,7 @@ func TestBootstrapRerunRefusesAnOlderLatestRelease(t *testing.T) {
 			}
 			command := exec.Command("bash", arguments...)
 			command.Env = append([]string{
-				"PATH=" + root + ":" + os.Getenv("PATH"), "HOME=" + home, "TMPDIR=/tmp", "SHELL=/bin/bash",
+				"PATH=" + root + ":" + os.Getenv("PATH"), "HOME=" + home, "TMPDIR=" + testkit.TempDir(t), "SHELL=/bin/bash",
 				"FAKE_LOG=" + filepath.Join(root, "requests"), "FAKE_RESPONSES=" + root,
 			}, test.environment...)
 			output, err := command.CombinedOutput()

@@ -41,7 +41,7 @@ case "${1:-}:$#" in :0|--preflight:1) ;; *) exit 2 ;; esac
 
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'allocation token must be numeric'
 if [ "${1:-}" = --preflight ]; then
-  probe="$(mktemp -d /tmp/subyard-git-fetch-preflight.XXXXXX)"
+  probe="$(mktemp -d "${TMPDIR:-/tmp}/subyard-git-fetch-preflight.XXXXXX")"
   trap 'rm -rf -- "$probe"' EXIT
   require_unclaimed_key_units "$probe/absent-units"
   mkdir -m 0700 "$probe/units"

@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 # Exercise the real runner against a tiny checkout, without recursively running this suite.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-runner.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [ "$rc" -eq 0 ]; then
-    rm -rf -- "$tmp"
-  else
-    printf 'test-runner: failed fixture retained at %s\n' "$tmp" >&2
-  fi
+  rm -rf -- "${tmp:?}"
   exit "$rc"
 }
 trap cleanup EXIT
 fixture="$tmp/source with spaces"
-mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
+mkdir -p "$fixture"/{bin,cmd,internal,scripts/lib,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
+cp "$ROOT/dev/test-run-temp.py" "$ROOT/dev/with-test-temp.sh" "$fixture/dev/"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
 cp "$ROOT/tests/helpers/permission-umasks.sh" "$fixture/tests/helpers/permission-umasks.sh"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
@@ -28,7 +25,7 @@ cp "$tmp/tools/go" "$tmp/tools/gofmt"
 cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${TMPDIR:-}" = /tmp ] || exit 25
+[ "${TMPDIR:-}" = "${SUBYARD_RUN_TEMP:-/tmp}" ] || exit 25
 [ -z "${RUNNER_BASIC_GO_LOG:-}" ] || printf '%s\n' "$*" >> "$RUNNER_BASIC_GO_LOG"
 case " $* " in
   *' test -list '*)
@@ -106,6 +103,11 @@ run_fixture() {
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
 
 (umask 0077; run_fixture success)
+# Spoofing the entry PID must still allocate and validate a private root.
+env -u SUBYARD_RUN_TEMP_FD -u SUBYARD_RUN_TEMP -u SUBYARD_RUN_TEMP_OWNER \
+  PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/spoof.go" TMPDIR=/tmp \
+  bash -c 'export SUBYARD_RUN_TEMP_ENTERED=$$; exec bash "$1"' _ "$fixture/tests/run.sh" \
+  > "$tmp/spoof.out" 2>&1
 awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }
   !/-count=1/ { exit 1 }
   $1 == "0022" && /-run / { exit 1 }
@@ -224,7 +226,8 @@ def interrupted_case(name, sig, expected_status):
     case.mkdir()
     marker = case / 'blocked'
     output_path = case / 'runner.out'
-    env = os.environ.copy()
+    # This detached fixture models a separate top-level run, with fresh ownership.
+    env = {key: value for key, value in os.environ.items() if not key.startswith('SUBYARD_RUN_TEMP')}
     env.update({
         'PATH': str(root / 'tools') + os.pathsep + env.get('PATH', ''),
         'RUNNER_GO_LOG': str(case / 'go.log'),
@@ -243,6 +246,16 @@ def interrupted_case(name, sig, expected_status):
                 time.sleep(0.05)
             if not marker.exists():
                 raise AssertionError(f'{name}: runner did not reach blocked umask 0077 check')
+            summary = next(line.removeprefix('RESULTS ') for line in output_path.read_text().splitlines()
+                           if line.startswith('RESULTS '))
+            live_logs = Path(summary).parent
+            for index in range(11):
+                padding = live_logs.parent / f'run.padding-{index}'
+                padding.mkdir(exist_ok=True)
+                os.utime(padding, (time.time() + 100, time.time() + 100))
+            subprocess.run(['python3', runner.parent.parent / 'dev/test-run-temp.py',
+                            'retain', live_logs.parent], check=True)
+            assert live_logs.exists(), 'retention removed active core logs'
             os.killpg(process.pid, sig)
             status = process.wait(timeout=10)
         except BaseException:
@@ -295,9 +308,12 @@ awk -F '\t' '$1 == "check" && $3 == "syntax" && $4 == "failed" { found=1 }
 cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
 cp "$ROOT/dev/run-profile-tests.py" "$fixture/dev/run-profile-tests.py"
 mkdir -p "$fixture/config/profiles/example/tests"
-printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile check ran\\n"\n' \
+printf '#!/usr/bin/env bash\n[ "$TMPDIR" = "$SUBYARD_RUN_TEMP" ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
 (umask 0002; TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh") > "$tmp/profiles.out" 2>&1
+env -u SUBYARD_RUN_TEMP_FD -u SUBYARD_RUN_TEMP -u SUBYARD_RUN_TEMP_OWNER TMPDIR=/tmp \
+  bash -c 'export SUBYARD_RUN_TEMP_ENTERED=$$; exec bash "$1"' _ "$fixture/dev/test-profiles.sh" \
+  > "$tmp/profiles-spoof.out" 2>&1
 grep -Fxq 'PROFILE TESTS example passed' "$tmp/profiles.out" || fail 'profile tests were not discovered'
 grep -Fxq 'profile check ran' "$fixture"/.build/profile-test-runs/run.*/example.log \
   || fail 'successful profile output was not retained'
@@ -453,7 +469,7 @@ SUBYARD_PROFILE_TESTS_SERIAL=1 PROFILE_MARKER="$tmp/serial-started" \
   bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/serial.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] && [ ! -e "$tmp/serial-started" ] || fail 'serial opt-out lost fail-fast execution'
 
-# Interrupt a full pool while two profiles are still waiting to start.
+# PID-only signals drain running profiles without forwarding; group signals reach children.
 env -u SUBYARD_PROFILE_TESTS_SERIAL python3 - "$tmp" "$fixture/dev/test-profiles.sh" <<'PYCASE'
 import os
 from pathlib import Path
@@ -461,43 +477,225 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 tmp, wrapper = map(Path, sys.argv[1:])
 root = tmp / "interrupt"
 (root / "dev").mkdir(parents=True)
-for name in ("test-profiles.sh", "run-profile-tests.py"):
+prefix = f"syr.runner-{uuid.uuid4().hex[:12]}."
+helper = root / "dev/test-run-temp.py"
+helper.write_text((wrapper.parent / helper.name).read_text().replace('PREFIX = "syr."', f'PREFIX = {prefix!r}'))
+for name in ("test-profiles.sh", "run-profile-tests.py", "with-test-temp.sh"):
     (root / "dev" / name).write_bytes(wrapper.with_name(name).read_bytes())
-marked = tmp / "interrupt-started"
-marked.mkdir()
+worker = root / "worker.py"
+worker.write_text('''import os
+from pathlib import Path
+import signal
+import sys
+import time
+marker = Path(sys.argv[1])
+scratch = Path(os.environ["TMPDIR"])
+def stop(signum, _frame):
+    time.sleep(.5)
+    try:
+        (scratch / marker.name).write_text("cleanup")
+        verdict = "ok"
+    except OSError as error:
+        verdict = str(error)
+    marker.with_suffix(".verdict").write_text(verdict)
+    sys.exit(128 + signum)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+pending = marker.with_suffix('.pending')
+pending.write_text(f"{os.getppid()} {os.getpid()}")
+pending.replace(marker)
+while not (marker.parent / 'release').exists():
+    assert scratch.is_dir(), 'running profile lost scratch'
+    time.sleep(.02)
+(scratch / marker.name).write_text('finished')
+marker.with_suffix('.verdict').write_text('finished')
+''')
+bystander = root / 'bystander.py'
+bystander.write_text('''import os
+from pathlib import Path
+import signal
+import sys
+import time
+marker = Path(sys.argv[1])
+def stop(signum, _frame):
+    marker.with_suffix('.signal').write_text(str(signum))
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+marker.write_text(str(os.getpid()))
+while not marker.with_suffix('.release').exists():
+    time.sleep(.02)
+''')
 for index in range(5):
     profile = root / "config" / "profiles" / str(index) / "tests"
     profile.mkdir(parents=True)
-    script = 'import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\n'
-    if index < 3:
-        script += 'time.sleep(30)\n'
-    (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
-{script}PY
-""")
-
+    # Keep bash as the runner, with a foreground child rather than an exec.
+    (profile / "run.sh").write_text(f'python3 "{worker}" "$1/{index}"\n: \n')
+environment = {key: value for key, value in os.environ.items()
+               if not key.startswith('SUBYARD_RUN_TEMP')}
 signal.signal(signal.SIGINT, signal.default_int_handler)
-with (tmp / "profile-interrupt.out").open("wb") as log:
-    with subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
-                          stdout=log, stderr=log, start_new_session=True) as process:
+
+
+def state(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        return None
+
+
+def alive(pid):
+    fields = state(pid)
+    return fields is not None and fields[0] != "Z"
+
+
+def roots():
+    return set(Path('/tmp').glob(prefix + '*'))
+
+
+def sweep():
+    subprocess.run(['bash', root / 'dev/with-test-temp.sh', 'true'], env=environment, check=True)
+
+
+for label, sig, target, expected, serial in (
+        ("int-group", signal.SIGINT, "group", 130, False),
+        ("int-pid", signal.SIGINT, "wrapper", 130, False),
+        ("int-dispatcher", signal.SIGINT, "dispatcher", 130, False),
+        ("term-group", signal.SIGTERM, "group", 143, False),
+        ("term-pid", signal.SIGTERM, "wrapper", 143, False),
+        ("term-dispatcher", signal.SIGTERM, "dispatcher", 143, False),
+        ("serial-term", signal.SIGTERM, "wrapper", 143, True),
+        ("serial-dispatcher", signal.SIGTERM, "dispatcher", 143, True),
+        ("serial-int-group", signal.SIGINT, "group", 130, True),
+        ("kill-group", signal.SIGKILL, "group", -signal.SIGKILL, False),
+        ("hup-group", signal.SIGHUP, "group", -signal.SIGHUP, False)):
+    marked = tmp / ("interrupt-started-" + label)
+    marked.mkdir()
+    output = tmp / ("profile-interrupt-" + label + ".out")
+    command = ["bash", str(root / "dev/test-profiles.sh"), str(marked)]
+    sibling = marked / 'bystander'
+    if target != 'group':
+        # Start an unrelated caller-group member before the wrapper owns any locks.
+        command = ['python3', '-c', '''import os, subprocess, sys
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+os.execvp(sys.argv[3], sys.argv[3:])
+''', str(bystander), str(sibling), *command]
+    with output.open("wb") as log:
+        process = subprocess.Popen(command,
+                                   stdout=log, stderr=log, start_new_session=True,
+                                   env={**environment, 'SUBYARD_PROFILE_TESTS_SERIAL': str(int(serial))})
         try:
             deadline = time.monotonic() + 10
-            while len(list(marked.iterdir())) < 3:
+            wanted = 1 if serial else 3
+            while len(list(marked.glob('[0-9]'))) < wanted or (target != 'group' and not sibling.exists()):
                 assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
-                time.sleep(0.01)
-            os.killpg(process.pid, signal.SIGINT)
-            code = process.wait(timeout=10)
-            assert sorted(p.name for p in marked.iterdir()) == ["0", "1", "2"], (
+                time.sleep(.01)
+            pids = [int(pid) for marker in marked.glob('[0-9]') for pid in marker.read_text().split()]
+            assert all(int(state(pid)[2]) == process.pid for pid in pids), (
+                'runner or child changed the caller process group'
+            )
+            live_roots = roots()
+            assert len(live_roots) == 1, live_roots
+            live_logs = Path(next(line.removeprefix('PROFILE TESTS logs: ') for line in
+                                  output.read_text().splitlines() if line.startswith('PROFILE TESTS logs: ')))
+            for index in range(11):
+                padding = live_logs.parent / f'run.padding-{index}'
+                padding.mkdir(exist_ok=True)
+                os.utime(padding, (time.time() + 100, time.time() + 100))
+            retain = ['python3', helper, 'retain', live_logs.parent]
+            subprocess.run(retain, check=True)
+            assert live_logs.exists(), 'retention removed active profile logs'
+            started = time.monotonic()
+            if target == "group":
+                os.killpg(process.pid, sig)
+            else:
+                pid = int(state(pids[0])[1]) if target == "dispatcher" else process.pid
+                os.kill(pid, sig)
+                # Longer than the worker's signal cleanup: a forwarded signal must fail.
+                time.sleep(.75)
+                assert process.poll() is None, f'{label}: wrapper did not wait for running profiles'
+                assert all(alive(pid) for pid in pids), f'{label}: PID signal killed a runner'
+                assert not list(marked.glob('*.verdict')), f'{label}: PID signal reached a runner'
+                assert not sibling.with_suffix('.signal').exists(), f'{label}: signal reached unrelated process'
+                assert alive(int(sibling.read_text())), f'{label}: unrelated process died'
+                assert roots() == live_roots, f'{label}: running profiles lost scratch'
+                sweep()
+                assert roots() == live_roots, f'{label}: sweep removed live scratch'
+                assert sorted(p.name for p in marked.glob('[0-9]')) == [str(i) for i in range(wanted)]
+                (marked / 'release').touch()
+            code = process.wait(timeout=5)
+            assert time.monotonic() - started < 5, label
+            assert code == expected, f"profile runner returned {code} after {label}"
+            assert sorted(p.name for p in marked.glob('[0-9]')) == [str(i) for i in range(wanted)], (
                 "interruption started a waiting profile"
             )
-            assert code == 130, f"profile runner returned {code} after SIGINT"
+            if sig in (signal.SIGKILL, signal.SIGHUP):
+                deadline = time.monotonic() + 5
+                while any(alive(pid) for pid in pids):
+                    assert time.monotonic() < deadline, f'runner survived {label}'
+                    time.sleep(.01)
+                if sig == signal.SIGKILL:
+                    assert roots() == live_roots, 'KILL did not leave scratch for recovery'
+                # Bash may run EXIT cleanup on HUP; KILL always needs the next run's sweep.
+                assert not list(marked.glob('*.verdict')), 'fatal signal ran graceful cleanup'
+                sweep()
+                subprocess.run(retain, check=True)
+                assert not live_logs.exists(), 'abandoned profile logs not removed'
+            else:
+                assert all(not alive(pid) for pid in pids), f'runner survived {label}'
+                verdicts = list(marked.glob('*.verdict'))
+                verdict = 'ok' if target == 'group' else 'finished'
+                assert len(verdicts) == wanted and all(p.read_text() == verdict for p in verdicts), (
+                    f'{label}: children lost scratch during cleanup: {verdicts}'
+                )
+            if target != 'group':
+                assert not sibling.with_suffix('.signal').exists(), f'{label}: signal reached unrelated process'
+                sibling.with_suffix('.release').touch()
+                deadline = time.monotonic() + 5
+                while alive(int(sibling.read_text())):
+                    assert time.monotonic() < deadline, f'{label}: unrelated process did not finish'
+                    time.sleep(.01)
+            # The wrapper and dispatcher group must be drained at wrapper exit.
+            for stat in Path('/proc').glob('[0-9]*/stat'):
+                fields = state(stat.parent.name)
+                assert fields is None or fields[0] == 'Z' or int(fields[2]) != process.pid, (
+                    f'wrapper group survived {label}: {stat.parent.name}'
+                )
+            assert not roots(), f'{label}: scratch root leaked: {roots()}'
         finally:
-            if process.poll() is None:
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            for marker in marked.glob('[0-9]'):
+                for pid in marker.read_text().split():
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            process.wait(timeout=5)
+            sweep()
+print('ok: profile cancellation drains children, preserves scratch and inherits run locks')
 PYCASE
+
+# A cleanup refusal cannot replace a profile failure with status 1.
+python3 - "$fixture/dev/test-run-temp.py" <<'PYCASE'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('if sys.argv[1] == "clean":',
+    'if sys.argv[1] == "clean":\n        raise OSError("fixture cleanup failure")'))
+PYCASE
+rc=0
+SUBYARD_PROFILE_TESTS_SERIAL=1 bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' \
+  > "$tmp/profile-cleanup-failure.out" 2>&1 || rc=$?
+[ "$rc" -eq 29 ] || fail 'profile cleanup replaced the native failure'
+cp "$ROOT/dev/test-run-temp.py" "$fixture/dev/test-run-temp.py"
+# The refusal intentionally left a root; recover it before the fixture is removed.
+bash "$fixture/dev/with-test-temp.sh" true
 
 # The selected matrix uses real children/masks, rejects empty/missing checks,
 # and preserves the first operation failure before later masks.

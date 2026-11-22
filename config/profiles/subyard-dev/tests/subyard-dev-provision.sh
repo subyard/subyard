@@ -20,7 +20,7 @@ for cache in /srv/cache/go-build /srv/cache/go-mod; do
   esac
 done
 
-tmp="$(mktemp -d /tmp/subyard-dev-provision.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-dev-provision.XXXXXX")"
 adapter_cwd="$tmp/adapter-cwd"
 trap 'chmod 0700 "$adapter_cwd" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/fake-bin" "$tmp/home" "$adapter_cwd"

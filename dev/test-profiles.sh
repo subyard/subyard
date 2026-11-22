@@ -3,7 +3,8 @@
 set -euo pipefail
 # Host-free profile tests must not inherit the outer allocation route of a live collector.
 unset SUBYARD_E2E_ROLLOUT_YARD
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+original_args=("$@")
 suite=run.sh
 list=0
 permissions=normal
@@ -55,7 +56,20 @@ if [ "$list" = 1 ]; then
   exit 0
 fi
 if [ "$suite" = run.sh ]; then
-  export TMPDIR=/tmp
+  if ! python3 "$ROOT/dev/test-run-temp.py" check; then
+    exec python3 "$ROOT/dev/test-run-temp.py" enter bash "$0" "${original_args[@]}"
+  fi
+  finish() {
+    local rc="$1"
+    trap - EXIT
+    # Release this shell's lock reference; the root goes only when no user remains.
+    exec {SUBYARD_RUN_TEMP_FD}<&-
+    python3 "$ROOT/dev/test-run-temp.py" clean || { [ "$rc" -ne 0 ] || rc=1; }
+    exit "$rc"
+  }
+  trap 'finish "$?"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   umask 0022
 fi
 # Check the complete inventory before a live runner can acquire a lease.
@@ -70,6 +84,9 @@ if [ "$suite" = run.sh ]; then
   [ "${#runners[@]}" -gt 0 ] || exit 0
   mkdir -p "$ROOT/.build/profile-test-runs"
   log_dir="$(mktemp -d "$ROOT/.build/profile-test-runs/run.XXXXXX")"
+  exec {run_log_fd}<"$log_dir"
+  flock -x "$run_log_fd"
+  python3 "$ROOT/dev/test-run-temp.py" retain "$ROOT/.build/profile-test-runs"
   printf 'PROFILE TESTS logs: %s\n' "$log_dir"
   if [ "$permissions" != passed ]; then
     for runner in "${runners[@]}"; do
@@ -84,7 +101,12 @@ if [ "$suite" = run.sh ]; then
     done
   fi
   [ "$permissions" != only ] || exit 0
-  exec python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@"
+  python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@" &
+  profile_pid=$!
+  trap 'kill -INT "$profile_pid" 2>/dev/null || :; wait "$profile_pid" || :; exit 130' INT
+  trap 'kill -TERM "$profile_pid" 2>/dev/null || :; wait "$profile_pid" || :; exit 143' TERM
+  wait "$profile_pid"
+  exit 0
 fi
 for runner in "${runners[@]}"; do
   printf 'PROFILE TESTS %s\n' "${runner#"$ROOT/"}"

@@ -2,7 +2,7 @@
 # Host-free checks owned by the hermes profile.
 set -euo pipefail
 umask 0022
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$ROOT/tests/helpers/profile-go.sh" hermes
 bash "$ROOT/config/profiles/hermes/tests/hermes-dashboard-resource.sh"

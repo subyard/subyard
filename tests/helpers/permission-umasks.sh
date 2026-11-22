@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Repeat short owning Shell/Python contracts in independent processes.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 [ "$#" -gt 0 ] || { printf 'FAIL: empty Shell/Python permission selection\n' >&2; exit 1; }
 for check in "$@"; do
   [ -f "$check" ] || { printf 'FAIL: selected permission check missing: %s\n' "$check" >&2; exit 1; }

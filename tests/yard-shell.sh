@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-yard-shell.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 # shellcheck source=tests/helpers/test-context.sh

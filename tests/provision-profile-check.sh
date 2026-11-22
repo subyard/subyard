@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp="$(mktemp -d /tmp/subyard-profile-check.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-profile-check.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 mkdir -p "$tmp/runtime/scripts/lib" "$tmp/runtime/config/profiles/synthetic" "$tmp/bin" "$tmp/home" "$tmp/config-home" "$tmp/storage" "$tmp/host"
 

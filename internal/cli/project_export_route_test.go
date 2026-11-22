@@ -100,7 +100,7 @@ func TestProjectExportSameHostRemoteAliasRetainsNativeRoute(t *testing.T) {
 	if err := project.prepareSource(context.Background(), program); err != nil {
 		t.Fatal(err)
 	}
-	defer project.closePreparedSource()
+	t.Cleanup(func() { closePreparedSourceFixture(t, project) })
 	archive, err := project.preparedArchive.Open(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)

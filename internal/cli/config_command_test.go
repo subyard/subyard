@@ -3308,6 +3308,7 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 }
 
 func TestConfigGitCandidateDeadlineOwnership(t *testing.T) {
+	testkit.UseHostTempDir(t)
 	for _, test := range []struct {
 		name, delayedCommand string
 		budget               time.Duration
@@ -3319,7 +3320,7 @@ func TestConfigGitCandidateDeadlineOwnership(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// Fixture repositories and isolated candidates must stay outside the workspace.
-			t.Setenv("TMPDIR", "/tmp")
+
 			f := newConfigGitAuthoringFixture(t)
 			checkout := filepath.Join(f.home, ".local", "share", "subyard-config")
 			realGit, err := exec.LookPath("git")

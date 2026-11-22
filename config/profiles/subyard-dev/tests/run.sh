@@ -2,7 +2,7 @@
 # Host-free checks owned by the subyard-dev profile.
 set -euo pipefail
 umask 0022
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$ROOT/config/profiles/subyard-dev/tests/subyard-dev-provision.sh"
 bash "$ROOT/config/profiles/subyard-dev/tests/e2e-controller.sh"

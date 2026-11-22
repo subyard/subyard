@@ -487,7 +487,8 @@ func TestHostExactRPCRejectsChangedManifest(t *testing.T) {
 }
 
 func TestRegisteredHostRenameNoninteractiveConsent(t *testing.T) {
-	t.Setenv("TMPDIR", "/tmp")
+	testkit.UseHostTempDir(t)
+
 	for _, explicit := range []bool{false, true} {
 		for _, flag := range []string{"", "--yes", "-y"} {
 			t.Run(fmt.Sprintf("recovery=%t/flag=%s", explicit, flag), func(t *testing.T) {

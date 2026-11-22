@@ -415,7 +415,8 @@ func crashChild(t *testing.T, f *crashFixture, cut string, resume, kill bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessCrashWriter$", "-test.v")
-	command.Env = append(os.Environ(), "SUBYARD_TEST_CRASH_ROOT="+f.root, "SUBYARD_TEST_CRASH_CUT="+cut, "SUBYARD_TEST_CRASH_FAMILY="+f.family)
+	childTemp := testkit.TempDir(t)
+	command.Env = append(os.Environ(), "TMPDIR="+childTemp, "GOTMPDIR="+childTemp, "SUBYARD_TEST_CRASH_ROOT="+f.root, "SUBYARD_TEST_CRASH_CUT="+cut, "SUBYARD_TEST_CRASH_FAMILY="+f.family)
 	if resume {
 		command.Env = append(command.Env, "SUBYARD_TEST_CRASH_RESUME=1")
 	}

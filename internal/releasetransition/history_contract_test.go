@@ -16,11 +16,7 @@ func TestHistoryCompilerBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("/tmp", "subyard-history-contract-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(dir, "go.mod"), []byte("module github.com/Subyard/Subyard/historycontract\n\ngo 1.25.6\n\nrequire github.com/Subyard/Subyard v0.0.0\nreplace github.com/Subyard/Subyard => "+root+"\n"), 0o600)
 	fixtures := map[string]string{
 		"positive": `package contract
@@ -45,7 +41,7 @@ func invalid(r mh.Registry,p string) { r.Next(p) }
 			testkit.WriteFile(t, path, []byte(source), 0o600)
 			cmd := exec.Command("go", "test", "-mod=mod", "./"+name)
 			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "TMPDIR=/tmp", "GOWORK=off")
+			cmd.Env = append(os.Environ(), "TMPDIR="+testkit.TempDir(t), "GOWORK=off")
 			output, err := cmd.CombinedOutput()
 			if name == "positive" {
 				if err != nil {
@@ -67,11 +63,7 @@ func TestV2PhaseCompilerBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("/tmp", "subyard-phase-contract-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testkit.TempDir(t)
 	cases := map[string]string{
 		"positive":               `func contract(t *V2Transition,p runtimeReadyProof,r authorityLedgerRevision,e mh.Edge) { t.publishCheckpointAfterReady(context.Background(),JournalRecord{},p);t.cleanupReady(context.Background(),"tx",p);ledgerMigrationWork(PlannerStepIntent{},MigrationDefinitionV2{},e,r,nil) }`,
 		"completion-publication": `func contract(t *V2Transition,p mh.Completion) {t.publishCheckpointAfterReady(context.Background(),JournalRecord{},p)}`,
@@ -98,7 +90,7 @@ var _ mh.Edge
 			testkit.WriteFile(t, overlay, payload, 0o600)
 			cmd := exec.Command("go", "test", "-overlay", overlay, "-run", "^$", "./internal/releasetransition")
 			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "TMPDIR=/tmp", "GOWORK=off")
+			cmd.Env = append(os.Environ(), "TMPDIR="+testkit.TempDir(t), "GOWORK=off")
 			output, err := cmd.CombinedOutput()
 			if name == "positive" {
 				if err != nil {

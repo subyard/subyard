@@ -654,11 +654,7 @@ func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
 		t.Fatalf("export listing: %q %v", files, err)
 	}
 	// A source below a Git top level lists only its tracked files.
-	repository, err := os.MkdirTemp("/tmp", "subyard-fixture-listing-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(repository) })
+	repository := testkit.TempDir(t)
 	nested := filepath.Join(repository, "nested")
 	for _, tree := range checkoutTrees {
 		if err := os.MkdirAll(filepath.Join(nested, tree), 0o700); err != nil {

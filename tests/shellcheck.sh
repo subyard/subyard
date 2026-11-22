@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixture="$(mktemp -d /tmp/subyard-shellcheck.XXXXXX)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/subyard-shellcheck.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 cd "$fixture"
 mkdir -p bin completions scripts dev config/profiles config/agents tests

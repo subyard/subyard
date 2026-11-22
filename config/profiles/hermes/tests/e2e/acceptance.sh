@@ -22,7 +22,7 @@ set_requested_slot "$slot" --slot
 install -d -m 0700 "$ROOT/.build/test-runs"
 OUTPUT="$(mktemp -d "$ROOT/.build/test-runs/hermes.XXXXXX")"
 chmod 0700 "$OUTPUT"
-LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
+LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 finish() {
   local original=$? capture_rc=0 cleanup_rc=0 started
   trap - EXIT INT TERM

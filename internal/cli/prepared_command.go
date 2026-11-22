@@ -375,7 +375,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
 		if err != nil {
-			_ = prepared.Close()
+			err = errors.Join(err, prepared.Close())
 		} else {
 			prepared.seal()
 		}
@@ -1269,7 +1269,12 @@ func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBoots
 	return prepared.preparePostRepairInit(ctx, execution)
 }
 
-func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBootstrap) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.Project.closePreparedSource())
+		}
+	}()
 	project := prepared.Project
 	if project == nil {
 		return errors.New("project execution is required")

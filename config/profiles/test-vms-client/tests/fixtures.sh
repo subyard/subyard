@@ -3,7 +3,7 @@
 set -euo pipefail
 PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$PROFILE/../../.." && pwd)"
-export PYTHONDONTWRITEBYTECODE=1 TMPDIR=/tmp
+export PYTHONDONTWRITEBYTECODE=1 TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 go -C "$ROOT" test -count=1 ./config/profiles/test-vms-client/tests
 python3 -B "$PROFILE/tests/skill-delivery-test.py"
 bash "$PROFILE/tests/image-selection.sh"

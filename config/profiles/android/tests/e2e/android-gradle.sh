@@ -22,7 +22,7 @@ test ! -e "$sdk/platforms/android-36.1"
 # Pinned distribution; AGP 9.2.1 requires Gradle 9.4.1 or newer.
 gradle_version=9.4.1
 gradle_sha256=2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb
-work="$(mktemp -d /tmp/subyard-android-gradle.XXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-android-gradle.XXXXXX")"
 chmod 0700 "$work"
 printf '%s\n' subyard-android-gradle-v1 > "$work/.marker"
 stage='setup'

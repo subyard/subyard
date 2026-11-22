@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Repeat explicit Go file-creation contracts under the other supported umasks.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="${1:?repository root required}"; shift
 packages=() names=()
 for selection in "$@"; do

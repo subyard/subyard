@@ -6,7 +6,7 @@ set -euo pipefail
 owner=dev
 other=nobody
 id "$other" >/dev/null
-work="$(mktemp -d /tmp/subyard-android-relay-owner.XXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-android-relay-owner.XXXXXX")"
 printf '%s\n' subyard-android-relay-owner-v1 > "$work/.marker"
 chown "$owner" "$work"
 runner=''

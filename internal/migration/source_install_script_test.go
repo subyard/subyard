@@ -170,7 +170,7 @@ printf '%s\n' "$TEST_RELEASE"
 				arguments = append(arguments, "--runtime-root", runtimeRoot+"/")
 			}
 			command := exec.Command("bash", arguments...)
-			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + bootstrapHome, "SHELL=/bin/bash", "TMPDIR=/tmp",
+			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + bootstrapHome, "SHELL=/bin/bash", "TMPDIR=" + testkit.TempDir(t),
 				"SUBYARD_HOME=" + requestData, "SUBYARD_CONFIG_HOME=" + requestConfig, "YARD_BIN_DIR=" + requestBin,
 				"YARD_SHELL_RC=" + filepath.Join(bootstrapHome, ".bashrc"), "YARD_LOGIN_RC=" + filepath.Join(bootstrapHome, ".profile"),
 				"TEST_INGRESS_LOG=" + ingressLog, "TEST_INSTALLER_LOG=" + installerLog, "TEST_TRANSITION_EXIT=" + transitionExit, "TEST_CLASS_LOG=" + classLog,
@@ -472,7 +472,7 @@ install() { return 73; }
 								args = append(args, "--runtime-root", logicalRoot)
 							}
 							command := exec.Command("bash", args...)
-							command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + logicalHome, "SHELL=/bin/bash", "TMPDIR=/tmp", "BASH_ENV=" + probe, "SUBYARD_HOME=" + filepath.Join(logicalHome, "data"), "SUBYARD_CONFIG_HOME=" + filepath.Join(logicalHome, "config"), "YARD_BIN_DIR=" + filepath.Join(logicalHome, "bin"), "YARD_SHELL_RC=" + filepath.Join(logicalHome, ".bashrc"), "YARD_LOGIN_RC=" + filepath.Join(logicalHome, ".profile")}
+							command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + logicalHome, "SHELL=/bin/bash", "TMPDIR=" + testkit.TempDir(t), "BASH_ENV=" + probe, "SUBYARD_HOME=" + filepath.Join(logicalHome, "data"), "SUBYARD_CONFIG_HOME=" + filepath.Join(logicalHome, "config"), "YARD_BIN_DIR=" + filepath.Join(logicalHome, "bin"), "YARD_SHELL_RC=" + filepath.Join(logicalHome, ".bashrc"), "YARD_LOGIN_RC=" + filepath.Join(logicalHome, ".profile")}
 							command.ExtraFiles = []*os.File{writer}
 							var stdout, stderr strings.Builder
 							command.Stdout, command.Stderr = &stdout, &stderr

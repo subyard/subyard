@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # Keep the real runner's full/focused permission selection under its profile owner.
 set -euo pipefail
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-tmp="$(mktemp -d /tmp/subyard-github-runner.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-github-runner.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [ "$rc" -eq 0 ]; then
-    rm -rf -- "$tmp"
-  else
-    printf 'github-runner: failed fixture retained at %s\n' "$tmp" >&2
-  fi
+  rm -rf -- "${tmp:?}"
   exit "$rc"
 }
 trap cleanup EXIT
@@ -29,7 +25,7 @@ printf '# Isolated permission fixture.\n' > "$fixture/config/profiles/github/tes
 cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${TMPDIR:-}" = /tmp ] || exit 25
+[ "${TMPDIR:-}" = "${SUBYARD_RUN_TEMP:-/tmp}" ] || exit 25
 case " $* " in
   *' test -list '*)
     printf '%s\n' TestLoadConfigAndKeyRejectUnsafeFiles TestProtectedFilesRejectSymlinksAndOversize ;;

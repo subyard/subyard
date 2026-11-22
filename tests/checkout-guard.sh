@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/tests/helpers/test-lib.sh"
 TEST_LIB_PREFIX='checkout-guard'
 GUARD="$ROOT/tests/helpers/checkout-guard.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-checkout-guard.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 commit_all() {

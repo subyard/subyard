@@ -5,7 +5,7 @@ umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-ssh-agent-environment.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/etc/profile.d" "$TMP/etc/ssh" "$TMP/bin" "$TMP/home/.ssh"
 sed "s|/etc/|$TMP/etc/|g" "$ROOT/scripts/ssh-agent-environment.sh" > "$TMP/setup.sh"

@@ -6,7 +6,7 @@ LIB="$ROOT/tests/helpers/test-lib.sh"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$LIB"
 unset TEST_LIB_DIE_STATUS
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-test-lib.XXXXXX")"
 trap 'rm -rf -- "$TMP"' EXIT
 
 check() {

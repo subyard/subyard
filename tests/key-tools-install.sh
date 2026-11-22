@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-TMP="$(mktemp -d /tmp/subyard-key-tools.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-key-tools.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/fixture/age" "$TMP/bin" "$TMP/home"

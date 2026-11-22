@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-install-runtime-release-rollback.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 runtime_root="$TMP/runtime"
 engine="$TMP/yard-engine"

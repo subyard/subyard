@@ -24,7 +24,7 @@ systemd_version="$(systemd-analyze --version | awk 'NR == 1 { print $2 }')"
 [[ "$systemd_version" =~ ^[0-9]+$ ]] \
   || fail "cannot identify systemd version: $systemd_version"
 
-temporary="$(mktemp -d)"
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-reconciler-systemd.XXXXXX")"
 cleanup() {
   find "$temporary" -depth -delete
 }

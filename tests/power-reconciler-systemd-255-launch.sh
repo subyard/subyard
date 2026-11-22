@@ -7,7 +7,7 @@ TEST_LIB_DIE_STATUS=1
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 FIXTURE="$ROOT/dev/e2e/power-reconciler-systemd-255.sh"
-TEMPORARY="$(mktemp -d /tmp/subyard-systemd255-launch.XXXXXX)"
+TEMPORARY="$(mktemp -d "${TMPDIR:-/tmp}/subyard-systemd255-launch.XXXXXX")"
 FAKE_BIN="$TEMPORARY/bin"
 STATE="$TEMPORARY/state"
 TIMEOUT_LOG="$TEMPORARY/timeout.log"

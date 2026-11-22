@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
 HOOK="$ROOT/config/profiles/openclaw/provision.sh"
-tmp="$(mktemp -d /tmp/subyard-openclaw-provision.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-openclaw-provision.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 dev_home="$tmp/home"

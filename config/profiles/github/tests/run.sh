@@ -2,7 +2,7 @@
 # Broker and integration checks owned by the GitHub profile.
 set -euo pipefail
 umask 0022
-export TMPDIR=/tmp
+export TMPDIR="${SUBYARD_RUN_TEMP:-/tmp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 preflight=0
 case "$#:${1:-}" in 0:) ;; 1:--preflight) preflight=1 ;; *) printf 'Usage: tests/run.sh [--preflight]\n' >&2; exit 2 ;; esac
@@ -19,7 +19,7 @@ print('GitHub local preflight: reuse validated make verify PASS; protocol, owner
 PY
   exit 0
 fi
-log="$(mktemp /tmp/subyard-github-checks.XXXXXX)"
+log="$(mktemp "${TMPDIR:-/tmp}/subyard-github-checks.XXXXXX")"
 trap 'rm -f -- "$log"' EXIT
 required='TestConnectionFixtureIssuerLocal|TestClientHandlerAndFakeGitHubContractOverUnixSocket|TestRuntimeStatusReportsLoadedExecutableWithoutCredentials|TestClientRuntimeStatusRejectsPredecessorAndIncompatibleIdentity'
 if [ "$preflight" = 1 ]; then

@@ -162,9 +162,9 @@ profile binaries under `.build/profiles/<name>/`. It also publishes the complete
 runtime under `.build/runtime/current`. `make test` and `make verify` stage a source-compatible test version before Go consumers;
 targeted source-repair tests require `make build VERSION=0.29.0-test` first. A delivery gate may instead supply its
 once-built normal runtime through `SUBYARD_SOURCE_QUERY_TOOLING_ROOT`.
-These fixtures check the runtime version before creating any directory and always remove their
-`/tmp/subyard-current-source-*` root; set `SUBYARD_TEST_KEEP_FAILED_FIXTURES=1` to keep a failed
-test's root for diagnosis, and the test log names its path.
+These fixtures check the runtime version before creating any directory and normally use
+test-owned temporary storage. Set `SUBYARD_KEEP_FAILED=1` to keep a failed test's detached
+`/tmp/subyard-current-source-*` root for diagnosis; the test log names its path.
 `make verify` runs core and profile host-free
 checks together. Packaging builds the same declared binaries for the target architecture, excluding
 profile Go sources and test directories from runtime bundles. Packaging enumerates current public

@@ -26,7 +26,7 @@ case "$(dpkg --print-architecture)" in
   *) exit 2 ;;
 esac
 test ! -e /usr/local/bin/claude
-stage=$(mktemp -d /tmp/subyard-claude-probe.XXXXXX)
+stage=$(mktemp -d "${TMPDIR:-/tmp}/subyard-claude-probe.XXXXXX")
 trap 'rm -f -- "$stage/claude.tgz" "$stage/claude"; rmdir "$stage"' EXIT
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location \
   --connect-timeout 10 --max-time 180 \

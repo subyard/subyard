@@ -15,7 +15,7 @@ if grep -Fq 'pattern = ["git"' "$ROOT/config/agents/codex/rules/repo.rules"; the
   fail "Codex home rules carry a Git gate"
 fi
 
-tmp="$(mktemp -d /tmp/subyard-codex-provision.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/subyard-codex-provision.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 releases="$tmp/releases"
 fake_bin="$tmp/fake-bin"

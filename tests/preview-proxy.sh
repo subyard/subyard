@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
-temporary="$(mktemp -d)"
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/subyard-preview-proxy.XXXXXX")"
 trap 'rm -rf -- "$temporary"' EXIT
 mkdir -p "$temporary/bin"
 export PREVIEW_PROXY_STATE="$temporary/state.json" PREVIEW_PROXY_LOG="$temporary/log"

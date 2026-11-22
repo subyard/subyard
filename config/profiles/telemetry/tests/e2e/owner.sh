@@ -44,7 +44,7 @@ if [ "$delegated" = 0 ]; then
     --working-directory="$ROOT" "${fixture_env[@]}" bash config/profiles/telemetry/tests/e2e/owner.sh --delegated-fixture "$mode"
 fi
 for command in python3 curl jq tar sha256sum systemctl incus go; do command -v "$command" >/dev/null; done
-state="$(mktemp -d /tmp/subyard-telemetry-acceptance.XXXXXX)"
+state="$(mktemp -d "${TMPDIR:-/tmp}/subyard-telemetry-acceptance.XXXXXX")"
 chmod 0700 "$state"
 trap 'printf "telemetry disposable evidence: %s\n" "$state"' EXIT
 # shellcheck source=config/profiles/telemetry/tests/e2e/assets.sh

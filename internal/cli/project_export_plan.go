@@ -200,8 +200,7 @@ func (cli *CLI) prepareOwnerProjectExport(ctx context.Context, loaded config.Loa
 		return application.CleanupProjectExportTemporary(cli.projectDataPlane(), loaded.Context, prepared.Plan.OperationID, project.ownerExport.temporaryIdentity)
 	}
 	if err := prepared.preparePlan(ctx); err != nil {
-		_ = prepared.Close()
-		return nil, err
+		return nil, errors.Join(err, prepared.Close())
 	}
 	return prepared, nil
 }
@@ -295,7 +294,12 @@ func (cli *CLI) finalizeOwnerProjectTransfer(ctx context.Context, prepared *prep
 	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
 }
 
-func (prepared *preparedCommand) prepareRemoteProjectExport(ctx context.Context) error {
+func (prepared *preparedCommand) prepareRemoteProjectExport(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.Project.closePreparedSource())
+		}
+	}()
 	cli, project := prepared.CLI, prepared.Project
 	if project == nil || project.Loaded.Context.AccessKind != domain.AccessRemote || prepared.Definition.Name != "export" {
 		return errors.New("remote export requires a controller project")
