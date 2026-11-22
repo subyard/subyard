@@ -31,7 +31,7 @@ NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnez
 SPLIT = {"vm:p0-full"}
 # A hosted run took 17 minutes; 45m leaves room for slower runners. The 10m TERM grace covers
 # two 120s guest cleanups and the 180s lease release.
-PERIODIC_ONLY = [{"id": "periodic:config-sync",
+PERIODIC_ONLY = [{"id": "periodic:config-sync", "tier": "system-container",
                   "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
                               "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]},
                  # Physical regression outside the release acceptance catalog; uses the normal candidate bundle.
