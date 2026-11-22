@@ -133,8 +133,8 @@ type historySelection struct {
 const rollbackDeclarationRefusal = "a rollback declaration of the release pair cannot be verified"
 
 // assembleHistorySelection is shared by captureTransitionSelection and the
-// verb. A non-empty refusal reports a registry that cannot be verified, or an
-// Equivalent relation whose rollback declaration cannot be verified.
+// verb. A non-empty refusal reports an unverifiable registry or declaration,
+// collected with any independently determined history refusals.
 func assembleHistorySelection(request releasetransition.ProcessRequest, links runtimeLinkSnapshot, state currentSnapshot,
 	active, target *verifiedPublishedCandidate,
 ) (historySelection, string, error) {
@@ -150,12 +150,11 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		return history, "the selected release's sealed migration registry cannot be verified", err
 	}
 	history.targetRegistry = identity
-	// Only an Equivalent relation depends on a declaration, so a read failure
-	// refuses only that relation. Both releases may have newer declarations;
-	// the running engine parses its own declaration strictly at its boundary.
+	// Both releases may have newer declarations. Only an Equivalent relation
+	// needs the active predecessor digest; the target's sealed reader facts
+	// must always be verified. The engine parses its own declaration strictly.
 	predecessor, activeDeclarationErr := declaredPredecessor(active, releasetransition.ParseRollbackPredecessor)
-	targetPredecessor, targetDeclarationErr := declaredPredecessor(target, releasetransition.ParseRollbackPredecessor)
-	targetFeatures, _ := verifiedRegistryFeatures(target)
+	targetPredecessor, targetFeatures, targetDeclarationErr := verifiedRollbackReader(target)
 	history.missingHistory = !state.ledger.Exists && !state.checkpoint.Exists
 	// The installer can publish the first current link before the native
 	// transition creates protected history. Let that same engine initialize it.
@@ -180,14 +179,18 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 		input.History = retainedHistoryEvidence(target, retained, state.ledger, state.checkpoint)
 	}
 	history.verdict = releasetransition.HistoryCompatibility(input)
-	// The older release of an Equivalent pair is named by the newer one's
-	// declaration, so only that declaration can refuse it.
-	declarationErr := activeDeclarationErr
-	if history.verdict.Successor {
-		declarationErr = targetDeclarationErr
+	// The target's reader facts always require a verified declaration. An
+	// Equivalent predecessor also needs the active release's declared pair.
+	declarationErr := targetDeclarationErr
+	if !history.verdict.Successor && history.verdict.Kind == releasetransition.HistoryEquivalent {
+		declarationErr = domain.CollectRefusals(activeDeclarationErr, declarationErr)
 	}
-	if declarationErr != nil && history.verdict.Kind == releasetransition.HistoryEquivalent {
-		return history, rollbackDeclarationRefusal, declarationErr
+	if declarationErr != nil {
+		message, cause := history.refusal()
+		if message != "" {
+			message += "; "
+		}
+		return history, message + rollbackDeclarationRefusal, domain.CollectRefusals(cause, declarationErr)
 	}
 	return history, "", nil
 }
@@ -195,16 +198,19 @@ func assembleHistorySelection(request releasetransition.ProcessRequest, links ru
 // rollbackPredecessorParser reads the predecessor digest from declaration bytes.
 type rollbackPredecessorParser func([]byte) (releasetransition.Fingerprint, error)
 
-// verifiedRegistryFeatures uses the same bounded, manifest-bound declaration
-// read as the predecessor. An absent or unreadable flag grants no capability.
-func verifiedRegistryFeatures(verified *verifiedPublishedCandidate) ([]string, error) {
+// verifiedRollbackReader reads the predecessor and reader flags from the same
+// bounded, manifest-bound declaration. Failed verification grants no capability.
+func verifiedRollbackReader(verified *verifiedPublishedCandidate) (releasetransition.Fingerprint, []string, error) {
 	var features []string
-	_, err := declaredPredecessor(verified, func(payload []byte) (releasetransition.Fingerprint, error) {
-		var err error
+	predecessor, err := declaredPredecessor(verified, func(payload []byte) (releasetransition.Fingerprint, error) {
+		predecessor, err := releasetransition.ParseRollbackPredecessor(payload)
+		if err != nil {
+			return "", err
+		}
 		features, err = releasetransition.ParseRollbackRegistryFeatures(payload)
-		return "", err
+		return predecessor, err
 	})
-	return features, err
+	return predecessor, features, err
 }
 
 // strictRollbackPredecessor parses a release's own declaration in full.

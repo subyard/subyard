@@ -2,6 +2,7 @@ package releaseruntime
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -585,5 +586,88 @@ func TestEngineRollbackPredecessor(t *testing.T) {
 	shipped, err := EngineRollbackPredecessor(filepath.Join("..", "..", ".."))
 	if err != nil || shipped == "" {
 		t.Fatalf("shipped declaration = %q, %v", shipped, err)
+	}
+}
+
+func TestHistorySelectionCollectsTargetDeclarationAndRegistryRefusals(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("declared=%t", declared), func(t *testing.T) {
+			fixture := newHistoryFixture(t)
+			canonical, err := fixture.parsed.CanonicalDigest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			retired, err := fixture.parsed.RetirePrefixes(map[string]int{"owner-registration": 3, "power-metadata": 3, "settings": 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(retired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			activeFiles := map[string][]byte{"config/release-transition.json": payload}
+			if declared {
+				activeFiles["config/release-rollback.json"] = rollbackDeclarationPayload(canonical)
+			}
+			activeRoot := fixture.writeRelease(t, fixture.runtimeRoot, "1.1.0-aaaaaaaaaaaa", activeFiles, nil)
+			declaration, err := json.Marshal(releasetransition.RollbackDeclaration{
+				SchemaVersion: 1, PredecessorRegistryDigest: canonical,
+				Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{},
+				RegistryFeatures: releasetransition.RegistryReaderFeatures(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetID := releasetransition.ReleaseID("1.0.0-bbbbbbbbbbbb")
+			targetRoot := fixture.writeRelease(t, fixture.runtimeRoot, string(targetID), map[string][]byte{
+				"config/release-transition.json": fixture.registry, "config/release-rollback.json": declaration,
+			}, nil)
+			runtime := New(Config{})
+			active, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{release: "1.1.0-aaaaaaaaaaaa", root: activeRoot}, fixture.runtimeRoot, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer active.Close()
+			target, err := runtime.verifyPublishedCandidateFiles(publishedCandidate{release: targetID, root: targetRoot}, fixture.runtimeRoot, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer target.Close()
+			// Valid JSON with different bytes still violates the captured seal.
+			testkit.WriteFile(t, filepath.Join(targetRoot, "config", "release-rollback.json"), append(declaration, '\n'), 0o600)
+			before := treeDigest(t, filepath.Dir(fixture.runtimeRoot))
+			history, message, err := assembleHistorySelection(releasetransition.ProcessRequest{
+				RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Target: targetID,
+				Direction: releasetransition.DirectionActivatePrevious,
+			}, runtimeLinkSnapshot{}, currentSnapshot{}, active, target)
+			registryMessage, registryCause := history.verdict.Refusal()
+			if err == nil || !strings.Contains(message, rollbackDeclarationRefusal) || !strings.Contains(message, registryMessage) ||
+				!strings.Contains(err.Error(), "rollback declaration does not match its verified manifest") ||
+				registryCause == nil || !errors.Is(err, releasetransition.ErrRegistryInvalid) {
+				t.Fatalf("target declaration and registry findings = %q, %v; verdict %#v", message, err, history.verdict)
+			}
+			if strings.Index(message, registryMessage) >= strings.Index(message, rollbackDeclarationRefusal) {
+				t.Fatalf("unstable refusal order: %q", message)
+			}
+			if after := treeDigest(t, filepath.Dir(fixture.runtimeRoot)); after != before {
+				t.Fatal("failed selection changed the installation")
+			}
+		})
+	}
+}
+
+func TestRollbackFactsRejectUnverifiableRegistryFeatures(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
+	root := filepath.Dir(filepath.Dir(fixture.engine))
+	declaration := []byte(fmt.Sprintf(`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[],"registryFeatures":{}}`, strings.Repeat("a", 64)))
+	testkit.WriteFile(t, filepath.Join(root, "config", "release-rollback.json"), declaration, 0o600)
+	manifest := mustReadFile(t, filepath.Join(root, "runtime-files.sha256"))
+	manifest = append(manifest, []byte(fmt.Sprintf("%x  ./config/release-rollback.json\n", sha256.Sum256(declaration)))...)
+	testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), manifest, 0o600)
+	facts, registry, err := VerifyRollbackTarget(context.Background(), fixture.runtimeRoot, releasetransition.ReleaseID(fixture.target),
+		releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))))
+	if err == nil || facts != nil || registry != nil || !strings.Contains(err.Error(), rollbackDeclarationRefusal) ||
+		!strings.Contains(err.Error(), "decode registry features") {
+		t.Fatalf("unverifiable target reader facts = %#v, %#v, %v", facts, registry, err)
 	}
 }
