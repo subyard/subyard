@@ -143,11 +143,9 @@ type formatItem struct {
 }
 
 // formatObservation collects every yard's items and independent refusals,
-// in yard and owner order. loaded holds each local yard read with the
-// active release.
+// in yard and owner order.
 type formatObservation struct {
 	items    []formatItem
-	loaded   map[string]config.Loaded
 	messages []string
 	retry    string
 	causes   []error
@@ -207,7 +205,7 @@ func (runtime *Runtime) rollbackYardLoader(configHome string) func(root, name st
 // prepared state. A stopped yard, a failed observation and settings the
 // target cannot read refuse.
 func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target *verifiedPublishedCandidate, configHome string, owners []string) (formatObservation, error) {
-	observation := formatObservation{loaded: map[string]config.Loaded{}}
+	observation := formatObservation{}
 	observe, accept := runtime.config.ProfileRuntimeRollbackObservation, runtime.config.ProfileRuntimeObservation
 	if observe == nil || accept == nil || runtime.config.ProfileRuntimeRollbackApply == nil {
 		observation.refuse("profile runtime rollback preparation is unavailable", keepActiveRetry, nil)
@@ -230,7 +228,6 @@ func (runtime *Runtime) observeFormatOwners(ctx context.Context, active, target 
 		if loaded.Context.AccessKind != domain.AccessLocal {
 			continue
 		}
-		observation.loaded[name] = loaded
 		targetLoaded, targetErr := load(targetRoot, name)
 		stopped := "run " + domain.RenderAction(domain.Action{Verb: domain.VerbStart, Yard: name})
 		prepared := false
@@ -528,17 +525,29 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 		}
 		defer activeNow.Close()
 		hookRoot, load := pinnedReleaseRoot(activeNow), runtime.rollbackYardLoader(request.ConfigHome)
-		loaded := map[string]config.Loaded{}
+		// Each bound yard is checked on its own; every change is reported.
+		loaded, read := map[string]config.Loaded{}, map[string]bool{}
+		var messages []string
+		var causes []error
 		for _, item := range now.pending() {
-			if _, read := loaded[item.yard]; read {
+			if read[item.yard] {
 				continue
 			}
+			read[item.yard] = true
 			yard, err := load(hookRoot, item.yard)
-			if err != nil || yard.Context.AccessKind != domain.AccessLocal || yard.Context.IncusProject+"/"+yard.Context.YardInstanceName != item.instance {
-				changed := staleReleaseState(request.RuntimeRoot, request.Target, fmt.Sprintf("yard %s settings changed after confirmation; nothing was converted", item.yard), rollbackRetry)
-				return domain.CollectOrderedRefusals(changed, err)
+			switch {
+			case err != nil:
+				message := fmt.Sprintf("yard %s: settings cannot be read again after confirmation", item.yard)
+				messages, causes = append(messages, message), append(causes, fmt.Errorf("%s: %w", message, err))
+			case yard.Context.AccessKind != domain.AccessLocal || yard.Context.IncusProject+"/"+yard.Context.YardInstanceName != item.instance:
+				message := fmt.Sprintf("yard %s: settings no longer name the confirmed instance %s", item.yard, item.instance)
+				messages, causes = append(messages, message), append(causes, errors.New(message))
+			default:
+				loaded[item.yard] = yard
 			}
-			loaded[item.yard] = yard
+		}
+		if len(messages) != 0 {
+			return changedYardSettings(request, messages, causes)
 		}
 		var operation [12]byte
 		if _, err := crand.Read(operation[:]); err != nil {
@@ -560,6 +569,19 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 		return nil
 	}
 	return plan, nil
+}
+
+// changedYardSettings reports every bound yard whose settings changed after
+// confirmation, in yard order; nothing was converted. A failed read's cause
+// stays out of the public message.
+func changedYardSettings(request releasetransition.ProcessRequest, messages []string, causes []error) error {
+	message := strings.Join(messages, "; ") + "; nothing was converted"
+	if len(message) > 512 {
+		message = fmt.Sprintf("the settings of %d yards changed after confirmation; nothing was converted; full details: stderr of yard update --rollback", len(messages))
+	}
+	outcome := observedPublicReleaseOutcome(request.RuntimeRoot, request.Target, nil, releasetransition.CodePlanStale, message, rollbackRetry)
+	stale := fmt.Errorf("%w: %w", domain.ErrPlanStale, transitionOutcomeError(outcome))
+	return publicReleaseInspectionError{cause: domain.CollectOrderedRefusals(append([]error{stale}, causes...)...), outcome: outcome}
 }
 
 // partialPreparation reports a failure after the first conversion could

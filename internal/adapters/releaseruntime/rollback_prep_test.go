@@ -1168,3 +1168,49 @@ func TestRollbackPreparationRefusesAChangedYardSet(t *testing.T) {
 		})
 	}
 }
+
+// Yard settings that change after the recheck, before any conversion, are
+// each reported, in yard order, and nothing is converted.
+func TestRollbackPreparationReportsEveryChangedYard(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedSample)
+	fixture.formats["named"] = 2
+	// The recheck admission's last native observation follows its yard reads.
+	observe, calls := fixture.runtime.config.ProfileRuntimeObservation, 0
+	fixture.runtime.config.ProfileRuntimeObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+		calls++
+		return observe(ctx, root, loaded, id)
+	}
+	prepared, err := fixture.prepare(t)
+	if err != nil || calls == 0 {
+		t.Fatal(calls, err)
+	}
+	perAdmission, seen := calls, 0
+	fixture.runtime.config.ProfileRuntimeObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+		if seen++; seen == perAdmission {
+			declareRollbackPrepYard(t, fixture.home, "default")
+			testkit.WriteFile(t, filepath.Join(fixture.home, "yards", "default", "config.env"), []byte("YARD_INSTANCE_NAME=moved\n"), 0o600)
+			if err := os.RemoveAll(filepath.Join(fixture.home, "yards", "named")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return observe(ctx, root, loaded, id)
+	}
+	err = prepared.Execute(context.Background())
+	outcome := outcomeOf(t, err)
+	if outcome.Code != releasetransition.CodePlanStale || outcome.Retry != rollbackRetry || !errors.Is(err, domain.ErrPlanStale) || len(fixture.applies) != 0 ||
+		outcome.Message != "yard default: settings no longer name the confirmed instance subyard/yard; yard named: settings cannot be read again after confirmation; nothing was converted" {
+		t.Fatalf("changed yards = %#v, %v, applies %v", outcome, err, fixture.applies)
+	}
+	var refusals *domain.Refusals
+	if !errors.As(err, &refusals) {
+		t.Fatalf("refusals = %v", err)
+	}
+	var texts []string
+	for _, cause := range refusals.Unwrap()[1:] {
+		texts = append(texts, cause.Error())
+	}
+	if len(texts) != 2 || !strings.HasPrefix(texts[0], "yard default: settings no longer name the confirmed instance") ||
+		!strings.HasPrefix(texts[1], "yard named: settings cannot be read again after confirmation: ") {
+		t.Fatalf("refusals = %q", texts)
+	}
+}
