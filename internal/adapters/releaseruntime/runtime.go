@@ -1624,14 +1624,21 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 		}
 		recoveryRequest = &requestCopy
 	}
+	var cleanup []releasetransition.RollbackBoundary
+	if parsed.selection != nil {
+		cleanup = slices.Clone(parsed.selection.agentCleanup)
+	} else if !parsed.check && owner.candidate.release != target.candidate.release {
+		cleanup, err = runtime.protectedAgentCleanup(request.RuntimeRoot, owner, target)
+		if err != nil {
+			return Prepared{}, fmt.Errorf("read protected rollback cleanup: %w", err)
+		}
+	}
 	defer func() {
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
-			if parsed.selection != nil {
-				prepared.AgentCleanup = slices.Clone(parsed.selection.agentCleanup)
-				prepared.Consequences = append(prepared.Consequences, prepared.AgentCleanupConsequences()...)
-			}
+			prepared.AgentCleanup = cleanup
+			prepared.Consequences = append(prepared.Consequences, prepared.AgentCleanupConsequences()...)
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks)
 			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
 		}

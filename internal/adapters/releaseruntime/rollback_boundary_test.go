@@ -187,3 +187,138 @@ func TestShippedAgentCleanupAllowsRollbackToV030(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedRollbackRetainsAgentCleanup(t *testing.T) {
+	data, err := os.ReadFile("../../../config/release-rollback.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, direction := range []releasetransition.Direction{releasetransition.DirectionActivatePrevious, releasetransition.DirectionActivateTarget} {
+		for _, switched := range []bool{false, true} {
+			t.Run(string(direction)+"/"+map[bool]string{false: "before activation", true: "after activation"}[switched], func(t *testing.T) {
+				fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{targetVersion: "0.30.0", seed: func(active, _ string) {
+					testkit.WriteFile(t, filepath.Join(active, "config/release-rollback.json"), data, 0o600)
+				}})
+				prepared, err := fixture.prepare(t)
+				if err != nil {
+					t.Fatal(err)
+				}
+				active, target := fixture.verified(t)
+				request := prepared.Request
+				request.Mode = releasetransition.ProcessInspect
+				response, err := fixture.runtime.invokeVerifiedCandidateTransition(context.Background(), active, request, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Direction = direction
+				if switched {
+					next := filepath.Join(fixture.runtimeRoot, "next-current")
+					if err := os.Symlink("releases/"+fixture.targetID, next); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(next, filepath.Join(fixture.runtimeRoot, "current")); err != nil {
+						t.Fatal(err)
+					}
+					response.Inspection.Outcome.Active = releasetransition.ReleaseID(fixture.targetID)
+					previous := releasetransition.ReleaseID(fixture.activeID)
+					response.Inspection.Outcome.Previous = &previous
+				}
+				resumed, err := fixture.runtime.prepareProtectedTransition(options{root: fixture.runtimeRoot}, &protectedTransitionInspection{
+					owner: verificationOf(active), target: verificationOf(target), request: request, inspection: *response.Inspection,
+					activationReconciliationOwned: true,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resumed.AgentCleanup) == 0 || !slices.Equal(resumed.AgentCleanupConsequences(), prepared.AgentCleanupConsequences()) {
+					t.Fatalf("resume lost cleanup: %#v", resumed.AgentCleanup)
+				}
+				for _, consequence := range prepared.AgentCleanupConsequences() {
+					if !slices.Contains(resumed.Consequences, consequence) {
+						t.Fatalf("resumed plan lost %s", consequence)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRollbackBoundaryUsesVerifiedCandidateVersions(t *testing.T) {
+	fixture := newPreparedRollbackFixture(t, preparedRollbackOptions{targetVersion: "0.30.0", seed: func(active, _ string) {
+		declaration := releasetransition.RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+			Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}, Boundaries: []releasetransition.RollbackBoundary{{Component: "registry", ThroughVersion: "0.30.0", Reason: "unreadable state", Recovery: "restore a complete pre-upgrade backup into a clean installation"}}}
+		data, err := json.Marshal(declaration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(active, "config/release-rollback.json"), data, 0o600)
+	}})
+	active, target := fixture.verified(t)
+	// IDs suggest an upgrade; the verified engine versions establish a downgrade.
+	active.candidate.release, target.candidate.release = "0.9.0-owner", "0.10.0-target"
+	message, _, _, err := declaredRollbackBoundary(active, target)
+	if err == nil || !strings.Contains(message, "declared rollback boundary") {
+		t.Fatalf("reported versions ignored: %s, %v", message, err)
+	}
+	target.version = "0.32.0"
+	if message, _, _, err := declaredRollbackBoundary(active, target); err != nil || message != "" {
+		t.Fatalf("upgrade refused: %s, %v", message, err)
+	}
+}
+
+func TestBlockingBoundaryCannotBeBypassedByOlderVersionOrBootstrap(t *testing.T) {
+	for _, bootstrap := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit version", true: "bootstrap"}[bootstrap], func(t *testing.T) {
+			fixture := retainedVersionFixture
+			if bootstrap {
+				fixture = bootstrapDraftFixture
+			}
+			runtime, candidate, request, called, args := fixture(t)
+			active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases/release-a")}
+			writeMigrationRollbackSource(t, candidate, request, []byte(sourceAdmissionRegistry))
+			rewriteReleaseOwnerManifest(t, candidate)
+			declaration := releasetransition.RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}, Boundaries: []releasetransition.RollbackBoundary{{Component: "registry", ThroughVersion: "0.30.0", Reason: "unreadable state", Recovery: "restore a complete pre-upgrade backup into a clean older installation"}}}
+			data, err := json.Marshal(declaration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(active.root, "config/release-rollback.json"), data, 0o600)
+			if err := os.MkdirAll(filepath.Join(active.root, "bin"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(active.root, "bin/yard-engine"), []byte("#!/bin/sh\n[ \"$1\" = --version ] || exit 64\nprintf 'yard-engine 0.31.0\\n'\n"), 0o700)
+			rewriteReleaseOwnerManifest(t, active)
+			newerRoot := filepath.Join(request.RuntimeRoot, "releases/0.31.0-active")
+			if err := os.Rename(active.root, newerRoot); err != nil {
+				t.Fatal(err)
+			}
+			next := filepath.Join(request.RuntimeRoot, "new-current")
+			if err := os.Symlink("releases/0.31.0-active", next); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(next, filepath.Join(request.RuntimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			_, err = runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+			if err == nil || !strings.Contains(err.Error(), "declared rollback boundary") || !strings.Contains(err.Error(), "complete pre-upgrade backup") {
+				t.Fatalf("boundary bypassed: %v", err)
+			}
+			for _, path := range []string{called, filepath.Join(request.ConfigHome, "release-transition/v2/journal.json")} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("refusal changed %s: %v", path, err)
+				}
+			}
+			if current, err := os.Readlink(filepath.Join(request.RuntimeRoot, "current")); err != nil || current != "releases/0.31.0-active" {
+				t.Fatalf("current changed: %s %v", current, err)
+			}
+			previous, err := os.Readlink(filepath.Join(request.RuntimeRoot, "previous"))
+			if bootstrap {
+				if !os.IsNotExist(err) {
+					t.Fatalf("previous created: %s %v", previous, err)
+				}
+			} else if err != nil || previous != "releases/"+string(request.Target) {
+				t.Fatalf("previous changed: %s %v", previous, err)
+			}
+		})
+	}
+}
