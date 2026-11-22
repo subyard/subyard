@@ -457,16 +457,30 @@ Agents preparing a release apply the
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.
+- Every release, including a hotfix, has its own task plan before preparation. It records the
+  [release level](#release-levels) and its reason, the frozen candidate commit, each check with its
+  command, slot budget and runner owner, and every result the release relies on.
+- A full release runs every check on the frozen candidate commit on its release branch: CI
+  preparation, the hosted inventory, every core `vm:` check and every VM profile check. Results from
+  other commits, including `master` and earlier candidates, never count; transfers are limited to
+  the local and CI builds of the same candidate. Extended checks on `master` while waiting for
+  preparation only find defects earlier and are not a gate.
+- An ordinary release runs the mandatory candidate gates: CI preparation, the hosted inventory and
+  `p0-release-smoke`. For other checks it may rely on passing results from `master` history, such as
+  Periodic E2E runs, owning lanes of merged PRs or earlier release receipts, when the changes since
+  that pass give no reason to suspect a regression in what the check covers. Record each such result
+  (commit and run URL or receipt) in the task plan, and run on the candidate every check that has no
+  such result or whose covered code changed since.
 - Release acceptance always has priority on local slots and CI. While a release `accept` or Release VM
   checks run is active, agents start no new non-release physical lanes or long hosted dispatches such as
   Periodic E2E; non-release lanes on slots the release needs stop at their next safe point.
 - Release repairs land as reviewed PRs to the release base. Before preparation
   CI, run the [publication preflight](#operator-commands-and-retained-state)
-  and assign every required local check and explicitly requested VM gate in the existing task plan:
+  and assign every required local check and VM gate in the release task plan:
   frozen local candidate, full command, slot budget and runner owner. Build locally and start ready
-  requested gates alongside CI; a targeted lane does not complete full release smoke. Do not
-  allocate VMs without an explicit request or wait for CI artifacts to begin
-  checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
+  required gates alongside CI; a targeted lane does not complete full release smoke. Allocate VMs
+  only for checks that the release level or an explicit request requires, and do not wait for CI
+  artifacts to begin checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
   then transfer equivalent complete original PASS evidence through the reviewed workflow.
   Rerun only affected or missing gates.
 - A release at the default branch head needs no extra branch. Every non-head candidate, including a
