@@ -229,6 +229,12 @@ yard_service_failure_diagnostics() { # <start epoch>
     hostkeys="$(timeout --kill-after=1 5 sshd -G 2>/dev/null | grep -ci '^hostkey ')"
     printf 'sshd -G hostkey entries: %s, host key files: %s\n' "${hostkeys:-0}" \
       "$(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' -type f 2>/dev/null | wc -l)"
+    # Probe only: who created the host keys before the package did.
+    stat -c '%a %U:%G %y %n' /etc/ssh/ssh_host_* 2>&1 | sed -n '1,12p'
+    printf 'yard provisioning started: %s\n' "$(date -d "@$1" '+%F %T')"
+    (cloud-id; cloud-init status --long) 2>&1 | sed -n '1,15p'
+    grep -h -i -E 'ssh|datasource|Azure' /var/log/cloud-init.log 2>/dev/null | grep -v -i 'authorized' | sed -n '1,40p' | cut -c1-240
+    sed -n '1,30p' /run/cloud-init/ds-identify.log 2>/dev/null | cut -c1-200
   done
 }
 services_started="$(date +%s)"
