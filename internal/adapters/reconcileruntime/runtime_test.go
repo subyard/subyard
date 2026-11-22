@@ -2074,7 +2074,7 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 				LocalDevices: map[string]map[string]string{
 					"srv": {"source": "yard-srv", "path": "/srv", "pool": "default"},
 					"subyard-e2e-routes": {
-						"type": "disk", "source": "/data/e2e/routes",
+						"type": "disk", "source": filepath.Join(deviceRoot, "e2e", "routes"),
 						"path": "/var/lib/subyard/e2e-routes", "readonly": "true",
 					},
 				},
@@ -2086,7 +2086,7 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 		Environment: []string{"PATH=" + bin, "INCUS_SERVICE_ENV="},
 		Yard: domain.Context{
 			IncusProject: "subyard", YardInstanceName: "yard", YardKind: domain.YardContainer,
-			Paths: domain.RuntimePaths{DataHome: "/data"},
+			Paths: domain.RuntimePaths{DataHome: deviceRoot},
 		},
 		HostDeviceRoot: deviceRoot,
 	}
@@ -2098,7 +2098,9 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 		"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
 	}
 	assertStageConverged(t, runtime, false, "legacy device-node mask needs migration")
-	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"]["source"] = "/data/docker-apparmor-disabled"
+	incus.Reconcile.Instance.LocalDevices["subyard-docker-apparmor"]["source"] = filepath.Join(deviceRoot, "docker-apparmor-disabled")
+	assertStageConverged(t, runtime, false, "missing mask source")
+	testkit.WriteFile(t, filepath.Join(deviceRoot, "docker-apparmor-disabled"), nil, 0644)
 	assertStageConverged(t, runtime, true, "disabled-Incus AppArmor mask")
 	runtime.Environment[1] = "INCUS_SERVICE_ENV="
 	assertStageConverged(t, runtime, false, "stale restored-Incus AppArmor mask")
@@ -2141,7 +2143,7 @@ printf '%s\n' "${INCUS_SERVICE_ENV:-}"
 	incus.Reconcile.Instance.LocalDevices = map[string]map[string]string{
 		"srv": {"source": "yard-srv", "path": "/srv", "pool": "default"},
 		"subyard-e2e-routes": {
-			"type": "disk", "source": "/data/e2e/routes",
+			"type": "disk", "source": filepath.Join(deviceRoot, "e2e", "routes"),
 			"path": "/var/lib/subyard/e2e-routes", "readonly": "true",
 		},
 	}

@@ -738,6 +738,16 @@ func (runtime Runtime) instanceConverged(ctx context.Context, diagnostics *[]str
 			dockerAppArmor["readonly"] != "true" {
 			return false, nil
 		}
+		info, err := os.Lstat(dockerAppArmor["source"])
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() || info.Size() != 0 {
+			return false, nil
+		}
 	} else if dockerAppArmorPresent {
 		return false, nil
 	}
