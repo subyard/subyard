@@ -42,7 +42,8 @@ bash() { printf '%s\\0' "$@"; }
                                         capture_output=True, check=True, env={**os.environ, 'SUBYARD_E2E_ROLLOUT_YARD': route})
                 assert result.stdout.split(b'\0')[:-1] == [value.encode() for value in [
                     '/fixture/dev/agent-e2e.sh', *(['--yard', route] if route else []), '--slot', '3', '--type', 'android-test', '--vm-count', '1',
-                    '--purpose', 'telemetry-acceptance', '--vm', '1', '--', 'timeout', '--signal=TERM',
+                    '--purpose', 'telemetry-acceptance', '--vm', '1',
+                    *(['--disk', '50GiB'] if mode in ('all', '--resources') else []), '--', 'timeout', '--signal=TERM',
                     '--kill-after=120s', timeout, 'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', mode]]
         for memory, limit in (('4GiB', '3G'), ('8GiB', '6G')):
             environment['SUBYARD_E2E_MEMORY_PER_VM'] = memory
@@ -64,7 +65,7 @@ bash() { printf '%s\\0' "$@"; }
         result = subprocess.run(['bash', '-c', probe+delegation, 'probe', 'all'],
                                 env={**environment, **invalid}, capture_output=True)
         assert result.returncode == 2 and not result.stdout, 'invalid grant reached native command'
-print('ok: only full telemetry receives 175-minute delegation and 180-minute controller budgets; narrow budgets and delegation guards preserved')
+print('ok: full telemetry and resources request 50GiB disks; controller budgets and delegation guards preserved')
 assets = ('fixture_assets="$state/assets"\n' + owner.split('fixture_assets="$state/assets"\n', 1)[1]
           .split('\nmkdir "$state/source"', 1)[0])
 probe = 'set -eu\nstate=/fixture-state; ROOT=/fixture\ntelemetry_prepare_assets() { :; }\n'
@@ -254,7 +255,10 @@ fixture_timeout=70m
 [ "$mode" != --resources ] || fixture_timeout=180m
 [ "$mode" != --held-diagnostic ] || fixture_timeout=20m
 [ "$mode" != --native-only ] || fixture_timeout=10m
+fixture_disk=()
+# The cold nested builder needs headroom beside the installed baseline on both images.
+case "$mode" in all|--resources) fixture_disk=(--disk 50GiB) ;; esac
 allocation_route=()
 [ -z "${SUBYARD_E2E_ROLLOUT_YARD:-}" ] || allocation_route=(--yard "$SUBYARD_E2E_ROLLOUT_YARD")
-bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$2" --type android-test --vm-count 1 --purpose telemetry-acceptance --vm 1 -- \
+bash "$ROOT/dev/agent-e2e.sh" "${allocation_route[@]}" --slot "$2" --type android-test --vm-count 1 --purpose telemetry-acceptance --vm 1 "${fixture_disk[@]}" -- \
   timeout --signal=TERM --kill-after=120s "$fixture_timeout" bash config/profiles/telemetry/tests/e2e/owner.sh "$mode"
