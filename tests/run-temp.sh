@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as
     shutil.copyfile(source / wrapper.name, wrapper)
     command = ['bash', str(wrapper)]
     processes = []
+    detached = []
     protected = []
 
     def roots():
@@ -118,6 +119,89 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as
         finally:
             helper.write_text(original)
         run('true')
+
+        # PID-only TERM forwards promptly and waits for the command to finish cleanup.
+        marker, verdict = fixture / 'term-ready', fixture / 'term-verdict'
+        worker = fixture / 'term-worker.py'
+        worker.write_text('''import os
+from pathlib import Path
+import signal
+import sys
+import time
+marker, verdict = map(Path, sys.argv[1:])
+root = Path(os.environ['TMPDIR'])
+def stop(signum, _frame):
+    time.sleep(.5)
+    (root / 'term-cleanup').touch()
+    verdict.write_text('ok')
+    sys.exit(128 + signum)
+signal.signal(signal.SIGTERM, stop)
+marker.write_text(str(root))
+while True:
+    time.sleep(30)
+''')
+        with (fixture / 'term.out').open('wb') as output:
+            process = subprocess.Popen(command + ['python3', str(worker), str(marker), str(verdict)],
+                                       env=environment, stdout=output, stderr=output, start_new_session=True)
+            processes.append(process)
+            wait_for(marker)
+            root = Path(marker.read_text())
+            started = time.monotonic()
+            os.kill(process.pid, signal.SIGTERM)
+            assert process.wait(timeout=5) == 143
+            assert time.monotonic() - started < 5
+            assert verdict.read_text() == 'ok' and not root.exists()
+
+        # A detached fd holder outlives cleanup's grace without losing its scratch.
+        original = helper.read_text()
+        helper.write_text(original.replace('GRACE = 5', 'GRACE = .15'))
+        marker, release = fixture / 'detached-ready', fixture / 'detached-release'
+        descendant = fixture / 'detached.py'
+        descendant.write_text('''import os
+from pathlib import Path
+import sys
+import time
+marker, release = map(Path, sys.argv[1:])
+root = Path(os.environ['TMPDIR'])
+marker.write_text(f'{os.getpid()} {root}')
+while not release.exists():
+    assert root.is_dir(), 'detached descendant lost scratch'
+    time.sleep(.02)
+''')
+        try:
+            launch = '''import subprocess, sys, time
+from pathlib import Path
+subprocess.Popen([sys.executable, *sys.argv[1:]], close_fds=False, start_new_session=True,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+while not Path(sys.argv[2]).exists():
+    time.sleep(.01)
+sys.exit(23)
+'''
+            result = subprocess.run(command + ['python3', '-c', launch, str(descendant), str(marker), str(release)],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            assert result.returncode == 23, result
+            pid, root = marker.read_text().split()
+            detached.append(int(pid))
+            root = Path(root)
+            assert root.exists(), 'cleanup removed a locked root'
+            assert len(result.stderr.splitlines()) == 1 and 'still in use' in result.stderr, result.stderr
+            print(result.stderr.strip())
+            run('true')
+            assert root.exists(), 'next run removed a live detached descendant root'
+            release.touch()
+            deadline = time.monotonic() + 5
+            while root.exists():
+                assert time.monotonic() < deadline, 'detached lock did not close'
+                time.sleep(.02)
+                run('true')
+        finally:
+            release.touch()
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text().split()[0]), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            helper.write_text(original)
 
         for whole_group in (False, True):
             process, root = blocked('kill-' + str(whole_group), 'sleep 60 &' if whole_group else '')
@@ -222,6 +306,11 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as
         assert roots() == set(protected), roots()
     finally:
         (fixture / 'release').touch()
+        for pid in detached:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         for process in processes:
             try:
                 os.killpg(process.pid, signal.SIGKILL)

@@ -469,7 +469,7 @@ SUBYARD_PROFILE_TESTS_SERIAL=1 PROFILE_MARKER="$tmp/serial-started" \
   bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/serial.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] && [ ! -e "$tmp/serial-started" ] || fail 'serial opt-out lost fail-fast execution'
 
-# Interrupt a full pool while two profiles are still waiting to start.
+# Interrupt realistic shell runners whose foreground children finish slow cleanup.
 env -u SUBYARD_PROFILE_TESTS_SERIAL python3 - "$tmp" "$fixture/dev/test-profiles.sh" <<'PYCASE'
 import os
 from pathlib import Path
@@ -477,70 +477,156 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 tmp, wrapper = map(Path, sys.argv[1:])
 root = tmp / "interrupt"
 (root / "dev").mkdir(parents=True)
-(root / "dev/test-run-temp.py").write_bytes((wrapper.parent.parent / "dev/test-run-temp.py").read_bytes())
-for name in ("test-profiles.sh", "run-profile-tests.py"):
+prefix = f"syr.runner-{uuid.uuid4().hex[:12]}."
+helper = root / "dev/test-run-temp.py"
+helper.write_text((wrapper.parent / helper.name).read_text().replace('PREFIX = "syr."', f'PREFIX = {prefix!r}'))
+for name in ("test-profiles.sh", "run-profile-tests.py", "with-test-temp.sh"):
     (root / "dev" / name).write_bytes(wrapper.with_name(name).read_bytes())
+worker = root / "worker.py"
+worker.write_text('''import os
+from pathlib import Path
+import signal
+import sys
+import time
+marker = Path(sys.argv[1])
+scratch = Path(os.environ["TMPDIR"])
+def stop(signum, _frame):
+    time.sleep(.5)
+    try:
+        (scratch / marker.name).write_text("cleanup")
+        verdict = "ok"
+    except OSError as error:
+        verdict = str(error)
+    marker.with_suffix(".verdict").write_text(verdict)
+    sys.exit(128 + signum)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+pending = marker.with_suffix('.pending')
+pending.write_text(f"{os.getppid()} {os.getpid()}")
+pending.replace(marker)
+while True:
+    time.sleep(30)
+''')
+for index in range(5):
+    profile = root / "config" / "profiles" / str(index) / "tests"
+    profile.mkdir(parents=True)
+    # Keep bash as the runner, with a foreground child rather than an exec.
+    (profile / "run.sh").write_text(f'python3 "{worker}" "$1/{index}"\n: \n')
+environment = {key: value for key, value in os.environ.items()
+               if not key.startswith('SUBYARD_RUN_TEMP')}
 signal.signal(signal.SIGINT, signal.default_int_handler)
-for label, sig, group, expected in (("int", signal.SIGINT, True, 130),
-                                    ("term-pid", signal.SIGTERM, False, 143)):
+
+
+def state(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        return None
+
+
+def alive(pid):
+    fields = state(pid)
+    return fields is not None and fields[0] != "Z"
+
+
+def roots():
+    return set(Path('/tmp').glob(prefix + '*'))
+
+
+def sweep():
+    subprocess.run(['bash', root / 'dev/with-test-temp.sh', 'true'], env=environment, check=True)
+
+
+for label, sig, group, expected, serial in (
+        ("int-group", signal.SIGINT, True, 130, False),
+        ("int-pid", signal.SIGINT, False, 130, False),
+        ("term-group", signal.SIGTERM, True, 143, False),
+        ("term-pid", signal.SIGTERM, False, 143, False),
+        ("serial-term", signal.SIGTERM, False, 143, True),
+        ("kill-group", signal.SIGKILL, True, -signal.SIGKILL, False)):
     marked = tmp / ("interrupt-started-" + label)
     marked.mkdir()
-    for index in range(5):
-        profile = root / "config" / "profiles" / str(index) / "tests"
-        profile.mkdir(parents=True, exist_ok=True)
-        script = 'import os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getppid()))\n'
-        if index < 3:
-            script += 'time.sleep(30)\n'
-        (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
-{script}PY
-""")
-
-    with (tmp / ("profile-interrupt-" + label + ".out")).open("wb") as log:
+    output = tmp / ("profile-interrupt-" + label + ".out")
+    with output.open("wb") as log:
         process = subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
                                    stdout=log, stderr=log, start_new_session=True,
-                                   env={key: value for key, value in os.environ.items()
-                                        if not key.startswith('SUBYARD_RUN_TEMP')})
+                                   env={**environment, 'SUBYARD_PROFILE_TESTS_SERIAL': str(int(serial))})
         try:
             deadline = time.monotonic() + 10
-            while len(list(marked.iterdir())) < 3:
+            wanted = 1 if serial else 3
+            while len(list(marked.glob('[0-9]'))) < wanted:
                 assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
-                time.sleep(0.01)
-            live_logs = next(line.removeprefix('PROFILE TESTS logs: ') for line in
-                             (tmp / ("profile-interrupt-" + label + ".out")).read_text().splitlines()
-                             if line.startswith('PROFILE TESTS logs: '))
-            live_logs = Path(live_logs)
+                time.sleep(.01)
+            pids = [int(pid) for marker in marked.glob('[0-9]') for pid in marker.read_text().split()]
+            live_roots = roots()
+            assert len(live_roots) == 1, live_roots
+            live_logs = Path(next(line.removeprefix('PROFILE TESTS logs: ') for line in
+                                  output.read_text().splitlines() if line.startswith('PROFILE TESTS logs: ')))
             for index in range(11):
                 padding = live_logs.parent / f'run.padding-{index}'
                 padding.mkdir(exist_ok=True)
                 os.utime(padding, (time.time() + 100, time.time() + 100))
-            subprocess.run(['python3', root / 'dev/test-run-temp.py', 'retain', live_logs.parent], check=True)
+            retain = ['python3', helper, 'retain', live_logs.parent]
+            subprocess.run(retain, check=True)
             assert live_logs.exists(), 'retention removed active profile logs'
+            started = time.monotonic()
             (os.killpg if group else os.kill)(process.pid, sig)
             code = process.wait(timeout=5)
-            assert sorted(p.name for p in marked.iterdir()) == ["0", "1", "2"], (
+            assert time.monotonic() - started < 5, label
+            assert code == expected, f"profile runner returned {code} after {label}"
+            assert sorted(p.name for p in marked.glob('[0-9]')) == [str(i) for i in range(wanted)], (
                 "interruption started a waiting profile"
             )
-            assert code == expected, f"profile runner returned {code} after {label}"
-            dispatcher = Path('/proc') / (marked / '0').read_text() / 'stat'
-            deadline = time.monotonic() + 5
-            while dispatcher.exists():
-                try:
-                    if dispatcher.read_text().split()[2] == 'Z':
-                        break
-                except FileNotFoundError:
-                    break
-                assert time.monotonic() < deadline, 'profile dispatcher survived cancellation'
-                time.sleep(.01)
+            if sig == signal.SIGKILL:
+                assert all(alive(pid) for pid in pids), 'runner did not outlive killed wrapper group'
+                subprocess.run(retain, check=True)
+                sweep()
+                assert live_logs.exists(), 'retention deleted surviving runners logs'
+                assert roots() == live_roots, 'sweep deleted surviving runners scratch'
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                deadline = time.monotonic() + 5
+                while any(alive(pid) for pid in pids):
+                    assert time.monotonic() < deadline, 'killed runner survived'
+                    time.sleep(.01)
+                sweep()
+                subprocess.run(retain, check=True)
+                assert not live_logs.exists(), 'abandoned profile logs not removed'
+            else:
+                assert all(not alive(pid) for pid in pids), f'runner survived {label}'
+                verdicts = list(marked.glob('*.verdict'))
+                assert len(verdicts) == wanted and all(p.read_text() == 'ok' for p in verdicts), (
+                    f'{label}: children lost scratch during cleanup: {verdicts}'
+                )
+            # The wrapper and dispatcher group must be drained at wrapper exit.
+            for stat in Path('/proc').glob('[0-9]*/stat'):
+                fields = state(stat.parent.name)
+                assert fields is None or fields[0] == 'Z' or int(fields[2]) != process.pid, (
+                    f'wrapper group survived {label}: {stat.parent.name}'
+                )
+            assert not roots(), f'{label}: scratch root leaked: {roots()}'
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            for marker in marked.glob('[0-9]'):
+                for pid in marker.read_text().split():
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             process.wait(timeout=5)
+            sweep()
+print('ok: profile cancellation drains children, preserves scratch and inherits run locks')
 PYCASE
 
 # A cleanup refusal cannot replace a profile failure with status 1.
@@ -556,6 +642,8 @@ SUBYARD_PROFILE_TESTS_SERIAL=1 bash "$fixture/dev/test-profiles.sh" -- 'forwarde
   > "$tmp/profile-cleanup-failure.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] || fail 'profile cleanup replaced the native failure'
 cp "$ROOT/dev/test-run-temp.py" "$fixture/dev/test-run-temp.py"
+# The refusal intentionally left a root; recover it before the fixture is removed.
+bash "$fixture/dev/with-test-temp.sh" true
 
 # The selected matrix uses real children/masks, rejects empty/missing checks,
 # and preserves the first operation failure before later masks.
