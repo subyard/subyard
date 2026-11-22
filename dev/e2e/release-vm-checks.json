@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "checks": [
     {"id": "p0-full", "tier": "vm", "needs": ["reboot", "kvm"], "timeout_seconds": 14400,
      "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "full", "--smoke-covered", "--split-covered"],

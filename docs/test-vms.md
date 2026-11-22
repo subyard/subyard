@@ -2,15 +2,15 @@
 
 The `test-vms` profile declares an owner infrastructure service and runs a root-owned lease broker
 inside its dedicated service container. Its configured
-pool contains one or more shared slots and defaults to two. Each lease selects `subyard-pair`
-(one or two standard VMs) or `android-test` (one larger VM). Slots own isolated inner Incus projects and networks;
-each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
+pool contains one or more shared slots and defaults to two. A lease selects `subyard-pair`
+(one or two standard VMs), `android-test` (one larger VM), or `system-container`
+(one or two unprivileged Incus system containers). Each slot owns an isolated inner
+Incus project and network. VM leases use fresh disks from a versioned immutable base. Release fences access and
 deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
 Lease-taking commands accept `--image debian-13|ubuntu-24.04|ubuntu-26.04`; omission retains Debian 13.
 The broker allowlists these choices rather than accepting arbitrary Incus images.
-Each OS and environment type has its own current immutable base; pruning retains all four
-current bases and every active lease pin. `yard test-vms refresh TYPE --image IMAGE` refreshes
+Each prepared VM environment and OS has its own immutable base. Pruning retains current bases and every active lease pin. `yard test-vms refresh TYPE --image IMAGE` refreshes
 only that combination, and status reports each base's image. Old callers and persisted leases
 without image metadata retain their Debian behavior. Explicit selection requires the broker's
 `image-v1` capability; clients refuse it on older brokers before acquiring a lease.
@@ -70,6 +70,13 @@ slots are held, provisioning, draining or quarantined. Grants report the actual 
 | --- | ---: | ---: | ---: |
 | `subyard-pair` | 1 or 2 | 4 GiB | 20 GiB |
 | `android-test` | 1 | 8 GiB | 40 GiB |
+| `system-container` | 1 or 2 | Shared host memory | Shared pool space |
+
+System containers use the broker CPU limit and a 4096-process limit per guest.
+Their restricted project permits nesting with isolated ID maps. Autostart is
+disabled. Acquire pins the architecture-matched upstream container fingerprint.
+Release or expiry fences access and deletes the allocation. Failed deletion
+keeps the slot draining until the broker verifies that its project is empty.
 
 Admission reserves provisioning RAM and builder promises against the lower of visible
 memory/cgroup headroom and verified physical-owner available RAM. Swap adds no RAM headroom;

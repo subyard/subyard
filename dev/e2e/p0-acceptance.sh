@@ -99,7 +99,7 @@ RUNNER_KILL_GRACE_SECONDS=10
 usage() {
   cat <<'EOF'
 Usage:
-  dev/e2e/p0-acceptance.sh --slot N
+  dev/e2e/p0-acceptance.sh --slot N [--image IMAGE]
   dev/e2e/p0-acceptance.sh --slot N --lane NAME
   dev/e2e/p0-acceptance.sh --list-lanes
 
@@ -134,6 +134,11 @@ parse_arguments() {
         [ "$slot_seen" = 0 ] || die '--slot may be specified only once'
         set_requested_slot "$2" --slot
         slot_seen=1
+        shift 2
+        ;;
+      --image)
+        [ "$#" -ge 2 ] || die '--image needs a supported image name'
+        allocation_option --image "$2"
         shift 2
         ;;
       --lane)
@@ -484,7 +489,9 @@ stop_runner_children() {
 }
 p0_guest() {
   local vm="$1"; shift
-  guest "$vm" runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
+  local -a placement=()
+  [ "$ENVIRONMENT_TYPE" != system-container ] || placement+=(SHIFT_MODE=acl)
+  guest "$vm" runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev "${placement[@]}" \
     sh -c 'cd "$HOME"; exec "$@"' _ "$@"
 }
 run_vm() {
