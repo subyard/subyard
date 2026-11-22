@@ -485,7 +485,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 				// The owning host-memory validator checked marker, shape and effective identity.
 				continue
 			case "subyard-docker-apparmor":
-				if runtime.Yard.YardKind != domain.YardContainer || !maps.Equal(device, legacyAppArmorDevice()) {
+				current := legacyAppArmorDevice()
+				current["source"] = filepath.Join(runtime.Yard.Paths.DataHome, "docker-apparmor-disabled")
+				if runtime.Yard.YardKind != domain.YardContainer || (!maps.Equal(device, legacyAppArmorDevice()) && !maps.Equal(device, current)) {
 					refusals = append(refusals, runtime.adoptionRefusal("legacy continuation refuses noncanonical AppArmor compatibility device"))
 				}
 				continue

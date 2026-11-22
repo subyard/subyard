@@ -43,7 +43,7 @@ exit "${PROBE_EXIT:-0}"
 	}
 	if mask {
 		instance.LocalDevices["subyard-docker-apparmor"] = map[string]string{
-			"type": "disk", "source": "/dev/null",
+			"type": "disk", "source": filepath.Join(root, "docker-apparmor-disabled"),
 			"path": "/sys/module/apparmor/parameters/enabled", "readonly": "true",
 		}
 	}

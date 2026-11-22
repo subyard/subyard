@@ -735,13 +735,18 @@ saved_count="$VM_COUNT"
 saved_cpu="$GRANT_CPU_PER_VM"
 saved_memory="$GRANT_MEMORY_PER_VM"
 saved_disk="$GRANT_DISK_PER_VM"
-for contract in subyard-pair:2 subyard-pair:1 android-test:1; do
+for contract in subyard-pair:2 subyard-pair:1 android-test:1 system-container:1; do
   ENVIRONMENT_TYPE="${contract%:*}" VM_COUNT="${contract#*:}"
   GRANT_CPU_PER_VM=4 GRANT_MEMORY_PER_VM=4GiB GRANT_DISK_PER_VM=20GiB
   if [ "$ENVIRONMENT_TYPE" = android-test ]; then
     GRANT_MEMORY_PER_VM=8GiB GRANT_DISK_PER_VM=40GiB
   fi
   write_guest_command 1 "$TMP" true > "$TMP/count-command.sh"
+  if [ "$ENVIRONMENT_TYPE" = system-container ]; then
+    grep -Fxq 'export SHIFT_MODE=acl' "$TMP/count-command.sh" || fail 'container fixture needs ACL mounts'
+  else
+    ! grep -q '^export SHIFT_MODE=' "$TMP/count-command.sh" || fail 'VM mount mode overridden'
+  fi
   sed -n '/^export SUBYARD_E2E_/p' "$TMP/count-command.sh" > "$TMP/resource-exports.sh"
   chmod 0600 "$TMP/count-command.sh" "$TMP/resource-exports.sh"
   env -i PATH=/usr/bin:/bin bash --noprofile --norc -c '

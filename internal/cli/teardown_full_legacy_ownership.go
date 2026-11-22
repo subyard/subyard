@@ -90,6 +90,10 @@ func validateLegacyFullYard(loaded config.Loaded, installation uninstall.Install
 		"kvm":                     {"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm"},
 		"subyard-docker-apparmor": {"type": "disk", "source": "/dev/null", "path": "/sys/module/apparmor/parameters/enabled", "readonly": "true"},
 	}
+	maskSource := filepath.Join(installation.DataHome, "docker-apparmor-disabled")
+	if instance.Devices["subyard-docker-apparmor"]["source"] == maskSource {
+		expected["subyard-docker-apparmor"]["source"] = maskSource
+	}
 	if loaded.Context.YardKind == "container" && loaded.Context.SSHPort > 0 && loaded.Context.SSHPort <= 65535 {
 		expected["ssh"] = map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:" + strconv.Itoa(loaded.Context.SSHPort), "connect": "tcp:127.0.0.1:22"}
 	}

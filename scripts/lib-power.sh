@@ -324,7 +324,11 @@ power_route_device_unsafe() { # <device> [bridge...]
   case "$dev" in veth*) return 0 ;; esac
   [[ "$dev" =~ ^tap.{8}$ ]] && return 0
   details="$(ip -d link show dev "$dev" 2>/dev/null)" || details=
-  case " $details " in *' veth '*|*' veth@'*) return 0 ;; esac
+  case " $details " in *' veth '*|*' veth@'*)
+    # Incus gives the primary host interface this name inside a system container.
+    if [ "$dev" = eth0 ] && [ "$(systemd-detect-virt --container 2>/dev/null)" = lxc ]; then return 1; fi
+    return 0 ;;
+  esac
   return 1
 }
 
