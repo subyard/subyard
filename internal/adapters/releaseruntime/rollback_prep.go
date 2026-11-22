@@ -462,6 +462,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 	prepared := false
 	plan := Prepared{
 		Request: request, Action: PrepareRollbackAction, Changed: true, Consequences: consequences,
+		AgentCleanup:   slices.Clone(selection.agentCleanup),
 		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 		SourceRelease:  string(links.Active), TargetRelease: string(target.candidate.release), TargetVersion: target.version, Steps: steps,
 		Binding: releaseOperationBinding(request, releasetransition.Inspection{Assessment: domain.ActionAssessment{Consequences: consequences}},
@@ -473,6 +474,7 @@ func (runtime *Runtime) prepareRollbackPreparation(parsed options, request relea
 			}{parsed.expectedLinks, steps, boundItems(items), retained}),
 		preparation: &observation,
 	}
+	plan.Consequences = append(plan.Consequences, plan.AgentCleanupConsequences()...)
 	plan.check = func(context.Context) (releasetransition.Inspection, error) {
 		if observed, err := runtime.inspectRuntimeLinks(parsed.root); err != nil || observed != *parsed.expectedLinks {
 			return releasetransition.Inspection{}, staleRetainedSelection(request.RuntimeRoot, request.Target)

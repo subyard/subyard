@@ -41,7 +41,9 @@ type releaseSelection struct {
 	compatibility *releasetransition.HistoryCompatibilityVerdict
 	// formatOwners are the runtime owners the active release prepares for
 	// this rollback target.
-	formatOwners []string
+	formatOwners     []string
+	rollbackBoundary bool
+	agentCleanup     []releasetransition.RollbackBoundary
 }
 
 // appendRefusal reports a refusal beside the one already selected, whose
@@ -139,6 +141,17 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 	}
 	defer active.Close()
 	selection.activeArtifact = active.manifestDigest
+	// The newer active release owns declarations as well as rollback hooks.
+	// Keep this independent of profile and history reads, including failed reads.
+	boundaryMessage, boundaryRetry, cleanup, boundaryErr := declaredRollbackBoundary(active, target)
+	selection.agentCleanup = cleanup
+	defer func() {
+		if selection != nil && boundaryMessage != "" {
+			selection.appendRefusal(boundaryMessage, boundaryRetry, boundaryErr)
+			selection.retry = boundaryRetry
+			selection.rollbackBoundary = true
+		}
+	}()
 	// Both routes to an older release: one fixed rule for its runtime formats.
 	retained := links.previous.present && links.previous.target == "releases/"+string(target.candidate.release)
 	formatOwners, formatRefusal, formatRetry, formatCause := profileFormatAdmission(active, target,

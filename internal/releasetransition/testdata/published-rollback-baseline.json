@@ -1,0 +1,30 @@
+{
+  "agentSourcesDigest": "624b84e79812edcf590010f4197e1dbd9528a5e27355d99a9eb3090fab9c104c",
+  "bundleSHA256": "85adf086cd630d61ba8ce3f4c0ea6e450bb898964e2135fbddaddf4104d75164",
+  "predecessorRegistryDigest": "",
+  "profiles": {
+    "git-fetch-runtime": {
+      "activation_id": "git-fetch-runtime",
+      "custody": true,
+      "handler": "runtime.sh"
+    },
+    "github-runtime": {
+      "activation_id": "github-runtime",
+      "handler": "runtime.sh"
+    },
+    "orca-runtime": {
+      "activation_id": "orca-runtime",
+      "failure_scope": "yard",
+      "handler": "runtime.sh",
+      "projects_changed_hooks": [
+        "/usr/local/libexec/subyard/projects-changed.d/orca"
+      ]
+    },
+    "telemetry-runtime": {
+      "activation_id": "telemetry-runtime",
+      "handler": "runtime.sh"
+    }
+  },
+  "registryFeatures": [],
+  "version": "0.30.0"
+}

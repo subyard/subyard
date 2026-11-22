@@ -52,6 +52,7 @@ type preparedRollbackFixture struct {
 }
 
 type preparedRollbackOptions struct {
+	targetVersion  string
 	active, target string // the sample runtime's extra declaration fields
 	seed           func(active, target string)
 }
@@ -66,8 +67,12 @@ func newPreparedRollbackFixture(t *testing.T, options preparedRollbackOptions) *
 	t.Cleanup(func() { _ = runtime.Close() })
 	declareRollbackPrepYard(t, home, "named")
 	root := filepath.Dir(active)
+	targetVersion := options.targetVersion
+	if targetVersion == "" {
+		targetVersion = UpdateAnchorVersion
+	}
 	fixture := &preparedRollbackFixture{runtime: runtime, runtimeRoot: filepath.Join(root, "runtime"), home: home, log: filepath.Join(root, "engine.log"),
-		drift: filepath.Join(root, "drift.json"), activeID: "0.31.0-active", targetID: UpdateAnchorVersion + "-target",
+		drift: filepath.Join(root, "drift.json"), activeID: "0.31.0-active", targetID: targetVersion + "-target",
 		formats: map[string]int{"default": 2, "named": 1}, consequence: map[string]string{}}
 	if err := os.MkdirAll(filepath.Join(fixture.runtimeRoot, "releases"), 0o700); err != nil {
 		t.Fatal(err)
@@ -81,7 +86,7 @@ func newPreparedRollbackFixture(t *testing.T, options preparedRollbackOptions) *
 	}
 	inspection := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"%s","previous":"%s","target":"%s","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`, fixture.activeID, fixture.targetID, fixture.targetID)
 	ready := fmt.Sprintf(`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"%s","target":"%s","code":"ready","message":"verified","transaction":"%s"}}}`, fixture.activeID, fixture.targetID, fixture.activeID, prepTransaction)
-	for _, candidate := range []struct{ path, id, version string }{{active, fixture.activeID, "0.31.0"}, {target, fixture.targetID, UpdateAnchorVersion}} {
+	for _, candidate := range []struct{ path, id, version string }{{active, fixture.activeID, "0.31.0"}, {target, fixture.targetID, targetVersion}} {
 		if err := os.MkdirAll(filepath.Join(candidate.path, "bin"), 0o700); err != nil {
 			t.Fatal(err)
 		}

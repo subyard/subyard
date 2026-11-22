@@ -1249,6 +1249,70 @@ release's declaration, which can come from a newer release, is read for
 and schema versions above 1 are tolerated, while the size bound, a single JSON object, a schema version of at least 1 and a
 well-formed digest are still required. Later schemas therefore keep that field and its meaning.
 
+### Declared rollback boundaries
+
+The newer active release performs rollback. Its sealed `config/release-rollback.json` may add
+`boundaries` to declare blocking state changes or accepted agent integration cleanup limitations.
+Each entry has:
+
+- `component`: `registry`, `profile:ACTIVATION_ID`, or `agents`.
+- `throughVersion`: the last affected published version, without `v`.
+- `reason` and `recovery`: single-line explanations, at most 512 bytes each. Recovery describes
+  the manual next step; it grants no automatic cleanup authority.
+- For `agents`, `sourceDigest` binds the reviewed integration sources and `files` lists the
+  surviving yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
+
+Sort entries by numeric semantic `throughVersion`, then `component`. Retain a boundary while
+incompatible releases remain possible targets. For `registry` and `profile:ACTIVATION_ID`, an older target at or below the
+version is refused with `rollback-incompatible`, the reason and a manual recovery hint. This
+applies both to `yard update --rollback` and explicit older version selection, before profile
+preparation or release mutation. Independent registry, configuration, VM and profile findings
+remain visible. These blocking boundaries do not make incompatible history readable. A blocking
+declaration is not bypassed by selecting an older version or running bootstrap.
+Keep the newer release active until a repair release supplies a supported down path, or restore
+a complete pre-upgrade backup into a clean installation of the older release. Restoring only
+release binaries is insufficient; restore the corresponding settings, history and yard state.
+Newer targets and same-release repair are unaffected.
+
+An `agents` entry is a **non-blocking accepted limitation**. Rollback and profile preparation
+proceed through their existing compatibility checks. The operator-facing plan output and result
+show the surviving yard files and manual cleanup instructions, also documented in release notes.
+Agent declarations neither authorize automatic removal nor add integration rollback hooks. Stop
+agent sessions before rollback and complete the documented cleanup before restarting them.
+
+`TestPublishedRollbackGate` compares the current source to the latest version in
+`dev/e2e/published-upgrade-baselines.tsv`. Its checked-in snapshot keeps this check offline and
+usable in shallow checkouts. After adding a published baseline, fetch its release tag and run
+`python3 dev/update-rollback-baseline.py`; review the snapshot and registry against the published
+release. The test rejects a stale snapshot. There is no additional packaging-time gate.
+
+A changed registry must pass the shared `HistoryCompatibility` / `RegistryAdmitted` rule,
+including the target reader features and the predecessor declaration of whichever release is
+the retiring successor, or carry a `registry` boundary. A format change for an activation ID
+present in both releases needs its existing `prepares_rollback_to` contract (whose handler owns
+`rollback-observe` and `rollback-apply`) or a `profile:ACTIVATION_ID` boundary. Introduced or
+removed runtime owners are skipped, matching runtime admission. Agent integrations have no
+rollback hooks: changes to tracked inputs in the existing integration asset inventory need a
+reviewed non-blocking `agents` declaration with manual cleanup. This covers integration metadata,
+package provisioning and lifecycle sources, every declared artifact and approval variant, shipped
+configuration defaults, the usage provisioner and `config/projects-changed.sh` (installed as
+`/usr/local/libexec/subyard/projects-changed`). Referenced assets under `tests/` are included;
+unreferenced files and untracked scratch files are excluded. Inventory records use sorted full
+repository-relative paths, content hashes and the Git executable flag. Both the gate and snapshot
+updater use the same Go inventory. Its failure prints the current source digest; a later source
+edit requires renewed review and an updated digest, so an old declaration cannot silently cover new files.
+
+For example, an integration that replaces the shared Claude policy with drop-ins
+`48-`, `49-` and `51-` adds their exact paths under
+`/etc/claude-code/managed-settings.d/` to `files`, updates `sourceDigest`, and documents stopping
+Claude, backing up and removing those Subyard-owned drop-ins, then restoring the previous
+release's policy after rollback and before restarting agents. List complete filenames, not globs; preserve
+operator-owned policy. The current declaration covers the approval hooks and managed agent
+configuration and project dispatcher changed or added since 0.30.0. Review cleanup inside each
+affected yard, including custom installation paths. This declaration belongs to the introducing unreleased 0.31.0
+candidate; `throughVersion: "0.30.0"` describes affected rollback targets, not its owning release.
+It does not refuse the supported rollback to v0.30.0.
+
 Release selection compares the profile runtime formats that the active release and an older or
 equal target declare for each activation ID. A newer target is exempt only when both versions are
 established. `yard update --version` refuses any difference, and so

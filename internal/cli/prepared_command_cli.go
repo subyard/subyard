@@ -96,6 +96,7 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	} else if prepared.preview != nil {
 		prepared.preview()
 	}
+
 	if prepared.readiness != nil {
 		prepared.readiness()
 	}
@@ -103,6 +104,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		cli.printPendingInit(*prepared.pendingInit)
 	}
 	assumeYes = assumeYes || commandAssumeYes(prepared.Arguments) || cli.env["ASSUME_YES"] == "1"
+	if prepared.release != nil && (assumeYes || prepared.Plan.Confirmation == domain.ConfirmationNever || prepared.Plan.Confirmed) {
+		cli.printUpdateAgentCleanup(prepared.release)
+	}
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
 	plan, err := prepared.Confirm(ctx, orchestrator, assumeYes)
 	if err != nil {

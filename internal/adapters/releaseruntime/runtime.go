@@ -57,19 +57,22 @@ type Config struct {
 }
 
 type Prepared struct {
-	Request        releasetransition.ProcessRequest `json:"-"`
-	Action         domain.ActionID
-	Changed        bool
-	Consequences   []string
-	RefreshConfigs bool
-	ActiveLauncher string
-	SourceRelease  string
-	SourceVersion  string
-	TargetRelease  string
-	TargetVersion  string
-	Steps          []domain.OperationStep
-	Binding        string       `json:"-"`
-	Close          func() error `json:"-"`
+	Request      releasetransition.ProcessRequest `json:"-"`
+	Action       domain.ActionID
+	Changed      bool
+	Consequences []string
+	// AgentCleanup reports accepted rollback limitations, without authorizing cleanup.
+	AgentCleanup        []releasetransition.RollbackBoundary `json:",omitempty"`
+	AgentCleanupWarning string                               `json:",omitempty"`
+	RefreshConfigs      bool
+	ActiveLauncher      string
+	SourceRelease       string
+	SourceVersion       string
+	TargetRelease       string
+	TargetVersion       string
+	Steps               []domain.OperationStep
+	Binding             string       `json:"-"`
+	Close               func() error `json:"-"`
 	// RepairCurrent identifies protected recovery of the active release before release selection.
 	RepairCurrent bool
 	// BootstrapRepositoryRoot is the canonical repository to use for a fresh
@@ -759,7 +762,7 @@ func (runtime *Runtime) prepareTransition(
 						return Prepared{}, err
 					}
 				}
-				prepared, err := runtime.prepareProtectedTransition(parsed, protected)
+				prepared, err := runtime.prepareProtectedTransition(ctx, parsed, protected)
 				if err == nil && verified != nil && !parsed.check {
 					retainDraft(&prepared)
 				}
@@ -1220,6 +1223,7 @@ func sourceIngressRequestFromEnvironment(
 }
 
 func (runtime *Runtime) prepareProtectedTransition(
+	ctx context.Context,
 	parsed options,
 	protected *protectedTransitionInspection,
 ) (Prepared, error) {
@@ -1239,9 +1243,9 @@ func (runtime *Runtime) prepareProtectedTransition(
 		)
 	}
 	prepared, err := runtime.prepareInspectedCandidateTransitionWithRecovery(
-		parsed, protected.owner, protected.target,
+		ctx, parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
-		protected.activationReconciliationOwned, protected.recoveryRequest,
+		protected.activationReconciliationOwned, protected.recoveryRequest, protected.journal.Releases.From,
 	)
 	if err == nil && !parsed.check {
 		prepared.RepairCurrent = protected.inspection.Outcome.Active == protected.request.Target &&
@@ -1577,7 +1581,7 @@ func (runtime *Runtime) inspectVerifiedTransition(
 		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 	}
 	return runtime.prepareInspectedCandidateTransition(
-		parsed,
+		ctx, parsed,
 		candidateVerification{
 			candidate: owner.candidate, digest: owner.manifestDigest, version: owner.version,
 			registryDigest: owner.registryDigest,
@@ -1592,6 +1596,7 @@ func (runtime *Runtime) inspectVerifiedTransition(
 }
 
 func (runtime *Runtime) prepareInspectedCandidateTransition(
+	ctx context.Context,
 	parsed options,
 	owner candidateVerification,
 	target candidateVerification,
@@ -1600,11 +1605,12 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	activationReconciliationOwned bool,
 ) (Prepared, error) {
 	return runtime.prepareInspectedCandidateTransitionWithRecovery(
-		parsed, owner, target, request, inspection, activationReconciliationOwned, nil,
+		ctx, parsed, owner, target, request, inspection, activationReconciliationOwned, nil, "",
 	)
 }
 
 func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
+	ctx context.Context,
 	parsed options,
 	owner candidateVerification,
 	target candidateVerification,
@@ -1612,6 +1618,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 	inspection releasetransition.Inspection,
 	activationReconciliationOwned bool,
 	recoveryRequest *releasetransition.RecoveryProcessRequest,
+	cleanupSource releasetransition.ReleaseID,
 ) (prepared Prepared, err error) {
 	if recoveryRequest != nil {
 		requestCopy := *recoveryRequest
@@ -1622,10 +1629,25 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithRecovery(
 		}
 		recoveryRequest = &requestCopy
 	}
+	var cleanup []releasetransition.RollbackBoundary
+	var cleanupWarning string
+	if parsed.selection != nil {
+		cleanup = slices.Clone(parsed.selection.agentCleanup)
+	} else if !parsed.check && cleanupSource != "" && cleanupSource != target.candidate.release {
+		var cleanupErr error
+		cleanup, cleanupErr = runtime.protectedAgentCleanup(ctx, request.RuntimeRoot, cleanupSource, target)
+		if cleanupErr != nil {
+			cleanup = nil
+			cleanupWarning = fmt.Sprintf("Warning: cleanup notices could not be read for release %s; recovery proceeds.", cleanupSource)
+		}
+	}
 	defer func() {
 		if err == nil && !parsed.check {
 			prepared.nativePlan = inspection.Plan
 			prepared.Steps = releaseOperationSteps(request, inspection)
+			prepared.AgentCleanup = cleanup
+			prepared.AgentCleanupWarning = cleanupWarning
+			prepared.Consequences = append(prepared.Consequences, prepared.AgentCleanupConsequences()...)
 			prepared.Binding = releaseOperationBinding(request, inspection, owner, target, parsed.expectedLinks)
 			prepared.Binding = activationRecoveryOperationBinding(prepared.Binding, recoveryRequest)
 		}
