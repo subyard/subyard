@@ -199,11 +199,11 @@ yard_service_failure_diagnostics() { # <start epoch>
     [ "$unit" = ssh.service ] || continue
     printf 'ssh.service journal for this start:\n'
     timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u ssh.service --since "@$1" -n 20 2>/dev/null \
-      | head -n 20 | cut -c1-240
+      | sed -n '1,20p' | cut -c1-240
     printf 'sshd -t errors:\n'
-    timeout --kill-after=1 5 sshd -t 2>&1 >/dev/null | head -n 20 | cut -c1-240
+    timeout --kill-after=1 5 sshd -t 2>&1 >/dev/null | sed -n '1,20p' | cut -c1-240
     printf 'sshd -G errors:\n'
-    timeout --kill-after=1 5 sshd -G 2>&1 >/dev/null | head -n 20 | cut -c1-240
+    timeout --kill-after=1 5 sshd -G 2>&1 >/dev/null | sed -n '1,20p' | cut -c1-240
     hostkeys="$(timeout --kill-after=1 5 sshd -G 2>/dev/null | grep -ci '^hostkey ')"
     printf 'sshd -G hostkey entries: %s, host key files: %s\n' "${hostkeys:-0}" \
       "$(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' -type f 2>/dev/null | wc -l)"
