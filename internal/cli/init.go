@@ -168,6 +168,11 @@ func (reporter initReporter) StageStarted(stage application.ReconcileStage) {
 	fmt.Fprintf(reporter.output, "  [ .. ] %s\n", stage.ID)
 }
 
+// StagePending renders readiness an apply accepted as pending, with its hint.
+func (reporter initReporter) StagePending(stage application.ReconcileStage, observation ports.ReconcileStageObservation) {
+	fmt.Fprintf(reporter.output, "  [ !! ] %s: %s\n", stage.ID, profileReadinessSummary(observation.Owner, observation.Reason))
+}
+
 func parseInitArguments(arguments []string) (initArguments, error) {
 	request := initArguments{mode: initReconcile, consentFD: -1}
 	for index := 0; index < len(arguments); index++ {

@@ -9,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -66,8 +69,10 @@ func (runtime *profileDiagnosticRuntime) ProfileServiceConverged(ctx context.Con
 	return runtime.profileRuntimeSelection.ProfileServiceConverged(ctx, name)
 }
 
-func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
-	for _, reason := range []string{"boot-dependency-unloaded", "private-canary"} {
+// Only validated readiness codes reach status, in text and JSON, with the
+// boundary's hint when one is mapped.
+func TestScopedProfileStatusRendersValidatedDiagnostic(t *testing.T) {
+	for _, reason := range []string{"boot-dependency-unloaded", "source-unavailable", "private-canary"} {
 		t.Run(reason, func(t *testing.T) {
 			cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
 			runtime := &profileDiagnosticRuntime{profileRuntimeSelection: profileRuntimeSelection{fixture, true}, observation: ports.ReconcileStageObservation{Owner: "fixture", NativeExit: 1, Reason: reason}}
@@ -87,12 +92,23 @@ func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("status exit=%d: %s", code, output)
 				}
-				if asJSON {
-					if output.String() != "{\"yard\":\"default\",\"id\":\"fixture\",\"enabled\":true,\"configured\":true,\"runtime\":\"pending\",\"ready\":false}\n" {
-						t.Fatalf("status JSON changed: %s", output)
-					}
-				} else if reason == "boot-dependency-unloaded" && !strings.HasSuffix(output.String(), "diagnostic: boot-dependency-unloaded\n") {
-					t.Fatalf("human diagnostic absent: %s", output)
+				hint := profile.ServiceReadinessHint(reason)
+				wantJSON := `{"yard":"default","id":"fixture","enabled":true,"configured":true,"runtime":"pending","ready":false`
+				wantText := "diagnostic: " + reason + "\n"
+				switch reason {
+				case "private-canary":
+					wantText = "ready: false\n"
+				case "source-unavailable":
+					wantJSON += `,"code":"source-unavailable","hint":` + strconv.Quote(hint)
+					wantText += "hint: " + hint + "\n"
+				default:
+					wantJSON += `,"code":"` + reason + `"`
+				}
+				if asJSON && output.String() != wantJSON+"}\n" {
+					t.Fatalf("status JSON: %s", output)
+				}
+				if !asJSON && !strings.HasSuffix(output.String(), wantText) {
+					t.Fatalf("human diagnostic: %s", output)
 				}
 				if strings.Contains(output.String(), "private-canary") {
 					t.Fatal("unvalidated diagnostic rendered")
@@ -705,9 +721,9 @@ func (runtime sourcePendingRuntime) ProfileServiceConverged(context.Context, str
 	return false, nil
 }
 
-func (runtime sourcePendingRuntime) VerifyAppliedProfileService(context.Context, string) (bool, error) {
+func (runtime sourcePendingRuntime) VerifyAppliedProfileService(_ context.Context, name string) (ports.ReconcileStageObservation, error) {
 	*runtime.verified++
-	return true, nil
+	return ports.ReconcileStageObservation{Converged: true, Owner: name, NativeExit: 1, Reason: profile.SourceUnavailable}, nil
 }
 
 func TestScopedProfileEnableAcceptsSourceAccessAfterApply(t *testing.T) {
@@ -727,5 +743,19 @@ func TestScopedProfileEnableAcceptsSourceAccessAfterApply(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != "ENVIRONMENT_PROFILES='neighbor fixture'\n" || verified != 1 || strings.Join(runtime.applied, " ") != "fixture" || strings.Join(runtime.recorded, " ") != "fixture=true" {
 		t.Fatalf("selection=%q verified=%d applied=%v recorded=%v", data, verified, runtime.applied, runtime.recorded)
+	}
+	if want := "profile fixture is pending (source-unavailable): " + profile.ServiceReadinessHint(profile.SourceUnavailable); !strings.Contains(output.String(), want) {
+		t.Fatalf("the boundary did not render the readiness hint: %s", output)
+	}
+}
+
+// Init's post-apply summary renders accepted pending readiness with its hint.
+func TestInitReporterRendersPendingReadinessHint(t *testing.T) {
+	var output bytes.Buffer
+	initReporter{output: &output}.StagePending(application.ReconcileStage{ID: ports.ReconcileStageProfileServices},
+		ports.ReconcileStageObservation{Converged: true, Owner: "user-skills", Reason: profile.SourceUnavailable})
+	want := "  [ !! ] profile-services: profile user-skills is pending (source-unavailable): " + profile.ServiceReadinessHint(profile.SourceUnavailable) + "\n"
+	if output.String() != want {
+		t.Fatalf("summary: %q", output.String())
 	}
 }

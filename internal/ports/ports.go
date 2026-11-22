@@ -253,7 +253,9 @@ type ReconcileStageObservation struct {
 	Converged  bool
 	Owner      string
 	NativeExit int
-	Reason     string
+	// Reason is a readiness code. On a converged post-apply observation it is
+	// readiness the apply accepted as pending; the operation boundary renders it.
+	Reason string
 	// Diagnostics are readiness state of a converged stage that the operation
 	// boundary renders, such as a setting that applies at the next start or a
 	// profile declaration that this yard kind does not apply.

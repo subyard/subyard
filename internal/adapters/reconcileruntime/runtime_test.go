@@ -2644,24 +2644,22 @@ exit "$INCUS_RC"
 	}
 }
 
+// The adapter returns accepted readiness as state; it never renders a hint.
 func TestAppliedProfileServicesAcceptOnlySourceUnavailable(t *testing.T) {
-	var stderr bytes.Buffer
-	runtime := Runtime{Stderr: &stderr}
 	pending := ports.ReconcileStageObservation{Owner: "sample", NativeExit: 1, Reason: "source-unavailable"}
-	if ready, err := runtime.acceptAppliedProfileServices(pending, nil); !ready || err != nil || !strings.Contains(stderr.String(), "profile sample cannot reach a source yet: authorize access") {
-		t.Fatalf("source access not accepted after apply: %v %v %q", ready, err, stderr.String())
+	if observation, err := acceptAppliedProfileServices(pending, nil); err != nil || !observation.Converged || observation.Owner != "sample" || observation.Reason != "source-unavailable" {
+		t.Fatalf("source access not accepted after apply: %#v %v", observation, err)
 	}
-	stderr.Reset()
 	for _, observation := range []ports.ReconcileStageObservation{
 		{Owner: "sample", NativeExit: 1, Reason: "unit-inactive"},
 		{Owner: "sample", NativeExit: 1},
 	} {
-		if ready, err := runtime.acceptAppliedProfileServices(observation, nil); ready || err != nil || stderr.Len() != 0 {
-			t.Fatalf("other drift accepted: %#v %v %v", observation, ready, err)
+		if accepted, err := acceptAppliedProfileServices(observation, nil); accepted.Converged || err != nil {
+			t.Fatalf("other drift accepted: %#v %#v %v", observation, accepted, err)
 		}
 	}
 	failure := errors.New("profile service check failed")
-	if ready, err := runtime.acceptAppliedProfileServices(pending, failure); ready || err != failure {
-		t.Fatalf("check failure accepted: %v %v", ready, err)
+	if accepted, err := acceptAppliedProfileServices(pending, failure); accepted.Converged || err != failure {
+		t.Fatalf("check failure accepted: %#v %v", accepted, err)
 	}
 }
