@@ -20,10 +20,17 @@ func main() {
 }
 
 func run(args []string) error {
+	path := fmt.Sprintf("/run/user/%d/herdr-core/default.sock", os.Getuid())
+	if len(args) > 0 && (args[0] == "sync" || args[0] == "hook") {
+		restore := len(args) == 2 && args[0] == "sync" && args[1] == "--restore"
+		if len(args) != 1 && !restore {
+			return errors.New("invalid project sync arguments")
+		}
+		return syncProjects(path, "/srv/workspaces", restore, args[0] == "hook")
+	}
 	if len(args) != 1 {
 		return errors.New("expected a guest operation")
 	}
-	path := fmt.Sprintf("/run/user/%d/herdr-core/default.sock", os.Getuid())
 	switch args[0] {
 	case "observe", "status":
 		return observe(path, args[0] == "status")
@@ -84,7 +91,7 @@ func observe(socket string, human bool) error {
 			fmt.Printf("Clean startup marker: %s. Use yard herdr restart to refresh the login environment.\n", core.CleanStart)
 		}
 	}
-	return domain.CollectRefusals(err, homeErr, pathErr)
+	return domain.CollectRefusals(err, homeErr, pathErr, reportPending())
 }
 
 func versionBelow(candidate, floor string) bool {

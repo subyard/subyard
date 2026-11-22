@@ -56,7 +56,7 @@ core_release() {
 }
 digest() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
-  sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" "$profile/release.env" |
+  sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" "$here/projects-changed.sh" "$profile/release.env" |
     awk '{print $1}' | sha256sum | cut -d ' ' -f1
 }
 guest_file() {
@@ -72,9 +72,10 @@ guest_file() {
 }
 install_assets() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
-  yexec install -d -m 0755 /usr/local/libexec/subyard
+  yexec install -d -m 0755 /usr/local/libexec/subyard/projects-changed.d
   guest_file "$helper" 0755 < "$native"
   guest_file "$login" 0755 < "$here/login.sh"
+  guest_file /usr/local/libexec/subyard/projects-changed.d/herdr 0755 < "$here/projects-changed.sh"
   guest_file "/etc/systemd/system/$unit" 0644 <<EOF
 [Unit]
 Description=Start Herdr Core in the developer login environment
@@ -107,6 +108,7 @@ up() {
   yexec systemctl enable --quiet "$unit"
   if ! running; then yexec systemctl start "$unit"; fi
   wait_core
+  as_dev "$helper" sync
   digest | guest_file "$helper.sha256" 0644
 }
 up_ready() {
@@ -151,7 +153,8 @@ runtime() {
 
 usage() {
   cat <<EOF
-Usage: ${PROG:-yard} herdr <up|status|is-up|update|restart|logs|down>
+Usage: ${PROG:-yard} herdr <up|status|is-up|sync|update|restart|logs|down>
+  sync [--restore]  Reconcile project spaces, optionally restoring closed ones
   update [--force]  Upgrade to the latest compatible release, or restore the pin
   logs [--follow]   Read Herdr logs
   down              Stop Core and its running terminals
@@ -163,7 +166,7 @@ if [ "$action" = _runtime ]; then shift; runtime "$@"; exit; fi
 case "$action" in ''|--help|-h|help) usage; exit ;; esac
 shift
 case "$action:$*" in
-  update:--force|logs:--follow|up:|status:|is-up:|update:|restart:|logs:|down:) ;;
+  update:--force|logs:--follow|sync:--restore|up:|status:|is-up:|sync:|update:|restart:|logs:|down:) ;;
   *) svc_usage_error 'invalid Herdr command or arguments' ;;
 esac
 
@@ -173,6 +176,11 @@ assessment() {
   case "$action" in
     status|is-up|logs)
       jq -cn --arg action "$action" '{schema:"yard.resource-action-assessment.v1",action:$action,changed:false,consequences:[]}'
+      return ;;
+    sync)
+      allowed
+      svc_require_yard_running
+      jq -cn '{schema:"yard.resource-action-assessment.v1",action:"sync",changed:true,consequences:[]}'
       return ;;
     up)
       allowed
@@ -225,6 +233,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         if ! yexec test -x "$helper"; then printf 'Herdr: not installed\n'; exit; fi
         printf 'Minimum Core release: %s\n' "$HERDR_VERSION"
         as_dev env "SUBYARD_HERDR_MINIMUM=$HERDR_VERSION" "$helper" status ;;
+      sync) allowed; svc_require_yard_running; as_dev "$helper" sync "$@" ;;
       logs) svc_require_yard_running; yexec journalctl --no-pager -n 100 -u "$unit" + "_UID=$DEV_UID" "_COMM=herdr-core" "$@" ;;
       update)
         allowed

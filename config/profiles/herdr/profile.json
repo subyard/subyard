@@ -2,6 +2,10 @@
   "schema_version": 1,
   "disabled_when": {"NESTED_E2E_VMS": "1"},
   "selected_provision_only": true,
-  "runtime": {"activation_id": "herdr-runtime", "handler": "runtime.sh"},
+  "runtime": {
+    "activation_id": "herdr-runtime",
+    "handler": "runtime.sh",
+    "projects_changed_hooks": ["/usr/local/libexec/subyard/projects-changed.d/herdr"]
+  },
   "native": [{"package": "cmd/herdr-profile", "path": "bin/herdr-profile"}]
 }
