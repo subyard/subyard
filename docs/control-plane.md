@@ -1213,7 +1213,9 @@ Otherwise, `retired-prefix-dependencies` admits only a whole registry canonicall
 frozen v0.30.0 registry retired through its own floors. Every dependency of a retired migration
 must also be retired; an unclosed set refuses entirely. The same proved retired IDs reserve names
 and satisfy surviving dependencies. Foreign definitions, reused IDs and foreign prefix digests
-cannot expand this closed language. Of the 71 nonempty v0.30.0 retirements, the golden enumerates
+cannot expand this closed language.
+The feature's meaning is frozen while any release declaring it can be a rollback target.
+Of the 71 nonempty v0.30.0 retirements, the golden enumerates
 25 accepted forms: 5 strict forms and 20 additional dependency-closed forms. This release keeps
 all historical definitions and handlers; their removal belongs to a later release.
 Any other relation is `refuse`; `steps` is not produced
@@ -1229,9 +1231,9 @@ equivalent target, such as an older release, keeps the registry refusal and is n
 that decide by the registry read `RegistryAdmitted`, so an admitted equivalent target behaves like
 identical registries for source-floor advice, first-publication evidence and bootstrap
 publication, and an undeclared one like differing registries. Only an equivalent relation depends
-on a declaration, the newer release's, so one that cannot be verified refuses only an equivalent
-target: the runtime selection and the verb report a verification error, and the engine treats it as
-no declared predecessor. The engine applies the same verdict to its own and the rollback target's
+on the newer release's predecessor declaration. The target's reader declaration must also be
+verified; a failure is collected with independently known registry and history refusals at the
+runtime boundary. The engine applies the same verdict to its own and the rollback target's
 parsed registries and its own declaration; identical sealed bytes stand in for a target registry it
 cannot parse. The sealed
 [`config/release-rollback.json`](../config/release-rollback.json) declares the canonical registry

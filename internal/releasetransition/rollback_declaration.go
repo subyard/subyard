@@ -12,6 +12,7 @@ const (
 
 // RegistryFeatureRetiredPrefixDependencies is the closed frozen-v0.30 reader,
 // not permission to satisfy dependencies from arbitrary retired prefixes.
+// Its meaning is frozen while any release declaring it can be a rollback target.
 const RegistryFeatureRetiredPrefixDependencies = "retired-prefix-dependencies"
 
 // RegistryReaderFeatures is bound to the shipped declaration by a repository
