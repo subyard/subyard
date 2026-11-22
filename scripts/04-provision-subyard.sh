@@ -187,7 +187,36 @@ chown root:yard "${srv_skel[@]}"
 chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit the yard group
 
 # Services live in the container's own systemd (does not touch host systemd).
-systemctl enable --now ssh docker
+# A failed start reports each failed unit's result. For sshd it also reports this attempt's journal
+# and the config/key checks behind Debian's host key setup, bounded and without their stdout.
+yard_service_failure_diagnostics() { # <start epoch>
+  local unit result hostkeys
+  for unit in ssh.service docker.service; do
+    ! timeout --kill-after=1 3 systemctl is-active --quiet "$unit" || continue
+    result="$(timeout --kill-after=1 3 systemctl show "$unit" --property=Result --value 2>/dev/null)" || result=
+    [[ "$result" =~ ^[a-z-]{1,32}$ ]] || result=unknown
+    printf 'yard service %s failed to start: result=%s\n' "$unit" "$result"
+    [ "$unit" = ssh.service ] || continue
+    printf 'ssh.service journal for this start:\n'
+    timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u ssh.service --since "@$1" -n 20 2>/dev/null \
+      | head -n 20 | cut -c1-240
+    printf 'sshd -t errors:\n'
+    timeout --kill-after=1 5 sshd -t 2>&1 >/dev/null | head -n 20 | cut -c1-240
+    printf 'sshd -G errors:\n'
+    timeout --kill-after=1 5 sshd -G 2>&1 >/dev/null | head -n 20 | cut -c1-240
+    hostkeys="$(timeout --kill-after=1 5 sshd -G 2>/dev/null | grep -ci '^hostkey ')"
+    printf 'sshd -G hostkey entries: %s, host key files: %s\n' "${hostkeys:-0}" \
+      "$(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' -type f 2>/dev/null | wc -l)"
+  done
+}
+services_started="$(date +%s)"
+if systemctl enable --now ssh docker; then
+  :
+else
+  services_exit=$?
+  yard_service_failure_diagnostics "$services_started" >&2 || true
+  exit "$services_exit"
+fi
 # Verify the inventory API used by native callers; provisioning consumes no info fields.
 docker_api_started=$EPOCHREALTIME
 if timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1; then
