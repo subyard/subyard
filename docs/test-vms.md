@@ -310,8 +310,10 @@ with one deadline, including a slot that becomes `provisioning` or `held` while 
 the release acceptance collector sets it to `120m` for VM checks unless
 already set, and hosted CI collector selections set `30m` to stay inside their job limits. The runner retries only while another request can start before the deadline, so a
 late grant is never needed. When the bound expires, the final typed capacity refusal and exit 4
-remain visible. A slot refusal records `resource=slot` with exit 4, immediately when no wait is
+remain visible. Only `provisioning`, `held`, `draining` and `recovering` are transient slot states.
+Their refusal records `resource=slot state=STATE` with exit 4, immediately when no wait is
 configured or after the deadline; the collector records it as retryable `capacity_slot`.
+`quarantined` and `unavailable` fail immediately with exit 2 and require operator action.
 The exact requested slot is retained throughout the wait. A `held` busy response
 contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
 `acquired_at` and `expires_at`. Other unavailable states carry no owner object. The runner validates

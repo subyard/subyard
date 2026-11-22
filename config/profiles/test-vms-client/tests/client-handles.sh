@@ -67,6 +67,15 @@ case "$command" in
     read -r protocol _ _ _ yard project run purpose _ _ slot count _ <<<"$command"
     log "$protocol yard=$yard project=$project purpose=$purpose slot=$slot count=${count:-}"
     case "$(cat "$FAKE/scenario" 2>/dev/null || true)" in
+      slot-held)
+        busy
+        exit 0 ;;
+      slot-*)
+        state="$(cat "$FAKE/scenario")"
+        state="${state#slot-}"
+        jq -cn --arg state "$state" '{schema_version:1,status:"error",code:"busy",
+          state:$state,reason:$state,message:"requested slot is unavailable"}'
+        exit 0 ;;
       race-success|race-timeout)
         attempt="$(grep -c "^$protocol " "$FAKE/facade.log")"
         if [ "$attempt" = 1 ]; then
@@ -381,6 +390,28 @@ done
 # Both acquire protocols must keep the exact slot and the original deadline.
 for protocol in v3 v4; do
   [ "$protocol" != v4 ] || touch "$TMP/v4"
+  for state in provisioning held draining recovering quarantined unavailable; do
+    printf 'slot-%s\n' "$state" > "$TMP/scenario"
+    : > "$TMP/facade.log"
+    budget=2s expected_rc=4
+    case "$state" in quarantined|unavailable) budget=20s expected_rc=2 ;; esac
+    rc=0
+    started=$SECONDS
+    handle="$(SUBYARD_E2E_CAPACITY_WAIT="$budget" SUBYARD_E2E_LANE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      client acquire --yard test-yard --slot 2 2>"$TMP/err")" || rc=$?
+    [ "$rc" = "$expected_rc" ] && [ -z "$handle" ] && [ -z "$(ls -A "$TMP/client/handles")" ] \
+      && [ "$(count guest-start)" = 0 ] \
+      || fail "$protocol $state refusal: rc=$rc $(cat "$TMP/err")"
+    if [ "$expected_rc" = 4 ]; then
+      grep -Eq "^E2E_LEASE lane=a{32} run=[0-9a-f]{8} slot=slot-002 event=refused resource=slot state=$state$" "$TMP/err" \
+        && [ "$((SECONDS - started))" -ge 2 ] \
+        || fail "$protocol $state did not wait and record its transient state"
+    else
+      [ "$(count acquire)" = 1 ] && [ "$((SECONDS - started))" -lt 10 ] \
+        && grep -Fq 'operator action required' "$TMP/err" && ! grep -q 'event=refused' "$TMP/err" \
+        || fail "$protocol $state waited or became a retryable capacity refusal"
+    fi
+  done
   for scenario in race-success race-timeout; do
     printf '%s\n' "$scenario" > "$TMP/scenario"
     : > "$TMP/facade.log"
@@ -397,7 +428,7 @@ for protocol in v3 v4; do
     else
       [ "$rc" = 4 ] && [ "$((SECONDS - started))" -lt 10 ] && [ "$(count acquire)" -ge 2 ] \
         && grep -Fq 'timed out waiting for slot-002: state=provisioning reason=provisioning' "$TMP/err" \
-        && grep -Eq '^E2E_LEASE lane=a{32} run=[0-9a-f]{8} slot=slot-002 event=refused resource=slot$' "$TMP/err" \
+        && grep -Eq '^E2E_LEASE lane=a{32} run=[0-9a-f]{8} slot=slot-002 event=refused resource=slot state=provisioning$' "$TMP/err" \
         && [ -z "$handle" ] && [ -z "$(ls -A "$TMP/client/handles")" ] \
         && [ "$(count guest-start)" = 0 ] \
         || fail "$protocol lost the original deadline or typed slot refusal: rc=$rc $(cat "$TMP/err")"

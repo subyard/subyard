@@ -3730,6 +3730,16 @@ set -e
   && [ "$(grep -c '^release' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
   || fail "late exact-slot grant was accepted or not released: $late_grant_output"
 
+new_runner_fixture capacity-late-grant
+late_grant_rc=0
+late_grant_output="$(SUBYARD_E2E_CAPACITY_WAIT=1s run_runner_fixture late-grant --slot 2 --ssh 1 -- true 2>&1)" || late_grant_rc=$?
+[ "$late_grant_rc" = 4 ] \
+  && grep -Fq 'deadline elapsed before the lease grant arrived' <<<"$late_grant_output" \
+  && [ "$(grep -c '^acquire' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && [ "$(grep -c '^release' "$RUNNER_FIXTURE/facade.log")" = 1 ] \
+  && ! grep -q '^other ' "$RUNNER_FIXTURE/facade.log" \
+  || fail "late grant bypassed the shared capacity deadline: $late_grant_output"
+
 # The controller records only fixed phase fields, including terminal failures and interruption.
 for phase_scenario in success guest-failure transfer-failure direct-failure release-failure interrupt; do
   new_runner_fixture "phase-$phase_scenario"
@@ -3792,7 +3802,7 @@ for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wa
     # A raw guest command stages nothing.
     phase-direct-failure) lane_expected="request"$'\n'"$lane_grant"$'\nrelease exit_code=0' ;;
     capacity) lane_expected=$'request\nrefused resource=memory' ;;
-    busy) lane_expected=$'request\nrefused resource=slot' ;;
+    busy) lane_expected=$'request\nrefused resource=slot state=held' ;;
   esac
   [ "$(lane_records "$TMP/lane-$lane_scenario.log")" = "$lane_expected" ] \
     || fail "lane records of $lane_scenario differ: $(cat "$TMP/lane-$lane_scenario.log")"

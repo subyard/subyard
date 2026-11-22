@@ -1007,7 +1007,7 @@ LANE_HEADER = re.compile(rb"E2E_LANE id=([0-9a-f]{32})\n")
 LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,100})\n")
 LANE_EVENTS = {event: re.compile(fields) for event, fields in (
     (b"request", rb""), (b"grant", rb" type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})"),
-    (b"refused", rb" resource=(memory|disk|slot)"), (b"work", rb" vm=([12])"),
+    (b"refused", rb" resource=(memory|disk|slot)(?: state=(provisioning|held|draining|recovering))?"), (b"work", rb" vm=([12])"),
     (b"cleaned", rb" vm=([12]) exit_code=([0-9]{1,3})"), (b"release", rb" exit_code=([0-9]{1,3})"))}
 # The longest well-formed record line, from its `E2E_LEASE lane=ID ` prefix to the newline.
 LANE_RECORD_BYTES = 200
@@ -1052,6 +1052,7 @@ def lane_evidence(log, slot, declared=None):
             fields = record and LANE_EVENTS.get(record[3]) and LANE_EVENTS[record[3]].fullmatch(record[4])
             event = record and record[3].decode()
             if (not fields or event in ("cleaned", "release") and int(fields.groups()[-1]) > 255
+                    or event == "refused" and (fields[1] == b"slot") != (fields[2] is not None)
                     or event == "grant" and fields[1] == b"android-test" and fields[2] != b"1"):
                 issue = issue or "malformed lane lease record"
                 continue

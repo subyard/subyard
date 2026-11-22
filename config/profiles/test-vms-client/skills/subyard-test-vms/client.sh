@@ -908,7 +908,7 @@ acquire_lease() {
       printf '%s: timed out waiting for %s: state=%s reason=%s\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
       [ -z "$last_owner_summary" ] || printf '%s: %s\n' "$E2E_PROGRAM" "$last_owner_summary" >&2
-      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot"
+      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot" "state=$last_state"
       return 4
     fi
     attempt=$((attempt + 1))
@@ -927,7 +927,7 @@ acquire_lease() {
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
       elapsed=$((SECONDS - started))
-      if [ "$WAIT_SECONDS" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+      if [ "$capacity_wait" -gt 0 ] && [ "$elapsed" -ge "$capacity_wait" ]; then
         printf '%s: deadline elapsed before the lease grant arrived; releasing %s without guest access\n' "$E2E_PROGRAM" \
           "$LEASE_REQUESTED_SLOT" >&2
         release_lease \
@@ -1008,6 +1008,10 @@ acquire_lease() {
     fi
     validate_exact_busy_response "$response" \
       || die_acquire_unknown invalid-busy-refusal
+    case "$state" in
+      provisioning|held|draining|recovering) ;;
+      *) die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason; operator action required" ;;
+    esac
     owner_summary=''
     if [ "$state" = held ]; then
       owner_acquired_epoch="$(date -u -d "$(jq -r '.owner.acquired_at' <<<"$response")" +%s 2>/dev/null)" \
@@ -1024,7 +1028,7 @@ acquire_lease() {
     if [ "$capacity_wait" -eq 0 ]; then
       printf '%s: requested E2E slot %s is unavailable: state=%s reason=%s%s\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$state" "$reason" "${owner_summary:+; $owner_summary}" >&2
-      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot"
+      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=slot" "state=$state"
       return 4
     fi
     elapsed=$((SECONDS - started))
