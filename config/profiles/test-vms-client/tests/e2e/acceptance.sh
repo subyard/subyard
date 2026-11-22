@@ -64,5 +64,6 @@ released="$handle"
 handle=''
 if bash "$client" exec "$released" -- true 2>/dev/null; then fail 'exec succeeded after release'; fi
 
-bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-boundary --verify-boundary
+# This existing check requires the VM bastion and subyard-pair verification contract.
+SUBYARD_E2E_TIER=vm bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-boundary --verify-boundary
 printf 'ok: Hermes yard delivery and retirement; installed client leased, ran root commands across calls, released; boundary verified\n'

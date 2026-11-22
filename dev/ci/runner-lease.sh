@@ -89,7 +89,10 @@ CONFIG
   printf '    ConnectionAttempts 5\n    ConnectTimeout 5\n' >> "$CLIENT_CONFIG"
   # Exercise the same real SSH path that the staged fixture and direct P0
   # callers will use before issuing a grant.
-  facts="$(E2E_GUEST_TIMEOUT=30 guest 1 sh -ec '. /etc/os-release; printf "image=%s-%s arch=%s" "$ID" "$VERSION_ID" "$(dpkg --print-architecture)"' </dev/null)" ||
+  facts="$(E2E_GUEST_TIMEOUT=30 guest 1 sh -ec '
+    test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${ACTIONS_RUNTIME_TOKEN:-}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}${SSH_AUTH_SOCK:-}"
+    . /etc/os-release
+    printf "image=%s-%s arch=%s" "$ID" "$VERSION_ID" "$(dpkg --print-architecture)"' </dev/null)" ||
     die 'hosted runner SSH identity probe failed'
   [[ "$facts" =~ ^image=ubuntu-24\.04' arch='(amd64|arm64)$ ]] || die 'unsupported hosted runner guest identity'
   jq -cn --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" --arg yard "$LEASE_YARD" \

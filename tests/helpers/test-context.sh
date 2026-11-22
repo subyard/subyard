@@ -58,7 +58,14 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
 # Standalone E2E platform bootstrap runs the installer outside the native dispatcher.
 prepare_test_incus_dispatcher() { # <source-root>
   local source="${1:?}" engine="$1/.build/incus-bootstrap/yard"
-  "$source/dev/build-engine.sh" --output "$engine" || return
+  if [ -e "$source/.subyard-acceptance/candidate.json" ] || [ -L "$source/.subyard-acceptance/candidate.json" ]; then
+    # The transported dispatcher is already built for this exact candidate.
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$source/tests/helpers/release-candidate.sh"
+    engine="$(release_candidate_prepare "$source")" || return
+  else
+    "$source/dev/build-engine.sh" --output "$engine" || return
+  fi
   export SUBYARD_DISPATCHER_PATH="$engine"
 }
 

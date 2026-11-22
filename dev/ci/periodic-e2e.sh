@@ -262,9 +262,10 @@ check_probes() {
   else
     probe_after candidate candidate-runtime install_runtime
     probe_after candidate-runtime test-vms-service install_pool "$id"
-    probe_after test-vms-service "check:$id" run_check "$@"
     if [ "$id" = pool-boundary ]; then
-      probe_after "check:$id" container-pool prove_container_pool
+      probe_after test-vms-service container-pool prove_container_pool
+    else
+      probe_after test-vms-service "check:$id" run_check "$@"
     fi
   fi
   probe facts-after facts
@@ -281,6 +282,10 @@ case "${1:-}" in
     cd "$WORKSPACE"
     BUNDLE=''
     keep_diagnostics
+    ;;
+  pool)
+    [ "$#" = 4 ] && [ "$3" = --image ] && [ -n "$4" ] || die 'usage: periodic-e2e.sh pool BUNDLE --image IMAGE'
+    SUBYARD_E2E_LEASE_IMAGE="$4" check_probes pool-boundary "$2"
     ;;
   check)
     [ "$#" -ge 6 ] && [ "$4" = --image ] && [ -n "$5" ] \

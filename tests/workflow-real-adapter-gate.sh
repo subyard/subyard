@@ -389,7 +389,7 @@ assert f"github.ref == 'refs/heads/master' && format(' ({{0}})',\n  {lease_image
 assert f"github.ref == 'refs/heads/master' && format(':image:{{0}}',\n    {lease_image})" in workflow
 assert "inputs.origin && format('-retry-{0}', inputs.origin)" in workflow
 assert "cancel-in-progress: ${{ !inputs.origin }}" in workflow
-assert '--image "$LEASE_IMAGE"\n          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1' in workflow
+assert 'bash dev/ci/periodic-e2e.sh pool\n          "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"\n          --image "$LEASE_IMAGE"' in workflow
 assert '-f attempt="$attempt" -f image="$LEASE_IMAGE"' in workflow
 assert workflow.count('CHECK_COMMAND: ${{ toJSON(matrix.command) }}') == 2
 assert workflow.count('tar.gz" "${command[@]}"') == 2
