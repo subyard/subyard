@@ -272,9 +272,9 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					if yard.Context.IncusProject != owner.Project {
 						t.Fatal("capture lost native partial ownership")
 					}
-					fixture := newFixture(t, withCommands("incus"))
-					bin := fixture.Bin
-					fixture.Exec().On(testkit.Match{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}}, testkit.Reply{Stdout: string(partialProfile)})
+					incusFake := newFixture(t, withCommands("incus"))
+					bin := incusFake.Bin
+					incusFake.Exec().On(testkit.Match{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}}, testkit.Reply{Stdout: string(partialProfile)})
 					values := structuredCommandContext(program.teardownLoaded(yard))
 					payload, _ := json.Marshal(yard.Snapshot.Resources)
 					engine, err := os.Executable()
@@ -291,7 +291,7 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					if output, err := command.CombinedOutput(); err != nil {
 						t.Fatalf("captured native partial profile routed to another project: %v: %s", err, output)
 					}
-					fixture.Exec().AssertCalls(
+					incusFake.Exec().AssertCalls(
 						testkit.Call{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}},
 						testkit.Call{Tool: "incus", Args: []string{"query", "/1.0/profiles/default?project=native-partial"}},
 					)
