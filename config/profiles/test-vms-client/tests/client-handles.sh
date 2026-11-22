@@ -34,6 +34,9 @@ for argument in "$@"; do
   previous="$argument"
 done
 log() { printf '%s\n' "$*" >> "$FAKE/facade.log"; }
+busy() {
+  printf '%s\n' '{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Other#run-a","yard":"other","project":"Other","run":"run-a","purpose":"tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:20:00Z"},"message":"requested slot is unavailable"}'
+}
 grant() {
   jq -cn --arg yard "$1" --arg project "$2" --arg run "$3" --arg purpose "$4" \
     '{schema_version:1,status:"ok",grant:{environment:{type:"subyard-pair",vm_count:1,cpu_per_vm:2,
@@ -64,8 +67,21 @@ case "$command" in
     read -r protocol _ _ _ yard project run purpose _ _ slot count _ <<<"$command"
     log "$protocol yard=$yard project=$project purpose=$purpose slot=$slot count=${count:-}"
     case "$(cat "$FAKE/scenario" 2>/dev/null || true)" in
+      race-success|race-timeout)
+        attempt="$(grep -c "^$protocol " "$FAKE/facade.log")"
+        if [ "$attempt" = 1 ]; then
+          printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}'
+          exit 0
+        elif [ "$attempt" = 2 ] || [ "$(cat "$FAKE/scenario")" = race-timeout ]; then
+          printf '%s\n' '{"schema_version":1,"status":"error","code":"busy","state":"provisioning","reason":"provisioning","message":"requested slot is unavailable"}'
+          exit 0
+        elif [ "$attempt" = 3 ]; then
+          busy
+          exit 0
+        fi
+        ;;
       busy|busy-wait)
-        printf '%s\n' '{"schema_version":1,"status":"error","code":"busy","state":"held","reason":"busy","owner":{"display_label":"Other#run-a","yard":"other","project":"Other","run":"run-a","purpose":"tests","acquired_at":"2026-08-24T12:00:00Z","expires_at":"2026-08-24T12:20:00Z"},"message":"requested slot is unavailable"}'
+        busy
         exit 0 ;;
       capacity)
         printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}'
@@ -348,7 +364,7 @@ for scenario in busy busy-wait capacity; do
   rc=$?
   set -e
   case "$scenario" in
-    busy) [ "$rc" = 2 ] && grep -Fq 'state=held reason=busy; owner=other/Other run=run-a purpose=tests' "$TMP/err" \
+    busy) [ "$rc" = 4 ] && grep -Fq 'state=held reason=busy; owner=other/Other run=run-a purpose=tests' "$TMP/err" \
       || fail "busy refusal: rc=$rc $(cat "$TMP/err")" ;;
     busy-wait) [ "$rc" = 4 ] \
       && grep -E -q '^[^:]+: timed out waiting for slot-002: state=held reason=busy$' "$TMP/err" \
@@ -360,6 +376,35 @@ for scenario in busy busy-wait capacity; do
   [ ! -s "$TMP/refused-handle" ] && [ -z "$(ls -A "$TMP/client/handles")" ] \
     || fail "$scenario refusal left a handle"
 done
-rm -f "$TMP/scenario"
+
+# Another lane can reserve a slot between memory retries, hold it, then release it.
+# Both acquire protocols must keep the exact slot and the original deadline.
+for protocol in v3 v4; do
+  [ "$protocol" != v4 ] || touch "$TMP/v4"
+  for scenario in race-success race-timeout; do
+    printf '%s\n' "$scenario" > "$TMP/scenario"
+    : > "$TMP/facade.log"
+    budget=30s
+    [ "$scenario" != race-timeout ] || budget=6s
+    rc=0
+    started=$SECONDS
+    handle="$(SUBYARD_E2E_CAPACITY_WAIT="$budget" SUBYARD_E2E_LANE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      client acquire --yard test-yard --slot 2 2>"$TMP/err")" || rc=$?
+    if [ "$scenario" = race-success ]; then
+      [ "$rc" = 0 ] && [ "$(count acquire)" = 4 ] \
+        || fail "$protocol did not wait through memory, provisioning and held: rc=$rc $(cat "$TMP/err")"
+      client release "$handle" 2>/dev/null || fail "$protocol race lease release failed"
+    else
+      [ "$rc" = 4 ] && [ "$((SECONDS - started))" -lt 10 ] && [ "$(count acquire)" -ge 2 ] \
+        && grep -Fq 'timed out waiting for slot-002: state=provisioning reason=provisioning' "$TMP/err" \
+        && grep -Eq '^E2E_LEASE lane=a{32} run=[0-9a-f]{8} slot=slot-002 event=refused resource=slot$' "$TMP/err" \
+        && [ -z "$handle" ] && [ -z "$(ls -A "$TMP/client/handles")" ] \
+        && [ "$(count guest-start)" = 0 ] \
+        || fail "$protocol lost the original deadline or typed slot refusal: rc=$rc $(cat "$TMP/err")"
+    fi
+    [ "$(grep '^acquire' "$TMP/facade.log" | grep -vc ' slot=slot-002 count=1$')" = 0 ] \
+      || fail "$protocol race changed the exact requested slot"
+  done
+done
 
 printf 'ok: test-VM client handles span separate commands, fence keepers and release\n'

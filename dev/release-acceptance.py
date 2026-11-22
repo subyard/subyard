@@ -1007,7 +1007,7 @@ LANE_HEADER = re.compile(rb"E2E_LANE id=([0-9a-f]{32})\n")
 LANE_RECORD = re.compile(rb"run=([0-9a-f]{8}) slot=slot-([0-9]{3}) event=([a-z]{1,8})([^\r\n]{0,100})\n")
 LANE_EVENTS = {event: re.compile(fields) for event, fields in (
     (b"request", rb""), (b"grant", rb" type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})"),
-    (b"refused", rb" resource=(memory|disk)"), (b"work", rb" vm=([12])"),
+    (b"refused", rb" resource=(memory|disk|slot)"), (b"work", rb" vm=([12])"),
     (b"cleaned", rb" vm=([12]) exit_code=([0-9]{1,3})"), (b"release", rb" exit_code=([0-9]{1,3})"))}
 # The longest well-formed record line, from its `E2E_LEASE lane=ID ` prefix to the newline.
 LANE_RECORD_BYTES = 200
@@ -1682,7 +1682,7 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None, requ
                     continue
                 capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
                                     and result.get("termination") == "exit"
-                                    and result.get("reason") in ("capacity_memory", "capacity_disk"))
+                                    and result.get("reason") in ("capacity_memory", "capacity_disk", "capacity_slot"))
                 if capacity_blocked and not retrying:
                     retries.append(name)
 
@@ -1866,7 +1866,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             # For example, an excluded local gate: name it instead of leaving preflights silently not run.
             print("INCOMPLETE: profile preflights await successful local gates; not passed: " + ", ".join(unready_local), flush=True)
             failure_reason = "prerequisite-stop"
-        # Only live checks wait for broker memory or disk instead of draining the queue on a
+        # Only live checks wait for broker memory, disk or slots instead of draining the queue on a
         # transient refusal; a refusal that outlasts this bound still blocks visibly.
         env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
