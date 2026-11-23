@@ -655,6 +655,8 @@ func TestCLIFixtureRefusesPathsAndSettingsItDoesNotOwn(t *testing.T) {
 }
 
 func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
+	// Git fixtures stay outside the checkout even when TMPDIR points into it.
+	testkit.UseHostTempDir(t)
 	export := testkit.TempDir(t)
 	// A repository above the test directory must not adopt the export.
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(export))
@@ -694,6 +696,8 @@ func TestCLIFixtureCheckoutListingFailsClosed(t *testing.T) {
 }
 
 func TestCLIFixtureCopiesIgnoredNestedExport(t *testing.T) {
+	// Git fixtures stay outside the checkout even when TMPDIR points into it.
+	testkit.UseHostTempDir(t)
 	repository := testkit.TempDir(t)
 	runConfigSyncGit(t, repository, "init", "-q")
 	testkit.WriteFile(t, filepath.Join(repository, ".gitignore"), []byte(".build/\n"), 0o600)
