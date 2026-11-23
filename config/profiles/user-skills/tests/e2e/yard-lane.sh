@@ -135,6 +135,8 @@ YARDS+=("$first")
 yard "$first" init --environment-profiles 'user-skills' --yes
 grep -Fqx "ENVIRONMENT_PROFILES='user-skills'" "$SUBYARD_CONFIG_HOME/yards/$first/config.env" \
   || die 'creation did not save the requested selection'
+# Init preserves desired power; guest-side checks require a running yard.
+yard "$first" start --yes
 # A rerun with the saved set continues as plain init.
 yard "$first" init --environment-profiles 'user-skills' --yes
 
@@ -199,5 +201,6 @@ as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'init-time de
 printf 'user-skills_e2e_stage=plain-named-yard\n'
 YARDS+=("$second")
 yard "$second" init --yes
+yard "$second" start --yes
 yard "$second" profile enable user-skills --yes
 printf 'ok: user-skills creation, source access retry, disable/enable, deselection and named-yard enable\n'
