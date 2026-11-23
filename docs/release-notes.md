@@ -22,7 +22,9 @@
 - Service recreation checks the replacement's host network safety before opening a release
   transition or deleting the old runtime. It records an unbound NetworkManager guard first;
   when a reboot is required, reboot once, then rerun `yard update`. Recreation retains the shared
-  bridge, storage pool and guard binding so reinstalling the last yard does not require another reboot.
+  bridge, storage pool, guard binding and power reconciler so reinstalling the last yard does not
+  require another reboot. The power stage updates the retained unit; recreation does not try to
+  remove an older release’s unit using the new release’s template.
 - `yard init` on a stopped yard accepts newly visible project-hook counts after its temporary
   identity inspection start; a new resource or operation step still refuses as a stale plan.
 - Boot power reconciliation retries failed attempts every 30 seconds, including storage that

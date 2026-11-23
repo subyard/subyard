@@ -338,7 +338,7 @@ func (recreation *serviceRecreation) assess(ctx context.Context, yard string) (s
 
 func (recreation *serviceRecreation) consequence(plan serviceRecreationPlan) string {
 	record := plan.selection.record
-	return fmt.Sprintf("recreate service %s in yard %s for the new release: its open SSH sessions are interrupted; teardown deletes its instance, Incus project and /srv volume with their VMs, leases and base images; the shared bridge, storage pool, guard binding and yard settings are kept and the runtime gets a new UUID", record.Service, record.Yard)
+	return fmt.Sprintf("recreate service %s in yard %s for the new release: its open SSH sessions are interrupted; teardown deletes its instance, Incus project and /srv volume with their VMs, leases and base images; the shared bridge, storage pool, guard binding, power reconciler and yard settings are kept and the runtime gets a new UUID", record.Service, record.Yard)
 }
 
 func (recreation *serviceRecreation) warning(yard string, refusal error) string {

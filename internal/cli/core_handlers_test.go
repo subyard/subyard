@@ -23,6 +23,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
@@ -806,10 +807,18 @@ func TestRecreationTeardownKeepsSharedIncusForItsReplacement(t *testing.T) {
 	}
 	program := fixture.New(Options{Arguments: []string{"teardown", "--yes"}, Environment: append(fixture.Environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), AdapterRunner: runner, Prompt: &testkit.Prompt{}, Incus: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy()})
 	program.releaseTransitionChild = true
+	inspectedProducers := false
+	program.options.ObserveCoreProducers = func(_ config.Loaded, _ uninstall.RecoveryPlan, owners []string, _ int) ([]uninstall.RecoveryService, error) {
+		inspectedProducers = true
+		if slices.Contains(owners, "power") {
+			t.Fatal("recreation selected the shared power reconciler for removal")
+		}
+		return nil, nil
+	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("teardown failed with %d", code)
 	}
-	if len(runner.Requests) != 1 ||
+	if !inspectedProducers || len(runner.Requests) != 1 ||
 		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_SHARED"] != "1" {
 		t.Fatalf("shared Incus lifecycle was not preserved: %#v", runner.Requests)
 	}

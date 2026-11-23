@@ -333,7 +333,10 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 		for _, instance := range others {
 			managedNeighbor = managedNeighbor || instance.Project != loaded.Context.IncusProject && instance.Config["user.subyard.managed"] == "true"
 		}
-		if !managedNeighbor {
+		// Release recreation immediately reinstalls the yard. Its power owner
+		// updates the shared unit; teardown must not validate/remove an older
+		// release's unit against the candidate template.
+		if !managedNeighbor && !cli.releaseTransitionChild {
 			owners = append(owners, "power")
 		}
 		installation := uninstall.Installation{DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: firstNonempty(loaded.Environment["YARD_RUNTIME_ROOT"], filepath.Join(loaded.Context.Paths.DataHome, "runtime")), OperatorUID: uint32(os.Getuid())}
