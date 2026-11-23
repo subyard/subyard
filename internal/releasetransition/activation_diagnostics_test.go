@@ -314,3 +314,67 @@ func TestActivationBlockerGivesAccessRepairForDeniedSocket(t *testing.T) {
 		t.Fatalf("blocker = %#v", blocker)
 	}
 }
+
+// A resumed destructive activation must recheck start safety before continuing.
+type preflightReconcilerFixture struct {
+	*v2TestReconciler
+	failure error
+	calls   int
+}
+
+func (fixture *preflightReconcilerFixture) PreflightActivation(context.Context) error {
+	fixture.calls++
+	return fixture.failure
+}
+
+func TestActivationPreflightCollectsRefusalsBeforeJournalAndOnInterruptedResume(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprint(interrupted), func(t *testing.T) {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			a := &preflightReconcilerFixture{v2TestReconciler: &v2TestReconciler{id: "a"}}
+			b := &preflightReconcilerFixture{v2TestReconciler: &v2TestReconciler{id: "b"}}
+			transition.options.Reconcilers = []V2ActivationReconciler{a, b}
+			inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)}
+			if interrupted {
+				transition.options.fault = func(point string) error {
+					if point == "after-journal-authorized" {
+						return errors.New("interrupted")
+					}
+					return nil
+				}
+				_, _ = transition.Converge(context.Background(), execution)
+				transition.options.fault = nil
+				inspection, err = transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget})
+				if err != nil {
+					t.Fatal(err)
+				}
+				execution.Plan = inspection.Plan
+			}
+			before, err := transition.store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.failure = fmt.Errorf("a: %w", v2PublicActivationError{"guard unread", "reboot, then update"})
+			b.failure = fmt.Errorf("b: %w", v2PublicActivationError{"route unsafe", "repair route, then update"})
+			a.calls, b.calls = 0, 0
+			outcome, err := transition.Converge(context.Background(), execution)
+			if err != nil || outcome.Status != StatusOperatorActionRequired || a.calls != 1 || b.calls != 1 || a.reconciles+b.reconciles != 0 {
+				t.Fatalf("preflight applied or skipped checks: %+v %v calls=%d/%d", outcome, err, a.calls, b.calls)
+			}
+			if !strings.Contains(outcome.Message, "guard unread") || !strings.Contains(outcome.Message, "route unsafe") || strings.Index(outcome.Message, "guard unread") > strings.Index(outcome.Message, "route unsafe") {
+				t.Fatal("lost refusal order", outcome)
+			}
+			after, err := transition.store.ReadCurrentJournal()
+			if err != nil || !sameProtectedSnapshot(before, after) {
+				t.Fatal("refusal changed journal", err)
+			}
+			if !interrupted && after.Exists {
+				t.Fatal("refusal opened a transition")
+			}
+		})
+	}
+}

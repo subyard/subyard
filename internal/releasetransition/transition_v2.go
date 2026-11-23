@@ -116,6 +116,33 @@ type V2ActivationReconciler interface {
 	Reconcile(context.Context, ReleaseLinks) error
 }
 
+// V2ActivationPreflighter checks prerequisites of destructive activation work
+// after consent, under the update lock, before publishing a new journal. It
+// also runs on resume. Preparation must be idempotent and preserve the runtime.
+type V2ActivationPreflighter interface {
+	PreflightActivation(context.Context) error
+}
+
+func (transition *V2Transition) preflightActivation(ctx context.Context, observation v2Observation) *Outcome {
+	var findings []error
+	for _, reconciler := range transition.options.Reconcilers {
+		if preflight, ok := reconciler.(V2ActivationPreflighter); ok {
+			findings = append(findings, preflight.PreflightActivation(ctx))
+		}
+	}
+	if err := domain.CollectRefusals(findings...); err != nil {
+		message, retry := publicActivationDiagnostic(err, "activation prerequisites are unavailable", "run yard update --check")
+		var transaction *TransactionID
+		if observation.journal != nil && observation.journal.Checkpoint != JournalComplete {
+			transaction = transactionIDPointer(observation.journal.Transaction)
+		}
+		outcome := withActivationWarnings(v2OperatorOutcome(observation.links, observation.goal.Target, transaction,
+			CodeDependencyUnavailable, message, retry), observation.activationWarnings)
+		return &outcome
+	}
+	return nil
+}
+
 // V2ConcurrentActivationObserver opts independent, read-only Observe calls into
 // bounded overlap with adjacent opted-in observers. Prospective observations and
 // reconciliation remain serial; every overlapping call finishes before reduction.
@@ -944,6 +971,9 @@ func (transition *V2Transition) Converge(
 					"run yard update --check"), nil
 			}
 		}
+		if outcome := transition.preflightActivation(ctx, observation); outcome != nil {
+			return *outcome, nil
+		}
 		created, createErr := transition.newJournal(observation, plan, execution.Authorization)
 		if createErr != nil {
 			return Outcome{}, createErr
@@ -1002,6 +1032,9 @@ func (transition *V2Transition) Converge(
 				transactionIDPointer(journal.Transaction), CodePlanStale,
 				"the authorized release transition bindings changed",
 				"run yard update --check"), nil
+		}
+		if outcome := transition.preflightActivation(ctx, observation); outcome != nil {
+			return *outcome, nil
 		}
 	}
 	links, guardOutcome, guardErr := transition.guardJournalLinks(ctx, *journal)
