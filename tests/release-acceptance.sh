@@ -3342,8 +3342,8 @@ while True: time.sleep(1)
         self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
                           if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
             "published-upgrade/anchor": ["anchor", "claude opencode pi"],
-            "published-upgrade/0.29.0": ["0.29.0", "all"],
             "published-upgrade/0.30.0": ["0.30.0", "all"],
+            "published-upgrade/0.31.0": ["0.31.0", "all"],
         })
         for role in ("anchor", "hop"):
             pin = getattr(upgrade_verifier, "published_" + role)(root)
@@ -3414,9 +3414,9 @@ while True: time.sleep(1)
             "previous release 99.0.0: missing catalog check with all agents"])
         for previous in ("0.28.0", "0.28.1"):
             self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
-        catalog["checks"] = [entry for entry in catalog["checks"] if entry["id"] != "published-upgrade/0.29.0"]
-        self.assertEqual(published_baseline_refusals(root, catalog, "0.29.0"), [
-            "previous release 0.29.0: missing catalog check with all agents"])
+        catalog["checks"] = [entry for entry in catalog["checks"] if entry["id"] != "published-upgrade/0.31.0"]
+        self.assertEqual(published_baseline_refusals(root, catalog, "0.31.0"), [
+            "previous release 0.31.0: missing catalog check with all agents"])
 
     def test_core_vm_check_wrapper_runs_the_declared_command_on_its_slot(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

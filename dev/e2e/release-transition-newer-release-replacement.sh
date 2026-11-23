@@ -18,7 +18,7 @@ STATE_ROOT="/var/tmp/subyard-newer-release-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
 MARKER="subyard-newer-release-$TOKEN"
 SUCCESS_YARD="newer-release-$TOKEN"
-SOURCE_VERSION=0.30.0
+SOURCE_VERSION=0.31.0
 SOURCE_BUNDLE="subyard-$SOURCE_VERSION-linux-amd64.tar.gz"
 ASSET_ROOT="$STATE_ROOT/assets"
 SOURCE_ASSETS="$ASSET_ROOT/source"
@@ -83,7 +83,7 @@ cleanup_newer_release() {
 }
 
 fetch_source_assets() {
-  local name publisher_sha
+  local name
   install -d -m 0700 "$SOURCE_ASSETS"
   for name in "$SOURCE_BUNDLE" "$SOURCE_BUNDLE.sha256" "$SOURCE_BUNDLE.manifest.json" \
     "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install.sh; do
@@ -93,9 +93,10 @@ fetch_source_assets() {
   [ "$(sha256sum "$SOURCE_ASSETS/$SOURCE_BUNDLE" | awk '{print $1}')" = "$SOURCE_AMD64_SHA256" ] \
     && [ "$(sha256sum "$SOURCE_ASSETS/subyard-install.sh" | awk '{print $1}')" = "$SOURCE_INSTALLER_SHA256" ] \
     || die 'published source differs from its immutable pin'
-  publisher_sha="$(sed -nE "s/^publisher_sha='([0-9a-f]{64})'$/\1/p" "$SOURCE_ASSETS/subyard-install.sh")"
-  [ "$(sha256sum "$SOURCE_ASSETS/subyard-install-runtime-release.sh" | awk '{print $1}')" = "$publisher_sha" ] \
-    || die 'published runtime installer differs from the authenticated bootstrap digest'
+  # The pinned archive carries the release's own copy of the standalone runtime installer.
+  [ "$(sha256sum "$SOURCE_ASSETS/subyard-install-runtime-release.sh" | awk '{print $1}')" \
+    = "$(tar -xzOf "$SOURCE_ASSETS/$SOURCE_BUNDLE" ./scripts/install-runtime-release.sh | sha256sum | awk '{print $1}')" ] \
+    || die 'published runtime installer differs from the copy in the pinned archive'
 }
 
 stage() { # version: sets LAUNCHER to the published release's own launcher

@@ -1,7 +1,7 @@
 {
-  "agentSourcesDigest": "624b84e79812edcf590010f4197e1dbd9528a5e27355d99a9eb3090fab9c104c",
-  "bundleSHA256": "85adf086cd630d61ba8ce3f4c0ea6e450bb898964e2135fbddaddf4104d75164",
-  "predecessorRegistryDigest": "",
+  "agentSourcesDigest": "02e92517724ee6d17a3bb326e88c361d5a7d8172dfd5bd766272f76e2d35df4d",
+  "bundleSHA256": "fd0504fff2cd4155fc65cae8291f2f8fbd3e5a0aff645fed971afce8b3f3365f",
+  "predecessorRegistryDigest": "aa4007773efe0e9862479442a5cb2eb4f6f528f86b9047502167d03568f1768b",
   "profiles": {
     "git-fetch-runtime": {
       "activation_id": "git-fetch-runtime",
@@ -22,9 +22,11 @@
     },
     "telemetry-runtime": {
       "activation_id": "telemetry-runtime",
-      "handler": "runtime.sh"
+      "format": 2,
+      "handler": "runtime.sh",
+      "prepares_rollback_to": 1
     }
   },
   "registryFeatures": [],
-  "version": "0.30.0"
+  "version": "0.31.0"
 }
