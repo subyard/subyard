@@ -361,9 +361,9 @@ nm_guard_static_listed() { # <conf>: a current-format guard lists every static e
 
 # Planning: no released guard, a known inventory whose bridges the guard all lists, every static
 # entry, and an active NetworkManager that has read it (a migration waiting for its reboot is no
-# drift init could repair).
+# drift init could repair). A legacy decimal-comma record still needs canonicalization.
 nm_guard_file_current() { # <conf> [bridge]
-  local conf="$1" bridge="${2:-}" listed rc
+  local conf="$1" bridge="${2:-}" listed rc record='' recorded_file
   nm_guard_released "$conf" && return 1
   nm_guard_inventory || return 1
   if ! nm_path_exists "$conf"; then
@@ -376,6 +376,9 @@ nm_guard_file_current() { # <conf> [bridge]
   while IFS= read -r bridge; do
     [ -z "$bridge" ] || grep -Fxq -- "$bridge" <<< "$listed" || return 1
   done <<< "$NM_INVENTORY"
+  { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || true
+  read -r _ recorded_file _ <<< "$record"
+  case "$recorded_file" in *,*) return 1 ;; esac
   if power_nm_active; then :; else rc=$?; [ "$rc" -eq 1 ] && return 0; return 1; fi
   case "$(power_nm_guard_state "$conf")" in loaded|loaded-reboot|unread-migration) return 0 ;; *) return 1 ;; esac
 }

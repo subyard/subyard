@@ -695,10 +695,12 @@ for legacy_state in 'held init' 'held migration' 'unread init' 'unread migration
   legacy_record="boot-0 ${identity/./,} $(power_nm_guard_static_hash "$guard_conf") $legacy_state"
   nm_guard_write_file "$POWER_NM_GUARD_STATE" "$legacy_record"
   [ "$(state_of)" = loaded ] || fail "legacy $legacy_state record did not bind across reboot"
+  if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning skipped legacy record canonicalization"; fi
   nm_guard_publish "$guard_conf" "$(cat "$guard_conf")" init 1 "$(power_nm_binary)" >/dev/null
   [ "$(cat "$POWER_NM_GUARD_STATE")" = "${legacy_record/,/.}" ] \
     && [ "$(power_nm_file_id "$guard_conf")" = "$identity" ] \
     || fail "legacy $legacy_state canonicalization changed the binding or state"
+  nm_guard_file_current "$guard_conf" incusbr0 || fail "canonicalization did not converge network planning"
 done
 # Canonicalization persists the identity it matched, even if the path changes before recording.
 (
