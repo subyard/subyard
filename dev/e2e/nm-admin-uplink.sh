@@ -656,7 +656,16 @@ fresh-final)
   yard_devices_unmanaged 'yard restored at boot'
   uplink_admins 'after the final reboot'
   [ "$(device_state br0)" = connected ] && [ "$(device_state e2ebr1)" = unmanaged ] || die 'the reboot changed br0 or e2ebr1'
+  [ "$(cut -d ' ' -f2 "$state_record")" = "$(tr '.' ',' < "$STATE/legacy-identity")" ] \
+    && [ "$(cut -d ' ' -f1,3- "$state_record")" = "$(cat "$STATE/legacy-fields")" ] \
+    || die 'boot reconciliation rewrote the legacy comma record'
+  [ "$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")" = "$(cat "$STATE/legacy-identity")" ] \
+    || die 'boot reconciliation changed the legacy guard identity'
+  [ "$(sudo -n env LC_ALL=C bash -c '. "$1"; power_nm_guard_state' \
+    _ "$YARD_RUNTIME_ROOT/current/scripts/lib-power.sh")" = loaded ] \
+    || die 'the legacy comma record is not bound after reboot'
   pass 'the boot reconciler restored the running yard; its veth and both bridges keep their state'
+  pass 'boot accepts the unchanged legacy comma record without canonicalizing it'
   yard init --yes >"$STATE/init-repaired.log" 2>&1 || die "init failed after the reboot read the repaired guard: $(tail -5 "$STATE/init-repaired.log")"
   assert_canonical_record
   pass 'after the reboot init accepts the repaired guard'

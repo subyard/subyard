@@ -702,15 +702,30 @@ for legacy_state in 'held init' 'held migration' 'unread init' 'unread migration
     || fail "legacy $legacy_state canonicalization changed the binding or state"
   nm_guard_file_current "$guard_conf" incusbr0 || fail "canonicalization did not converge network planning"
 done
+# Failed canonicalization must preserve the existing binding and the untouched guard.
+(
+  identity="$(power_nm_file_id "$guard_conf")"
+  contents="$(cat "$guard_conf")"
+  legacy_record="boot-0 ${identity/./,} $(power_nm_guard_static_hash "$guard_conf") unread init"
+  nm_guard_write_file "$POWER_NM_GUARD_STATE" "$legacy_record"
+  nm_guard_write_file() { return 1; }
+  if nm_guard_publish "$guard_conf" "$contents" init 1 "$(power_nm_binary)" >/dev/null; then
+    fail "failed canonicalization reported success"
+  fi
+  [ "$(cat "$POWER_NM_GUARD_STATE")" = "$legacy_record" ] && [ "$(state_of)" = loaded ] \
+    && [ "$(power_nm_file_id "$guard_conf")" = "$identity" ] && [ "$(cat "$guard_conf")" = "$contents" ] \
+    || fail "failed canonicalization lost the legacy binding or changed the guard"
+)
 # Canonicalization persists the identity it matched, even if the path changes before recording.
 (
   identity="$(power_nm_file_id "$guard_conf")"
   nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-0 ${identity/./,} $(power_nm_guard_static_hash "$guard_conf") held init"
-  original_record="$(declare -f nm_guard_record)"
-  eval "${original_record/nm_guard_record/nm_guard_record_original}"
-  nm_guard_record() {
-    nm_guard_write_file "$1" "$(cat "$1")"
-    nm_guard_record_original "$@"
+  eval "original_$(declare -f nm_guard_write_file)"
+  nm_guard_write_file() {
+    if [ "$1" = "$POWER_NM_GUARD_STATE" ]; then
+      original_nm_guard_write_file "$guard_conf" "$(cat "$guard_conf")" || return 1
+    fi
+    original_nm_guard_write_file "$@"
   }
   nm_guard_publish "$guard_conf" "$(cat "$guard_conf")" init 1 "$(power_nm_binary)" >/dev/null
   [ "$(cut -d ' ' -f2 "$POWER_NM_GUARD_STATE")" = "$identity" ] \

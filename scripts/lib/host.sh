@@ -523,9 +523,9 @@ nm_guard_released_evidence() { # <conf>: any failed read means no evidence
 # removes the record (it then reads as unbound) and leaves its one next step in
 # NM_GUARD_RECORD_ERROR for nm_guard_post_publish.
 NM_GUARD_RECORD_ERROR=''
-nm_guard_record() { # <conf> <hash> <held|unread> <init|migration> <boot> [matched identity]
-  local file="${6:-}"
-  [ -n "$file" ] || file="$(power_nm_file_id "$1")" || file=''
+nm_guard_record() { # <conf> <hash> <held|unread> <init|migration> <boot>
+  local file
+  file="$(power_nm_file_id "$1")" || file=''
   if [ -z "$5" ]; then
     NM_GUARD_RECORD_ERROR="cannot read the boot ID (/proc/sys/kernel/random/boot_id), so Subyard cannot record which NetworkManager guard is loaded and no yard starts; fix the boot ID, then rerun $POWER_NM_GUARD_COMMAND"
   elif [ -n "$file" ] && { install -d -m 0755 "${POWER_NM_GUARD_STATE%/*}" \
@@ -582,8 +582,12 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   if [ -n "$guard_identity" ] && ! nm_path_exists "$legacy" && [ "$(cat -- "$conf")" = "$desired" ]; then
     ok "NetworkManager guard already current ($conf)"
     if [ "$bound" = 1 ]; then
-      # Canonicalize a bound 0.31.0 decimal-comma record without changing its read state.
-      [ "$old_file" = "$guard_identity" ] || nm_guard_record "$conf" "$hash" "$old_state" "$old_kind" "$old_boot" "$guard_identity"
+      # Keep the valid legacy record on write failure. Persist the identity already matched;
+      # unlike a guard rewrite, canonicalization must never invalidate the existing binding.
+      if [ "$old_file" != "$guard_identity" ]; then
+        nm_guard_write_file "$POWER_NM_GUARD_STATE" "$old_boot $guard_identity $hash $old_state $old_kind" \
+          || { power_fail "could not canonicalize the NetworkManager guard record $POWER_NM_GUARD_STATE; rerun $POWER_NM_GUARD_COMMAND"; return 1; }
+      fi
       return 0
     fi
     nm_guard_record "$conf" "$hash" "$(nm_guard_inactive_state "$active" "$binary")" "$kind" "$(power_nm_boot_id)"
