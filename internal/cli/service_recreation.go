@@ -263,6 +263,7 @@ func (reconciler *activationStageReconciler) PreflightActivation(ctx context.Con
 	// A preparation failure must not hide the independent route/guard checks.
 	err = domain.CollectRefusals(preflight.PrepareServiceRecreation(ctx), preflight.CheckServiceRecreation(ctx))
 	if err != nil {
+		fmt.Fprintf(reconciler.recreation.cli.options.Stderr, "service recreation preflight: %v\n", err)
 		return serviceRecreationPrerequisiteError{yard: applicability.target, err: err}
 	}
 	return nil
@@ -276,7 +277,15 @@ type serviceRecreationPrerequisiteError struct {
 func (failure serviceRecreationPrerequisiteError) Error() string { return failure.err.Error() }
 func (failure serviceRecreationPrerequisiteError) Unwrap() error { return failure.err }
 func (failure serviceRecreationPrerequisiteError) ActivationDiagnostic() (string, string) {
-	return "service recreation in yard " + failure.yard + " cannot start its replacement: " + failure.err.Error(),
+	causes := []error{failure.err}
+	if refusals, ok := failure.err.(*domain.Refusals); ok {
+		causes = refusals.Unwrap()
+	}
+	messages := make([]string, len(causes))
+	for index, cause := range causes {
+		messages[index] = cause.Error()
+	}
+	return boundedStepList("service recreation in yard "+failure.yard+" cannot start its replacement (full details: stderr): ", messages, "; ", "host safety refusals"),
 		"resolve the reported host safety prerequisites, reboot the host once if the guard is unread, then run yard update"
 }
 
@@ -353,6 +362,7 @@ func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecrea
 		return errors.New("service recreation start preflight is unavailable")
 	}
 	if err := preflight.CheckServiceRecreation(ctx); err != nil {
+		fmt.Fprintf(cli.options.Stderr, "service recreation preflight: %v\n", err)
 		return serviceRecreationPrerequisiteError{yard: record.Yard, err: err}
 	}
 	stopper, ok := platform.(serviceRuntimeStopper)

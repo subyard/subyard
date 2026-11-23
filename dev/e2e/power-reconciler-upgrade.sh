@@ -506,8 +506,9 @@ load_release_targets() {
 # login-time mount appears, without changing desired power or restarting the unit.
 prepare_late_storage() {
   [ ! -e "$LATE_STORAGE" ] && [ ! -L "$LATE_STORAGE" ] || die 'late storage path already exists'
-  mkdir -m 0700 "$STATE_ROOT/late-storage"
+  mkdir -m 0755 "$STATE_ROOT/late-storage"
   printf '%s\n' "$MARKER" > "$STATE_ROOT/late-storage/marker"
+  chmod 0644 "$STATE_ROOT/late-storage/marker"
   sudo -n mkdir -m 0700 "$LATE_STORAGE"
   sudo -n mount --bind "$STATE_ROOT/late-storage" "$LATE_STORAGE"
   incus config device add "$INSTANCE" late-storage disk "source=$LATE_STORAGE" path=/mnt/late-storage --project "$PROJECT"

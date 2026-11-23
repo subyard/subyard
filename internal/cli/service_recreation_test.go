@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -622,5 +623,26 @@ func TestRecreationPreflightReportsPreparationAndIndependentSafetyRefusals(t *te
 	err := stage.PreflightActivation(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "guard record write failed") || !strings.Contains(err.Error(), "unsafe host default route") || len(calls.calls) != 0 {
 		t.Fatalf("preparation hid safety refusal or changed runtime: %v %v", err, calls.calls)
+	}
+}
+
+func TestRecreationPreflightBoundsProtocolDiagnosticWithoutDroppingStderr(t *testing.T) {
+	program, _, _, stage, calls := serviceRecreationFixture(t)
+	var stderr bytes.Buffer
+	program.options.Stderr = &stderr
+	first, second := errors.New(strings.Repeat("guard inspection failed ", 40)), errors.New("unsafe host default route")
+	calls.prepareRecreation = func() error { return first }
+	calls.checkRecreation = func() error { return second }
+	err := stage.PreflightActivation(context.Background())
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatal("missing public preflight refusal", err)
+	}
+	message, next := diagnostic.ActivationDiagnostic()
+	if len(message) > operationStepTextLimit || !strings.Contains(message, "host safety refusals") || !strings.Contains(next, "yard update") {
+		t.Fatal("invalid bounded diagnostic", message, next)
+	}
+	if !strings.Contains(stderr.String(), first.Error()) || !strings.Contains(stderr.String(), second.Error()) || len(calls.calls) != 0 {
+		t.Fatal("refusal details lost or runtime changed", stderr.String(), calls.calls)
 	}
 }
