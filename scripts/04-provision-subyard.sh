@@ -224,8 +224,6 @@ yard_service_failure_diagnostics() { # <start epoch>
     printf 'ssh.service journal for this start:\n'
     timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u ssh.service --since "@$1" -n 20 2>/dev/null \
       | sed -n '1,20p' | cut -c1-240
-    printf 'sshd -t errors:\n'
-    timeout --kill-after=1 5 sshd -t 2>&1 >/dev/null | sed -n '1,20p' | cut -c1-240
     printf 'sshd -G errors:\n'
     timeout --kill-after=1 5 sshd -G 2>&1 >/dev/null | sed -n '1,20p' | cut -c1-240
     hostkeys="$(timeout --kill-after=1 5 sshd -G 2>/dev/null | grep -ci '^hostkey ')"

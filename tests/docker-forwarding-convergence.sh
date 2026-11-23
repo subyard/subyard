@@ -78,7 +78,6 @@ cat >"$TMP/bin/sshd" <<'SH'
 #!/bin/sh
 printf 'sshd %s\n' "$*" >>"$TEST_LOG"
 case "$1" in
-  -t) printf '%s\n' 'sshd: no hostkeys available -- exiting.' >&2; exit 1 ;;
   -G) printf '%s\n' 'port 22' 'PRIVATE_PAYLOAD'; printf '%s\n' 'sshd -G warning' >&2 ;;
 esac
 SH
@@ -138,9 +137,8 @@ lines = (root / "stderr").read_text().splitlines()
 result = "exit-code" if os.environ["TEST_COMPARE_EXIT"] == "0" else "unknown"
 assert lines[0] == f"yard service ssh.service failed to start: result={result}", lines
 assert not any("docker.service" in line for line in lines), lines
-journal = lines[lines.index("ssh.service journal for this start:") + 1:lines.index("sshd -t errors:")]
+journal = lines[lines.index("ssh.service journal for this start:") + 1:lines.index("sshd -G errors:")]
 assert len(journal) == 20 and all(len(line) == 240 for line in journal), journal
-assert lines[lines.index("sshd -t errors:") + 1] == "sshd: no hostkeys available -- exiting."
 assert lines[lines.index("sshd -G errors:") + 1] == "sshd -G warning"
 assert re.fullmatch(r"sshd -G hostkey entries: 0, host key files: [0-9]+", lines[-1]), lines
 calls = (root / "log").read_text()
