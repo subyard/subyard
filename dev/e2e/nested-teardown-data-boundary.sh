@@ -65,6 +65,38 @@ yard() {
   bounded_command yard "$YARD_BIN" -Y "$OUTER_YARD" "$@"
 }
 
+sync_capacity_diagnostics() {
+  printf '\n== candidate sync: host capacity ==\n'
+  timeout --kill-after=2 10 df -B1 -- "$ROOT" "$STATE" "${TMPDIR:-/tmp}" /var/lib/incus || true
+  timeout --kill-after=2 10 df -i -- "$ROOT" "$STATE" "${TMPDIR:-/tmp}" /var/lib/incus || true
+  timeout --kill-after=2 10 du -sb -- "$ROOT" || true
+  printf '\n== candidate sync: outer yard capacity ==\n'
+  timeout --kill-after=2 10 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
+    sh -c 'df -B1 /srv/workspaces; df -i /srv/workspaces; free -b' || true
+}
+
+sync_candidate() {
+  local started sync_started rc=0
+  sync_capacity_diagnostics
+  sync_started="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  printf '  [ .. ] syncing the exact candidate into the outer yard at %s\n' "$sync_started"
+  started=$SECONDS
+  # Keep the prepared archive's exact byte count and digest in the lane log.
+  yard sync "$ROOT" --name NestedBoundary --target yard --yes || rc=$?
+  printf 'nested-teardown-boundary: candidate sync status=%s duration=%ss\n' \
+    "$rc" "$((SECONDS - started))"
+  if [ "$rc" != 0 ]; then
+    sync_capacity_diagnostics
+    printf '\n== candidate sync: outer yard kernel warnings ==\n'
+    timeout --kill-after=2 10 incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
+      journalctl -k --no-pager --priority=warning --since "$FIXTURE_STARTED" || true
+    printf '\n== candidate sync: host Incus journal (last 100 entries since sync start) ==\n'
+    timeout --kill-after=2 10 sudo -n journalctl -u incus --no-pager --lines=100 \
+      --since "$sync_started" || true
+  fi
+  return "$rc"
+}
+
 setting() {
   local key="$1" value
   value="$(yard config show "$key" | sed -n 's/^effective: //p')"
@@ -704,8 +736,7 @@ yard init --yes
 assert_outer_data_home_metadata restart-init
 assert_outer_vm_ssh_address restart-init
 
-printf '  [ .. ] syncing the exact candidate into the outer yard\n'
-yard sync "$ROOT" --name NestedBoundary --target yard --yes >/dev/null
+sync_candidate
 project_state="$(find "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD/projects" \
   -maxdepth 1 -type f -name '*.json' -print -quit)"
 [ -n "$project_state" ] || die 'controller project state is missing'

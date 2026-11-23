@@ -771,6 +771,9 @@ resource examples and export/replay. The resource lane uses a 50 GiB `android-te
 lease for Android's short `memory-budget` exercise and the broker's
 `--telemetry-resources` mode, leaving room for the installed baseline and cold nested
 builder on Debian and Ubuntu. The default full run requests the same disk size.
+The telemetry VM pair uses 1536 MiB per guest plus 512 MiB overhead (4 GiB total),
+retaining two guests above the broker's 2 GiB process ceiling while leaving controller
+headroom; owning memory-boundary lanes keep their 2 GiB guests.
 Long renewal, requester-death natural expiry and reuse assertions run in the owning
 Android `memory-lease` and test-vms `memory-boundary` lanes. Telemetry's host-free
 `resources-test.py` replays synthetic expiry and actual-stop events for both VM guests,

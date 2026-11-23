@@ -314,26 +314,38 @@ ensure_client_id() {
   ) 9>"$STATE_ROOT/.client-id.lock"
 }
 
-read_agent_logs() {
-  local mode="$1" count="$2" json_output="$3" incident_id="$4" client response request status
-  command -v jq >/dev/null 2>&1 || die 'jq is required'
+# One non-fatal owned diagnostic read: OPERATION ARGS [TIMEOUT]. Prints the ok reply.
+# Returns 2 no lease history, 3 invalid identity, 4 unreachable, 5 unsupported, 6 refused.
+agent_log_request() {
+  local operation="$1" arguments="$2" budget="${3:-}" client status response
   # A read must not manufacture a new identity with no ownership history.
-  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] \
-    || die 'no controller lease history; acquire a lease with this controller first'
-  read -r client < "$STATE_ROOT/client-id"
-  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || die 'invalid persistent E2E client id'
-  status="$(facade_request status)" || die 'test environment unavailable'
+  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || return 2
+  read -r client < "$STATE_ROOT/client-id" || return 3
+  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || return 3
+  status="$(facade_request status "$budget")" || return 4
   jq -e '.schema_version == 1 and .status == "ok" and
-    ((.capabilities // []) | index("lease-logs-v1") != null)' <<<"$status" >/dev/null 2>&1 \
-    || die 'broker does not support lease logs (lease-logs-v1); operator runtime update required'
+    ((.capabilities // []) | index("lease-logs-v1") != null)' <<<"$status" >/dev/null 2>&1 || return 5
+  response="$(facade_request "$operation $client $arguments" "$budget")" || return 4
+  jq -e '.schema_version == 1 and .status == "ok"' <<<"$response" >/dev/null 2>&1 || return 6
+  printf '%s\n' "$response"
+}
+
+read_agent_logs() {
+  local mode="$1" count="$2" json_output="$3" incident_id="$4" response rc=0
+  command -v jq >/dev/null 2>&1 || die 'jq is required'
   if [ "$mode" = incident ]; then
-    request="incident-v1 $client $incident_id"
+    response="$(agent_log_request incident-v1 "$incident_id")" || rc=$?
   else
-    request="logs-v1 $client ${LEASE_REQUESTED_SLOT:--} $count"
+    response="$(agent_log_request logs-v1 "${LEASE_REQUESTED_SLOT:--} $count")" || rc=$?
   fi
-  response="$(facade_request "$request")" || die 'test environment unavailable'
-  jq -e '.schema_version == 1 and .status == "ok"' <<<"$response" >/dev/null 2>&1 \
-    || die 'diagnostics are unavailable for this controller'
+  case "$rc" in
+    0) ;;
+    2) die 'no controller lease history; acquire a lease with this controller first' ;;
+    3) die 'invalid persistent E2E client id' ;;
+    4) die 'test environment unavailable' ;;
+    5) die 'broker does not support lease logs (lease-logs-v1); operator runtime update required' ;;
+    *) die 'diagnostics are unavailable for this controller' ;;
+  esac
   if [ "$mode" = incident ]; then
     jq -e '.incident | type == "object"' <<<"$response" >/dev/null \
       || die 'invalid incident response'
@@ -1053,7 +1065,7 @@ lease_command() {
 # Only the reply's status decides success; a refusal code is display text.
 RELEASE_STATE='' RELEASE_CODE=''
 lease_release_request() {
-  local response started=$SECONDS rc=0
+  local response started=$SECONDS rc=0 message
   RELEASE_STATE=failed RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
   if response="$(facade_request "$(lease_command release)" 180)"; then
@@ -1063,6 +1075,8 @@ lease_release_request() {
       RELEASE_STATE=refused rc=1
       RELEASE_CODE="$(jq -r '.code | strings' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
       [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
+      message="$(jq -j '.message | strings' <<<"$response" 2>/dev/null | tr -c '[:print:]' ' ' | cut -c1-200)" || message=''
+      printf 'E2E_RELEASE_REFUSAL code=%s message=%s\n' "$RELEASE_CODE" "${message:-unspecified}" >&2 || true
     fi
   else
     rc=$?
@@ -1070,6 +1084,29 @@ lease_release_request() {
   printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
     "$((SECONDS - started))" "$rc" >&2 || true
   lane_record "$LEASE_SLOT" release "exit_code=$rc"
+}
+
+# Diagnostics only: after a foreground refused release, print this lease's own broker
+# events (the failing step, its error and timing) into the caller's log. Never changes
+# the outcome; each read is bounded.
+release_refusal_events() {
+  local response generation=null
+  [ "$RELEASE_STATE" = refused ] && [ "$RELEASE_CODE" != lease_lost ] || return 0
+  [[ "$LEASE_SLOT" =~ ^slot-[0-9]+$ && "$LEASE_EPOCH" =~ ^[0-9]+$ ]] || return 1
+  [[ ! "$LEASE_GENERATION" =~ ^[1-9][0-9]*$ ]] || generation="$LEASE_GENERATION"
+  response="$(agent_log_request logs-v1 "$LEASE_SLOT 30" 30)" \
+    && jq -e '.events | type == "array"' <<<"$response" >/dev/null 2>&1 \
+    || { printf 'E2E_RELEASE_EVENT unavailable slot=%s\n' "$LEASE_SLOT" >&2; return 1; }
+  # Only this lease: its epoch, and its generation when both sides carry one.
+  jq -r --argjson epoch "$LEASE_EPOCH" --argjson generation "$generation" '
+    [.events[] | select(.lease_epoch == $epoch and
+      ($generation == null or .resource_generation == null or .resource_generation == $generation))] as $own
+    | if ($own | length) == 0 then "E2E_RELEASE_EVENT none lease_epoch=\($epoch)" else
+        $own[] | "E2E_RELEASE_EVENT kind=\(.kind) at=\(.timestamp)"
+          + (if .duration_ms then " duration_ms=\(.duration_ms)" else "" end)
+          + (if .incident_id then " incident_id=\(.incident_id)" else "" end)
+          + (if .error then "\n" + (.error | split("\n") | map("  | " + .) | join("\n")) else "" end)
+      end' <<<"$response" | tr -d '\000-\010\013-\037\177' >&2
 }
 
 release_lease() {
@@ -1084,6 +1121,7 @@ release_lease() {
     *)
       printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
         "$released_slot" "$released_run" "$RELEASE_CODE" >&2
+      release_refusal_events || true
       return 1 ;;
   esac
   LEASE_ID=""
@@ -1788,7 +1826,7 @@ client_release() {
     printf 'E2E lease handle %s is not active; nothing to release\n' "$1" >&2
     return 0
   fi
-  release_handle explicit || exit 1
+  release_handle explicit || { release_refusal_events || true; exit 1; }
 }
 
 client_leases() {

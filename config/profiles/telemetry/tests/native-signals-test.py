@@ -38,6 +38,42 @@ from spool_fixture import prepare
 
 
 class NativeSignalsTest(unittest.TestCase):
+    def test_holder_memory_refusal_keeps_bounded_numeric_diagnostics_and_original_failure(self):
+        source_root = Path(__file__).resolve().parents[4]
+        broker = (source_root/'config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh').read_text()
+        failure = 'holder_failure() {'+broker.split('holder_failure() {', 1)[1].split('\n}', 1)[0]+'\n}\n'
+        script = '''set -euo pipefail
+die() { printf '%s\\n' "$1" >&2; exit 2; }
+timeout() {
+  [ "$*" = '--kill-after=1s 5s /fixture/runtime/current/bin/yard -Y test-yard test-vms status --json' ] || return 91
+  printf called > "$STATE_PARENT/probed"
+  [ "$fixture_probe" != unavailable ] || return 124
+  printf '%s\\n' "$fixture_status"
+}
+'''+failure+'holder_failure "original holder failure"\n'
+        for resource, probe, headroom in (('memory', 'available', 12345), ('memory', 'unavailable', 12345),
+                                          ('memory', 'available', 'private-canary'), ('disk', 'available', 12345)):
+            with self.subTest(resource=resource, probe=probe, headroom=headroom), tempfile.TemporaryDirectory(dir='/tmp') as directory:
+                root = Path(directory)
+                (root/'holder.log').write_text('private-canary\nagent-e2e: retryable capacity refusal for slot-001: resource='
+                                             +resource+'; retry after resources become available\n')
+                status = {'resources': {'memory_admission': {'headroom_bytes': headroom}}, 'private': 'private-canary'}
+                result = subprocess.run(['bash', '-c', script], text=True, capture_output=True, timeout=10,
+                                        env={**os.environ, 'STATE_PARENT': directory, 'SUBYARD_HOME': '/fixture',
+                                             'fixture_probe': probe, 'fixture_status': json.dumps(status)})
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, '')
+                self.assertTrue(result.stderr.endswith('original holder failure\n'))
+                self.assertNotIn('private-canary', result.stderr)
+                self.assertEqual((root/'probed').exists(), resource == 'memory')
+                if resource == 'memory':
+                    self.assertRegex(result.stderr, r'MemTotal_kib=\d+ MemAvailable_kib=\d+\n')
+                else:
+                    self.assertNotIn('MemTotal_kib=', result.stderr)
+                rows = [json.loads(line) for line in result.stderr.splitlines() if line.startswith('{')]
+                expected = [{'check': 'holder-memory-refusal', 'admission_headroom_bytes': 12345}]
+                self.assertEqual(rows, expected if resource == 'memory' and probe == 'available' and headroom == 12345 else [])
+
     def test_terminal_quit_waits_for_exit_flush_and_rejects_timeout_or_failure(self):
         terminal = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_quit_fixture').Terminal
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:

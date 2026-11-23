@@ -2,6 +2,7 @@
 yard-cleanup.sh
 agent-e2e-acquire-session.sh
 agent-e2e.sh
+nested-sync-diagnostics.sh
 cli-contract.sh
 command-registry.sh
 create-subyard-docker-apparmor.sh
