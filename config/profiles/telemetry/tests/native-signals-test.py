@@ -146,6 +146,91 @@ pathlib.Path(sys.argv[2]).write_text('export acknowledged')
         self.assertEqual(json.loads(line.split(': ', 1)[1]),
             dict(new=[], tool_run='', tool_exe='', traces_grew_for=[]))
 
+    @staticmethod
+    def trace_payload(run, *trace_ids):
+        """Encode stored OTLP traces whose resource carries the collector's run attribute."""
+        def varint(value):
+            out = bytearray()
+            while True:
+                out.append((value & 0x7f) | (0x80 if value > 0x7f else 0))
+                value >>= 7
+                if not value:
+                    return bytes(out)
+        def field(number, payload):
+            return varint(number << 3 | 2)+varint(len(payload))+payload
+        resource = field(1, field(1, b'subyard.agent_run.id')+field(2, field(1, run.encode())))
+        spans = b''.join(field(2, field(1, bytes.fromhex(trace))+field(2, bytes(8))) for trace in trace_ids)
+        return field(1, field(1, resource)+field(2, spans))
+
+    def run_attribution(self, turns):
+        """Drive the attribution check with synthetic turns: name -> (registered runs, tool run, stored payloads)."""
+        state = dict(runs=set(), payloads=[])
+        order = iter(('plain', 'first', 'second'))
+
+        class Terminal:
+            def wait(self, text, provider):
+                name = next(order)
+                registered, run, payloads = turns[name]
+                state['runs'] |= set(registered)
+                state['payloads'] += payloads
+                (provider.workspace/(name+'.run')).write_text(run)
+                (provider.workspace/(name+'.exe')).write_text('/usr/local/bin/codex')
+                daemon = provider.workspace.parent/'codex/app-server-daemon'
+                daemon.mkdir(parents=True, exist_ok=True)
+                (daemon/'daemon.pid').write_text('1')
+
+            def close(self):
+                pass
+
+        provider = SimpleNamespace(Provider=http.server.BaseHTTPRequestHandler, Terminal=Terminal)
+        native = SimpleNamespace(desired=lambda *args: {'otel': {}}, publish=lambda *args: None, snapshot=lambda *args: None)
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory, \
+                patch('pty.fork', return_value=(1, 2)), patch('fcntl.ioctl'), \
+                patch.object(fixture.subprocess, 'run'), patch.object(fixture, 'quit_codex_terminal'), \
+                patch.object(fixture, 'query', side_effect=lambda *args: [(run,) for run in sorted(state['runs'])]), \
+                patch.object(fixture, 'raw_otlp', side_effect=lambda *args: list(state['payloads'])), \
+                redirect_stdout(output):
+            fixture.assert_run_attribution(Path(directory), Path(directory)/'bin', provider, native,
+                SimpleNamespace(dumps=lambda value: ''), {}, 'http://127.0.0.1:1', '', Path(directory), False)
+        return output.getvalue()
+
+    def test_attribution_accepts_late_earlier_run_spans_only_on_their_own_traces(self):
+        first, second, late = 'a'*32, 'c'*32, 'b'*32
+        def turns(*second_payloads, plain=()):
+            return dict(plain=(plain, '', []),
+                        first=(['run-1'], 'run-1', [self.trace_payload('run-1', first)]),
+                        second=(['run-2'], 'run-2', [*second_payloads, self.trace_payload('run-2', second)]))
+        # Leftover run-1 processes flush after the second turn's baseline.
+        output = self.run_attribution(turns(self.trace_payload('run-1', late, first)))
+        self.assertIn('"traces_grew_for": ["run-1", "run-2"]', output.splitlines()[-1])
+        refusals = [
+            ('late spans joined this run', turns(self.trace_payload('run-1', second)),
+             '^second: late spans of earlier run run-1 shared a trace with this run$'),
+            ('unregistered run', turns(self.trace_payload('run-unknown', late)),
+             '^second: spans carried a run that is not an earlier managed run of this test: \\["run-unknown"\\]$'),
+            ('plain run', turns(self.trace_payload('run-plain', late), plain=['run-plain']),
+             '^second: spans carried a run that is not an earlier managed run of this test: \\["run-plain"\\]$'),
+        ]
+        for case, scenario, message in refusals:
+            with self.subTest(case):
+                with self.assertRaisesRegex(AssertionError, message):
+                    self.run_attribution(scenario)
+        # A resource without spans does not count as a run's traces.
+        output = self.run_attribution(turns(self.trace_payload('run-1'), self.trace_payload('run-unknown')))
+        self.assertIn('"traces_grew_for": ["run-2"]', output.splitlines()[-1])
+        for case, payloads in (('no run-2 resource', [self.trace_payload('run-1', late)]),
+                               ('run-2 resource without spans', [self.trace_payload('run-2'), self.trace_payload('run-1', late)])):
+            with self.subTest(case):
+                missing = turns()
+                missing['second'] = (['run-2'], 'run-2', payloads)
+                with self.assertRaisesRegex(AssertionError, '^second: spans did not carry this run$'):
+                    self.run_attribution(missing)
+        early = turns()
+        early['first'] = (['run-1'], 'run-1', [self.trace_payload('run-1', first), self.trace_payload('run-2', late)])
+        with self.assertRaisesRegex(AssertionError, '^first: spans carried a run that is not an earlier managed run of this test: \\["run-2"\\]$'):
+            self.run_attribution(early)
+
     def test_native_resource_timeout_budget_contract(self):
         profile = fixture.load(Path(__file__).parent/'e2e/profile-lifecycle.py', 'profile_budget_fixture')
         # The enclosing deadline must cover two sequential native commands,

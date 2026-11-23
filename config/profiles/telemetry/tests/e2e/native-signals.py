@@ -842,6 +842,40 @@ def quit_codex_terminal(client, timeout=60):
             time.sleep(min(.05, remaining))
 
 
+def trace_runs(payloads):
+    """Map each run on stored OTLP trace resources to the trace IDs of its spans; runs without spans are left out."""
+    # TracesData: resource_spans = 1. ResourceSpans: resource = 1, scope_spans = 2.
+    # ScopeSpans: spans = 2. Span: trace_id = 1. The collector writes the run on the resource.
+    found = {}
+    for payload in payloads:
+        for resource_spans in (value for number, value in protobuf_fields(payload) if number == 1):
+            fields = list(protobuf_fields(resource_spans))
+            resource = next((value for number, value in fields if number == 1), b'')
+            run = otlp_attributes(resource, 1).get('subyard.agent_run.id')
+            if run is None:
+                continue
+            for scope in (value for number, value in fields if number == 2):
+                for span in (value for number, value in protobuf_fields(scope) if number == 2):
+                    trace = dict(protobuf_fields(span)).get(1)
+                    if trace:
+                        found.setdefault(run, set()).add(trace.hex())
+    return found
+
+
+def assert_turn_traces(name, run, earlier, window):
+    """Spans stored during a managed turn are its own or late flushes of an earlier managed run.
+
+    subyard-telemetry-run returns when the main Codex process exits, so leftover
+    processes of an earlier run of this test may still export after the next
+    turn's baseline. They must never join this run's traces.
+    """
+    assert window.get(run), name+': spans did not carry this run'
+    foreign = sorted(set(window)-{run}-set(earlier))
+    assert not foreign, name+': spans carried a run that is not an earlier managed run of this test: '+json.dumps(foreign)
+    for other in sorted(set(window)-{run}):
+        assert window[other].isdisjoint(window[run]), name+': late spans of earlier run '+other+' shared a trace with this run'
+
+
 def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
     """A running shared daemon must not take a managed run's tools or their identity."""
     import fcntl, pty, struct, termios
@@ -876,13 +910,10 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
     def runs():
         return {row[0] for row in query(data, 'SELECT agent_run_id FROM runs')}
 
-    def traces(run):
-        # The collector stores spans as protobuf and writes the exporting run on their resource.
-        return sum(run.encode() in protobuf for protobuf in raw_otlp(data, 'otlp/traces'))
-
     def turn(name, argv):
         known = runs()
-        counts = {run: traces(run) for run in known}
+        start = len(raw_otlp(data, 'otlp/traces'))
+        window = {}
         provider.command = f'printf %s "$SUBYARD_AGENT_RUN_ID" > {name}.run; readlink /proc/$PPID/exe > {name}.exe'
         client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
         try:
@@ -896,24 +927,26 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
                 client.close()
             finally:
                 new = runs()-known
-                grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
+                window.update(trace_runs(raw_otlp(data, 'otlp/traces')[start:]))
                 def receipt(suffix):
                     path = project/(name+suffix)
                     return path.read_text().strip() if path.exists() else ''
-                result = dict(new=sorted(new), tool_run=receipt('.run'), tool_exe=receipt('.exe'), traces_grew_for=sorted(grown))
+                result = dict(new=sorted(new), tool_run=receipt('.run'), tool_exe=receipt('.exe'), traces_grew_for=sorted(window))
                 print('run-attribution '+name+': '+json.dumps(result, sort_keys=True), flush=True)
         assert (project/(name+'.run')).is_file() and (project/(name+'.exe')).is_file(), name+': tool receipts missing'
-        return result
+        return result, window
 
     telemetry = ['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--project-id', 'attribution', '--']
     try:
         turn('plain', [])
         assert (codex_home/'app-server-daemon/daemon.pid').exists(), 'the plain client started no daemon'
+        managed = []
         for name in ('first', 'second'):
-            result = turn(name, telemetry)
+            result, window = turn(name, telemetry)
             assert result['new'] == [result['tool_run']], name+': tools carried another run identity'
             assert 'app-server-daemon' not in result['tool_exe'], name+': a managed run reached the shared daemon'
-            assert result['traces_grew_for'] == [result['tool_run']], name+': spans did not carry only this run'
+            assert_turn_traces(name, result['tool_run'], managed, window)
+            managed.append(result['tool_run'])
     finally:
         subprocess.run([str(binaries/'codex'), 'app-server', 'daemon', 'stop'], env=environment, cwd=home, timeout=120,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, check=False)
