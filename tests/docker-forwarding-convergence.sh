@@ -328,6 +328,7 @@ sha256sum -c --quiet "$TMP/key-before" && [ ! -s "$TMP/stderr" ] && [ ! -s "$TES
 for unsafe in readable other symlink; do
   host_keys_case "$unsafe"
   ! sha256sum -c --quiet "$TMP/key-before" >/dev/null 2>&1 \
+    && grep -Fxq 'systemctl reset-failed ssh.service' "$TEST_LOG" \
     && grep -Fxq 'systemctl try-restart ssh.service' "$TEST_LOG" \
     && grep -Fq 'replacing yard SSH host keys' "$TMP/stderr" \
     || { printf 'FAIL: %s host keys were not replaced\n' "$unsafe" >&2; exit 1; }
