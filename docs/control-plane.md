@@ -2774,25 +2774,19 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+  Post-apply verification dispatches `--verify`, which runs the same `--check` hook
+  with `SUBYARD_PROFILE_POST_APPLY=1`. A hook may accept an external clone that could
+  not be fetched after reporting a warning during apply; its ordinary check still
+  schedules the next init's retry. Existing service checks keep their strict behavior.
   Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
   write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
   `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,
-  `boot-dependency-unloaded`, `unit-inactive`, `transport-unavailable`, or
-  `source-unavailable`. `source-unavailable` means the hook applied everything it can while an
-  external source stays unreachable until the operator grants access. The pre-apply check stays
-  strict, so every init retries; the post-apply verification of init and of scoped
-  `profile enable` accepts a failure whose only reason is this code and returns it as pending
-  readiness. The operation boundary renders it with the generic message that `internal/profile`
-  maps to the code: init's post-apply summary, scoped enable output and status. With
-  diagnostics, `--check` continues past such an owner and a later failure wins. The dispatcher
+  `boot-dependency-unloaded`, `unit-inactive`, or `transport-unavailable`. The dispatcher
   captures at most 128 bytes and discards malformed, duplicate, oversized or arbitrary
   output. Adapters opt in with `SUBYARD_PROFILE_DIAGNOSTICS=1` to receive a validated
   `reason=CODE` after the existing owner/native-exit check record; callers without the
-  opt-in retain that original record. Scoped status displays `diagnostic: CODE` and, for a
-  mapped code, `message: TEXT` from the same observation. While the profile is not ready with a
-  validated code, status JSON carries `"diagnostic": {"code": CODE, "message": TEXT}`, with
-  `message` only for a mapped code. Machines read `diagnostic.code`; `diagnostic.message` is
-  for display only and may change. Runtime observation stays unchanged.
+  opt-in retain that original record. Scoped human status displays `diagnostic: CODE`
+  from the same observation. Runtime observation and status JSON stay unchanged.
   A converged check (exit 0) may instead write exactly one
   `subyard-profile-advisory-v1 CODE` line, where `CODE` is `storage-capacity`; the same
   128-byte capture and opt-in apply, and the dispatcher reports it as

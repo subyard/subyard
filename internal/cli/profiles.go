@@ -40,12 +40,6 @@ type profileServiceObserver interface {
 	ProfileServiceObservation(context.Context, string) (ports.ReconcileStageObservation, error)
 }
 
-// profileServiceApplyVerifier accepts an apply whose only remaining reason is
-// source access the operator must grant; pre-apply checks stay strict.
-type profileServiceApplyVerifier interface {
-	VerifyAppliedProfileService(context.Context, string) (ports.ReconcileStageObservation, error)
-}
-
 type profileRequest struct {
 	verb, id string
 	json     bool
@@ -191,26 +185,8 @@ type profileStatus struct {
 	Configured bool   `json:"configured"`
 	Runtime    string `json:"runtime"`
 	Ready      bool   `json:"ready"`
-	// Diagnostic is present only while the profile is not ready with a validated code.
-	Diagnostic *profileDiagnostic `json:"diagnostic,omitempty"`
 	// Warnings are advisories of a converged profile, with its declared remediation.
 	Warnings []string `json:"warnings,omitempty"`
-}
-
-// profileDiagnostic names why a profile is not ready. Machines read Code;
-// Message is display-only remediation and may change.
-type profileDiagnostic struct {
-	Code    string `json:"code"`
-	Message string `json:"message,omitempty"`
-}
-
-// profileReadinessSummary renders a readiness code with its generic hint.
-func profileReadinessSummary(owner, reason string) string {
-	summary := fmt.Sprintf("profile %s is pending (%s)", owner, reason)
-	if message := profile.ServiceReadinessMessage(reason); message != "" {
-		summary += ": " + message
-	}
-	return summary
 }
 
 func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBootstrap) error {
@@ -273,6 +249,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	}
 	if request.verb == "status" {
 		status := profileStatus{Yard: loaded.Context.YardName, ID: request.id, Enabled: definition.Selected(loaded.Context.YardName, loaded.Environment), Configured: connectionErr == nil, Runtime: "unavailable"}
+		diagnostic := ""
 		if !removed && cli.requireRunningProfileYard(ctx, loaded) == nil {
 			runtime := cli.profileRuntime(loaded)
 			var converged bool
@@ -282,7 +259,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				observation, err = observer.ProfileServiceObservation(ctx, request.id)
 				converged = observation.Converged
 				if !converged && profile.ValidServiceReadinessReason(observation.Reason) {
-					status.Diagnostic = &profileDiagnostic{Code: observation.Reason, Message: profile.ServiceReadinessMessage(observation.Reason)}
+					diagnostic = observation.Reason
 				}
 				for _, advisory := range observation.Advisories {
 					if hint, declared := definition.Advisories[advisory.Code]; converged && declared && advisory.Owner == request.id {
@@ -310,11 +287,8 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				return
 			}
 			fmt.Fprintf(cli.options.Stdout, "yard: %s\nprofile: %s\nenabled: %t\nconfigured: %t\nruntime: %s\nready: %t\n", status.Yard, status.ID, status.Enabled, status.Configured, status.Runtime, status.Ready)
-			if status.Diagnostic != nil {
-				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", status.Diagnostic.Code)
-				if status.Diagnostic.Message != "" {
-					fmt.Fprintf(cli.options.Stdout, "message: %s\n", status.Diagnostic.Message)
-				}
+			if diagnostic != "" {
+				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", diagnostic)
 			}
 			for _, warning := range status.Warnings {
 				fmt.Fprintf(cli.options.Stdout, "warning: %s\n", warning)
@@ -571,21 +545,20 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if runtime != nil {
-			var verified ports.ReconcileStageObservation
+			var ready bool
 			var err error
-			if verifier, ok := runtime.(profileServiceApplyVerifier); ok && request.verb == "enable" {
-				verified, err = verifier.VerifyAppliedProfileService(ctx, request.id)
+			if verifier, ok := runtime.(interface {
+				VerifyProfileService(context.Context, string) (bool, error)
+			}); ok {
+				ready, err = verifier.VerifyProfileService(ctx, request.id)
 			} else {
-				verified.Converged, err = runtime.ProfileServiceConverged(ctx, request.id)
+				ready, err = runtime.ProfileServiceConverged(ctx, request.id)
 			}
 			if err != nil {
 				return result, err
 			}
-			if !verified.Converged {
+			if !ready {
 				return result, errors.New("profile runtime did not converge; desired selection retained for retry")
-			}
-			if verified.Reason != "" {
-				fmt.Fprintf(output, "%s\n", profileReadinessSummary(request.id, verified.Reason))
 			}
 			if recorder, ok := runtime.(profileSelectionRecorder); ok {
 				if err := recorder.RecordAppliedProfile(ctx, request.id, request.verb == "enable"); err != nil {

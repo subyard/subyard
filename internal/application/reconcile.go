@@ -60,12 +60,6 @@ type ReconcileReporter interface {
 	StageStarted(ReconcileStage)
 }
 
-// ReconcilePendingReporter receives a stage that an apply verified with
-// readiness accepted as pending (observation Owner and Reason) for rendering.
-type ReconcilePendingReporter interface {
-	StagePending(ReconcileStage, ports.ReconcileStageObservation)
-}
-
 type Reconciler struct {
 	Stages   []ReconcileStage
 	Runner   ports.ReconcileStageRunner
@@ -175,26 +169,19 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 		if err := reconciler.Runner.ApplyStage(ctx, stage.ID); err != nil {
 			return fmt.Errorf("apply init stage %q: %w", stage.ID, err)
 		}
-		var verified ports.ReconcileStageObservation
+		var verified bool
 		if verifier, ok := reconciler.Runner.(interface {
-			VerifyStageObservation(context.Context, ports.ReconcileStageID) (ports.ReconcileStageObservation, error)
-		}); ok {
-			verified, err = verifier.VerifyStageObservation(ctx, stage.ID)
-		} else if verifier, ok := reconciler.Runner.(interface {
 			VerifyStageWithDiagnostic(context.Context, ports.ReconcileStageID) (bool, error)
 		}); ok {
-			verified.Converged, err = verifier.VerifyStageWithDiagnostic(ctx, stage.ID)
+			verified, err = verifier.VerifyStageWithDiagnostic(ctx, stage.ID)
 		} else {
-			verified.Converged, err = reconciler.Runner.VerifyStage(ctx, stage.ID)
+			verified, err = reconciler.Runner.VerifyStage(ctx, stage.ID)
 		}
 		if err != nil {
 			return fmt.Errorf("verify init stage %q: %w", stage.ID, err)
 		}
-		if !verified.Converged {
+		if !verified {
 			return fmt.Errorf("init stage %q completed but did not converge: %s", stage.ID, stage.Label)
-		}
-		if reporter, ok := reconciler.Reporter.(ReconcilePendingReporter); ok && verified.Reason != "" {
-			reporter.StagePending(stage, verified)
 		}
 	}
 	return nil

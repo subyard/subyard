@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Owning host-free checks: the sync helper, the owner transport and skill delivery.
+# Owning host-free checks: the clone/link hook and owner transport.
 set -euo pipefail
 [ "$#" -eq 0 ] || { printf 'Usage: tests/run.sh\n' >&2; exit 2; }
 profile="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 root="$(cd "$profile/../../.." && pwd)"
-python3 -B "$profile/tests/sync-test.py"
+python3 -B "$profile/tests/clone-test.py"
 bash "$profile/tests/owner-lifecycle.sh"
 go -C "$root" test ./config/profiles/user-skills/...
 bash -n "$profile/owner.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh

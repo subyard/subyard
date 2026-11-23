@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# Installed-candidate lane on the leased owner VM: named-yard creation with the
-# profile, an unreachable SSH source (init succeeds, skill delivered, readiness
-# names source access), agent-side sync after access, scoped disable/enable,
-# init-time deselection and enabling on a plain named yard. Clones always stay.
+# Installed-candidate clone/link lifecycle: nonfatal source failure, stateless
+# retry, ordinary Git updates, disable/enable and init-time deselection.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 STATE=''
 YARDS=()
 CANDIDATE_ENGINE=''
-SKILL=/usr/local/share/subyard/skills/subyard-user-skills
-HELPER="$SKILL/sync.py"
-SKILLS_ROOT=/home/dev/.local/share/subyard-user-skills
 
 die() { printf 'user-skills-yard: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
@@ -142,29 +137,31 @@ grep -Fqx "ENVIRONMENT_PROFILES='user-skills'" "$SUBYARD_CONFIG_HOME/yards/$firs
   || die 'creation did not save the requested selection'
 # A rerun with the saved set continues as plain init.
 yard "$first" init --environment-profiles 'user-skills' --yes
-as_dev "$first" test -f "$HELPER" || die 'the profile skill was not delivered'
 
 printf 'user-skills_e2e_stage=unavailable\n'
 # shellcheck disable=SC2016
-as_dev "$first" sh -euc '
-work="$(mktemp -d)"
-mkdir -p "$work/skills/lane-skill"
-printf -- "---\nname: lane-skill\ndescription: Lane skill.\n---\n" > "$work/skills/lane-skill/SKILL.md"
-git -C "$work" init -q -b main
-git -C "$work" add -A
-git -C "$work" -c user.name=lane -c user.email=lane@example.org commit -q -m skills
-git clone -q --bare "$work" "$HOME/lane-skills.git"
-rm -rf -- "$work"
+as_dev "$first" python3 -c '
+from pathlib import Path
+import os, subprocess, tempfile
+with tempfile.TemporaryDirectory() as directory:
+    work = Path(directory)
+    skill = work / "skills/lane-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: lane-skill\ndescription: Lane skill.\n---\n")
+    def git(*args):
+        subprocess.run(["git", "-C", str(work), *args], check=True)
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("-c", "user.name=lane", "-c", "user.email=lane@example.org", "commit", "-q", "-m", "skills")
+    git("clone", "-q", "--bare", str(work), os.environ["HOME"] + "/lane-skills.git")
 '
 yard "$first" config set USER_SKILL_SOURCES "$source_url" --scope yard --yes
-yard "$first" init --yes
+yard "$first" init --yes 2>"$STATE/unavailable.log"
+grep -F >/dev/null 'could not be cloned; authorize Git access or correct USER_SKILL_SOURCES, then run yard init' "$STATE/unavailable.log" \
+  || die 'missing source retry warning'
 [ "$(ready "$first")" = false ] || die 'an unreachable source reported ready'
-yard "$first" profile status user-skills | grep -F >/dev/null 'source-unavailable' || die 'status lacks source-unavailable'
-yard "$first" profile status user-skills --json | jq -e '.diagnostic.code == "source-unavailable" and (.diagnostic.message | length > 0)' >/dev/null \
-  || die 'status JSON lacks the code and hint'
-as_dev "$first" test -f "$SKILLS_ROOT/sources.json" || die 'sources.json was not written'
 
-printf 'user-skills_e2e_stage=agent-sync\n'
+printf 'user-skills_e2e_stage=retry\n'
 # Access comes from an in-yard IdentityFile, not the per-yard agent socket: unlocking
 # an owner key into that socket needs owner-side key material the lane does not have.
 # shellcheck disable=SC2016
@@ -173,23 +170,22 @@ install -d -m 0700 "$HOME/.ssh"
 ssh-keygen -q -t ed25519 -N "" -f "$HOME/.ssh/lane_key"
 cat "$HOME/.ssh/lane_key.pub" >> "$HOME/.ssh/authorized_keys"
 chmod 0600 "$HOME/.ssh/authorized_keys"
-ssh-keyscan -q localhost >> "$HOME/.ssh/known_hosts"
+ssh-keyscan localhost 2>/dev/null >> "$HOME/.ssh/known_hosts"
 printf "Host localhost\n  IdentityFile ~/.ssh/lane_key\n" >> "$HOME/.ssh/config"
 '
-as_dev "$first" python3 "$HELPER" sync >/dev/null
-clone="$(as_dev "$first" python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[0]["dir"])' "$SKILLS_ROOT/sources.json")"
+yard "$first" init --yes
+clone="$(as_dev "$first" readlink /home/dev/.claude/skills/lane-skill)"
+clone="${clone%/skills/lane-skill}"
 for harness in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do
   [ "$(as_dev "$first" readlink "/home/dev/$harness/lane-skill")" = "$clone/skills/lane-skill" ] \
-    || die "link $harness is missing after sync"
+    || die "link $harness is missing after retry"
 done
 yard "$first" init --yes
-[ "$(ready "$first")" = true ] || die 'the profile is not ready after agent sync'
+[ "$(ready "$first")" = true ] || die 'the profile is not ready after retry'
 
 printf 'user-skills_e2e_stage=scoped-disable\n'
 yard "$first" profile disable user-skills --yes
 as_dev "$first" test ! -e /home/dev/.claude/skills/lane-skill || die 'disable left a link'
-as_dev "$first" test ! -e "$SKILLS_ROOT/sources.json" || die 'disable left sources.json'
-as_dev "$first" test ! -e "$SKILL" || die 'disable left the profile skill'
 as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'disable removed the clone'
 yard "$first" profile enable user-skills --yes
 [ "$(ready "$first")" = true ] || die 'scoped enable did not converge'
@@ -197,15 +193,11 @@ yard "$first" profile enable user-skills --yes
 printf 'user-skills_e2e_stage=deselect\n'
 yard "$first" config set ENVIRONMENT_PROFILES '' --scope yard --yes
 yard "$first" init --yes
-as_dev "$first" test ! -e "$SKILL" || die 'init-time deselection kept the profile skill'
 as_dev "$first" test ! -L /home/dev/.claude/skills/lane-skill || die 'init-time deselection kept a link'
-as_dev "$first" test ! -e "$SKILLS_ROOT/sources.json" || die 'init-time deselection kept sources.json'
 as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'init-time deselection removed the clone'
 
 printf 'user-skills_e2e_stage=plain-named-yard\n'
 YARDS+=("$second")
 yard "$second" init --yes
-as_dev "$second" test ! -e "$SKILL" || die 'a plain named yard gained the profile'
 yard "$second" profile enable user-skills --yes
-as_dev "$second" test -f "$HELPER" || die 'profile enable did not deliver the skill'
-printf 'ok: user-skills creation, source access, agent sync, disable/enable, deselection and named-yard enable\n'
+printf 'ok: user-skills creation, source access retry, disable/enable, deselection and named-yard enable\n'

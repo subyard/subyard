@@ -61,7 +61,7 @@ All providers link the same content into `~/.agents/skills` (Codex), `~/.claude/
 and `~/.config/opencode/skills`. Links are installed ahead of client installation and
 persist through client enable/disable; capability/provider removal owns retirement.
 This supports late installation without reprovisioning the capability. Core, the GitHub
-provider, the test-VM client and the user-skills profiles additionally use pi (`~/.pi/agent/skills`) and Hermes
+provider and the test-VM client profile additionally use pi (`~/.pi/agent/skills`) and Hermes
 (`~/.hermes/skills`) links. A profile requests them with `--extra` at registration; its receipt keeps
 them through static refresh, so they need no coding-tool integration. Recognized legacy `.codex/skills`
 links to the same canonical directory are removed to avoid duplicate Codex discovery.

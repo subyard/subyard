@@ -32,42 +32,23 @@ Accepted forms are `https://host/path`, `ssh://[user@]host[:port]/path` and `use
 Credentials, queries, fragments, other schemes, local paths and duplicates are refused; a
 refusal names the item by position, never by value. An empty value means no sources.
 
-## In the yard
+## Clone and link behavior
 
-| Path | Contents |
-| --- | --- |
-| `~/.local/share/subyard-user-skills/<name>` | One ordinary clone per source; `<name>` is the repository name plus a hash of the URL |
-| `~/.local/share/subyard-user-skills/sources.json` | The configured sources, rewritten by each init |
-| `~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills`, `~/.hermes/skills` | Links to each clone's `skills/<skill>` directories |
+Each source is an ordinary Git clone under `~/.local/share/subyard-user-skills/<name>`,
+where `<name>` combines the repository name and a hash of the configured URL.
+Subyard clones only a missing directory. It never pulls, updates or deletes an existing clone.
+Each real `skills/<skill>` directory containing `SKILL.md` is linked into
+`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`,
+`~/.pi/agent/skills` and `~/.hermes/skills`.
 
-Each `skills/<skill>` directory with a `SKILL.md` becomes one link. Names that start with
-`subyard-` are reserved for shipped skills. When two sources provide the same name, the earlier
-source wins. An existing file or foreign link at a skill path is never replaced; it is reported
-and skipped.
+Shipped `subyard-` names are reserved. The first source wins duplicate skill names;
+existing files, foreign links and symlinked harness directories are skipped.
+Disabling the profile, deselecting it or emptying the source list removes only its
+exact-target links. Clones and local edits remain.
 
-The `subyard-user-skills` skill tells agents how to list sources and repair links:
-
-```sh
-python3 /usr/local/share/subyard/skills/subyard-user-skills/sync.py list
-python3 /usr/local/share/subyard/skills/subyard-user-skills/sync.py sync
-```
-
-## Access
-
-The clone runs as the developer account, like `yard clone`. SSH sources use the yard's agent
-socket, so unlock a key with `yard ssh-agent unlock --key PATH --ttl DURATION`. HTTPS sources use
-anonymous access or existing Git credentials; a `github.com` source is retried through
-`subyard-github` when the GitHub profile is installed. Each attempt is bounded to 60 seconds and
-one sync to 300 seconds.
-
-When a source cannot be reached, init still succeeds and delivers the profile skill; its summary
-and `yard profile status user-skills` report `source-unavailable` with an access message
-(`diagnostic.code` and `diagnostic.message` in `--json`). An empty source list removes the profile's links and `sources.json`,
-like a deselection. After access is granted, an agent runs `sync.py sync`, or the next
-`yard init` clones the source.
-
-## Disable
-
-Disabling or deselecting the profile removes the links it created and `sources.json`, and
-retires the `subyard-user-skills` skill. Clones stay in place; delete them by hand if they are
-no longer needed. Changing a source URL leaves the old clone and removes its links.
+Cloning runs as the yard developer, with the same Git access as other yard repositories.
+A failed attempt prints the source name and a next step, leaves no clone directory and
+allows init to complete. The next init retries. `yard profile status user-skills` shows
+`ready: false` while a configured clone or link is missing; this is derived from the
+filesystem, without a state file or lock. Each clone attempt is bounded to 60 seconds,
+with a 300-second total clone budget per init.

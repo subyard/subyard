@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run owner.sh and its real guest script plus sync.py through a fake Incus
+# Run the clone/link owner hook and its real guest script through a fake Incus
 # boundary: the guest runs locally as the current user with stubbed identity tools.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -23,15 +23,10 @@ source = io.BytesIO(sys.stdin.buffer.read())
 patched = io.BytesIO()
 with tarfile.open(fileobj=source, mode='r:') as archive, tarfile.open(fileobj=patched, mode='w') as output:
     names = sorted(member.name for member in archive.getmembers() if member.isfile())
-    assert names == ['agent-skills.py', 'skills/subyard-user-skills/SKILL.md', 'skills/subyard-user-skills/sync.py'], names
+    assert names == ['clone.py'], names
     for member in archive.getmembers():
         data = archive.extractfile(member).read() if member.isfile() else None
-        if member.name == 'agent-skills.py':
-            # Core delivery has its own contracts; the stub records the verb.
-            data = ('import os,sys\nopen(os.environ["FIXTURE_STATE"]+"/skills","a").write(sys.argv[1]+"\\n")\n'
-                    'sys.exit(int(os.environ.get("FIXTURE_SKILLS_"+sys.argv[1].replace("-","_").upper(),"0")))\n').encode()
-        if member.name.endswith('sync.py'):
-            data = data.replace(b'LOCK_WAIT = 330', b'LOCK_WAIT = 1')
+        if member.name == 'clone.py':
             data = data.replace(b"SAFE_PATH = '/usr/local/sbin:", ("SAFE_PATH = '" + state + "/git-bin:").encode())
         if data is not None:
             member.size = len(data)
@@ -85,65 +80,53 @@ expect() { # <exit> <stderr> -- owner arguments
   shift 3
   bash "$owner" "$@" 2>"$state/stderr" >"$state/stdout" || rc=$?
   [ "$rc" = "$want" ] || fail "$* exit $rc, want $want: $(cat "$state/stderr")"
-  [ "$(cat "$state/stderr")" = "$want_err" ] || fail "$* stderr: $(cat "$state/stderr")"
+  if [ "$want_err" = warning ]; then
+    grep -F >/dev/null 'could not be cloned; authorize Git access or correct USER_SKILL_SOURCES, then run yard init' "$state/stderr" \
+      || fail "missing retry warning: $(cat "$state/stderr")"
+    if grep -F >/dev/null 127.0.0.1 "$state/stderr"; then fail 'warning leaked the URL'; fi
+  else
+    [ "$(cat "$state/stderr")" = "$want_err" ] || fail "$* stderr: $(cat "$state/stderr")"
+  fi
   [ ! -s "$state/stdout" ] || fail "$* wrote stdout"
 }
-record='subyard-profile-readiness-v1 source-unavailable'
-
-# Before apply: the skill is unregistered and sources.json is absent.
-FIXTURE_SKILLS_CHECK_REGISTERED=10 expect 1 '' -- --check
-# Apply delivers the skill even without access; the check then reports only access.
-expect 0 '' -- --yes
-[ "$(cat "$state/skills")" = $'check-registered\napply' ] || fail "skill verbs: $(cat "$state/skills")"
-python3 -c 'import json,sys; assert [s["name"][:7] for s in json.load(open(sys.argv[1]))] == ["skills-"]' "$skills_root/sources.json"
-grep -Fq 127.0.0.1 "$state/calls" || fail 'sources were not passed to the guest'
-expect 1 "$record" -- --check
-# Access appears: a check still reports the missing clone; the next init-side apply clones it.
-clone="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["dir"])' "$skills_root/sources.json")"
+# Missing sources schedule init, but a failed clone only warns and is retried.
+expect 1 '' -- --check
+expect 0 warning -- --yes
+expect 1 '' -- --check
+SUBYARD_PROFILE_POST_APPLY=1 expect 0 '' -- --check
+clone="$skills_root/skills-git-$(python3 -c 'import hashlib,os; print(hashlib.sha256(os.environ["USER_SKILL_SOURCES"].encode()).hexdigest()[:8])')"
+[ ! -e "$clone" ] || fail 'failed clone left its directory'
 touch "$state/access"
-expect 1 "$record" -- --check
-[ ! -e "$clone" ] || fail 'a check cloned'
 expect 0 '' -- --yes
 [ -f "$clone/skills/alpha/SKILL.md" ] || fail 'apply did not clone once access appeared'
 [ "$(readlink "$state/home/.claude/skills/alpha")" = "$clone/skills/alpha" ] || fail 'skill link missing'
 expect 0 '' -- --check
-# A registered-skill failure is a transport failure, never drift.
-FIXTURE_SKILLS_CHECK_REGISTERED=1 expect 2 '' -- --check
-# A held lock makes apply busy without changes; check answers at once.
-exec {lock}>"$skills_root/.lock"
-flock "$lock"
-expect 1 $'user skills: another user-skills sync holds the lock; retry\nuser-skills: another user-skills sync holds the lock; retry' -- --yes
-expect 0 '' -- --check
-exec {lock}>&-
-# Deselection: links and sources.json are work; --yes removes them, keeps the clone.
-SUBYARD_PROFILE_SELECTED=0 FIXTURE_SKILLS_CHECK_REMOVED=10 expect 1 '' -- --check
+# Deselection removes owned links and keeps the clone.
+SUBYARD_PROFILE_SELECTED=0 expect 1 '' -- --check
 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --yes
-[ ! -e "$skills_root/sources.json" ] && [ ! -L "$state/home/.claude/skills/alpha" ] || fail 'deselection left links'
+[ ! -L "$state/home/.claude/skills/alpha" ] || fail 'deselection left links'
 [ -f "$clone/skills/alpha/SKILL.md" ] || fail 'deselection removed the clone'
 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
 # A multi-line value (one URL per line) passes every URL and never globs.
 two=$'https://127.0.0.1:9/example/skills.git\n\thttps://127.0.0.1:9/example/other.git\n'
-USER_SKILL_SOURCES="$two" expect 0 '' -- --yes
-tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev", "https://127.0.0.1:9/example/skills.git", "https://127.0.0.1:9/example/other.git"]' \
+USER_SKILL_SOURCES="$two" expect 0 warning -- --yes
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev", "0", "https://127.0.0.1:9/example/skills.git", "https://127.0.0.1:9/example/other.git"]' \
   || fail "multi-line arguments: $(tail -n 1 "$state/calls")"
-python3 -c 'import json,sys; assert len(json.load(open(sys.argv[1]))) == 2' "$skills_root/sources.json"
 [ -L "$state/home/.claude/skills/alpha" ] || fail 'multi-line apply left no link'
-(cd "$state" && USER_SKILL_SOURCES='*' expect 2 '' -- --check)
-tail -n 1 "$state/calls" | grep -Fx >/dev/null '["check", "1", "dev", "*"]' || fail "glob arguments: $(tail -n 1 "$state/calls")"
-# A selected empty list converges like a deselection: no sources.json, no links, clones kept.
+# An empty list converges like a deselection: owned links removed, clones kept.
 USER_SKILL_SOURCES='' expect 1 '' -- --check
 USER_SKILL_SOURCES='' expect 0 '' -- --yes
-tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev"]' || fail "empty-list arguments: $(tail -n 1 "$state/calls")"
-[ ! -e "$skills_root/sources.json" ] && [ ! -L "$state/home/.claude/skills/alpha" ] || fail 'empty list left links'
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev", "0"]' || fail "empty-list arguments: $(tail -n 1 "$state/calls")"
+[ ! -L "$state/home/.claude/skills/alpha" ] || fail 'empty list left links'
 [ -f "$clone/skills/alpha/SKILL.md" ] || fail 'empty list removed the clone'
 USER_SKILL_SOURCES='' expect 0 '' -- --check
 expect 0 '' -- --remove
-tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "0", "dev"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "0", "dev", "0"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
 # Without the developer account a deselected profile is current; a selected one is work.
 FIXTURE_NO_DEV=1 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
 FIXTURE_NO_DEV=1 expect 1 '' -- --check
 FIXTURE_NO_DEV=1 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --yes
-FIXTURE_NO_DEV=1 expect 2 'user-skills: skill delivery or source sync failed' -- --yes
+FIXTURE_NO_DEV=1 expect 2 'user-skills: clone or link operation failed' -- --yes
 # Stopped yards and never-provisioned removal stay outside the guest.
 : > "$state/calls"
 FIXTURE_POWER=STOPPED expect 0 '' -- --check

@@ -370,6 +370,8 @@ func (runtime Runtime) ProvisionBase(ctx context.Context) error {
 
 func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
 	switch stage {
+	case ports.ReconcileStageProfileServices:
+		return runtime.VerifyProfileService(ctx, "")
 	case ports.ReconcileStageNetwork:
 		return runtime.observedPowerScriptConverged(ctx, true, "06-network.sh", "--verify")
 	case ports.ReconcileStageTestVMs:
@@ -391,23 +393,9 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 	}
 }
 
-// VerifyStageObservation is the post-apply verification that also returns
-// readiness the apply accepted as pending, for the operation boundary to render.
-func (runtime Runtime) VerifyStageObservation(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
-	if stage == ports.ReconcileStageProfileServices {
-		return acceptAppliedProfileServices(runtime.observeProfileServices(ctx))
-	}
-	converged, err := runtime.VerifyStageWithDiagnostic(ctx, stage)
-	return ports.ReconcileStageObservation{Converged: converged}, err
-}
-
 // VerifyStageWithDiagnostic is used at the post-apply boundary, where remaining
 // drift is a failure and its observed reason must reach the operator.
 func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
-	if stage == ports.ReconcileStageProfileServices {
-		observation, err := acceptAppliedProfileServices(runtime.observeProfileServices(ctx))
-		return observation.Converged, err
-	}
 	if stage == ports.ReconcileStageTestVMs {
 		return runtime.testVMsReadiness(ctx, true)
 	}
@@ -2667,23 +2655,18 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 	return observation, errors.New("profile service check unavailable")
 }
 
-// acceptAppliedProfileServices lets an apply finish when the only remaining
-// reason is source access the operator must grant. The accepted observation is
-// converged and keeps its owner and reason; the operation boundary renders them.
-func acceptAppliedProfileServices(observation ports.ReconcileStageObservation, err error) (ports.ReconcileStageObservation, error) {
-	if err != nil {
-		return ports.ReconcileStageObservation{}, err
+// VerifyProfileService checks applied effects. Hooks may leave an unavailable
+// external source pending; the next ordinary check still schedules its retry.
+func (runtime Runtime) VerifyProfileService(ctx context.Context, name string) (bool, error) {
+	ctx = readOnlyProbeContext(ctx)
+	arguments := []string{"--verify"}
+	if name != "" {
+		arguments = append(arguments, name)
 	}
-	if !observation.Converged && profile.ServiceReadinessAcceptedAfterApply(observation.Reason) {
-		observation.Converged = true
-	}
-	return observation, nil
-}
-
-// VerifyAppliedProfileService is the scoped post-apply boundary with the same
-// acceptance as init's profile-services verification.
-func (runtime Runtime) VerifyAppliedProfileService(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
-	return acceptAppliedProfileServices(runtime.ProfileServiceObservation(ctx, name))
+	output := &profileRuntimeBoundedBuffer{limit: 256}
+	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", arguments...)
+	observation, err := profileServiceObservation(output.String(), output.exceeded, err)
+	return observation.Converged, err
 }
 
 // Scoped profile operations never enter the general init reconciler.

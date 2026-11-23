@@ -77,7 +77,7 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		if observation.Converged || observation.Owner != "sample" || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
 			t.Fatalf("native disposition lost: %#v %v", observation, observedErr)
 		}
-		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable", "source-unavailable"} {
+		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable"} {
 			withReason := strings.TrimSuffix(output, "\n") + " reason=" + reason + "\n"
 			observation, observedErr := profileServiceObservation(withReason, false, err)
 			if observation.Reason != reason || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
@@ -131,6 +131,11 @@ func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
 	converged, err := runtime.ProfileServiceConverged(context.Background(), "sample")
 	if err != nil || converged {
 		t.Fatalf("scoped convergence lost drift: %t %v", converged, err)
+	}
+	converged, err = runtime.VerifyProfileService(context.Background(), "sample")
+	data, readErr = os.ReadFile(events)
+	if err != nil || converged || readErr != nil || !strings.HasSuffix(string(data), "--verify:sample:1\n") {
+		t.Fatalf("verification lost drift or phase: %t %v %q %v", converged, err, data, readErr)
 	}
 }
 
@@ -2641,25 +2646,5 @@ exit "$INCUS_RC"
 	runtime.Environment[len(runtime.Environment)-1] = "INCUS_RC=1"
 	if _, err := runtime.StageEngineChanged(context.Background(), ports.ReconcileStageTestVMs); err == nil {
 		t.Fatal("an unreadable broker engine was treated as observed")
-	}
-}
-
-// The adapter returns accepted readiness as state; it never renders a hint.
-func TestAppliedProfileServicesAcceptOnlySourceUnavailable(t *testing.T) {
-	pending := ports.ReconcileStageObservation{Owner: "sample", NativeExit: 1, Reason: "source-unavailable"}
-	if observation, err := acceptAppliedProfileServices(pending, nil); err != nil || !observation.Converged || observation.Owner != "sample" || observation.Reason != "source-unavailable" {
-		t.Fatalf("source access not accepted after apply: %#v %v", observation, err)
-	}
-	for _, observation := range []ports.ReconcileStageObservation{
-		{Owner: "sample", NativeExit: 1, Reason: "unit-inactive"},
-		{Owner: "sample", NativeExit: 1},
-	} {
-		if accepted, err := acceptAppliedProfileServices(observation, nil); accepted.Converged || err != nil {
-			t.Fatalf("other drift accepted: %#v %#v %v", observation, accepted, err)
-		}
-	}
-	failure := errors.New("profile service check failed")
-	if accepted, err := acceptAppliedProfileServices(pending, failure); accepted.Converged || err != failure {
-		t.Fatalf("check failure accepted: %#v %v", accepted, err)
 	}
 }

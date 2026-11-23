@@ -54,50 +54,6 @@ func TestReconcilerUsesDiagnosticOnlyAfterApply(t *testing.T) {
 	}
 }
 
-type pendingReconcileFixture struct {
-	*reconcileFixture
-	verified ports.ReconcileStageObservation
-}
-
-func (fixture pendingReconcileFixture) VerifyStageObservation(context.Context, ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
-	return fixture.verified, nil
-}
-
-type pendingReporter struct{ pending []string }
-
-func (*pendingReporter) StageSkipped(ReconcileStage) {}
-func (*pendingReporter) StageStarted(ReconcileStage) {}
-func (reporter *pendingReporter) StagePending(stage ReconcileStage, observation ports.ReconcileStageObservation) {
-	reporter.pending = append(reporter.pending, string(stage.ID)+" "+observation.Owner+" "+observation.Reason)
-}
-
-// Accepted pending readiness is state for the reporter; unconverged
-// verification still fails and a plain converged stage reports nothing.
-func TestReconcilerReportsReadinessAcceptedAfterApply(t *testing.T) {
-	stage := ReconcileStage{ID: ports.ReconcileStageProfileServices, Label: "Services"}
-	for _, test := range []struct {
-		verified ports.ReconcileStageObservation
-		pending  []string
-		fails    bool
-	}{
-		{ports.ReconcileStageObservation{Converged: true, Owner: "sample", Reason: "source-unavailable"}, []string{"profile-services sample source-unavailable"}, false},
-		{ports.ReconcileStageObservation{Converged: true}, nil, false},
-		{ports.ReconcileStageObservation{Owner: "sample", Reason: "unit-inactive"}, nil, true},
-	} {
-		reporter := &pendingReporter{}
-		fixture := pendingReconcileFixture{&reconcileFixture{converged: map[ports.ReconcileStageID]bool{}}, test.verified}
-		reconciler := Reconciler{Stages: []ReconcileStage{stage}, Runner: fixture, Reporter: reporter}
-		plan, err := reconciler.Plan(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = reconciler.Apply(context.Background(), plan)
-		if (err != nil) != test.fails || !reflect.DeepEqual(reporter.pending, test.pending) {
-			t.Fatalf("%#v: pending=%v err=%v", test.verified, reporter.pending, err)
-		}
-	}
-}
-
 func (fixture observedReconcileFixture) ObserveStage(context.Context, ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
 	return fixture.observation, nil
 }
