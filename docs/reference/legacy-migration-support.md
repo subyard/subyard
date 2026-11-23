@@ -331,11 +331,10 @@ and projection epochs, and pinned records before dispatch; captured records are 
 It preserves frozen transition owners and catalog/journal bindings. Marked targets read checkpoint
 authority themselves; incompatible history blocks mutation.
 
-The frozen v0.28.0 released-caller acceptance exercises the actual v0.11.2 and v0.18.1 binaries against matching epoch-2
-history, then a separately sealed synthetic epoch-3 owner built from the same bound source. It requires
-bridge-first refusal, successful advance after the bridge, an unchanged epoch-2 projection and
-refusal of epoch-2 rollback through each released caller and the candidate. The synthetic owner is not a
-published release.
+The frozen v0.28.0 released-caller acceptance established the matching-epoch bridge,
+synthetic future-epoch advance and epoch-2 rollback refusal using historical callers.
+Current released-caller acceptance starts at v0.28.0; Go contracts retain coverage of
+checkpoint/projection and unfinished-owner readers.
 Published v0.18.1 has no sealed checkpoint-reader marker; it cannot itself serve as that reader bridge.
 
 Retirement guidance must state the v0.11.0 source boundary, affected V1 formats, full-uninstall

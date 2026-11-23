@@ -14,7 +14,7 @@ while [ "$#" -gt 0 ]; do
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || usage
 case "$lane" in all|broker-cold-upgrade|service-container|full-uninstall|memory-boundary) ;; *) usage ;; esac
-printf 'test-vms physical selection: recipe/archive producer, installer/libraries, broker activation or release migration require supported 0.19 upgrade and cold acquire; full-uninstall remains required\n'
+printf 'test-vms physical selection: recipe/archive producer, installer/libraries, broker activation or release migration require supported anchor upgrade and cold acquire; full-uninstall remains required\n'
 bash "$ROOT/config/profiles/test-vms/tests/run.sh" --preflight
 [ "$preflight" = 0 ] || exit 0
 allocation_route=()
