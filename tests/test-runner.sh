@@ -478,6 +478,7 @@ import subprocess
 import sys
 import time
 import uuid
+from unittest.mock import patch
 
 tmp, wrapper = map(Path, sys.argv[1:])
 root = tmp / "interrupt"
@@ -543,13 +544,32 @@ signal.signal(signal.SIGINT, signal.default_int_handler)
 def state(pid):
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return None
 
 
 def alive(pid):
     fields = state(pid)
     return fields is not None and fields[0] != "Z"
+
+
+# A process can exit after /proc enumeration, including after opening its stat file.
+for error in (FileNotFoundError, ProcessLookupError):
+    with patch.object(Path, 'read_text', side_effect=error('process vanished')):
+        assert state(123) is None, f'{error.__name__}: vanished process has state'
+        assert not alive(123), f'{error.__name__}: vanished process is alive'
+with patch.object(Path, 'read_text', return_value='123 (fixture worker) S 1 123'):
+    assert state(123) == ['S', '1', '123'] and alive(123), 'live process was ignored'
+with patch.object(Path, 'read_text', return_value='123 (fixture worker) Z 1 123'):
+    assert not alive(123), 'zombie process is alive'
+with patch.object(Path, 'read_text', side_effect=PermissionError('stat denied')):
+    try:
+        state(123)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('unexpected stat read failure was ignored')
+print('ok: process state handles vanished processes and preserves live/error checks')
 
 
 def roots():
