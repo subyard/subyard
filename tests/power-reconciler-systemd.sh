@@ -9,14 +9,12 @@ TEST_LIB_DIE_STATUS=1
 # shellcheck source=tests/helpers/test-lib.sh
 . "$ROOT/tests/helpers/test-lib.sh"
 TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
-V072_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.7.2.service.in"
 
 fail() { die "power-reconciler-systemd: $*"; }
 
 command -v systemd-analyze >/dev/null 2>&1 \
   || fail 'systemd-analyze is required for the real unit parser contract'
 [ -r "$TEMPLATE" ] || fail "unit template is unavailable: $TEMPLATE"
-[ -r "$V072_TEMPLATE" ] || fail "v0.7.2 unit fixture is unavailable: $V072_TEMPLATE"
 grep -Fxq 'Wants=network-online.target incus.service incus.socket' "$TEMPLATE" \
   || fail 'production reconciler does not start Incus before using its socket'
 
@@ -38,19 +36,20 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 unit="$temporary/subyard-power-reconcile.service"
-v072_unit="$temporary/subyard-power-reconcile-v0.7.2.service"
+incompatible_unit="$temporary/subyard-power-reconcile-incompatible.service"
 diagnostics="$temporary/systemd-analyze.stderr"
 sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$TEMPLATE" > "$unit"
-sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$V072_TEMPLATE" > "$v072_unit"
+# A synthetic oneshot variant keeps the parser regression independent of retired releases.
+sed 's/^Type=exec$/Type=oneshot/' "$unit" > "$incompatible_unit"
 
 if [ "$systemd_version" -lt 256 ]; then
-  if systemd-analyze verify "$v072_unit" 2>"$diagnostics"; then
-    fail "systemd $systemd_version unexpectedly accepted the incompatible v0.7.2 unit"
+  if systemd-analyze verify "$incompatible_unit" 2>"$diagnostics"; then
+    fail "systemd $systemd_version unexpectedly accepted the incompatible synthetic oneshot unit"
   fi
   grep -Fq "RestartForceExitStatus= set, which isn't allowed for Type=oneshot services" \
     "$diagnostics" || {
       sed -n '1,160p' "$diagnostics" >&2
-      fail "systemd $systemd_version rejected the v0.7.2 fixture for an unexpected reason"
+      fail "systemd $systemd_version rejected the synthetic oneshot fixture for an unexpected reason"
     }
 fi
 
@@ -225,6 +224,6 @@ if [ "$systemd_version" -ge 256 ]; then
   printf 'ok: systemd %s accepts the unit; CI systemd 255 owns the compatibility regression\n' \
     "$systemd_version"
 else
-  printf 'ok: systemd %s rejects v0.7.2 and accepts the compatible power reconciler unit\n' \
+  printf 'ok: systemd %s rejects synthetic oneshot and accepts the compatible power reconciler unit\n' \
     "$systemd_version"
 fi

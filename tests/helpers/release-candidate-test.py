@@ -38,43 +38,39 @@ class SkillPackageTest(unittest.TestCase):
                     self.assertFalse((base/'unexpected').exists())
 
 
-class SourceAnchorRefusalTest(unittest.TestCase):
-    def test_refusal_requires_guidance_and_preserves_every_protected_input(self):
+class SupportedUpdateTest(unittest.TestCase):
+    def test_released_update_requires_completion_and_retains_operator_data(self):
         module = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))
-        verify = module['verify_source_anchor_refusal']
-        for failure in ('none', 'success', 'guidance', 'config', 'data', 'link', 'installer-config', 'installer-journal', 'check-json'):
+        verify = module['verify_supported_update']
+        for failure in ('none', 'inspect', 'inspect-mutation', 'update', 'version', 'settings', 'data', 'journal'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
-                root = Path(temporary)/'fixture'
-                root.mkdir()
+                root = Path(temporary)
                 config, runtime = root/'config', root/'runtime'
                 config.mkdir(); runtime.mkdir()
-                retained, marker = config/'settings.env', root/'project-data'
-                retained.write_text('operator settings'); marker.write_text('project data')
+                retained, marker, journal = config/'settings', root/'data', config/'journal'
+                retained.write_text('operator settings'); marker.write_text('retained data')
                 (runtime/'current').symlink_to('releases/source')
                 fixture = SimpleNamespace(root=root, config=config, runtime=runtime, project_marker=marker,
-                    retained=retained, retained_hash=module['digest'](retained), env={'PATH': '/usr/bin:/bin'},
-                    version='0.29.0', baseline_version='0.11.0', old_launcher=root/'old-yard')
+                    retained=retained, retained_hash=module['digest'](retained), journal=journal,
+                    env={}, version='99.0.0', baseline_version='0.28.0', old_launcher=root/'old-yard',
+                    run=lambda _: 'yard ' + ('wrong' if failure == 'version' else '99.0.0'))
                 calls = []
                 def run(command, environment, timeout):
                     calls.append(command[1:])
-                    self.assertEqual(environment['YARD_RELEASE_VERSION'], '0.29.0')
-                    if failure == 'config' or (failure == 'installer-config' and command[0] == 'bash'): retained.write_text('changed')
-                    if failure == 'data': marker.write_text('changed')
-                    if failure == 'installer-journal' and command[0] == 'bash':
-                        journal = config/'release-transition/v2/journal.json'
-                        journal.parent.mkdir(parents=True); journal.write_text('changed')
-                    if failure == 'link':
-                        (runtime/'current').unlink()
-                        (runtime/'current').symlink_to('releases/target')
-                    return subprocess.CompletedProcess(command, 0 if failure == 'success' or (failure == 'check-json' and '--check' in command) else 1,
-                        json.dumps({'outcome':{'reachedGoal':False,'status':'operator-action-required'}}) if failure == 'check-json' else '',
-                        'source-anchor-required: ' + ('' if failure == 'guidance' else 'next: ' + module['update_chain'](ROOT, fixture.baseline_version)))
-                with patch.dict(verify.__globals__, {'run_process':run}):
-                    if failure in ('none', 'check-json'):
-                        verify(fixture, root/'subyard-install.sh')
-                        self.assertEqual(calls, [['update'], ['update', '--check'], [str(root/'subyard-install.sh'), '--version', '0.29.0', '--yes']])
+                    self.assertEqual(environment['YARD_RELEASE_VERSION'], fixture.version)
+                    inspection = '--check' in command
+                    if inspection and failure == 'inspect-mutation': retained.write_text('changed')
+                    if not inspection:
+                        journal.write_text(json.dumps({'checkpoint': 'reconciling' if failure == 'journal' else 'complete'}))
+                        if failure == 'settings': retained.write_text('changed')
+                        if failure == 'data': marker.write_text('changed')
+                    return subprocess.CompletedProcess(command, int(failure == ('inspect' if inspection else 'update')), '', '')
+                with patch.dict(verify.__globals__, {'run_process': run}):
+                    if failure == 'none':
+                        verify(fixture)
+                        self.assertEqual(calls, [['update', '--check'], ['update', '--yes']])
                     else:
-                        with self.assertRaises(RuntimeError): verify(fixture, root/'subyard-install.sh')
+                        with self.assertRaises(RuntimeError): verify(fixture)
 
 
 class CandidateArchiveTest(unittest.TestCase):
@@ -84,9 +80,9 @@ class CandidateArchiveTest(unittest.TestCase):
             root = Path(temporary)
             release = root/'.subyard-acceptance/release'
             release.mkdir(parents=True)
-            archive = release/'subyard-0.21.0-linux-amd64.tar.gz'
+            archive = release/'subyard-0.28.0-linux-amd64.tar.gz'
             metadata = release.parent/'candidate.json'
-            payload = b'#!/bin/sh\nprintf "yard-engine 0.21.0\\n"\n'
+            payload = b'#!/bin/sh\nprintf "yard-engine 0.28.0\\n"\n'
             def package(bad_manifest=False):
                 files = {'bin/yard':payload, 'bin/yard-engine':payload}
                 files['runtime-files.sha256'] = ''.join(
@@ -98,7 +94,7 @@ class CandidateArchiveTest(unittest.TestCase):
                         entry.size = len(body)
                         entry.mode = 0o755 if name.startswith('bin/') else 0o644
                         bundle.addfile(entry,io.BytesIO(body))
-                metadata.write_text(json.dumps(dict(version='0.21.0',runtime_file=archive.name,
+                metadata.write_text(json.dumps(dict(version='0.28.0',runtime_file=archive.name,
                     runtime_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())))
             def prepare():
                 return subprocess.run(['bash','-c','. "$1"; release_candidate_prepare "$2"',
@@ -108,7 +104,7 @@ class CandidateArchiveTest(unittest.TestCase):
                 result = prepare()
                 self.assertEqual(result.returncode,0,result.stderr)
                 engine = Path(result.stdout.strip())
-                self.assertEqual(subprocess.check_output([str(engine)],text=True),'yard-engine 0.21.0\n')
+                self.assertEqual(subprocess.check_output([str(engine)],text=True),'yard-engine 0.28.0\n')
                 self.assertFalse((release.parent/'runtime.next').exists())
             before = engine.read_bytes()
             archive.write_bytes(archive.read_bytes()+b'tampered')

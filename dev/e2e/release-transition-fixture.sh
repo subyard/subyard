@@ -5,10 +5,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOKEN="${1:-}"
-STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"
+STATE_ROOT="/var/tmp/subyard-p0-newer-release-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
-MARKER="subyard-p0-v0111-$TOKEN"
-SUCCESS_YARD="v0111-success-$TOKEN"
+MARKER="subyard-p0-newer-release-$TOKEN"
+SUCCESS_YARD="newer-release-success-$TOKEN"
 CLEANUP_ARMED=0
 SUCCESS_ARMED=0
 
@@ -71,10 +71,10 @@ select_fixture() { # success
   POWER_UNIT_NAME=subyard-power-reconcile.service
   POWER_UNIT="/etc/systemd/system/$POWER_UNIT_NAME"
   POWER_UNIT_ENABLEMENT="/etc/systemd/system/multi-user.target.wants/$POWER_UNIT_NAME"
-  TEST_VMS_SINK="/usr/local/libexec/subyard/subyard-p0-v0111-$FIXTURE-$TOKEN-test-vms-sink"
-  TEST_VMS_SINK_SERVICE_NAME="subyard-p0-v0111-$FIXTURE-$TOKEN-test-vms-host-sink.service"
+  TEST_VMS_SINK="/usr/local/libexec/subyard/subyard-p0-newer-release-$FIXTURE-$TOKEN-test-vms-sink"
+  TEST_VMS_SINK_SERVICE_NAME="subyard-p0-newer-release-$FIXTURE-$TOKEN-test-vms-host-sink.service"
   TEST_VMS_SINK_SERVICE="/etc/systemd/system/$TEST_VMS_SINK_SERVICE_NAME"
-  TEST_VMS_SINK_TIMER_NAME="subyard-p0-v0111-$FIXTURE-$TOKEN-test-vms-host-sink.timer"
+  TEST_VMS_SINK_TIMER_NAME="subyard-p0-newer-release-$FIXTURE-$TOKEN-test-vms-host-sink.timer"
   TEST_VMS_SINK_TIMER="/etc/systemd/system/$TEST_VMS_SINK_TIMER_NAME"
 }
 
@@ -297,7 +297,7 @@ write_fixture_config() {
   printf '# Fixture-owned recovery artifact.\n' > "$HOME_ROOT/host/recovery-config"
   chmod 0600 "$HOME_ROOT/host/recovery-config"
   printf 'release-recovery fixture=%s config_artifact=plain structured_toml_migration=false\n' "$FIXTURE"
-  printf '# %s\nThe v0.11.1 %s fixture owns this file.\n' "$FIXTURE_MARKER" "$FIXTURE" \
+  printf '# %s\nThe %s fixture owns this file.\n' "$FIXTURE_MARKER" "$FIXTURE" \
     > "$HOME_ROOT/host/AGENTS.md"
   chmod 0600 "$CONFIG_HOME/config.env" \
     "$CONFIG_HOME/yards/$YARD_NAME/config.env" "$HOME_ROOT/host/AGENTS.md"

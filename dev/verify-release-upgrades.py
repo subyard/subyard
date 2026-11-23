@@ -23,38 +23,12 @@ import time
 import urllib.request
 
 
-LEGACY_BASELINE = "0.9.1"
-LEGACY_BASELINE_SHA256 = {
-    "amd64": "a5256e985fa5dd0d392df75515f9dca7e239888c3e101867bbd0285035644a90",
-    "arm64": "4c349fe6316f90242c09398261e7f76f9bf07c94fa50862e8e707989cd76eea5",
-}
-LEGACY_INSTALLER_SHA256 = "7932034b1c4f42c7fd66975ff1291bec5ea83b687988d634d67d46ff93ce6d06"
-MINIMUM_BASELINE = "0.11.0"
+# Official v0.28.0 archives: the oldest supported released caller on both CI architectures.
+MINIMUM_BASELINE = "0.28.0"
 MINIMUM_BASELINE_SHA256 = {
-    "amd64": "30ff2437219dcaaa568599a9df68a62d3f9203d66579d7ee6c802e527ca92163",
-    "arm64": "cf89b7319ad9fdb31872ba5272921b84d585c3baf20ecff52056d843448d53a3",
+    "amd64": "d4d3cc9919236ab2a2aac64391ae19bb8e0edbbe90f5241601c2399626c99f9e",
+    "arm64": "c99c5089a88042ca18822fcbcb66ee6eece20f6ba1e5950f6e4d513d23552e64",
 }
-RETIRED_BASELINES = {
-    "0.4.1": {"amd64": "fc5b030785089039177292b8127a793defdb54644d00fdcf0d8067106e9c3700", "arm64": "04bfe62cc5964ae841a2827e260dcba6afb4d511f41f62b54c45d9c74930048f"},
-    "0.4.2": {"amd64": "17608894ab0959d3eed5e1467da2174eb934683af10d8a774329f338cd82eda2", "arm64": "cac9f6791c03610ea35869875f6c1b5c013d30c0077b5530e1d6d182086b1654"},
-    LEGACY_BASELINE: LEGACY_BASELINE_SHA256,
-    "0.10.0": {"amd64": "e61405d6539ccc3b953be1dd24b9d7101476a4380225b866fe8bd9896ae7c659", "arm64": "ab11255d001025f9a099294b71a06c20d8c99d8b70adee536d128f85174e84f0"},
-}
-RETIRED_INSTALLER_SHA256 = {
-    "0.4.1": "28c45b916d8eaedc5a607bf0895fb0f3caad620f475a3744beb75c9c5528724e",
-    "0.4.2": "28c45b916d8eaedc5a607bf0895fb0f3caad620f475a3744beb75c9c5528724e",
-    LEGACY_BASELINE: LEGACY_INSTALLER_SHA256,
-    "0.10.0": LEGACY_INSTALLER_SHA256,
-}
-
-ACTIVATION_BASELINE = "0.17.3"
-ACTIVATION_BASELINE_SHA256 = {
-    "amd64": "3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b",
-    "arm64": "dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79",
-}
-# Immutable amd64 archive pin of the newest refused release; see the published-baseline table.
-RECENT_BASELINE = "0.27.0"
-RECENT_BASELINE_SHA256 = {"amd64": "b339acd76299a7c301d79e502459d9f4ab6e8d6f486c83e76c53aff1f6bc5e61"}
 
 
 def published_role(root, role):
@@ -161,10 +135,7 @@ def check_scratch_capacity(candidate, baselines=(), stage="before fixture instal
 
 def selected_baseline_archives(args, release, arch):
     """Name only selected pinned inputs before creating any fixture."""
-    selected = ordinary_baselines(args) if not args.only_legacy_retirement else []
-    if not args.only_source_anchor:
-        selected += [(v, hashes, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
-                     for v, hashes in RETIRED_BASELINES.items()]
+    selected = ordinary_baselines(args)
     archives = []
     for version, hashes, directory in selected:
         if arch not in hashes:
@@ -177,10 +148,7 @@ def selected_baseline_archives(args, release, arch):
 
 
 def ordinary_baselines(args):
-    # The oldest, a middle and the newest refused caller render the same refusal.
-    return [(MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, None),
-            (ACTIVATION_BASELINE, ACTIVATION_BASELINE_SHA256, args.activation_baseline_dir),
-            (RECENT_BASELINE, RECENT_BASELINE_SHA256, args.recent_baseline_dir)]
+    return [(MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, args.baseline_dir)]
 
 
 def skills_transport_contract(root):
@@ -493,9 +461,8 @@ class Fixture:
             "SUBYARD_POWER_UNIT_PATH": str(root / "missing-power-unit"),
         }
         bundle = baseline / f"subyard-{baseline_version}-linux-{arch}.tar.gz"
-        installer_root = baseline if baseline_version in RETIRED_BASELINES else release
         self.run([
-            "bash", str(installer_root / "subyard-install-runtime-release.sh"),
+            "bash", str(release / "subyard-install-runtime-release.sh"),
             "--runtime-root", str(self.runtime), "--bundle", str(bundle),
             "--checksum", str(bundle) + ".sha256", "--manifest", str(bundle) + ".manifest.json",
             "--provenance", str(bundle) + ".provenance.json",
@@ -517,134 +484,28 @@ class Fixture:
         return result.stdout
 
 
-def verify_legacy(release, version, baseline, arch, root, baseline_version=LEGACY_BASELINE):
-    fixture = Fixture(root / f"legacy-{baseline_version}", release, version, baseline, arch, baseline_version)
-    owned_marker = fixture.data / "projects/retained-project-data"
-    owned_marker.parent.mkdir()
-    fixture.project_marker.rename(owned_marker)
-    fixture.project_marker = owned_marker
-    def links():
-        return tuple(os.readlink(path) if path.is_symlink() else None
-                     for path in (fixture.runtime / "current", fixture.runtime / "previous"))
-    initial_links = links()
+def verify_supported_update(fixture):
     before = snapshot(fixture.config)
-    installer = (release / "subyard-install.sh").read_text()
-    def bootstrap(*arguments):
-        return run_process(["bash", "-s", "--", "--version", version, *arguments],
-                           fixture.env, timeout=180, input_text=installer)
-    # The original released updater and the current standalone entrypoint both
-    # refuse before changing the active pair or protected settings.
-    for result in (run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
-                               fixture.env, timeout=180), bootstrap("--yes")):
-        require(result.returncode != 0, "unsupported source activated the candidate")
-        require("v0.11.0" in result.stdout + result.stderr
-                and "uninstall --full" in result.stdout + result.stderr,
-                f"unsupported source lacks actionable removal guidance: {result.stdout}{result.stderr}")
-        require(snapshot(fixture.config) == before and links() == initial_links,
-                "unsupported upgrade changed protected config or active links")
-    result = bootstrap("--publish-only")
-    require(result.returncode == 0 and links() == initial_links and snapshot(fixture.config) == before,
-            f"cleanup tooling staging required migration/activation: {result.stdout}{result.stderr}")
-    candidates = list((fixture.runtime / "releases").glob(f"{version}-*"))
-    require(len(candidates) == 1, "staging did not produce one exact candidate")
-    candidate = candidates[0] / "bin/yard"
-    # No yard workload is created here; physical inventory and interrupted
-    # deletion belong to the owning full-uninstall lane.
-    foreign = fixture.home / "foreign.control"
-    foreign.write_text("foreign content\n")
-    tools = fixture.root / "cold-tools"
-    tools.mkdir()
-    for command in ("bash", "dirname", "readlink", "python3", "env"):
-        (tools / command).symlink_to(shutil.which(command))
-    removal_env = dict(fixture.env, PATH=str(tools), INCUS_DIR=str(fixture.root / "absent-incus"))
-    removal_env.pop("SUBYARD_INCUS_SOCKET", None)
-    result = run_process([str(candidate), "uninstall", "--full", "--yes"], removal_env, timeout=180)
-    require(result.returncode == 0, f"staged full uninstall failed: {result.stdout}{result.stderr}")
-    require(not fixture.runtime.exists() and not fixture.config.exists() and not fixture.data.exists(),
-            f"full uninstall retained owned old state: {[str(path.relative_to(fixture.home)) for path in fixture.data.rglob('*')]}")
-    require(foreign.read_text() == "foreign content\n", "uninstall removed foreign content")
-    require(not Path(str(fixture.data) + ".uninstall").exists(), "uninstall did not verify closure")
-    # A separate invocation models the user's later clean installation.
-    result = bootstrap("--yes")
-    require(result.returncode == 0, f"separate clean install failed: {result.stdout}{result.stderr}")
-    require(not fixture.retained.exists() and not fixture.project_marker.exists(),
-            "clean installation reused retired settings or data")
-    shutil.rmtree(fixture.root)
-    print(f"PASS: actual released {baseline_version} refuses upgrade, stages cleanup without activation, "
-          "fully uninstalls and permits a separate clean install", flush=True)
-
-
-def verify_source_anchor_refusal(fixture, installer=None):
-    shims = fixture.root / "refusal-tools"
-    shims.mkdir()
-    calls = fixture.root / "incus-calls"
-    incus = shims / "incus"
-    incus.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + str(calls) + "\nexit 97\n")
-    incus.chmod(0o700)
-    before = snapshot(fixture.config)
-    links = {name: os.readlink(fixture.runtime / name) if (fixture.runtime / name).is_symlink() else None
-             for name in ("current", "previous", "next")}
     marker = fixture.project_marker.read_bytes()
-    # Select the local packaged target without a GitHub latest-release lookup.
-    # Both invocations otherwise use the real released caller's ordinary path.
-    environment = dict(fixture.env, YARD_RELEASE_VERSION=fixture.version,
-                       PATH=str(shims) + ":" + fixture.env["PATH"])
-    attempts = [(arguments, [str(fixture.old_launcher), "update", *arguments])
-                for arguments in ([], ["--check"])]
-    if installer is not None:
-        attempts.append((["installer"], ["bash", str(installer), "--version", fixture.version, "--yes"]))
-    read_only = fixture.root.parent / "refusal-read-only"
-    read_only.touch()
-    api_calls = fixture.root.parent / "incus-requests"
-    api_before = api_calls.read_text() if api_calls.exists() else ""
-    for arguments, command in attempts:
-        refused = run_process(command, environment, timeout=180)
-        reported_refusal = refused.returncode != 0
-        if arguments == ["--check"] and not reported_refusal:
-            # Older callers can return success for a completed inspection whose
-            # JSON outcome still reports that the requested goal was refused.
-            try:
-                report = json.loads(refused.stdout)
-            except json.JSONDecodeError:
-                report = {}
-            outcome = report.get("outcome") if isinstance(report, dict) else None
-            reported_refusal = (isinstance(outcome, dict) and outcome.get("reachedGoal") is False
-                                and isinstance(outcome.get("status"), str)
-                                and outcome["status"] not in ("", "ready"))
-        require(reported_refusal and "source-anchor-required" in refused.stderr
-                and f"next: {update_chain(Path(__file__).resolve().parent.parent, fixture.baseline_version)}" in refused.stderr
-                and "uninstall --full" not in refused.stderr,
-                f"released {fixture.baseline_version} update {arguments} lost hop guidance "
-                f"(exit={refused.returncode}): "
-                + refused.stdout + refused.stderr)
-        require(snapshot(fixture.config) == before and fixture.project_marker.read_bytes() == marker
-                and digest(fixture.retained) == fixture.retained_hash
-                and all((os.readlink(fixture.runtime / name) if (fixture.runtime / name).is_symlink() else None) == value
-                        for name, value in links.items()),
-                "source-anchor refusal changed protected config, runtime links or project data")
-    require(not calls.exists(), "released caller invoked Incus CLI before refusal: " +
-            (calls.read_text() if calls.exists() else ""))
-    read_only.unlink()
-    api_after = api_calls.read_text() if api_calls.exists() else ""
-    observed = api_after[len(api_before):].splitlines()
-    require(all(line.startswith("GET ") for line in observed), "Incus API mutation before refusal")
-    print(f"Incus API before refusal: {fixture.baseline_version}: {observed}", flush=True)
-    print(f"Incus CLI before refusal: {fixture.baseline_version}: none", flush=True)
-    # Immutable release staging is allowed; config/journal, stable links and data are not.
-    print(f"PASS: released {fixture.baseline_version} update/check" + ("/installer" if installer else "")
-          + " refuse below-anchor admission without mutation (immutable staging allowed)",
-          flush=True)
-
-
-def verify_minimum_source(release, version, baseline, arch, root):
-    fixture = Fixture(root / "minimum-source", release, version, baseline, arch, MINIMUM_BASELINE)
-    verify_source_anchor_refusal(fixture, release / "subyard-install.sh")
-    shutil.rmtree(fixture.root)
+    initial = os.readlink(fixture.runtime / "current")
+    environment = dict(fixture.env, YARD_RELEASE_VERSION=fixture.version)
+    inspected = run_process([str(fixture.old_launcher), "update", "--check"], environment, timeout=180)
+    require(inspected.returncode == 0, "released update inspection failed: " + inspected.stdout + inspected.stderr)
+    require(snapshot(fixture.config) == before and os.readlink(fixture.runtime / "current") == initial
+            and fixture.project_marker.read_bytes() == marker, "released update inspection changed protected state")
+    updated = run_process([str(fixture.old_launcher), "update", "--yes"], environment, timeout=180)
+    require(updated.returncode == 0, "released update failed: " + updated.stdout + updated.stderr)
+    require(fixture.run([str(fixture.runtime / "current/bin/yard"), "--version"]).strip() == f"yard {fixture.version}",
+            "released caller did not activate the candidate")
+    require(digest(fixture.retained) == fixture.retained_hash and fixture.project_marker.read_bytes() == marker,
+            "supported update changed retained settings or project data")
+    require(json.loads(fixture.journal.read_text())["checkpoint"] == "complete", "supported update did not complete")
+    print(f"PASS: released {fixture.baseline_version} update/check reaches {fixture.version} and preserves retained data", flush=True)
 
 
 def verify(release, version, baseline, arch, root, baseline_version):
     normal = Fixture(root / f"normal-{baseline_version}", release, version, baseline, arch, baseline_version)
-    verify_source_anchor_refusal(normal, release / "subyard-install.sh" if baseline_version == MINIMUM_BASELINE else None)
+    verify_supported_update(normal)
     shutil.rmtree(normal.root)
 
 
@@ -731,13 +592,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    for name in ("legacy-baseline", "activation-baseline", "recent-baseline"):
-        parser.add_argument("--" + name + "-dir", type=Path)
-    focused = parser.add_mutually_exclusive_group()
-    focused.add_argument("--only-source-anchor", action="store_true",
-                         help="run update/check refusal with every pinned ordinary released caller")
-    focused.add_argument("--only-legacy-retirement", action="store_true",
-                         help="run retired-source refusal, staged full uninstall and separate clean installation")
+    parser.add_argument("--baseline-dir", type=Path, help="reuse verified official v0.28.0 assets")
     args = parser.parse_args()
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in MINIMUM_BASELINE_SHA256, "unsupported platform")
@@ -763,19 +618,9 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 readiness = server.stdout.readline().strip() if readable else "readiness timeout"
                 require(readiness == "ready", "Incus fixture did not become ready: " + readiness)
-                if not args.only_legacy_retirement:
-                    for version, hashes, directory in ordinary_baselines(args):
-                        if arch in hashes:
-                            baseline = baseline_assets(root, directory, version, hashes, arch)
-                            verify(release, args.version, baseline, arch, root, version)
-                if not args.only_source_anchor:
-                    for version, hashes in RETIRED_BASELINES.items():
-                        directory = args.legacy_baseline_dir if version == LEGACY_BASELINE else None
-                        baseline = baseline_assets(root, directory, version, hashes, arch)
-                        verify_legacy(release, args.version, baseline, arch, root, version)
-                    if args.only_legacy_retirement:
-                        baseline = baseline_assets(root, None, MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, arch)
-                        verify_minimum_source(release, args.version, baseline, arch, root)
+                for version, hashes, directory in ordinary_baselines(args):
+                    baseline = baseline_assets(root, directory, version, hashes, arch)
+                    verify(release, args.version, baseline, arch, root, version)
             finally:
                 server.terminate()
                 try:
@@ -793,8 +638,6 @@ def baseline_assets(root, directory, version, hashes, arch):
         baseline.mkdir(parents=True, exist_ok=True)
         print(f"Downloading pinned official {version} baseline for linux/{arch}", flush=True)
         names = [bundle_name + suffix for suffix in ("", ".sha256", ".manifest.json", ".provenance.json")]
-        if version in RETIRED_BASELINES:
-            names.append("subyard-install-runtime-release.sh")
         for name in names:
             url = f"https://github.com/Subyard/Subyard/releases/download/v{version}/{name}"
             target = baseline / name
@@ -806,9 +649,6 @@ def baseline_assets(root, directory, version, hashes, arch):
                 temporary.replace(target)
     require(digest(baseline / bundle_name) == hashes[arch],
             "official baseline checksum does not match the pinned release")
-    if version in RETIRED_BASELINES:
-        require(digest(baseline / "subyard-install-runtime-release.sh") == RETIRED_INSTALLER_SHA256[version],
-                "official legacy installer does not match the pinned release")
     check_scratch_capacity(baseline / bundle_name, stage=f"after {version} assets")
     return baseline
 

@@ -61,6 +61,8 @@ def published_baseline_refusals(source, catalog, previous=None):
             errors.append(f"baseline row {index}: expected version, two pins and role")
             continue
         version, installer, archive, role = fields
+        if tuple(map(int, version.split("."))) < (0, 28, 0):
+            errors.append(f"baseline {version}: below the minimum test release 0.28.0")
         if version in pins:
             errors.append(f"baseline {version}: duplicate version")
         if not all(re.fullmatch(r"[0-9a-f]{64}", pin) for pin in (installer, archive)):
@@ -3351,6 +3353,8 @@ while True: time.sleep(1)
                 '. "$1/dev/e2e/lib-power-upgrade-contracts.sh"; ROOT="$1"; published_' + role, "_", str(root)], text=True)
             self.assertEqual(shell.strip().split("\t"), pin)
             self.assertEqual(pin[3], role)
+        self.assertEqual(upgrade_verifier.MINIMUM_BASELINE, upgrade_verifier.published_anchor(root)[0])
+        self.assertEqual(upgrade_verifier.MINIMUM_BASELINE_SHA256["amd64"], upgrade_verifier.published_anchor(root)[2])
 
     def test_published_baseline_contract_reports_independent_violations(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -3388,7 +3392,7 @@ while True: time.sleep(1)
             policy.write_text('const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "2.0.1"\n'
                               'var priorUpdateBoundaries = []updateBoundary{\n\t{anchor: "1.0.0", hop: "1.1.0"},\n}\n')
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text(
-                "0.12.0\t"+"a"*64+"\t"+"b"*64+"\trefusal\n"+
+                "0.28.0\t"+"a"*64+"\t"+"b"*64+"\trefusal\n"+
                 "1.1.0\t"+"a"*64+"\t"+"b"*64+"\tdirect\n"+
                 "2.0.0\t"+"a"*64+"\t"+"b"*64+"\tanchor\n"+
                 "2.0.1\t"+"a"*64+"\t"+"b"*64+"\thop\n")
@@ -3397,10 +3401,10 @@ while True: time.sleep(1)
                 "prior hop 1.1.0: expected a refusal or pin baseline, has role direct"])
             (source / "dev/e2e/published-upgrade-baselines.tsv").write_text("".join(
                 f"{version}\t{'a'*64}\t{'b'*64}\t{role}\n" for version, role in
-                (("0.12.0", "refusal"), ("1.0.0", "pin"), ("1.1.0", "refusal"), ("2.0.0", "anchor"), ("2.0.1", "hop"))))
+                (("0.28.0", "refusal"), ("1.0.0", "pin"), ("1.1.0", "refusal"), ("2.0.0", "anchor"), ("2.0.1", "hop"))))
             self.assertEqual(published_baseline_refusals(source, {"checks": []}), [])
             self.assertEqual(upgrade_verifier.update_boundaries(source), [("1.0.0", "1.1.0"), ("2.0.0", "2.0.1")])
-            self.assertEqual([upgrade_verifier.update_chain(source, version) for version in ("0.12.0", "1.0.0", "2.0.0")], [
+            self.assertEqual([upgrade_verifier.update_chain(source, version) for version in ("0.28.0", "1.0.0", "2.0.0")], [
                 "yard update --version 1.1.0 && yard update --version 2.0.1 && yard update",
                 "yard update --version 2.0.1 && yard update", "yard update"])
             policy.write_text('const UpdateAnchorVersion = "2.0.0"\nconst UpdateHopVersion = "2.0.1"\n')

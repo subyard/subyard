@@ -132,24 +132,21 @@ projects retain their ordinary repeatable initialization contract.
 Release acceptance runs the direct update from the anchor (v0.28.0, with agents) and from the
 previous published release if it is neither the anchor nor the hop. The hop row keeps the
 supported direct path covered by an agent-free `published:0.28.1` upgrade in Periodic E2E;
-the refusal checks below assert the hop command. The immutable installer and archive digests live in
+the host-free compatibility job uses the anchor. The immutable installer and archive digests live in
 [`published-upgrade-baselines.tsv`](../../dev/e2e/published-upgrade-baselines.tsv); its fourth column
 labels `anchor` and `hop` (both also direct, exactly one each), `direct` and `refusal` expectations;
 `pin` rows supply immutable assets for fixture lookups only and never create matrix or periodic
 checks. Release preparation refuses if the previous published release is not a direct, anchor or hop
 row or local release tags are unavailable. Candidate versions must sort above their direct baselines.
 
-Required host-free released-caller refusal coverage includes v0.11.0, v0.17.3 and v0.27.0,
-each asserting the hop command and unchanged protected state using temporary homes and a local
-`file://` candidate. The focused `--only-source-anchor` verifier records Incus API reads and
-rejects API mutations; an Incus CLI stub rejects every invocation. Pinned downloads are cached
-in CI and rechecked against immutable archive hashes. These refusals need no VM lanes.
-Pre-v0.11.0 removal retains its own pinned harness and full-uninstall lane. The one-time physical hop
-chains belong to the first boundary release, v0.29.0, whose acceptance runs from its release branch;
-master no longer includes them. The printed chain is permanent. Fixtures that step an older
-install through the boundary use the hop; fixtures whose subject starts at an accepted source use
-the anchor. The complete old-source
-matrix remains frozen in the v0.28.0 tag; later candidate acceptance does not repeat it.
+Published-release tests start at v0.28.0. The host-free compatibility job runs that
+actual released caller's read-only update inspection and update to the packaged candidate,
+checking completed transition state and retained settings/data. CI caches downloads and
+rechecks immutable hashes. Periodic and release acceptance fixtures also install only
+v0.28.0 or newer; earlier source-upgrade/refusal and native legacy-uninstall scenarios
+are retired. The old-source matrix remains frozen in the v0.28.0 tag. Product admission,
+hop guidance, migration and recovery support is unchanged, with synthetic state and
+frozen format/ownership reader contracts retained in host-free tests.
 
 ## Moving the update boundary
 
@@ -255,11 +252,11 @@ The historical released producers and their retained contracts are:
 | v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then the v0.28.1 hop; later candidates refuse the replacement and unknown artifacts fail closed |
 
 Completed V2 journals and evidence retain their sealed runtime, registry and recovery bindings;
-they do not require reading original V1 files. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
-v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0 and v0.17.3 runtime checksums, the amd64 v0.27.0 checksum
-and the exact legacy runtime installers. These binaries remain current refusal/uninstall inputs. Their successful migration and original-owner recovery
-corpora are frozen in the v0.28.0 tag; current Go readers retain accepted history coverage. Rebuilding
-old versions from current source does not replace authentic released inputs.
+they do not require reading original V1 files. The [released compatibility check](../../dev/verify-release-upgrades.py)
+pins official v0.28.0 archives on amd64 and arm64. Earlier binaries are no longer active
+test inputs; their migration and original-owner recovery corpora are frozen in the v0.28.0
+tag. Current Go tests retain accepted-history reader and immutable producer-template
+contracts without installing historical releases.
 
 Completed-history source admission proves sealed original assets, the supported registry/catalog,
 canonical journal, authoritative ledger/checkpoint and terminal typed evidence independently of old

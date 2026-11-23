@@ -71,7 +71,7 @@ and bounded debugging options. Reconnect deadline and worker failure behavior
 also have focused runtime tests with real OpenSSH agents.
 
 The default release smoke checks the pool boundary and disconnect handling, exercises real Incus on
-VM1, then upgrades a checksum-pinned published v0.14.0 runtime to the candidate. It runs candidate
+VM1, then upgrades a checksum-pinned published v0.28.0 runtime to the candidate. It runs candidate
 `init` twice, preserves operator and guest data across one reboot, exports the changed project,
 rolls back and forward, and tears the yard down without removing the installed runtime. Its scoped
 two-owner peer phase starts a fresh candidate yard twice and exercises real remote projects and RPC;
@@ -79,8 +79,8 @@ offline recovery and credential exchange remain in the full peer phase. Cleanup 
 check close the run.
 
 The explicit `--lane full` matrix runs on the ordinary 4 GiB pair. It retains
-historical migration, broker runtime activation/rollback, nested teardown, source upgrade,
-power/systemd and full peer scenarios, and includes the same release-smoke phase before peer acceptance. It assumes the host-free core,
+current broker runtime activation/rollback, nested teardown, power/systemd
+and full peer scenarios, and includes the same release-smoke phase before peer acceptance. It assumes the host-free core,
 loopback SSH/crypto and engine-release contracts have already passed, so it does not repeat them on
 the VMs. The disposable VMs exercise real KVM and kernel behavior. See
 [test VM capacity and scope](test-vms.md#capacity-and-test-scope) for the owning broker checks.
@@ -97,14 +97,10 @@ The host-free `tests/engine-release.sh` proves engine and full-runtime checksums
 offline and incomplete-download behavior, atomic upgrade/rollback layout, stdio half-close and
 supported/unsupported protocol negotiation. On the E2E lane, install two versioned runtimes on VM1,
 connect from VM2 over SSH stdio, upgrade the owner while the controller stays on the previous
-version, and then run `yard update --rollback`. Separate optional Periodic coverage
-retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) from a checksum-pinned
-installed v0.11.0 predecessor. Its legacy `e2e-yard` remains intact until the operator
-executes the printed recreation commands; the ordinary yard retains its data, identity
-and power state. Two reboots, a second candidate update and rollback/roll-forward
-exercise the resulting installed runtime. This lane starts below the
-[supported v0.28.0 anchor](reference/legacy-migration-support.md) and is outside release acceptance
-and full P0; its failure never blocks a release or PR.
+version, and then run `yard update --rollback`. Published upgrade coverage starts at the checksum-pinned
+v0.28.0 anchor. Retained-data/reboot and compatible rollback/roll-forward checks use
+supported published sources and current candidate bundles; older migration support
+remains in product code and host-free reader contracts.
 
 If guarded yard restoration fails during an owner-host boot, inspect the bounded host-side journal
 before running `yard init` or manually starting the yard:

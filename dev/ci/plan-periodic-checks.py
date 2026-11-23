@@ -117,12 +117,6 @@ def plan(root=ROOT, image=IMAGES[0]):
         if "vm:published-upgrade/" + catalog_version not in declared:
             include.append({"id": "published:" + version,
                             "command": published_upgrade(version, "none" if expectation in ("direct", "anchor", "hop") else "refusal")})
-    # Unsupported-source VM coverage is diagnostic: retain Periodic and on-demand execution.
-    include.append({"id": "p0:source-upgrade", "optional": True,
-                    "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", *SLOT]})
-    for check in include:
-        if check["id"] in {"published:0.11.0", "published:0.17.3", "published:0.27.0"}:
-            check["optional"] = True
     include += PERIODIC_ONLY
     include += [veranda_short(name, options) for name, options in VERANDA.items()]
     include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]

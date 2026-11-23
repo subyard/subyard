@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Published pre-policy yards through the hop release: pending yards, one upfront
+# Published anchor yards through the hop release: pending yards, one upfront
 # confirmation, approved session interruption and marker-only retry on the candidate.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,8 +48,8 @@ install -d "$RELEASE_ROOT"
 cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
 operator_env bash -c 'printf "%s\n" "AGENTS=none" "CODING_TOOL_INTEGRATIONS=" "ENVIRONMENT_PROFILES=" "YARD_IMAGE=subyard-e2e-debian-13-container" "YARD_IMAGE_FALLBACK=subyard-e2e-debian-13-container" "DEV_UID=2000" > "$HOME/.config/subyard/config.env"; chmod 0600 "$HOME/.config/subyard/config.env"'
-read -r creation installer_sha archive_sha _ < <(awk -F '\t' '$1=="0.21.3" && $4=="pin"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
-[ "$creation" = 0.21.3 ] || die 'creation baseline missing'
+read -r creation installer_sha archive_sha _ < <(published_anchor)
+[ -n "$creation" ] || die 'creation baseline missing'
 curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/Subyard/Subyard/releases/download/v$creation/subyard-install.sh" -o "$INSTALLER"
 [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$installer_sha" ] || die 'creation installer changed'
 operator_env env YARD_RELEASE_VERSION="$creation" bash "$INSTALLER" --version "$creation" --yes
@@ -63,7 +63,7 @@ for name in "${NAMES[@]}"; do
     operator_env install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/$name"
     port=2243
     [ "$name" != weighted ] || port=2242
-    # Both VM yards predate the VM start policy.
+    # The anchor predates the VM start policy.
     settings="SSH_PORT=$port"$'\nYARD_KIND=vm\nYARD_IMAGE=subyard-e2e-debian-13-cloud-vm\nYARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-vm\nHOST_MOUNTS=\nHOST_LINKS=\nLIMITS_CPU=1\nLIMITS_MEMORY=1GiB\nROOT_DISK_SIZE=10GiB\nSRV_VOLUME_TYPE=block\nSRV_VOLUME_SIZE=2GiB\n'
     operator_env bash -c 'printf "%s" "$2" > "$1"; chmod 0600 "$1"' _ "$OPERATOR_HOME/.config/subyard/yards/$name/config.env" "$settings"
   fi
@@ -79,24 +79,26 @@ for name in "${NAMES[@]}"; do
 done
 lowlevel() { incus project get "$(project_for "$1")" restricted.virtual-machines.lowlevel; }
 [ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'VM yards already carry the VM start policy grant'
-# An owned guest preflight refusal leaves the VM running with its disk-/tmp migration pending.
-# This tests isolation without host shims, a fabricated exit code or an extra guest mount,
-# and keeps both VM yards pending through the hop for this candidate's own restart.
-for name in weighted z-last; do
-  yard_guest "$name" sh -eu -c 'test ! -e /etc/systemd/system/tmp.mount; test ! -L /etc/systemd/system/tmp.mount; printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
-done
-# Below the anchor, follow the printed route: the hop release first, then plain update.
+# Exercise the supported anchor-to-hop update before the candidate.
 # A stopped published 0.28.0 update and its installer exit belong to the hop's own acceptance.
 read -r hop _ archive_sha _ < <(published_hop)
 operator_yard update --version "$hop" --yes > "$STATE_ROOT/hop.log" 2>&1 || { rc=$?; tail -c 16384 "$STATE_ROOT/hop.log" >&2; exit "$rc"; }
 [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$hop/subyard-$hop-linux-amd64.tar.gz" | awk '{print $1}')" = "$archive_sha" ] || die 'hop baseline changed'
 [ "$(operator_yard --version)" = "yard $hop" ] && operator_env jq -e '.checkpoint=="complete"' "$V2_JOURNAL" >/dev/null || die 'hop did not complete'
-for name in weighted z-last; do
-  grep -Fq "yard $name: disk-/tmp migration pending" "$STATE_ROOT/hop.log" && [ -z "$(marker "$name")" ] \
-    && [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] || { cat "$STATE_ROOT/hop.log" >&2; die 'hop did not keep the refused VM yard running and pending'; }
+for name in "${NAMES[@]}"; do
+  [ "$(marker "$name")" = v1 ] && [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] \
+    && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'supported hop changed initialized yard state'
 done
-[ "$(marker default)" = v1 ] || die 'hop did not finish the container yard'
-BOOT[default]="$(yard_boot default)"
+# The supported anchor already initializes disk-/tmp policy. Reopen only this
+# fixture's two VM markers and replace their owned mask with a foreign policy to
+# exercise pending-policy recovery; this is synthetic drift, not an old producer.
+for name in weighted z-last; do
+  [ "$(marker "$name")" = v1 ] || die 'anchor did not initialize disk-/tmp policy'
+  yard_guest "$name" sh -eu -c 'test -L /etc/systemd/system/tmp.mount; test "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null'
+  yard_guest "$name" rm -- /etc/systemd/system/tmp.mount
+  yard_guest "$name" sh -eu -c 'printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
+  incus config unset "$(instance_for "$name")" user.subyard.disk_tmp --project "$(project_for "$name")"
+done
 # Only z-last becomes eligible for the candidate's restart; weighted keeps its foreign policy.
 yard_guest z-last rm -- /etc/systemd/system/tmp.mount
 # The update from the hop runs no migration step, so pending yards wait for the current-release retry.

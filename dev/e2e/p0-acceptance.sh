@@ -15,13 +15,10 @@ VM1_YARD_ENTRY=''
 VM2_YARD_ENTRY=''
 VM1_SSH_STATE=''
 VM2_SSH_STATE=''
-SOURCE_HOST_STARTED=0
-SOURCE_LANE_VM=1
 POWER_SYSTEMD_STARTED=0
 POWER_SYSTEMD_LANE_VM=1
 POWER_RECONCILE_VM=1
 FULL_AUX_STAGE_FILE=''
-FULL_SOURCE_ARM_FILE=''
 FULL_POWER_ARM_FILE=''
 FULL_OWNER_DURATION=0
 FULL_AUX_DURATION=0
@@ -121,7 +118,7 @@ EOF
 list_lanes() {
   assert_split_lanes
   printf '%s\n' \
-    smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
+    smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release \
     power-systemd newer-release legacy-continuation yard-maintenance init-settings \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
@@ -155,7 +152,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|newer-release|legacy-continuation|yard-maintenance|init-settings|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|power-systemd|newer-release|legacy-continuation|yard-maintenance|init-settings|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "${P0_SMOKE_COVERED:-0}" = 0 ] || [ "$P0_LANE" = full ] \
@@ -365,7 +362,6 @@ record_phase_blocked() { # <phase> <reason>
 recover_vm() { # <vm>: remove every owned fixture, then verify a clean disposable VM.
   local vm="$1" rc=0
   ( run_vm "$vm" peer-clean ) || rc=1
-  ( clean_source_host "$vm" ) || rc=1
   ( clean_power_systemd_host "$vm" ) || rc=1
   [ "$rc" = 0 ] && ( run_vm "$vm" capacity-verify-cleanup )
 }
@@ -503,13 +499,6 @@ direct_vm() {
   p0_guest "$vm" env SUBYARD_E2E_VM="$vm" \
     bash "/tmp/subyard-p0-peer-$TOKEN/src/dev/e2e/p0-guest.sh" "$mode" "$TOKEN" "$@"
 }
-run_source_vm() {
-  local vm="$1" mode="$2" rc=0; shift 2
-  run_guest "$vm" "$P0_BUNDLE" "$P0_BUNDLE_HASH" \
-    bash dev/e2e/p0-source-upgrade.sh "$mode" "$TOKEN" "$@" || rc=$?
-  cleanup_guest "$vm" || return 3
-  return "$rc"
-}
 run_power_systemd_vm() {
   local vm="$1" script="$2" rc=0; shift 2
   run_guest "$vm" "$P0_BUNDLE" "$P0_BUNDLE_HASH" bash "$script" "$@" || rc=$?
@@ -527,10 +516,6 @@ clean_peers() {
   done
   return "$rc"
 }
-clean_source_host() {
-  local vm="${1:-$SOURCE_LANE_VM}"
-  run_source_vm "$vm" clean
-}
 arm_full_fixture() {
   local path="$1" vm="$2" temp
   case "$vm" in 1|2) ;; *) return 2 ;; esac
@@ -545,12 +530,6 @@ armed_fixture_vm() {
   IFS= read -r vm < "$path"
   case "$vm" in 1|2) printf '%s\n' "$vm" ;; *) return 2 ;; esac
 }
-cleanup_full_source_arm() {
-  local vm
-  vm="$(armed_fixture_vm "$FULL_SOURCE_ARM_FILE")" || return $?
-  clean_source_host "$vm" || return $?
-  find "$FULL_SOURCE_ARM_FILE" -delete
-}
 cleanup_full_power_arm() {
   local vm
   vm="$(armed_fixture_vm "$FULL_POWER_ARM_FILE")" || return $?
@@ -559,10 +538,6 @@ cleanup_full_power_arm() {
 }
 cleanup_armed_full_fixtures() {
   local rc=0
-  # Both fixtures are armed before the chain starts. The power fixture's clean refuses while
-  # another fixture's project exists, so remove the source fixture first, as recover_vm does.
-  [ -z "$FULL_SOURCE_ARM_FILE" ] || [ ! -e "$FULL_SOURCE_ARM_FILE" ] \
-    || cleanup_full_source_arm || rc=1
   [ -z "$FULL_POWER_ARM_FILE" ] || [ ! -e "$FULL_POWER_ARM_FILE" ] \
     || cleanup_full_power_arm || rc=1
   return "$rc"
@@ -588,7 +563,7 @@ cleanup() {
   stop_runner_children
   cleanup_armed_full_fixtures >/dev/null 2>&1 || cleanup_failed=1
   for vm in ${P0_ACTIVE_PHASE_VMS:-}; do
-    { ( run_vm "$vm" peer-clean ) && ( clean_source_host "$vm" ) && ( clean_power_systemd_host "$vm" ); } \
+    { ( run_vm "$vm" peer-clean ) && ( clean_power_systemd_host "$vm" ); } \
       >/dev/null 2>&1 || cleanup_failed=1
   done
   stop_capacity_monitors
@@ -611,9 +586,6 @@ cleanup() {
     p0_guest 1 find "$PROBE_MARKER" -delete >/dev/null 2>&1 || cleanup_failed=1
   fi
   [ "$PEERS_READY" = 0 ] || clean_peers >/dev/null 2>&1 || cleanup_failed=1
-  [ "$SOURCE_HOST_STARTED" = 0 ] \
-    || clean_source_host "$SOURCE_LANE_VM" >/dev/null 2>&1 \
-    || cleanup_failed=1
   [ "$POWER_SYSTEMD_STARTED" = 0 ] \
     || clean_power_systemd_host "$POWER_SYSTEMD_LANE_VM" >/dev/null 2>&1 \
     || cleanup_failed=1
@@ -1205,11 +1177,8 @@ run_full_matrix_phase() {
     # No VM2 upgrade fixture runs, so none is armed for cleanup.
     FULL_AUX_STAGES=(nested-teardown)
   else
-    FULL_SOURCE_ARM_FILE="$LOCAL_TEMP/full-source-vm"
     FULL_POWER_ARM_FILE="$LOCAL_TEMP/full-power-vm"
-    SOURCE_LANE_VM=2
     POWER_SYSTEMD_LANE_VM=2
-    arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
     arm_full_fixture "$FULL_POWER_ARM_FILE" 2
   fi
   printf '  [ .. ] phase=parallel-matrix bundle=%s timeout=%ss\n' \
@@ -1224,7 +1193,7 @@ run_full_matrix_phase() {
       "$duration" "$FULL_OWNER_DURATION" "$FULL_AUX_DURATION" >&2
     return 0
   fi
-  [ ! -e "$FULL_SOURCE_ARM_FILE" ] && [ ! -e "$FULL_POWER_ARM_FILE" ] \
+  [ ! -e "$FULL_POWER_ARM_FILE" ] \
     || die 'parallel release matrix retained an armed fixture after success'
   write_evidence parallel-matrix passed 0 "$duration"
   printf '  [ ok ] phase=parallel-matrix duration=%ss owner=%ss auxiliary=%ss\n' \
@@ -1250,18 +1219,6 @@ nested_teardown_lane() {
   # nested QEMU fixture in one lease adds no coverage and increases cumulative resident-pressure
   # risk. Exercise one explicitly selectable VM and monitor every allocated guest.
   run_vm "$P0_NESTED_VM" nested-teardown
-}
-
-source_upgrade_lane() {
-  local vm="${1:-1}"
-  SOURCE_LANE_VM="$vm"
-  SOURCE_HOST_STARTED=1
-  run_source_vm "$vm" prepare
-  reboot_vm "$vm"
-  run_source_vm "$vm" resume
-  reboot_vm "$vm"
-  run_source_vm "$vm" finish
-  SOURCE_HOST_STARTED=0
 }
 
 power_systemd_lane() {
@@ -1379,7 +1336,6 @@ peer_lane() {
 cleanup_lane() {
   local vm
   clean_peers
-  clean_source_host
   for ((vm=1; vm<=VM_COUNT; vm++)); do
     run_vm "$vm" capacity-verify-cleanup
   done
@@ -1547,7 +1503,6 @@ case "$P0_LANE" in
     find "$CAPACITY_LOG_DIR" -depth -delete
     CAPACITY_LOG_DIR=''
     ;;
-  source-upgrade) split_lane source-upgrade source_upgrade_lane fixture-platform-apparmor ;;
   power-systemd) split_lane power-systemd power_systemd_lane ;;
   init-settings)
     run_phase capacity-preflight run_vm 1 capacity-preflight
