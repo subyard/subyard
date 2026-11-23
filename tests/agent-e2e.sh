@@ -6487,6 +6487,28 @@ done
   [ "$(stat -c %a "$configuration")" = 600 ] || fail 'published selection lost private settings mode'
 ) || fail 'published agent selection contract failed'
 
+# Published init renders the approval variant of its active prompts; releases without variants keep the base.
+(
+  eval "$(sed -n '/^published_agent_config_source() {/,/^}/p' "$ROOT/dev/e2e/published-upgrade.sh")"
+  operator_env() { "$@"; }
+  OPERATOR_HOME="$TMP/published-variants/operator" runtime="$TMP/published-variants/runtime"
+  mkdir -p "$OPERATOR_HOME/.config/subyard" "$runtime/config/agents/opencode" "$runtime/config/agents/pi"
+  printf '%s\n' '{"artifacts": [{"id": "config", "kind": "config", "source": "opencode.jsonc",' \
+    '"approval_sources": {"git": "git.jsonc", "sudo": "sudo.jsonc", "git sudo": "git-sudo.jsonc"}}]}' \
+    > "$runtime/config/agents/opencode/integration.json"
+  printf '%s\n' '{"artifacts": [{"id": "config", "kind": "config", "source": "settings.json"}]}' \
+    > "$runtime/config/agents/pi/integration.json"
+  for variant in $'AGENTS=none\nDEV_UID=2000:sudo.jsonc' "DEV_SUDO=no:opencode.jsonc" "DEV_SUDO='prompt':sudo.jsonc" \
+    $'CODING_TOOL_GIT_APPROVAL=prompt\nDEV_SUDO=no:git.jsonc' "CODING_TOOL_GIT_APPROVAL=prompt:git-sudo.jsonc"; do
+    printf '%s\n' "${variant%:*}" > "$OPERATOR_HOME/.config/subyard/config.env"
+    [ "$(published_agent_config_source "$runtime" opencode opencode.jsonc)" = "${variant##*:}" ] \
+      || fail "published config variant for ${variant%:*} is not ${variant##*:}"
+  done
+  [ "$(published_agent_config_source "$runtime" pi settings.json)" = settings.json ] \
+    && [ "$(published_agent_config_source "$runtime" claude settings.json)" = settings.json ] \
+    || fail 'published config without approval variants changed its source'
+) || fail 'published config variant contract failed'
+
 # Exercise the actual bootstrap diagnostic against the current public report shape.
 (
   eval "$(sed -n '/^bootstrap_failure_diagnostics() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"

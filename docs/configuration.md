@@ -216,12 +216,12 @@ Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
 The earlier values `1` and `0` are deprecated aliases of `yes` and `no`. An existing assignment
 keeps its behaviour across `yard update`, and a yard whose `0` becomes `no` has nothing to
 reapply. `yard check` and `yard config validate` report each such assignment with its file, its
-line and the replacement. Any other value is refused. Older runtimes refuse `yes`, `no` and `prompt`, so replace `1` and `0` only after every
-owner host that reads the file runs this release, for example
+line and the replacement. Any other value is refused. Runtimes before v0.31.0 refuse `yes`, `no` and `prompt`, so replace `1` and `0` only after every
+owner host that reads the file runs v0.31.0 or later, for example
 `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`.
 
-Absent `DEV_SUDO` meant no grant in v0.30.0 and means `prompt` in this release. After
-`yard update`, release activation reprovisions the coding agents of each running yard without an
+Absent `DEV_SUDO` meant no grant in v0.30.0 and means `prompt` since v0.31.0. After
+`yard update` from v0.30.0, release activation reprovisions the coding agents of each running yard without an
 assignment with the default `prompt`, so they ask before sudo from then on; the grant itself
 appears on the yard's next `yard init`. Stopped yards stay unchanged until the release reaches
 them, at the latest on their next `yard init`. Set `no` there to keep the yard without sudo and
@@ -293,8 +293,8 @@ Run `yard config sync pull` on the other owner hosts, then run `yard init` for e
 you want to apply the change. Host, yard and command values follow the scalar precedence above.
 Restrict write access to the configuration repository to trusted operators.
 
-Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
-the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
+Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Runtimes before v0.31.0
+reject the shared scope and the values `yes`, `no` and `prompt`. Before downgrading below v0.31.0, remove every
 `DEV_SUDO` assignment, `1` and `0` included, and, if one was Git-backed, sync the removal while
 the runtime still supports it. A yard that runs the default needs nothing more before the
 downgrade: an older runtime reads its installed record. A yard that applied `yes` or `no` must

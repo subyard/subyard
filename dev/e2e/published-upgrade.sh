@@ -62,6 +62,31 @@ configure_published_agents() {
     "$OPERATOR_HOME/.config/subyard/config.env" || die 'published agent selection was not configured'
 }
 
+# Published init renders the config variant for its active approval prompts. The fixture
+# sets neither CODING_TOOL_GIT_APPROVAL nor DEV_SUDO, so a release that declares variants
+# applies its defaults: Git prompts off, sudo prompts on. Older releases declare none.
+published_agent_config_source() { # runtime agent source: prints the source published init renders
+  operator_env python3 - "$1/config/agents/$2/integration.json" "$3" \
+    "$OPERATOR_HOME/.config/subyard/config.env" <<'PY'
+import json, pathlib, shlex, sys
+integration, source, settings = sys.argv[1:]
+integration, settings = pathlib.Path(integration), pathlib.Path(settings)
+values = {}
+for line in settings.read_text().splitlines():
+    name, separator, value = line.partition("=")
+    if separator and name in ("CODING_TOOL_GIT_APPROVAL", "DEV_SUDO"):
+        values[name] = "".join(shlex.split(value))
+gates = " ".join(gate for gate, active in (
+    ("git", values.get("CODING_TOOL_GIT_APPROVAL", "") not in ("", "off")),
+    ("sudo", values.get("DEV_SUDO", "") in ("", "prompt"))) if active)
+if integration.exists():
+    for artifact in json.loads(integration.read_text()).get("artifacts", []):
+        if artifact.get("kind") == "config" and artifact.get("source") == source:
+            source = artifact.get("approval_sources", {}).get(gates, source)
+print(source)
+PY
+}
+
 assert_published_agent_configs() {
   local agent source destination expected observed digest_program runtime
   runtime="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET"
@@ -76,12 +101,14 @@ if p.suffix in (".json", ".toml"):
 print(hashlib.sha256(raw).hexdigest())'
   for agent in $PUBLISHED_AGENTS; do
     case "$agent" in
-      claude) source=claude/settings.json; destination=.claude/settings.json ;;
-      codex) source=codex/config.toml; destination=.codex/config.toml ;;
-      opencode) source=opencode/opencode.jsonc; destination=.config/opencode/opencode.jsonc ;;
-      pi) source=pi/settings.json; destination=.pi/agent/settings.json ;;
+      claude) source=settings.json; destination=.claude/settings.json ;;
+      codex) source=config.toml; destination=.codex/config.toml ;;
+      opencode) source=opencode.jsonc; destination=.config/opencode/opencode.jsonc ;;
+      pi) source=settings.json; destination=.pi/agent/settings.json ;;
     esac
-    expected="$(operator_env python3 -c "$digest_program" "$runtime/config/agents/$source")" \
+    source="$(published_agent_config_source "$runtime" "$agent" "$source")" \
+      || die "cannot read published $agent integration"
+    expected="$(operator_env python3 -c "$digest_program" "$runtime/config/agents/$agent/$source")" \
       || die "cannot read published $agent defaults"
     observed="$(guest python3 -c "$digest_program" "/home/dev/$destination")" \
       || die "published init did not materialize $agent"

@@ -1309,8 +1309,9 @@ Claude, backing up and removing those Subyard-owned drop-ins, then restoring the
 release's policy after rollback and before restarting agents. List complete filenames, not globs; preserve
 operator-owned policy. The current declaration covers the approval hooks and managed agent
 configuration and project dispatcher changed or added since 0.30.0. Review cleanup inside each
-affected yard, including custom installation paths. This declaration belongs to the introducing unreleased 0.31.0
-candidate; `throughVersion: "0.30.0"` describes affected rollback targets, not its owning release.
+affected yard, including custom installation paths. v0.31.0 shipped these agent changes without
+this declaration; the next release introduces it. `throughVersion: "0.30.0"` describes affected
+rollback targets, not its owning release.
 It does not refuse the supported rollback to v0.30.0.
 
 Release selection compares the profile runtime formats that the active release and an older or
