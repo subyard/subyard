@@ -16,8 +16,10 @@ observe() { timeout --foreground 30 incus "$@" </dev/null; }
 # Keep the physical systemd contract beside the existing P0 cleanup fixture.
 sink_lifecycle() (
   if ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
-    exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
-      env HOME="$HOME" PATH="$PATH" bash "$0" sink-lifecycle "$token"
+    local -a caller_env=()
+    mapfile -d '' -t caller_env < <(env -0)
+    exec sudo -n -- /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
+      env "${caller_env[@]}" HOME="$HOME" PATH="$PATH" bash "$0" sink-lifecycle "$token"
   fi
   # Reuse the marker-owned P0 owner bootstrap and its exact artifact cleanup.
   # shellcheck disable=SC1090

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	guestDependencyRevision = "subyard-test-vms-dependencies-v2"
+	guestDependencyRevision = "subyard-test-vms-dependencies-v3"
 	guestToolchainTimeout   = 30 * time.Minute
 	guestToolchainKillAfter = 10 * time.Second
 )
@@ -187,6 +187,7 @@ command -v make >/dev/null &&
 command -v shellcheck >/dev/null &&
 command -v sshd >/dev/null &&
 command -v sudo >/dev/null &&
+command -v sg >/dev/null &&
 command -v zsh >/dev/null`
 	_, err := runtime.guest(ctx, vm, []string{"DEPENDENCY_REVISION=" + guestDependencyRevision}, "sh", "-c", check)
 	return err
@@ -198,9 +199,11 @@ func (runtime *Runtime) ensureGuestTools(ctx context.Context, vm string) error {
 		if err := runtime.progress(ctx, "installing test toolchain in "+vm, func() error {
 			const install = `export DEBIAN_FRONTEND=noninteractive
 apt_options='Acquire::Retries=3'
+group_tools=''
+if ! command -v sg >/dev/null 2>&1; then group_tools=util-linux-extra; fi
 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends \
-  build-essential ca-certificates curl expect git golang-go jq make openssh-client openssh-server ripgrep shellcheck sudo tar xz-utils zsh
+  build-essential ca-certificates curl expect git golang-go jq make openssh-client openssh-server ripgrep shellcheck sudo tar xz-utils zsh $group_tools
 install -d -m 0755 /var/lib/subyard
 temp="$(mktemp /var/lib/subyard/.e2e-dependencies.XXXXXX)"
 trap 'rm -f "$temp"' EXIT

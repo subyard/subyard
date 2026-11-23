@@ -45,10 +45,13 @@ printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
   'case "$*" in' \
-  '  "-n -E /usr/sbin/runuser -u dev -g incus-admin -- "*)' \
+  '  "-n -- /usr/sbin/runuser -u dev -g incus-admin -- "*)' \
   '    printf "activate-incus-group\n" >> "$P0_FAKE_SUDO_LOG"' \
   '    [ "${P0_FAKE_GROUP_DENIED:-0}" = 0 ] || exit 1' \
-  '    shift 8; export P0_FAKE_ACTIVE_GROUP=incus-admin; exec "$@" ;;' \
+  '    shift 8; [ "$1" = env ] || exit 2; shift' \
+  '    caller_env=(); while [[ "${1:-}" = *=* ]]; do caller_env+=("$1"); shift; done' \
+  '    export P0_FAKE_HANDOFF_VALUE=scrubbed' \
+  '    exec env -i "${caller_env[@]}" P0_FAKE_ACTIVE_GROUP=incus-admin "$@" ;;' \
   '  "-n systemctl restart incus.service")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
   '    ;;' \
@@ -398,6 +401,7 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'source_path() { sed -n "s/^  source: //p" "$P0_FAKE_INCUS_STATE"; }' \
+  '[ "${P0_FAKE_HANDOFF_VALUE-}" = "${P0_FAKE_EXPECTED_HANDOFF_VALUE-}" ] || exit 98' \
   'case "$*" in' \
   '  "storage show default --project default")' \
   '    [ -r "$P0_FAKE_INCUS_STATE" ] || exit 1' \
@@ -478,6 +482,8 @@ run_recovery_preflight 124 /var/tmp/subyard-nested-teardown.fixture/storage
 
 # The fresh operator has no persisted membership; recovery gets a process-local group.
 : > "$P0_FAKE_SUDO_LOG"
+export P0_FAKE_HANDOFF_VALUE=$'space = value\nsecond line'
+export P0_FAKE_EXPECTED_HANDOFF_VALUE="$P0_FAKE_HANDOFF_VALUE"
 P0_FAKE_ACTIVE_GROUP='' run_recovery_preflight 142 /var/tmp/subyard-nested-teardown.fixture/storage
 [ "$(cat "$P0_FAKE_SUDO_LOG")" = activate-incus-group ] \
   || fail 'fresh preflight did not activate Incus access exactly once'
