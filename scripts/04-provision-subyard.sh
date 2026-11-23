@@ -204,6 +204,8 @@ yard_ssh_host_keys_converge() { # <root prefix>
   echo 'replacing yard SSH host keys: an existing private host key was readable beyond root' >&2
   find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' \( -type f -o -type l \) -delete
   ssh-keygen -q -A -f "$root"
+  # The package's start attempts with the ignored keys may have used up the unit's start limit.
+  systemctl reset-failed ssh.service 2>/dev/null || true
   systemctl try-restart ssh.service
 }
 yard_ssh_host_keys_converge /
