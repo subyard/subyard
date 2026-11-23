@@ -167,7 +167,6 @@ else
   fi
   announce "Subyard Phase 1 — install & initialize Incus" \
     "Install the 'incus' package if missing (apt)." \
-    "Install util-linux-extra if newgrp is missing (apt)." \
     "${restart_notes[@]}" \
     "${vm_qemu_note[@]}" \
     "Add user '$OPERATOR_USER' to group 'incus-admin' — this grants Incus access ≈ root on this host." \
@@ -267,17 +266,6 @@ if [ "$UPGRADE_ONLY" = 1 ]; then
   echo
   ok "Incus is $(_iver)."
   exit 0
-fi
-
-# Fresh group sessions use newgrp; Ubuntu 26.04 ships it in util-linux-extra.
-if ! command -v newgrp >/dev/null 2>&1; then
-  command -v apt-get >/dev/null 2>&1 \
-    || die "no apt-get; install newgrp manually and re-run"
-  info "installing util-linux-extra for group activation"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends util-linux-extra \
-    || die "util-linux-extra install failed"
-  command -v newgrp >/dev/null 2>&1 \
-    || die "newgrp is unavailable after util-linux-extra installation"
 fi
 
 if [ "${YARD_KIND:-container}" = vm ]; then

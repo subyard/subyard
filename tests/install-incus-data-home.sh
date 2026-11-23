@@ -400,12 +400,11 @@ version_bin="$TMP/version-bin"
 mkdir "$version_bin"
 # The dispatcher fixture owns operator access. Keep the Incus package tests independent
 # of whether the host has ACL utilities installed.
-ln -s /bin/true "$version_bin/newgrp"
 ln -s /bin/true "$version_bin/setfacl"
 ln -s /bin/true "$version_bin/getfacl"
 sed -i "s|/usr/bin/setfacl|$version_bin/setfacl|g; s|/usr/bin/getfacl|$version_bin/getfacl|g" \
   "$TMP/version-scripts/01-install-incus.sh"
-for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join sync ln; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join sync; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl sudo; do
@@ -424,9 +423,6 @@ if [ "${1:-}" = "${TEST_APT_FAIL_COMMAND:-install}" ]; then
   [ "${TEST_APT_RC:-0}" = 0 ] || exit "$TEST_APT_RC"
 fi
 case " $* " in
-  *' util-linux-extra '*)
-    [ "${TEST_NEWGRP_INSTALL_NOOP:-0}" = 1 ] || ln -s /bin/true "$TEST_FAKE_BIN/newgrp"
-    ;;
   *' install '*) cp "$TEST_INCUS_FIXTURE" "$TEST_FAKE_BIN/incus" ;;
 esac
 SH
@@ -479,38 +475,6 @@ SH
 chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
   "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$version_bin/nmcli" "$TMP/incus-initial"
 export TEST_FIXTURE_ROOT="$TMP"
-
-# Model an Ubuntu 26.04 PATH without newgrp, including a package that fails
-# to supply the advertised command. Existing newgrp must avoid package changes.
-newgrp_home="$TMP/newgrp/.subyard"
-mkdir -p "$newgrp_home/incus/storage"
-cp "$TMP/bin/incus" "$version_bin/incus"
-for group_case in present missing unavailable; do
-  if [ "$group_case" != present ]; then
-    mv "$version_bin/newgrp" "$TMP/saved-newgrp"
-  fi
-  group_log="$TMP/newgrp-$group_case.log"
-  group_rc=0
-  TEST_UID=0 TEST_INCUS_VERSION=6.0.7 TEST_EFFECT_LOG="$group_log" \
-    TEST_FAKE_BIN="$version_bin" TEST_COMMAND_PATH="$version_bin" \
-    TEST_NEWGRP_INSTALL_NOOP="$([ "$group_case" != unavailable ] && printf 0 || printf 1)" \
-    TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
-    run_installer "$newgrp_home" >"$TMP/newgrp-$group_case.out" 2>&1 || group_rc=$?
-  if [ "$group_case" = unavailable ]; then
-    [ "$group_rc" != 0 ] || fail 'installer accepted missing newgrp after package installation'
-    grep -Fq 'newgrp is unavailable' "$TMP/newgrp-$group_case.out" \
-      || fail 'installer omitted missing newgrp diagnostic'
-    mv "$TMP/saved-newgrp" "$version_bin/newgrp"
-  else
-    [ "$group_rc" = 0 ] || fail "installer rejected $group_case newgrp"
-  fi
-  if [ "$group_case" = present ]; then
-    ! grep -q '^apt-get ' "$group_log" || fail 'installer changed packages with newgrp present'
-  else
-    grep -Fxq 'apt-get install -y -qq --no-install-recommends util-linux-extra' "$group_log" \
-      || fail 'installer did not install the missing group utility'
-  fi
-done
 
 for package_path in upgrade install; do
   for mode in normal upgrade-only; do
