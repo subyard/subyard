@@ -305,4 +305,37 @@ done
 ! kill -0 "$(cat "$TEST_INSTALLER_CHILD")" 2>/dev/null \
   || { printf 'FAIL: stalled Docker installer child remains\n' >&2; exit 1; }
 
-printf 'ok: Docker forwarding, service readiness and atomic installer download\n'
+# Host keys that other yard users can read are replaced before sshd starts; safe keys stay.
+host_keys="$TMP/yard-host-keys.sh"
+sed -n '/^yard_ssh_host_keys_converge()/,/^}/p' "$ROOT/scripts/04-provision-subyard.sh" > "$host_keys"
+key_root="$TMP/yard-root"
+host_keys_case() { # <name>
+  rm -rf "$key_root"; mkdir -p "$key_root/etc/ssh"; : > "$TEST_LOG"
+  ssh-keygen -q -t ed25519 -N '' -C fixture -f "$key_root/etc/ssh/ssh_host_ed25519_key"
+  ssh-keygen -q -t ecdsa -N '' -C fixture -f "$key_root/etc/ssh/ssh_host_ecdsa_key"
+  case "$1" in
+    readable) chmod 0644 "$key_root/etc/ssh/ssh_host_ecdsa_key" ;;
+    other) chmod 0604 "$key_root/etc/ssh/ssh_host_ecdsa_key" ;;
+    symlink) ln -sf ssh_host_ed25519_key "$key_root/etc/ssh/ssh_host_rsa_key" ;;
+  esac
+  sha256sum "$key_root"/etc/ssh/ssh_host_ed25519_key.pub > "$TMP/key-before"
+  bash -euo pipefail -c '. "$1"; yard_ssh_host_keys_converge "$2"' _ "$host_keys" "$key_root" \
+    > "$TMP/stdout" 2> "$TMP/stderr"
+}
+host_keys_case safe
+sha256sum -c --quiet "$TMP/key-before" && [ ! -s "$TMP/stderr" ] && [ ! -s "$TEST_LOG" ] \
+  || { printf 'FAIL: owner-only host keys were changed\n' >&2; exit 1; }
+for unsafe in readable other symlink; do
+  host_keys_case "$unsafe"
+  ! sha256sum -c --quiet "$TMP/key-before" >/dev/null 2>&1 \
+    && grep -Fxq 'systemctl try-restart ssh.service' "$TEST_LOG" \
+    && grep -Fq 'replacing yard SSH host keys' "$TMP/stderr" \
+    || { printf 'FAIL: %s host keys were not replaced\n' "$unsafe" >&2; exit 1; }
+  for type in rsa ecdsa ed25519; do
+    key="$key_root/etc/ssh/ssh_host_${type}_key"
+    [ -f "$key" ] && [ ! -L "$key" ] && [ "$(stat -c %a "$key")" = 600 ] && [ -f "$key.pub" ] \
+      || { printf 'FAIL: %s replacement left an unsafe %s key\n' "$unsafe" "$type" >&2; exit 1; }
+  done
+done
+
+printf 'ok: Docker forwarding, service readiness, atomic installer download and yard host keys\n'
