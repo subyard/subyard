@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
-STATE="$(mktemp -d /tmp/subyard-runner-lease-test.XXXXXXXX)"
+STATE="$(mktemp -d "${TMPDIR:-/tmp}/subyard-runner-lease-test.XXXXXXXX")"
 trap 'find "$STATE" -depth -delete' EXIT
 mkdir "$STATE/controller" "$STATE/run" "$STATE/run/subyard-e2e-runner"
 printf '%s\n' 123/1/checks > "$STATE/run/subyard-e2e-runner/job"
