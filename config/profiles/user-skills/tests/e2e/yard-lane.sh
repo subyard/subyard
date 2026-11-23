@@ -123,7 +123,8 @@ esac
   bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
 )
 timeout 10 /usr/bin/incus query /1.0 >/dev/null
-printf 'STORAGE_PATH=%s\nHOST_BASE=%s\nRESTRICTED_DISK_PATHS=%s\n' "$STORAGE_PATH" "$STATE/host" "$STATE/host" \
+# Keep the standard per-yard host roots distinct during named-yard creation.
+printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" \
   > "$SUBYARD_CONFIG_HOME/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
 export YARD_RUNTIME_ROOT="$STATE/runtime"
@@ -158,7 +159,7 @@ rm -rf -- "$work"
 yard "$first" config set USER_SKILL_SOURCES "$source_url" --scope yard --yes
 yard "$first" init --yes
 [ "$(ready "$first")" = false ] || die 'an unreachable source reported ready'
-yard "$first" profile status user-skills | grep -Fq 'source-unavailable' || die 'status lacks source-unavailable'
+yard "$first" profile status user-skills | grep -F >/dev/null 'source-unavailable' || die 'status lacks source-unavailable'
 yard "$first" profile status user-skills --json | jq -e '.diagnostic.code == "source-unavailable" and (.diagnostic.message | length > 0)' >/dev/null \
   || die 'status JSON lacks the code and hint'
 as_dev "$first" test -f "$SKILLS_ROOT/sources.json" || die 'sources.json was not written'

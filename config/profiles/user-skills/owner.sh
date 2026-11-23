@@ -36,8 +36,11 @@ if [ "$selected" = 1 ]; then
   IFS=$' \t\n' read -r -d '' -a sources <<<"${USER_SKILL_SOURCES:-}" || :
 fi
 # A check's stderr may carry only the readiness record; apply keeps diagnostics.
-guest_stderr=/dev/stderr
-[ "$mode" != check ] || guest_stderr=/dev/null
+if [ "$mode" = check ]; then
+  exec {guest_stderr}>/dev/null
+else
+  exec {guest_stderr}>&2
+fi
 rc=0
 # The guest prints one token for a check; Git output and source URLs never leave it.
 output="$(tar -C "$profile" --exclude=__pycache__ -cf - skills/subyard-user-skills \
@@ -90,7 +93,8 @@ output="$(tar -C "$profile" --exclude=__pycache__ -cf - skills/subyard-user-skil
     sync_helper unlink >/dev/null || sync_rc=$?
     case "$sync_rc" in 0) ;; 4) exit 4 ;; *) exit 2 ;; esac
     agent_skills remove >/dev/null || exit 2
-  ' subyard "$mode" "$selected" "$DEV_USER" "${sources[@]}" 2>"$guest_stderr")" || rc=$?
+  ' subyard "$mode" "$selected" "$DEV_USER" "${sources[@]}" 2>&"$guest_stderr")" || rc=$?
+exec {guest_stderr}>&-
 if [ "$mode" = check ]; then
   [ "$rc" = 0 ] || exit 2
   case "$output" in

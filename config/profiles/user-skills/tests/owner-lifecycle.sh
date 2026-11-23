@@ -2,10 +2,9 @@
 # Run owner.sh and its real guest script plus sync.py through a fake Incus
 # boundary: the guest runs locally as the current user with stubbed identity tools.
 set -euo pipefail
-export TMPDIR=/tmp
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 owner="$root/config/profiles/user-skills/owner.sh"
-state="$(mktemp -d /tmp/subyard-user-skills-owner.XXXXXX)"
+state="$(mktemp -d "${TMPDIR:-/tmp}/subyard-user-skills-owner.XXXXXX")"
 trap 'chmod -R u+rwX -- "$state" 2>/dev/null || :; rm -rf -- "$state"' EXIT
 mkdir -p "$state/bin" "$state/guest-bin" "$state/git-bin" "$state/home"
 cat > "$state/bin/incus" <<'PY'
@@ -113,7 +112,7 @@ FIXTURE_SKILLS_CHECK_REGISTERED=1 expect 2 '' -- --check
 # A held lock makes apply busy without changes; check answers at once.
 exec {lock}>"$skills_root/.lock"
 flock "$lock"
-expect 1 'user-skills: another user-skills sync holds the lock; retry' -- --yes
+expect 1 $'user skills: another user-skills sync holds the lock; retry\nuser-skills: another user-skills sync holds the lock; retry' -- --yes
 expect 0 '' -- --check
 exec {lock}>&-
 # Deselection: links and sources.json are work; --yes removes them, keeps the clone.
@@ -125,21 +124,21 @@ SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
 # A multi-line value (one URL per line) passes every URL and never globs.
 two=$'https://127.0.0.1:9/example/skills.git\n\thttps://127.0.0.1:9/example/other.git\n'
 USER_SKILL_SOURCES="$two" expect 0 '' -- --yes
-tail -n 1 "$state/calls" | grep -Fxq '["apply", "1", "dev", "https://127.0.0.1:9/example/skills.git", "https://127.0.0.1:9/example/other.git"]' \
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev", "https://127.0.0.1:9/example/skills.git", "https://127.0.0.1:9/example/other.git"]' \
   || fail "multi-line arguments: $(tail -n 1 "$state/calls")"
 python3 -c 'import json,sys; assert len(json.load(open(sys.argv[1]))) == 2' "$skills_root/sources.json"
 [ -L "$state/home/.claude/skills/alpha" ] || fail 'multi-line apply left no link'
 (cd "$state" && USER_SKILL_SOURCES='*' expect 2 '' -- --check)
-tail -n 1 "$state/calls" | grep -Fxq '["check", "1", "dev", "*"]' || fail "glob arguments: $(tail -n 1 "$state/calls")"
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["check", "1", "dev", "*"]' || fail "glob arguments: $(tail -n 1 "$state/calls")"
 # A selected empty list converges like a deselection: no sources.json, no links, clones kept.
 USER_SKILL_SOURCES='' expect 1 '' -- --check
 USER_SKILL_SOURCES='' expect 0 '' -- --yes
-tail -n 1 "$state/calls" | grep -Fxq '["apply", "1", "dev"]' || fail "empty-list arguments: $(tail -n 1 "$state/calls")"
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "1", "dev"]' || fail "empty-list arguments: $(tail -n 1 "$state/calls")"
 [ ! -e "$skills_root/sources.json" ] && [ ! -L "$state/home/.claude/skills/alpha" ] || fail 'empty list left links'
 [ -f "$clone/skills/alpha/SKILL.md" ] || fail 'empty list removed the clone'
 USER_SKILL_SOURCES='' expect 0 '' -- --check
 expect 0 '' -- --remove
-tail -n 1 "$state/calls" | grep -Fxq '["apply", "0", "dev"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
+tail -n 1 "$state/calls" | grep -Fx >/dev/null '["apply", "0", "dev"]' || fail "remove arguments: $(tail -n 1 "$state/calls")"
 # Without the developer account a deselected profile is current; a selected one is work.
 FIXTURE_NO_DEV=1 SUBYARD_PROFILE_SELECTED=0 expect 0 '' -- --check
 FIXTURE_NO_DEV=1 expect 1 '' -- --check
