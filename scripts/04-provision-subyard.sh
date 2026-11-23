@@ -186,6 +186,28 @@ mkdir -p "${srv_skel[@]}"
 chown root:yard "${srv_skel[@]}"
 chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit the yard group
 
+# A cloud image's cloud-init may write host keys at first boot, before openssh-server is installed;
+# they were seen world-readable. sshd ignores a private key other users can read, and such a key is
+# no longer secret, so replace the whole set; access setup pins the new host key afterwards.
+yard_ssh_host_keys_converge() { # <root prefix>
+  local root="$1" key owner mode unsafe=0
+  for key in "$root/etc/ssh"/ssh_host_*_key; do
+    [ -e "$key" ] || [ -L "$key" ] || continue
+    if [ -L "$key" ] || [ ! -f "$key" ]; then
+      unsafe=1
+    else
+      read -r owner mode < <(stat -c '%u %a' "$key")
+      [ "$owner" = "$(id -u)" ] && (( (8#$mode & 8#077) == 0 )) || unsafe=1
+    fi
+  done
+  [ "$unsafe" = 1 ] || return 0
+  echo 'replacing yard SSH host keys: an existing private host key was readable beyond root' >&2
+  find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' \( -type f -o -type l \) -delete
+  ssh-keygen -q -A -f "$root"
+  systemctl try-restart ssh.service
+}
+yard_ssh_host_keys_converge /
+
 # Services live in the container's own systemd (does not touch host systemd).
 # A failed start reports each failed unit's result. For sshd it also reports this attempt's journal
 # and the config/key checks behind Debian's host key setup, bounded and without their stdout.
