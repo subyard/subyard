@@ -15,9 +15,10 @@ import (
 // the previous release already advanced every settings epoch. It changes no
 // runtime format and needs no rollback boundary.
 type deadSettingsActivation struct {
-	cli  *CLI
-	home string
-	plan config.DeadAssignmentPlan
+	cli                 *CLI
+	home                string
+	plan                config.DeadAssignmentPlan
+	captured, converged bool
 }
 
 func (*deadSettingsActivation) ID() string { return "legacy-settings" }
@@ -45,7 +46,13 @@ func (owner *deadSettingsActivation) observe(files *config.ProspectiveFiles) (re
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, domain.CollectRefusals(err)
 	}
-	owner.plan = plan
+	// Re-observation supplies fresh diagnostics, never fresh write authority.
+	// The first plan remains the CAS input until an explicit recovery plan is prepared.
+	if !owner.captured {
+		owner.plan = plan
+		owner.captured = true
+	}
+	owner.converged = len(plan.Removed) == 0
 	actual := sha256.Sum256(plan.Expected.Content)
 	desired := sha256.Sum256(plan.Desired)
 	binding, err := activationStageFingerprint(plan)
@@ -60,9 +67,16 @@ func (owner *deadSettingsActivation) observe(files *config.ProspectiveFiles) (re
 }
 
 func (owner *deadSettingsActivation) Reconcile(_ context.Context, _ releasetransition.ReleaseLinks) error {
+	if owner.converged {
+		return nil
+	}
+	if !owner.captured || len(owner.plan.Removed) == 0 {
+		return config.ErrPersistentTargetStale
+	}
 	if err := owner.plan.Apply(owner.home); err != nil {
 		return err
 	}
+	owner.converged = true
 	for _, assignment := range owner.plan.Removed {
 		fmt.Fprintf(owner.cli.options.Stdout, "%s:%d: removed dead %s assignment; file-settings source %s takes precedence\n", assignment.Path, assignment.Line, assignment.Name, assignment.Source)
 	}
@@ -70,6 +84,7 @@ func (owner *deadSettingsActivation) Reconcile(_ context.Context, _ releasetrans
 }
 
 func (owner *deadSettingsActivation) PrepareActivationRecovery(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks) (releasetransition.Fingerprint, error) {
+	owner.captured = false
 	observation, err := owner.Observe(ctx, releases, links)
 	return observation.Binding, err
 }

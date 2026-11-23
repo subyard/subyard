@@ -217,3 +217,39 @@ func TestDeadSettingsOwnerEmptyResultHasStableDesiredFingerprint(t *testing.T) {
 		t.Fatalf("empty result=%q err=%v", content, err)
 	}
 }
+
+func TestDeadSettingsReobservationDoesNotRenewWriteAuthority(t *testing.T) {
+	cli, home, path, _ := deadSettingsFixture(t)
+	owner := &deadSettingsActivation{cli: cli, home: home}
+	ctx := context.Background()
+	before, err := owner.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, path+".replacement", string(content), 0640)
+	if err := os.Rename(path+".replacement", path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := owner.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+	if err != nil || after.Desired != before.Desired || after.Binding == before.Binding {
+		t.Fatalf("before=%+v after=%+v err=%v", before, after, err)
+	}
+	if err := owner.Reconcile(ctx, releasetransition.ReleaseLinks{}); !errors.Is(err, config.ErrPersistentTargetStale) {
+		t.Fatalf("replacement was not stale: %v", err)
+	}
+	unchanged, _ := os.ReadFile(path)
+	if !bytes.Equal(unchanged, content) {
+		t.Fatal("re-observation authorized an unreviewed edit")
+	}
+	// Only a fresh recovery assessment can authorize the new exact inode.
+	if _, err := owner.PrepareActivationRecovery(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+}
