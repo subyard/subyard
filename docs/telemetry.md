@@ -74,8 +74,9 @@ upgrade removes the recorded token and keeps the private one. Subsequent telemet
 and disable operations leave home documents alone. Policy files that still contain the
 bearer are rewritten without it; the helper is installed before a policy names it.
 
-Releases v0.28–v0.30 read telemetry runtime format 1, and this release installs format 2.
-Rollback is supported only to v0.30.0; rollback to v0.29.0 or earlier stays refused.
+Releases v0.28–v0.30 read telemetry runtime format 1; v0.31.0 and later install format 2.
+Rollback to v0.31.0 keeps format 2 and needs no telemetry preparation. Rollback to v0.30.0 is supported as described
+below; rollback to v0.29.0 or earlier stays refused.
 `yard update --rollback` to v0.30.0 refuses while telemetry is enabled in a local
 yard: its collector cannot open this release's store or the producer files it retired.
 Run `yard -Y NAME profile disable telemetry` first, which also removes both system policy
