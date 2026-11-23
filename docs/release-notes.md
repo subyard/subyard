@@ -26,8 +26,9 @@
 
 - Fix yard startup after host reboot on NetworkManager hosts using a decimal-comma locale
   (such as German or Russian). In 0.31.0, the guard record could fail to match the unchanged
-  guard file, leaving yards stopped. Updates recognize these existing records and rewrite
-  them with a locale-independent identity, without manual repair or an extra reboot.
+  guard file, leaving yards stopped. Updates recognize these existing records without manual
+  repair or an extra reboot. Init rewrites bound legacy records with a locale-independent
+  identity while preserving their boot and read state.
 
 ### Rollback to v0.30.0
 
