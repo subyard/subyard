@@ -33,6 +33,8 @@ reconcile_approval_file() {
   fi
 }
 
+# Shared with Codex, which passes --plain; Claude needs no extra argument.
+# shellcheck disable=SC2120
 approval_command() {
   jq -n --args '$ARGS.positional | map(@sh) | join(" ")' -- \
     "$git_hook" "$@" --policies "$git_policy" "$sudo_policy"
@@ -62,6 +64,8 @@ check_approval_hash() {
 
 check_git_approval_hook() {
   [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
+  # The generated policy check assigns the expected hash before calling this helper.
+  # shellcheck disable=SC2154
   check_approval_hash "$git_hook" "$git_hook_sha" 755 'managed approval hook'
 }
 '''
