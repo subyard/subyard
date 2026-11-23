@@ -82,7 +82,7 @@ apt-get update -qq
 
 # Core packages; project toolchains come from profiles.
 apt-get install -y -qq \
-  ca-certificates curl gnupg lsb-release sudo \
+  ca-certificates curl gnupg lsb-release sudo acl \
   openssh-server git git-lfs jq ripgrep rsync make build-essential zip unzip uidmap \
   python3 python3-venv pipx
 git lfs install --system >/dev/null 2>&1 || true
@@ -208,6 +208,10 @@ yard_ssh_host_keys_converge() { # <root prefix>
   systemctl reset-failed ssh.service 2>/dev/null || true
   systemctl try-restart ssh.service
 }
+printf 'probe: yard SSH directory ACL before key convergence; caller umask='
+umask
+getfacl -p /etc/ssh
+stat -c '%u %a %n' /etc/ssh/ssh_host_*_key
 yard_ssh_host_keys_converge /
 
 # Services live in the container's own systemd (does not touch host systemd).

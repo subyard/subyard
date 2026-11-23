@@ -1012,6 +1012,11 @@ ensure_owner_incus() {
     reconcile_p0_incus_apparmor_compat
   fi
   assert_incus_daemon_line
+  printf 'probe: owner fixture ACLs before yard creation; caller umask='
+  umask
+  sudo -n getfacl -p /home /etc/skel /home/dev /home/dev/.cache \
+    "$P0_CAPACITY_STATE_ROOT" "$P0_CAPACITY_PLATFORM_ROOT" \
+    "$(incus storage get default source --project default)"
 }
 ensure_peer_incus() {
   ensure_incus "$PEER_STATE_ROOT/incus-home" "$PEER_INCUS_MARKER" peer-prepare-resume

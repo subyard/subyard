@@ -193,6 +193,9 @@ prepare_runner_host() {
   sudo -n visudo -cf /etc/sudoers.d/90-subyard-e2e-dev
   sudo -n bash -euc '. "$1/scripts/e2e-lab/base.sh"; base_install_incus "$1"; base_prepare_platform' bash "$WORKSPACE"
   sudo -n usermod -aG incus-admin,kvm dev
+  printf 'probe: runner ACLs after platform preparation; caller umask='
+  umask
+  sudo -n getfacl -p /home /etc/skel /home/dev /home/dev/.cache
   bash "$WORKSPACE/dev/ci/runner-lease.sh" prepare
 }
 
