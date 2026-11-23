@@ -294,7 +294,7 @@ func validatePersistentDirectoryFD(fd int) error {
 }
 
 func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, error) {
-	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return PersistentFileSnapshot{}, nil
 	}
@@ -377,17 +377,30 @@ func preparePersistentPendingAt(parent int, name string, desired []byte, mode ui
 		if readErr != nil {
 			return readErr
 		}
-		if !pending.Exists || !bytes.Equal(pending.Content, desired) || pending.Identity.Mode&0o777 != mode || pending.Identity.UID != owner.UID || pending.Identity.GID != owner.GID {
+		// Staging has no authority. Only a validated prefix of the independently
+		// reconstructed payload can be an interrupted attempt at this write.
+		if !pending.Exists || !bytes.HasPrefix(desired, pending.Content) {
 			return ErrPersistentTargetStale
 		}
-		pendingACL, err := persistentAccessACLAt(parent, name, pending.Identity)
-		if err != nil {
+		current, readErr := readPersistentSnapshotAt(parent, name)
+		if readErr != nil {
+			return readErr
+		}
+		if !samePersistentFileSnapshotExact(current, pending) {
+			return ErrPersistentTargetStale
+		}
+		if err := unix.Unlinkat(parent, name, 0); err != nil {
 			return err
 		}
-		if !bytes.Equal(pendingACL, acl) {
+		if err := unix.Fsync(parent); err != nil {
+			return err
+		}
+		// Start over with private permissions and restore metadata from the target,
+		// not from an unbound or only partially initialized staging inode.
+		fd, err = unix.Openat(parent, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if errors.Is(err, unix.EEXIST) {
 			return ErrPersistentTargetStale
 		}
-		return nil
 	}
 	if err != nil {
 		return err
