@@ -1590,6 +1590,56 @@ set -e
   [ "$(eval "$dispatch")" = $'capacity-preflight run_vm 1 capacity-preflight\nyard-maintenance-platform run_vm 1 fixture-platform\nyard-maintenance yard_maintenance_lane\ncleanup cleanup_lane' ] \
     || fail 'yard maintenance controller lost platform or cleanup'
 ) || fail 'yard maintenance lane contract failed'
+# The supported anchor already has current QEMU settings and a low-level grant.
+# Synthetic drift must leave both pending and preserve the native yard baseline.
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/yard-maintenance-upgrade.sh" \
+    project_for instance_for reopen_vm_start_policy)"
+  declare -A UUID=([weighted]=retained-uuid) BOOT=([weighted]=old-boot)
+  MARKER=fixture raw=current grant=allow
+  incus() {
+    case "$*" in
+      'stop yard-weighted --project subyard-weighted --timeout 120') : ;;
+      'config unset yard-weighted raw.qemu.conf --project subyard-weighted') raw='' ;;
+      'start yard-weighted --project subyard-weighted') [ -z "$raw" ] && [ "$grant" = allow ] ;;
+      'project unset subyard-weighted restricted.virtual-machines.lowlevel') grant='' ;;
+      *) fail "unexpected synthetic VM policy command: $*" ;;
+    esac
+  }
+  yard_guest() {
+    case "$*" in
+      'weighted true') : ;;
+      'weighted cat /var/lib/yard-maintenance-canary') printf '%s\n' "$MARKER-weighted" ;;
+      *) return 65 ;;
+    esac
+  }
+  yard_boot() { printf 'new-boot\n'; }
+  yard_uuid() { printf 'retained-uuid\n'; }
+  die() { fail "$*"; }
+  reopen_vm_start_policy weighted
+  [ -z "$raw" ] && [ -z "$grant" ] && [ "${BOOT[weighted]}" = new-boot ] && [ "${UUID[weighted]}" = retained-uuid ] \
+    || fail 'synthetic VM drift retained its QEMU value or grant, or lost its boot baseline'
+) || fail 'yard maintenance VM start-policy drift contract failed'
+
+# Keep the remaining released-checkpoint evidence available after guest cleanup.
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" full_uninstall_vm)"
+  STATE_ROOT="$TMP/full-uninstall-evidence" LEASE_RUN=fixture TOKEN=123
+  P0_BUNDLE=fixture P0_BUNDLE_HASH=fixture
+  run_guest() { :; }
+  guest() { printf '%s\n' "${@: -1}"; }
+  cleanup_guest() { :; }
+  full_uninstall_vm prepare
+  logs="$STATE_ROOT/evidence/full-uninstall-$LEASE_RUN/prepare"
+  for file in released-install.log released-full.log released-retry-preview.log released-retry.log; do
+    [ "$(cat "$logs/$file")" = "$file" ] && [ "$(stat -c %a "$logs/$file")" = 600 ] \
+      || fail "released checkpoint evidence missing or unsafe: $file"
+  done
+  [ "$(stat -c %a "$logs")" = 700 ] || fail 'full-uninstall evidence directory is not private'
+  [ -z "$(find "$logs" -name 'legacy-*.log' -print -quit)" ] \
+    || fail 'full-uninstall evidence still collects retired legacy logs'
+) || fail 'full-uninstall released checkpoint evidence contract failed'
+
 # Maintenance cleanup releases only its marker-owned named yards.
 for maintenance_cleanup_case in success teardown-failure absent foreign; do
   maintenance_cleanup_root="$TMP/maintenance-cleanup-$maintenance_cleanup_case"
@@ -2717,7 +2767,7 @@ newer_release_fixture_env="$(bash -c '
 ' _ "$newer_release_recovery" "$TMP/newer_release-env")"
 [ "$newer_release_fixture_env" = \
   '1|/usr/local/libexec/subyard/subyard-p0-newer-release-success-123-test-vms-sink|/etc/systemd/system/subyard-p0-newer-release-success-123-test-vms-host-sink.service|/etc/systemd/system/subyard-p0-newer-release-success-123-test-vms-host-sink.timer' ] \
-  || fail 'v0.11.1 fixture does not isolate optional user timers and the root host sink'
+  || fail 'newer-release fixture does not isolate optional user timers and the root host sink'
 bash -c '
   set -euo pipefail
   source "$1"
@@ -2732,12 +2782,12 @@ bash -c '
   grep -Fxq AGENTS= "$registration"
   ! grep -Eq "^(YARD_TEMPLATE|NESTED_E2E_VMS|E2E_VM_)" "$registration"
 ' _ "$newer_release_recovery" "$TMP/newer_release-config" \
-  || fail 'v0.11.1 config-drift fixture must allow the selected Codex integration'
+  || fail 'newer-release config-drift fixture must allow the selected Codex integration'
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-newer-release-$TOKEN"' "$newer_release_recovery" \
   && grep -Fq 'assert_state_root' "$newer_release_recovery" \
   && grep -Fq 'assert_fixture_root' "$newer_release_recovery" \
   && grep -Fq 'assert_project_marker' "$newer_release_recovery" \
-  || fail 'v0.11.1 recovery fixture mutations are not marker-bounded'
+  || fail 'newer-release recovery fixture mutations are not marker-bounded'
 bash -c '
   set -euo pipefail
   source "$1" 123
@@ -2989,7 +3039,7 @@ done
 grep -Fq 'cleanup_test_vms_sink' "$newer_release_recovery" \
   && grep -Fq 'systemctl disable --now "$TEST_VMS_SINK_TIMER_NAME"' "$newer_release_recovery" \
   && grep -Fq 'sudo -n find "$FIXTURE_ROOT" -depth -delete' "$newer_release_recovery" \
-  || fail 'v0.11.1 fixture does not stop its unique sink before privileged marked-root cleanup'
+  || fail 'newer-release fixture does not stop its unique sink before privileged marked-root cleanup'
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
 lease_response="$(printf '{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":5,"lease_id":"aabb","capability":"ccdd","lease_epoch":3,"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"

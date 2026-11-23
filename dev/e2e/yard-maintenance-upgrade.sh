@@ -15,6 +15,25 @@ yard_boot() { yard_guest "$1" cat /proc/sys/kernel/random/boot_id; }
 yard_uuid() { incus config get "$(instance_for "$1")" volatile.uuid --project "$(project_for "$1")"; }
 marker() { incus config get "$(instance_for "$1")" user.subyard.disk_tmp --project "$(project_for "$1")"; }
 update_candidate() { operator_env env YARD_RELEASE_VERSION="$CANDIDATE_VERSION" YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" "$OPERATOR_HOME/.local/bin/yard" update "$@"; }
+# A current QEMU value makes the start helper return before granting low-level
+# access. Reopen both owner values so the approved restart must restore the grant.
+reopen_vm_start_policy() {
+  local name="$1" deadline
+  incus stop "$(instance_for "$name")" --project "$(project_for "$name")" --timeout 120
+  incus config unset "$(instance_for "$name")" raw.qemu.conf --project "$(project_for "$name")"
+  # Bypass the product start only while preparing this marker-owned synthetic drift.
+  incus start "$(instance_for "$name")" --project "$(project_for "$name")"
+  deadline=$((SECONDS + 150))
+  until yard_guest "$name" true >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'synthetic VM policy drift did not return ready'
+    sleep 1
+  done
+  BOOT[$name]="$(yard_boot "$name")"
+  [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] \
+    && [ "$(yard_guest "$name" cat /var/lib/yard-maintenance-canary)" = "$MARKER-$name" ] \
+    || die 'synthetic VM policy drift changed identity or data'
+  incus project unset "$(project_for "$name")" restricted.virtual-machines.lowlevel
+}
 maintenance_cleanup() {
   local original=$? failed=0 name
   trap - EXIT ERR
@@ -63,7 +82,7 @@ for name in "${NAMES[@]}"; do
     operator_env install -d -m 0700 "$OPERATOR_HOME/.config/subyard/yards/$name"
     port=2243
     [ "$name" != weighted ] || port=2242
-    # The anchor predates the VM start policy.
+    # The anchor grants the VM start policy when it creates these projects.
     settings="SSH_PORT=$port"$'\nYARD_KIND=vm\nYARD_IMAGE=subyard-e2e-debian-13-cloud-vm\nYARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-vm\nHOST_MOUNTS=\nHOST_LINKS=\nLIMITS_CPU=1\nLIMITS_MEMORY=1GiB\nROOT_DISK_SIZE=10GiB\nSRV_VOLUME_TYPE=block\nSRV_VOLUME_SIZE=2GiB\n'
     operator_env bash -c 'printf "%s" "$2" > "$1"; chmod 0600 "$1"' _ "$OPERATOR_HOME/.config/subyard/yards/$name/config.env" "$settings"
   fi
@@ -78,7 +97,7 @@ for name in "${NAMES[@]}"; do
   UUID[$name]="$(yard_uuid "$name")" BOOT[$name]="$(yard_boot "$name")"
 done
 lowlevel() { incus project get "$(project_for "$1")" restricted.virtual-machines.lowlevel; }
-[ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'VM yards already carry the VM start policy grant'
+[ "$(lowlevel weighted)" = allow ] && [ "$(lowlevel z-last)" = allow ] || die 'anchor did not grant the VM start policy'
 # Exercise the supported anchor-to-hop update before the candidate.
 # A stopped published 0.28.0 update and its installer exit belong to the hop's own acceptance.
 read -r hop _ archive_sha _ < <(published_hop)
@@ -90,15 +109,17 @@ for name in "${NAMES[@]}"; do
     && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'supported hop changed initialized yard state'
 done
 # The supported anchor already initializes disk-/tmp policy. Reopen only this
-# fixture's two VM markers and replace their owned mask with a foreign policy to
-# exercise pending-policy recovery; this is synthetic drift, not an old producer.
+# fixture's two VM markers and QEMU start policies, remove their start-policy
+# grants and replace their owned masks with a foreign policy. This is synthetic drift.
 for name in weighted z-last; do
   [ "$(marker "$name")" = v1 ] || die 'anchor did not initialize disk-/tmp policy'
+  reopen_vm_start_policy "$name"
   yard_guest "$name" sh -eu -c 'test -L /etc/systemd/system/tmp.mount; test "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null'
   yard_guest "$name" rm -- /etc/systemd/system/tmp.mount
   yard_guest "$name" sh -eu -c 'printf "fixture foreign policy\n" > /etc/systemd/system/tmp.mount'
   incus config unset "$(instance_for "$name")" user.subyard.disk_tmp --project "$(project_for "$name")"
 done
+[ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'synthetic drift retained a VM start policy grant'
 # Only z-last becomes eligible for the candidate's restart; weighted keeps its foreign policy.
 yard_guest z-last rm -- /etc/systemd/system/tmp.mount
 # The update from the hop runs no migration step, so pending yards wait for the current-release retry.
@@ -106,6 +127,7 @@ update_candidate --yes > "$STATE_ROOT/candidate.log" 2>&1 || { rc=$?; tail -c 16
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
 for name in "${NAMES[@]}"; do [ "$(yard_boot "$name")" = "${BOOT[$name]}" ] && [ "$(yard_uuid "$name")" = "${UUID[$name]}" ] || die 'update from the hop restarted a yard'; done
 [ -z "$(marker weighted)" ] && [ -z "$(marker z-last)" ] || die 'update from the hop changed a pending marker'
+[ -z "$(lowlevel weighted)" ] && [ -z "$(lowlevel z-last)" ] || die 'update granted the VM start policy before restart'
 before="$(protected_state)"
 update_candidate --check --offline --version "$CANDIDATE_VERSION" --json > "$STATE_ROOT/plan.json"
 [ "$(protected_state)" = "$before" ] || die 'read-only plan changed protected state'
