@@ -644,6 +644,23 @@ grep -Fq 'restart NetworkManager (' "$tmp/guard.out" && fail "the first write of
   || fail "record: $(cat "$POWER_NM_GUARD_STATE" 2>/dev/null)"
 grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "the early call pinned a device"
 [ "$(state_of)" = unread-init ] || fail "the first write did not read as unread"
+# The identity must ignore LC_ALL, including translated %F and the decimal radix. Use real
+# comma locales when installed; otherwise stat simulates their output without host setup.
+(
+  canonical="$(LC_ALL=C power_nm_file_id "$guard_conf")"
+  for identity_locale in de_DE.UTF-8 ru_RU.UTF-8; do
+    (
+      if [ "$(LC_ALL="$identity_locale" locale decimal_point 2>/dev/null)" != ',' ]; then
+        stat() {
+          if [ "${LC_ALL:-}" = C ]; then command stat "$@"
+          else printf 'translated regular file|7:1,000000005\n'; fi
+        }
+      fi
+      got="$( { LC_ALL="$identity_locale" power_nm_file_id "$guard_conf"; } 2>/dev/null)"
+      [ "$got" = "$canonical" ] || fail "identity under $identity_locale: $got, want $canonical"
+    )
+  done
+)
 for attempt in record no-record foreign; do
   case "$attempt" in
     no-record) rm -f "$POWER_NM_GUARD_STATE" ;;
@@ -672,6 +689,32 @@ nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "the late call fail
 [ "$(cut -d ' ' -f1,3- "$POWER_NM_GUARD_STATE")" = "$first_record" ] \
   && [ "$(cut -d ' ' -f2 "$POWER_NM_GUARD_STATE")" = "$(power_nm_file_id "$guard_conf")" ] \
   || fail "bridge names changed the record: $(cat "$POWER_NM_GUARD_STATE")"
+# Only the legacy radix differs: unchanged bytes canonicalize without changing boot/state/kind.
+for legacy_state in 'held init' 'held migration' 'unread init' 'unread migration'; do
+  identity="$(power_nm_file_id "$guard_conf")"
+  legacy_record="boot-0 ${identity/./,} $(power_nm_guard_static_hash "$guard_conf") $legacy_state"
+  nm_guard_write_file "$POWER_NM_GUARD_STATE" "$legacy_record"
+  [ "$(state_of)" = loaded ] || fail "legacy $legacy_state record did not bind across reboot"
+  nm_guard_publish "$guard_conf" "$(cat "$guard_conf")" init 1 "$(power_nm_binary)" >/dev/null
+  [ "$(cat "$POWER_NM_GUARD_STATE")" = "${legacy_record/,/.}" ] \
+    && [ "$(power_nm_file_id "$guard_conf")" = "$identity" ] \
+    || fail "legacy $legacy_state canonicalization changed the binding or state"
+done
+# Canonicalization persists the identity it matched, even if the path changes before recording.
+(
+  identity="$(power_nm_file_id "$guard_conf")"
+  nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-0 ${identity/./,} $(power_nm_guard_static_hash "$guard_conf") held init"
+  original_record="$(declare -f nm_guard_record)"
+  eval "${original_record/nm_guard_record/nm_guard_record_original}"
+  nm_guard_record() {
+    nm_guard_write_file "$1" "$(cat "$1")"
+    nm_guard_record_original "$@"
+  }
+  nm_guard_publish "$guard_conf" "$(cat "$guard_conf")" init 1 "$(power_nm_binary)" >/dev/null
+  [ "$(cut -d ' ' -f2 "$POWER_NM_GUARD_STATE")" = "$identity" ] \
+    && [ "$(state_of)" = unbound ] || fail "canonicalization bound a replacement guard"
+)
+mark_loaded
 # Removing and adding back an Incus bridge rewrites only bridge names.
 MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true}]' nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null \
   || fail "a removed bridge on a loaded guard stopped init"

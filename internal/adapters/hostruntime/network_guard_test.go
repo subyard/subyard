@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -348,6 +349,21 @@ func bindGuardRecord(t *testing.T, record, guard, boot, contents, state string) 
 	testkit.WriteFile(t, record, []byte(boot+" "+networkManagerFileID(guard)+" "+NetworkManagerGuardStaticHash(contents)+" "+state+" init\n"), 0o644)
 }
 
+func TestNetworkManagerFileIDMatchesShell(t *testing.T) {
+	guard := filepath.Join(testkit.TempDir(t), "zz.conf")
+	testkit.WriteFile(t, guard, []byte("[device-subyard]\n"), 0o644)
+	command := exec.Command("bash", "-c", `. "$1"; power_nm_file_id "$2"`, "_",
+		filepath.Join("..", "..", "..", "scripts", "lib-power.sh"), guard)
+	command.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(output)), networkManagerFileID(guard); got != want {
+		t.Fatalf("shell identity %q, Go identity %q", got, want)
+	}
+}
+
 // A link in place of the guard is never bound: it could be retargeted and restored behind the
 // record (the shell twin runs in tests/lib-power-network.sh).
 func TestLocalNetworkManagerGuardStateRefusesALinkedGuard(t *testing.T) {
@@ -434,6 +450,14 @@ func TestLocalNetworkManagerGuardStateNeverLoadsWithoutTheRecord(t *testing.T) {
 	bindGuardRecord(t, record, guard, "b1", "[device-subyard]\n", "unread")
 	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
 		t.Fatalf("a bound record from another boot gave %q", got)
+	}
+	contents, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, record, []byte(strings.Replace(string(contents), ".", ",", 1)), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
+		t.Fatalf("a legacy decimal-comma record from another boot gave %q", got)
 	}
 }
 

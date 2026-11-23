@@ -382,7 +382,8 @@ func NetworkManagerGuardState(record, boot, fileID, hash string) string {
 		return "unread-init"
 	}
 	fields := strings.Fields(record)
-	if len(fields) != 5 || fileID == "" || fields[1] != fileID || hash == "" || fields[2] != hash ||
+	// 0.31.0 wrote ctime with the caller's decimal separator; the file still has to match exactly.
+	if len(fields) != 5 || fileID == "" || strings.Replace(fields[1], ",", ".", 1) != fileID || hash == "" || fields[2] != hash ||
 		(fields[3] != "held" && fields[3] != "unread") || (fields[4] != "init" && fields[4] != "migration") {
 		return "unbound"
 	}
