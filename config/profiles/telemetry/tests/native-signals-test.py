@@ -216,10 +216,16 @@ pathlib.Path(sys.argv[2]).write_text('export acknowledged')
             with self.subTest(case):
                 with self.assertRaisesRegex(AssertionError, message):
                     self.run_attribution(scenario)
-        missing = turns()
-        missing['second'] = (['run-2'], 'run-2', [self.trace_payload('run-1', late)])
-        with self.assertRaisesRegex(AssertionError, '^second: spans did not carry this run$'):
-            self.run_attribution(missing)
+        # A resource without spans does not count as a run's traces.
+        output = self.run_attribution(turns(self.trace_payload('run-1'), self.trace_payload('run-unknown')))
+        self.assertIn('"traces_grew_for": ["run-2"]', output.splitlines()[-1])
+        for case, payloads in (('no run-2 resource', [self.trace_payload('run-1', late)]),
+                               ('run-2 resource without spans', [self.trace_payload('run-2'), self.trace_payload('run-1', late)])):
+            with self.subTest(case):
+                missing = turns()
+                missing['second'] = (['run-2'], 'run-2', payloads)
+                with self.assertRaisesRegex(AssertionError, '^second: spans did not carry this run$'):
+                    self.run_attribution(missing)
         early = turns()
         early['first'] = (['run-1'], 'run-1', [self.trace_payload('run-1', first), self.trace_payload('run-2', late)])
         with self.assertRaisesRegex(AssertionError, '^first: spans carried a run that is not an earlier managed run of this test: \\["run-2"\\]$'):
