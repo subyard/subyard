@@ -700,8 +700,8 @@ case "$MODE" in
     CLEANUP_ARMED=1
     exit 0
     ;;
-  run|prepare|resume|finish) ;;
-  *) die 'expected run, prepare, resume, finish or clean mode' ;;
+  run|prepare|login|resume|finish) ;;
+  *) die 'expected run, prepare, login, resume, finish or clean mode' ;;
 esac
 for command in cmp curl diff go incus ip jq sed sha256sum systemd-analyze; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
@@ -725,11 +725,17 @@ case "$MODE" in
     finish_candidate_flow
     printf 'ok: exact published anchor upgrade, refused anchor rollback and compatible rollback/roll-forward passed\n'
     ;;
-  resume)
+  login)
     assert_state_root
     CLEANUP_ARMED=1
     assert_fixture_phase candidate-ready
     restore_late_storage_after_login
+    PRESERVE_FIXTURE=1
+    ;;
+  resume)
+    assert_state_root
+    CLEANUP_ARMED=1
+    assert_fixture_phase candidate-ready
     assert_post_reboot_candidate
     info 'checking repeatable init with limited legacy authority and boot reconciliation'
     verify_historical_init_boundary
