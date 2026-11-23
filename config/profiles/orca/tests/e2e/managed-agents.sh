@@ -16,6 +16,8 @@ helper=/tmp/subyard-managed-agents.py
 codex_provider=/tmp/subyard-managed-codex-provider.py
 workspace=/srv/workspaces/managed-agents/src
 claude_policy=/etc/claude-code/managed-settings.d/50-subyard-git-approval.json
+claude_sudo_policy=/etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json
+claude_update_lock=/etc/claude-code/managed-settings.d/48-subyard-update-lock.json
 incus --project "$PROJECT" file push "$ROOT/config/profiles/orca/tests/e2e/managed-agents.py" \
   "$INSTANCE$helper" --mode 0644
 incus --project "$PROJECT" file push "$ROOT/config/profiles/orca/tests/e2e/codex-permissions.py" \
@@ -66,11 +68,11 @@ jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE/git-
   || die 'release readiness did not report ready before ordinary init'
 [ "$(package_records)" = "$prompt_packages" ] || die 'readiness changed the installed packages'
 yard init --yes || die 'ordinary init did not apply the new default'
-guest_root jq -e '[.permissions.ask[]? | select(startswith("Bash(git "))] == []' "$claude_policy" >/dev/null \
+guest_root test ! -e "$claude_policy" \
   || die 'ordinary init kept Claude Git prompts'
-guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \
+guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_sudo_policy" >/dev/null \
   || die 'the default DEV_SUDO=prompt did not install the Claude sudo ask rules'
-guest_root grep -Fxq 'git_approval=off' /usr/local/bin/codex-policy-check \
+guest_root test ! -e /etc/codex/50-subyard-git-approval.rules.inc \
   || die 'ordinary init kept Codex Git prompts'
 guest_root cat "$inventory" | jq -e '.applied_settings.CODING_TOOL_GIT_APPROVAL == "off"' >/dev/null \
   || die 'ordinary init did not record the new mode'
@@ -82,7 +84,7 @@ printf 'CODING_TOOL_GIT_APPROVAL=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
 yard init --yes || die 'ordinary init did not restore prompt mode'
 [ "$(package_records)" = "$prompt_packages" ] || die 'prompt package identities did not return'
 printf 'ok: release ready with installed prompt packages; ordinary init applied off and restored prompt\n'
-guest_root jq -e '.env == {DISABLE_UPDATES: "1"}' "$claude_policy" >/dev/null \
+guest_root jq -e '.env == {DISABLE_UPDATES: "1"}' "$claude_update_lock" >/dev/null \
   || die 'managed Claude update lock is missing'
 guest_root grep -Fxq 'check_for_update_on_startup = false' /etc/codex/requirements.toml \
   || die 'managed Codex update check lock is missing'
@@ -121,7 +123,7 @@ assert_managed_resolution after-launch
 
 # The unlocked positive control proves the launch trigger, and leaves a real legacy link.
 stage 'creating a real legacy Claude self-install under the Orca server environment'
-guest_root sh -c "jq 'del(.env)' '$claude_policy' > /tmp/subyard-legacy-policy.json && cat /tmp/subyard-legacy-policy.json > '$claude_policy' && rm -f /tmp/subyard-legacy-policy.json"
+guest_root sh -c "jq 'del(.env)' '$claude_update_lock' > /tmp/subyard-legacy-policy.json && cat /tmp/subyard-legacy-policy.json > '$claude_update_lock' && rm -f /tmp/subyard-legacy-policy.json"
 as_dev python3 -B "$helper" launch --cli /usr/local/bin/claude --xdg "$orca_xdg" --expect-link --seconds 150 \
   || die 'unlocked Claude did not reproduce its native self-install'
 claude_target="$(guest_root readlink /home/dev/.local/bin/claude)"
@@ -149,7 +151,7 @@ assert_legacy_preserved() { # phase
   guest_root test -f /home/dev/.codex/packages/standalone/releases/0.1.0-fixture/bin/codex \
     || die "$1: standalone release was removed"
   guest_root test -f /home/dev/.codex/packages/unknown-fixture || die "$1: unknown Codex file was removed"
-  guest_root jq -e '.env == {DISABLE_UPDATES: "1"}' "$claude_policy" >/dev/null \
+  guest_root jq -e '.env == {DISABLE_UPDATES: "1"}' "$claude_update_lock" >/dev/null \
     || die "$1: Claude update lock did not converge"
   guest_root grep -Fxq 'check_for_update_on_startup = false' /etc/codex/requirements.toml \
     || die "$1: Codex update check lock did not converge"
@@ -255,7 +257,7 @@ stage 'installing sudo approval prompts before Claude sessions start'
 # An explicit prompt matches the default the yard already applied.
 printf 'DEV_SUDO=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
-guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_policy" >/dev/null \
+guest_root jq -e '.permissions.ask | index("Bash(sudo:*)")' "$claude_sudo_policy" >/dev/null \
   || die 'DEV_SUDO=prompt did not install the Claude sudo ask rules'
 guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the passwordless grant'
 stage 'preparing a registered Git workspace for Claude prompts'

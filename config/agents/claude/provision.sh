@@ -37,6 +37,7 @@ it, the Claude rules check the plain prefix up to the first direct gated command
 
 import collections
 import json
+import os
 import posixpath
 import re
 import shlex
@@ -264,8 +265,19 @@ def refused(command, gates, claude):
 
 
 def main():
-    gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
-    codex = "--plain" in sys.argv[1:]
+    args = sys.argv[1:]
+    if "--policies" in args:
+        index = args.index("--policies")
+        # Provision supplies the two paths under the client-owned managed directory.
+        gates = {gate for gate, path in zip(("git", "sudo"), args[index + 1:], strict=True)
+                 if os.path.isfile(path)}
+        if not gates:
+            return 0
+        args = args[:index]
+    else:
+        # Existing sessions can still invoke the original registration.
+        gates = {arg for arg in args if not arg.startswith("--")} or {"git"}
+    codex = "--plain" in args
     command = json.load(sys.stdin)["tool_input"]["command"]
     if len(command.encode(errors="surrogatepass")) > MAX_COMMAND_BYTES:
         print(f"Approval refuses a command longer than {MAX_COMMAND_BYTES // 1024} KiB; "
@@ -296,27 +308,64 @@ if __name__ == "__main__":
     sys.exit(main())
 GIT_APPROVAL_HOOK
 }
-# Publish the helper before the policy that references it.
-install_git_approval_hook() {
-  local hook_stage
-  [ -n "$APPROVAL_GATES" ] || return 0
-  hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
-  git_approval_hook > "$hook_stage"
-  chmod 0755 "$hook_stage"
-  mv -fT -- "$hook_stage" "$git_hook"
+# Publish each file atomically and preserve an already converged inode.
+publish_approval_file() {
+  local path="$1" mode="$2" stage
+  stage="$(mktemp "$(dirname "$path")/.approval.XXXXXX")"
+  cat > "$stage"
+  chmod "$mode" "$stage"
+  if [ "$(id -u)" = 0 ]; then chown "$expected_owner" "$stage"; fi
+  if [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(stat -c '%a:%u:%g' "$path")" = "$mode:$expected_owner" ] && cmp -s "$stage" "$path"; then
+    rm -f -- "$stage"
+  else
+    mv -fT -- "$stage" "$path"
+  fi
+}
+
+reconcile_approval_file() {
+  local path="$1" content="$2"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | publish_approval_file "$path" 644
+  else
+    rm -f -- "$path"
+  fi
+}
+
+# Shared with Codex, which passes --plain; Claude needs no extra argument.
+# shellcheck disable=SC2120
+approval_command() {
+  jq -n --args '$ARGS.positional | map(@sh) | join(" ")' -- \
+    "$git_hook" "$@" --policies "$git_policy" "$sudo_policy"
+}
+
+# A content check can still run when permissions drifted.
+approval_file_present() {
+  local path="$1" expected="$2" mode="$3" label="$4"
+  if [ -z "$expected" ]; then
+    [ ! -e "$path" ] && [ ! -L "$path" ] || refuse "$label should be absent; run yard init"
+  elif [ -f "$path" ] && [ ! -L "$path" ]; then
+    [ "$(stat -c '%a:%u:%g' "$path" 2>/dev/null)" = "$mode:$expected_owner" ] \
+      || refuse "$label permissions drifted; run yard init"
+    return 0
+  else
+    refuse "$label is missing; run yard init"
+  fi
+  return 1
+}
+
+check_approval_hash() {
+  if approval_file_present "$1" "$2" "$3" "$4"; then
+    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
+      || refuse "$4 content drifted; run yard init"
+  fi
 }
 
 check_git_approval_hook() {
-  local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
   [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
-  if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
-    [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed approval hook permissions drifted; run yard init'
-    [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed approval hook content drifted; run yard init'
-  else
-    refuse 'managed approval hook is missing; run yard init'
-  fi
+  # The generated policy check assigns the expected hash before calling this helper.
+  # shellcheck disable=SC2154
+  check_approval_hash "$git_hook" "$git_hook_sha" 755 'managed approval hook'
 }
 # END generated Git approval hook
 
@@ -324,10 +373,6 @@ modes_valid=1
 case "$GIT_APPROVAL" in prompt|off) ;; *) printf 'Claude policy: CODING_TOOL_GIT_APPROVAL must be prompt or off\n' >&2; modes_valid=0 ;; esac
 case "$DEV_SUDO" in yes|no|prompt) ;; *) printf 'Claude policy: DEV_SUDO must be yes, no or prompt\n' >&2; modes_valid=0 ;; esac
 [ "$modes_valid" = 1 ] || exit 1
-# The hook receives the gates whose direct commands the ask rules prompt for.
-APPROVAL_GATES=''
-[ "$GIT_APPROVAL" != prompt ] || APPROVAL_GATES=git
-[ "$DEV_SUDO" != prompt ] || APPROVAL_GATES="${APPROVAL_GATES:+$APPROVAL_GATES }sudo"
 [ "$(id -u)" = 0 ] || [ "${CLAUDE_POLICY_TEST_ALLOW_NON_ROOT:-0}" = 1 ] || die 'must run as root'
 ETC_DIR="${CLAUDE_ETC_DIR:-/etc}"
 case "$ETC_DIR" in /*) ;; *) die 'environment directory must be absolute' ;; esac
@@ -356,9 +401,12 @@ for path in "$INSTALL_ROOT" "$(dirname "$BIN_LINK")" "$(dirname "$CHECK_PATH")" 
     (( (8#$permissions & 0022) == 0 )) || die 'managed directory is writable by another user'
   fi
 done
-policy="$POLICY_DIR/50-subyard-git-approval.json"
+update_policy="$POLICY_DIR/48-subyard-update-lock.json"
+hook_policy="$POLICY_DIR/49-subyard-approval-hook.json"
+git_policy="$POLICY_DIR/50-subyard-git-approval.json"
+sudo_policy="$POLICY_DIR/51-subyard-sudo-approval.json"
 git_hook="$(dirname "$POLICY_DIR")/subyard-git-approval-hook"
-if [ -n "$APPROVAL_GATES" ]; then
+if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
   [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for managed approval'
   if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
     die 'managed approval hook is not a regular file'
@@ -367,7 +415,7 @@ if [ -n "$APPROVAL_GATES" ]; then
     die 'existing approval hook belongs to another policy'
   fi
 fi
-for path in "$policy" "$CHECK_PATH"; do
+for path in "$update_policy" "$hook_policy" "$git_policy" "$sudo_policy" "$CHECK_PATH"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
     die 'managed path is not a regular file'
   fi
@@ -386,12 +434,30 @@ fi
 for tool in curl jq sha256sum sort od timeout; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
-POLICY_JSON="$(jq -cn --arg git "$GIT_APPROVAL" --arg sudo "$DEV_SUDO" '
-  [if $git == "prompt" then "git commit", "git push" else empty end,
-   if $sudo == "prompt" then "sudo", "su", "doas", "pkexec", "sudoedit", "run0" else empty end]
-  | map("Bash(\(.))", "Bash(\(.):*)") as $ask
-  | {"$comment": "Subyard Claude permission policy", env: {DISABLE_UPDATES: "1"}}
-  + if $ask == [] then {} else {permissions: {ask: $ask}} end')"
+approval_rules() {
+  jq -n --arg marker "$MARKER" --args '
+    {"$comment": $marker, permissions: {ask: ($ARGS.positional | map("Bash(\(.))", "Bash(\(.):*)"))}}
+  ' -- "$@"
+}
+git_approval_policy() {
+  [ "$GIT_APPROVAL" != prompt ] || approval_rules 'git commit' 'git push'
+}
+sudo_approval_policy() {
+  [ "$DEV_SUDO" != prompt ] || approval_rules sudo su doas pkexec sudoedit run0
+}
+approval_hook_policy() {
+  [ -n "$git_policy_json" ] || [ -n "$sudo_policy_json" ] || return 0
+  jq -n --arg marker "$MARKER" --argjson command "$(approval_command)" '
+    {"$comment": $marker, hooks: {PreToolUse: [{matcher: "Bash", hooks: [{
+      type: "command", command: $command, timeout: 3, onFailure: "block"
+    }]}]}}'
+}
+check_policy_json() {
+  if approval_file_present "$1" "$2" 644 "$3"; then
+    jq -e --argjson expected "$2" '. == $expected' "$1" >/dev/null 2>&1 \
+      || refuse "$3 drifted or could not be read; run yard init"
+  fi
+}
 if [ -z "$ARCH" ]; then ARCH="$(dpkg --print-architecture)"; fi
 case "$ARCH" in
   amd64) platform=linux-x64 ;;
@@ -478,20 +544,19 @@ download_artifact() {
 # The approval policy precedes every download, the binary it governs and every developer-tree
 # repair, so a failed or slow download never leaves the CLI without it.
 install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
-stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
-install_git_approval_hook
-if [ -n "$APPROVAL_GATES" ]; then
-  # Keep the historical Git-only command for unchanged installed policies.
-  POLICY_JSON="$(jq -c --arg path "$git_hook" --arg gates "$APPROVAL_GATES" '
-    .hooks.PreToolUse = [{matcher:"Bash", hooks:[{
-      type:"command", command:(if $gates == "git" then $path | @sh else ($path | @sh) + " " + $gates end),
-      timeout:3, onFailure:"block"
-    }]}]' <<<"$POLICY_JSON")"
+update_policy_json='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"}}'
+git_policy_json="$(git_approval_policy)"
+sudo_policy_json="$(sudo_approval_policy)"
+hook_policy_json="$(approval_hook_policy)"
+reconcile_approval_file "$update_policy" "$update_policy_json"
+if [ -n "$hook_policy_json" ]; then
+  git_approval_hook | publish_approval_file "$git_hook" 755
+  reconcile_approval_file "$hook_policy" "$hook_policy_json"
 fi
-jq . <<<"$POLICY_JSON" > "$stage"
-chmod 0644 "$stage"
-mv -fT -- "$stage" "$policy"
-stage=""
+# Supersede the old combined policy only after the replacement sudo rules and hook exist.
+reconcile_approval_file "$sudo_policy" "$sudo_policy_json"
+reconcile_approval_file "$git_policy" "$git_policy_json"
+[ -n "$hook_policy_json" ] || reconcile_approval_file "$hook_policy" ''
 # /etc/profile.d covers login shells; PAM reads /etc/environment for yard shell -- cmd.
 # These Claude safety switches are ignored in settings env: they must precede CLI startup.
 install -d -m 0755 "$ETC_DIR/profile.d"
@@ -553,31 +618,30 @@ if [ ! -L "$BIN_LINK" ]; then ln -s "$RUNTIME_PATH" "$BIN_LINK"; fi
 stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
 {
   printf '#!/usr/bin/env bash\n# %s\nset -euo pipefail\n' "$MARKER"
-  printf 'policy=%q\npolicy_dir=%q\nexpected_owner=%q\n' "$policy" "$POLICY_DIR" "$(id -u):$(id -g)"
+  printf 'policy_dir=%q\nexpected_owner=%q\n' "$POLICY_DIR" "$expected_owner"
+  printf 'update_policy=%q\nhook_policy=%q\ngit_policy=%q\nsudo_policy=%q\n' \
+    "$update_policy" "$hook_policy" "$git_policy" "$sudo_policy"
+  printf 'update_policy_json=%q\nhook_policy_json=%q\ngit_policy_json=%q\nsudo_policy_json=%q\n' \
+    "$update_policy_json" "$hook_policy_json" "$git_policy_json" "$sudo_policy_json"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
-  printf 'git_approval=%q\ndev_sudo=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$DEV_SUDO" "$POLICY_JSON"
   printf 'git_hook=%q\ngit_hook_sha=%q\n' "$git_hook" "$(git_approval_hook | sha256sum | cut -d' ' -f1)"
-  declare -f check_git_approval_hook is_working_binary dev_owned_directory native_shadow_state
+  declare -f approval_file_present check_approval_hash check_git_approval_hook check_policy_json is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
 # Report every refusal that does not depend on a failed read, in this order.
 refusals=0
 refuse() { printf 'claude-policy-check: %s\n' "$*" >&2; refusals=$((refusals + 1)); }
 [ ! -L "$policy_dir" ] && [ "$(stat -c '%a:%u:%g' "$policy_dir" 2>/dev/null)" = "755:$expected_owner" ] \
   || refuse 'managed policy directory drifted; run yard init'
-if [ -f "$policy" ] && [ ! -L "$policy" ]; then
-  [ "$(stat -c '%a:%u:%g' "$policy")" = "644:$expected_owner" ] \
-    || refuse 'managed policy permissions drifted; run yard init'
-  jq -e --argjson expected "$policy_json" '. == $expected' "$policy" >/dev/null 2>&1 \
-    || refuse 'managed policy drifted or could not be read; run yard init'
-else
-  refuse 'managed policy is missing; run yard init'
-fi
-if [ "$git_approval" = prompt ] || [ "$dev_sudo" = prompt ]; then
+check_policy_json "$update_policy" "$update_policy_json" 'managed Claude update lock'
+check_policy_json "$git_policy" "$git_policy_json" 'managed Git approval policy'
+check_policy_json "$sudo_policy" "$sudo_policy_json" 'managed sudo approval policy'
+check_policy_json "$hook_policy" "$hook_policy_json" 'managed approval hook registration'
+if [ -n "$hook_policy_json" ]; then
   hook_dir="$(dirname "$git_hook")"
   [ ! -L "$hook_dir" ] && [ "$(stat -c '%a:%u:%g' "$hook_dir" 2>/dev/null)" = "755:$expected_owner" ] \
     || refuse 'managed approval hook directory drifted; run yard init'
-  check_git_approval_hook "$git_hook" "$git_hook_sha" "$expected_owner"
+  check_git_approval_hook
 fi
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
   || refuse 'canonical command does not point to the managed runtime; run yard init'
@@ -586,12 +650,12 @@ shadow="$(native_shadow_state)" || shadow=foreign
 [ "$shadow" != native ] || refuse "a native self-installed link shadows $link; run yard init"
 if [ "$refusals" = 0 ]; then
   printf 'Claude %s ready. ' "$BINARY_VERSION"
-  if [ "$git_approval" = off ]; then
+  if [ -z "$git_policy_json" ]; then
     printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).'
   else
     printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.'
   fi
-  [ "$dev_sudo" != prompt ] || printf ' Managed sudo ask rules installed (DEV_SUDO=prompt).'
+  [ -z "$sudo_policy_json" ] || printf ' Managed sudo ask rules installed (DEV_SUDO=prompt).'
   printf '\n'
 fi
 if [ "$shadow" = foreign ]; then

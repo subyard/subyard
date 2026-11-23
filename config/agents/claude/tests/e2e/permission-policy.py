@@ -220,9 +220,9 @@ async def run_case(source, mode, decision, base, server):
 async def main():
     assert os.environ.get("SUBYARD_E2E_VM") == "1", "requires disposable VM"
     assert os.geteuid() != 0, "run native CLI as the developer"
-    policy = Path("/etc/claude-code/managed-settings.d/50-subyard-git-approval.json")
-    assert policy.is_file(), "managed drop-in missing"
-    asked = json.loads(policy.read_text()).get("permissions", {}).get("ask", [])
+    directory = Path("/etc/claude-code/managed-settings.d")
+    policy = directory / ("51-subyard-sudo-approval.json" if SUDO else "50-subyard-git-approval.json")
+    asked = json.loads(policy.read_text())["permissions"]["ask"] if policy.is_file() else []
     if SUDO:
         assert "Bash(sudo:*)" in asked, "drop-in lacks the sudo ask rules"
     else:

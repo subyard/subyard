@@ -9,6 +9,7 @@ it, the Claude rules check the plain prefix up to the first direct gated command
 
 import collections
 import json
+import os
 import posixpath
 import re
 import shlex
@@ -236,8 +237,19 @@ def refused(command, gates, claude):
 
 
 def main():
-    gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
-    codex = "--plain" in sys.argv[1:]
+    args = sys.argv[1:]
+    if "--policies" in args:
+        index = args.index("--policies")
+        # Provision supplies the two paths under the client-owned managed directory.
+        gates = {gate for gate, path in zip(("git", "sudo"), args[index + 1:], strict=True)
+                 if os.path.isfile(path)}
+        if not gates:
+            return 0
+        args = args[:index]
+    else:
+        # Existing sessions can still invoke the original registration.
+        gates = {arg for arg in args if not arg.startswith("--")} or {"git"}
+    codex = "--plain" in args
     command = json.load(sys.stdin)["tool_input"]["command"]
     if len(command.encode(errors="surrogatepass")) > MAX_COMMAND_BYTES:
         print(f"Approval refuses a command longer than {MAX_COMMAND_BYTES // 1024} KiB; "

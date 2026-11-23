@@ -163,11 +163,11 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		applied    bool
 		settings   map[string]string
 	}{
-		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
-		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true},
-		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true, settings: map[string]string{}},
+		{mode: "prompt", want: "{\n  \"approval\": \"ask\"\n}\n"},
+		{mode: "", want: "{\n  \"approval\": \"ask\"\n}\n", applied: true},
+		{mode: "", want: "{\n  \"approval\": \"ask\"\n}\n", applied: true, settings: map[string]string{}},
 		{mode: "", want: "{\"approval\":\"allow\"}\n"},
-		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
+		{mode: "prompt", want: "{\n  \"approval\": \"ask\"\n}\n"},
 	} {
 		mode := step.mode
 		if step.applied {

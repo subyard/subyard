@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,12 +18,13 @@ import (
 // MaterializedAsset identifies a desired file and its policy in the developer home.
 // Policy follows the consumer destination, including after import renames a source.
 type MaterializedAsset struct {
-	Name           string
-	Setting        string
-	Source         string
-	Destination    string
-	OwnedFormat    string
-	FollowSymlinks bool
+	Name            string
+	Setting         string
+	Source          string
+	Destination     string
+	OwnedFormat     string
+	FollowSymlinks  bool
+	ApprovalSources []string
 }
 
 // MaterializedAssets resolves CONFIG and RULES assets. Host instruction files are
@@ -52,12 +55,12 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 				}
 				declaredKinds[artifact.ID] = true
 				artifact.Source = filepath.Join(definition.Root, artifact.Source)
-				if len(artifact.ApprovalSources) != 0 {
-					variants := make(map[string]string, len(artifact.ApprovalSources))
-					for gates, source := range artifact.ApprovalSources {
-						variants[gates] = filepath.Join(definition.Root, source)
+				if len(artifact.ApprovalSources) > 0 {
+					sources := make(map[string]string, len(artifact.ApprovalSources))
+					for gate, path := range artifact.ApprovalSources {
+						sources[gate] = filepath.Join(definition.Root, path)
 					}
-					artifact.ApprovalSources = variants
+					artifact.ApprovalSources = sources
 				}
 				artifacts = append(artifacts, artifact)
 			}
@@ -78,9 +81,6 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			if !present {
 				source = artifact.Source
 			}
-			if variant, ok := artifact.ApprovalSources[ApprovalGates(values)]; ok && source == artifact.Source {
-				source = variant
-			}
 			destination, present := values[setting+"_DEST"]
 			if !present {
 				destination = artifact.Destination
@@ -98,7 +98,21 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			} else if format == "destination" {
 				format = ownedDestinationFormat(clean)
 			}
-			assets = append(assets, MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format})
+			asset := MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format}
+			if source == artifact.Source {
+				for _, gate := range []struct {
+					name   string
+					active bool
+				}{
+					{"git", !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"])},
+					{"sudo", SudoApprovalPrompt(values["DEV_SUDO"])},
+				} {
+					if path := artifact.ApprovalSources[gate.name]; gate.active && path != "" {
+						asset.ApprovalSources = append(asset.ApprovalSources, path)
+					}
+				}
+			}
+			assets = append(assets, asset)
 		}
 	}
 	destinations := make([]string, 0, len(assets))
@@ -109,6 +123,114 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 		return nil, err
 	}
 	return assets, nil
+}
+
+// ReadContent merges the shipped approval fragments into the base with the same
+// source reader. Fragments are not installed on their own: the agent reads only
+// the composed file. Key order follows the base, then each fragment in turn.
+func (asset MaterializedAsset) ReadContent(read func(MaterializedAsset) ([]byte, error)) ([]byte, error) {
+	payload, err := read(MaterializedAsset{Source: asset.Source, FollowSymlinks: asset.FollowSymlinks})
+	if err != nil || len(asset.ApprovalSources) == 0 {
+		return payload, err
+	}
+	merged, err := parseApprovalObject(payload)
+	if err != nil {
+		return nil, fmt.Errorf("approval policy base %s: %v", asset.Source, err)
+	}
+	for _, path := range asset.ApprovalSources {
+		fragment, err := read(MaterializedAsset{Source: path})
+		if err != nil {
+			return nil, fmt.Errorf("read approval overlay: %v", err)
+		}
+		overlay, err := parseApprovalObject(fragment)
+		if err != nil {
+			return nil, fmt.Errorf("approval overlay %s: %v", path, err)
+		}
+		merged.merge(overlay)
+	}
+	var out strings.Builder
+	merged.render(&out, "")
+	out.WriteByte('\n')
+	return []byte(out.String()), nil
+}
+
+// approvalObject is a JSON object that keeps its key order; nested objects are
+// parsed so that overlays merge into them instead of replacing them.
+type approvalObject struct {
+	keys   []string
+	values map[string]json.RawMessage
+	nested map[string]*approvalObject
+}
+
+func parseApprovalObject(payload []byte) (*approvalObject, error) {
+	if !json.Valid(payload) {
+		return nil, errors.New("approval policies must be plain JSON objects; comments and trailing commas are not supported")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, errors.New("approval policies must be JSON objects")
+	}
+	object := &approvalObject{values: map[string]json.RawMessage{}, nested: map[string]*approvalObject{}}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := token.(string)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if _, seen := object.values[key]; seen {
+			return nil, fmt.Errorf("duplicate key %q", key)
+		}
+		object.keys = append(object.keys, key)
+		object.values[key] = value
+		if value[0] == '{' {
+			if object.nested[key], err = parseApprovalObject(value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return object, nil
+}
+
+func (object *approvalObject) merge(overlay *approvalObject) {
+	for _, key := range overlay.keys {
+		if _, present := object.values[key]; !present {
+			object.keys = append(object.keys, key)
+		}
+		if base, extra := object.nested[key], overlay.nested[key]; base != nil && extra != nil {
+			base.merge(extra)
+			continue
+		}
+		object.values[key] = overlay.values[key]
+		object.nested[key] = overlay.nested[key]
+	}
+}
+
+// render matches json.MarshalIndent with a two-space indent.
+func (object *approvalObject) render(out *strings.Builder, indent string) {
+	if len(object.keys) == 0 {
+		out.WriteString("{}")
+		return
+	}
+	out.WriteString("{")
+	for index, key := range object.keys {
+		if index > 0 {
+			out.WriteString(",")
+		}
+		name, _ := json.Marshal(key)
+		out.WriteString("\n" + indent + "  " + string(name) + ": ")
+		if nested := object.nested[key]; nested != nil {
+			nested.render(out, indent+"  ")
+			continue
+		}
+		var value bytes.Buffer
+		_ = json.Indent(&value, object.values[key], indent+"  ", "  ")
+		out.Write(value.Bytes())
+	}
+	out.WriteString("\n" + indent + "}")
 }
 
 // validateManagedDestinations keeps files and managed links from replacing each
@@ -190,16 +312,4 @@ func GitApprovalOff(value string) bool {
 // escalation. Unset means the default, prompt.
 func SudoApprovalPrompt(value string) bool {
 	return value == "" || value == "prompt"
-}
-
-// ApprovalGates names the active prompt gates in the order the agent packages accept.
-func ApprovalGates(values map[string]string) string {
-	var gates []string
-	if !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"]) {
-		gates = append(gates, "git")
-	}
-	if SudoApprovalPrompt(values["DEV_SUDO"]) {
-		gates = append(gates, "sudo")
-	}
-	return strings.Join(gates, " ")
 }

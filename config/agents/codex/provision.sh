@@ -20,11 +20,6 @@ GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
 DEV_SUDO="${DEV_SUDO:-prompt}"
 # 0 and 1 are deprecated aliases of no and yes.
 case "$DEV_SUDO" in 0) DEV_SUDO=no ;; 1) DEV_SUDO=yes ;; esac
-# The hook receives the gates whose direct commands the prefix rules prompt for.
-APPROVAL_GATES=''
-[ "$GIT_APPROVAL" != prompt ] || APPROVAL_GATES=git
-[ "$DEV_SUDO" != prompt ] || APPROVAL_GATES="${APPROVAL_GATES:+$APPROVAL_GATES }sudo"
-
 # BEGIN generated Git approval hook
 git_approval_hook() {
   cat <<'GIT_APPROVAL_HOOK'
@@ -39,6 +34,7 @@ it, the Claude rules check the plain prefix up to the first direct gated command
 
 import collections
 import json
+import os
 import posixpath
 import re
 import shlex
@@ -266,8 +262,19 @@ def refused(command, gates, claude):
 
 
 def main():
-    gates = {arg for arg in sys.argv[1:] if not arg.startswith("--")} or {"git"}
-    codex = "--plain" in sys.argv[1:]
+    args = sys.argv[1:]
+    if "--policies" in args:
+        index = args.index("--policies")
+        # Provision supplies the two paths under the client-owned managed directory.
+        gates = {gate for gate, path in zip(("git", "sudo"), args[index + 1:], strict=True)
+                 if os.path.isfile(path)}
+        if not gates:
+            return 0
+        args = args[:index]
+    else:
+        # Existing sessions can still invoke the original registration.
+        gates = {arg for arg in args if not arg.startswith("--")} or {"git"}
+    codex = "--plain" in args
     command = json.load(sys.stdin)["tool_input"]["command"]
     if len(command.encode(errors="surrogatepass")) > MAX_COMMAND_BYTES:
         print(f"Approval refuses a command longer than {MAX_COMMAND_BYTES // 1024} KiB; "
@@ -298,52 +305,88 @@ if __name__ == "__main__":
     sys.exit(main())
 GIT_APPROVAL_HOOK
 }
-# Publish the helper before the policy that references it.
-install_git_approval_hook() {
-  local hook_stage
-  [ -n "$APPROVAL_GATES" ] || return 0
-  hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
-  git_approval_hook > "$hook_stage"
-  chmod 0755 "$hook_stage"
-  mv -fT -- "$hook_stage" "$git_hook"
+# Publish each file atomically and preserve an already converged inode.
+publish_approval_file() {
+  local path="$1" mode="$2" stage
+  stage="$(mktemp "$(dirname "$path")/.approval.XXXXXX")"
+  cat > "$stage"
+  chmod "$mode" "$stage"
+  if [ "$(id -u)" = 0 ]; then chown "$expected_owner" "$stage"; fi
+  if [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(stat -c '%a:%u:%g' "$path")" = "$mode:$expected_owner" ] && cmp -s "$stage" "$path"; then
+    rm -f -- "$stage"
+  else
+    mv -fT -- "$stage" "$path"
+  fi
+}
+
+reconcile_approval_file() {
+  local path="$1" content="$2"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" | publish_approval_file "$path" 644
+  else
+    rm -f -- "$path"
+  fi
+}
+
+# Shared with Codex, which passes --plain; Claude needs no extra argument.
+# shellcheck disable=SC2120
+approval_command() {
+  jq -n --args '$ARGS.positional | map(@sh) | join(" ")' -- \
+    "$git_hook" "$@" --policies "$git_policy" "$sudo_policy"
+}
+
+# A content check can still run when permissions drifted.
+approval_file_present() {
+  local path="$1" expected="$2" mode="$3" label="$4"
+  if [ -z "$expected" ]; then
+    [ ! -e "$path" ] && [ ! -L "$path" ] || refuse "$label should be absent; run yard init"
+  elif [ -f "$path" ] && [ ! -L "$path" ]; then
+    [ "$(stat -c '%a:%u:%g' "$path" 2>/dev/null)" = "$mode:$expected_owner" ] \
+      || refuse "$label permissions drifted; run yard init"
+    return 0
+  else
+    refuse "$label is missing; run yard init"
+  fi
+  return 1
+}
+
+check_approval_hash() {
+  if approval_file_present "$1" "$2" "$3" "$4"; then
+    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
+      || refuse "$4 content drifted; run yard init"
+  fi
 }
 
 check_git_approval_hook() {
-  local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
   [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
-  if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
-    [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed approval hook permissions drifted; run yard init'
-    [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed approval hook content drifted; run yard init'
-  else
-    refuse 'managed approval hook is missing; run yard init'
-  fi
+  # The generated policy check assigns the expected hash before calling this helper.
+  # shellcheck disable=SC2154
+  check_approval_hash "$git_hook" "$git_hook_sha" 755 'managed approval hook'
 }
 # END generated Git approval hook
 
-# Native requirements apply across projects, CODEX_HOME and client launch modes.
-# Keep this in the self-contained provision hook copied into the yard.
-requirements() {
-  cat <<'REQUIREMENTS'
-# Managed by Subyard Codex provision.
-allowed_approval_policies = ["on-request"]
-allowed_approvals_reviewers = ["user"]
-check_for_update_on_startup = false
-REQUIREMENTS
-  [ -n "$APPROVAL_GATES" ] || return 0
-  printf '\n[rules]\nprefix_rules = [\n'
-  [ "$GIT_APPROVAL" != prompt ] || cat <<'REQUIREMENTS'
+git_approval_rules() {
+  [ "$GIT_APPROVAL" = prompt ] || return 0
+  printf '%s\n' "$MANAGED_CHECK_MARKER"
+  cat <<'RULES'
   { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt", justification = "Creating or amending commits and pushing require explicit operator approval." },
-REQUIREMENTS
-  if [ "$DEV_SUDO" = prompt ]; then
-    local command
-    for command in sudo su doas pkexec sudoedit run0; do
-      printf '  { pattern = [{ token = "%s" }], decision = "prompt", justification = "Privilege escalation requires explicit operator approval." },\n' "$command"
-    done
-  fi
-  printf ']\n'
+RULES
+}
+
+sudo_approval_rules() {
+  [ "$DEV_SUDO" = prompt ] || return 0
+  local command
+  printf '%s\n' "$MANAGED_CHECK_MARKER"
+  for command in sudo su doas pkexec sudoedit run0; do
+    printf '  { pattern = [{ token = "%s" }], decision = "prompt", justification = "Privilege escalation requires explicit operator approval." },\n' "$command"
+  done
+}
+
+approval_hook_requirements() {
+  [ -n "$git_rules" ] || [ -n "$sudo_rules" ] || return 0
   cat <<REQUIREMENTS
+$MANAGED_CHECK_MARKER
 
 [features]
 hooks = true
@@ -357,9 +400,27 @@ matcher = "Bash"
 [[hooks.PreToolUse.hooks]]
 type = "command"
 # Codex matches its prompt rules only against plain command sequences; the hook refuses the rest.
-command = $(jq -n --arg path "$git_hook" --arg gates "$APPROVAL_GATES" '($path | @sh) + " --plain " + $gates')
+command = $(approval_command --plain)
 timeout = 3
 REQUIREMENTS
+}
+
+# Codex loads one system requirements file. Publish the native projection atomically.
+requirements() {
+  cat <<'REQUIREMENTS'
+# Managed by Subyard Codex provision.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+check_for_update_on_startup = false
+REQUIREMENTS
+  [ -f "$hook_policy" ] || return 0
+  printf '\n[rules]\nprefix_rules = [\n'
+  local policy
+  for policy in "$git_policy" "$sudo_policy"; do
+    [ ! -f "$policy" ] || tail -n +2 -- "$policy"
+  done
+  printf ']\n'
+  tail -n +2 -- "$hook_policy"
 }
 
 die() { printf 'Codex provision: %s\n' "$*" >&2; exit 1; }
@@ -498,13 +559,18 @@ requirements_dir="$(dirname "$REQUIREMENTS_PATH")"
 if [ -L "$requirements_dir" ] || { [ -e "$requirements_dir" ] && [ ! -d "$requirements_dir" ]; }; then
   refuse "$requirements_dir is not a regular directory — leaving it unchanged"
 fi
-if [ -L "$REQUIREMENTS_PATH" ] || { [ -e "$REQUIREMENTS_PATH" ] && [ ! -f "$REQUIREMENTS_PATH" ]; }; then
-  refuse "$REQUIREMENTS_PATH is not a managed regular file — leaving it unchanged"
-elif [ -f "$REQUIREMENTS_PATH" ] && ! grep -Fxq "$MANAGED_CHECK_MARKER" "$REQUIREMENTS_PATH"; then
-  refuse "$REQUIREMENTS_PATH is managed by another policy — leaving it unchanged"
-fi
+hook_policy="$requirements_dir/49-subyard-approval-hook.toml"
+git_policy="$requirements_dir/50-subyard-git-approval.rules.inc"
+sudo_policy="$requirements_dir/51-subyard-sudo-approval.rules.inc"
+for path in "$REQUIREMENTS_PATH" "$hook_policy" "$git_policy" "$sudo_policy"; do
+  if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+    refuse "$path is not a managed regular file — leaving it unchanged"
+  elif [ -f "$path" ] && ! grep -Fxq "$MANAGED_CHECK_MARKER" "$path"; then
+    refuse "$path is managed by another policy — leaving it unchanged"
+  fi
+done
 git_hook="$requirements_dir/subyard-git-approval-hook"
-if [ -n "$APPROVAL_GATES" ]; then
+if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
   [ -x /usr/bin/python3 ] || refuse '/usr/bin/python3 is required for managed approval'
   if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
     refuse 'managed approval hook is not a regular file'
@@ -514,21 +580,28 @@ if [ -n "$APPROVAL_GATES" ]; then
 fi
 [ "$refusals" = 0 ] || exit 1
 
+git_rules="$(git_approval_rules)"
+sudo_rules="$(sudo_approval_rules)"
+hook_rules="$(approval_hook_requirements)"
+
 install_requirements() {
-  local requirements_stage
   install -d -m 0755 "$requirements_dir"
-  requirements_stage="$(mktemp "$requirements_dir/.requirements.XXXXXX")"
-  requirements > "$requirements_stage"
-  chmod 0644 "$requirements_stage"
-  if [ "$(id -u)" -eq 0 ]; then
-    chown 0:0 "$requirements_dir" "$requirements_stage"
+  if [ "$(id -u)" -eq 0 ]; then chown 0:0 "$requirements_dir"; fi
+  if [ -n "$hook_rules" ]; then
+    git_approval_hook | publish_approval_file "$git_hook" 755
   fi
-  install_git_approval_hook
-  mv -fT -- "$requirements_stage" "$REQUIREMENTS_PATH"
+  reconcile_approval_file "$git_policy" "$git_rules"
+  reconcile_approval_file "$sudo_policy" "$sudo_rules"
+  reconcile_approval_file "$hook_policy" "$hook_rules"
+  requirements | publish_approval_file "$REQUIREMENTS_PATH" 644
+}
+
+approval_hash() {
+  [ -z "$1" ] || printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
 }
 
 install_check() {
-  local q_hook q_gates hook_sha check_dir check_stage q_root q_link q_user q_home q_owner q_requirements requirements_sha
+  local hook_sha check_dir check_stage q_root q_link q_user q_home q_owner q_requirements requirements_sha
   check_dir="$(dirname "$CHECK_PATH")"
   mkdir -p "$check_dir"
   check_stage="$(mktemp "$check_dir/.codex-policy-check.XXXXXX")"
@@ -538,8 +611,6 @@ install_check() {
   printf -v q_home '%q' "$DEV_HOME"
   printf -v q_owner '%q' "$expected_owner"
   printf -v q_requirements '%q' "$REQUIREMENTS_PATH"
-  printf -v q_hook '%q' "$git_hook"
-  printf -v q_gates '%q' "$APPROVAL_GATES"
   hook_sha="$(git_approval_hook | sha256sum | cut -d' ' -f1)"
   requirements_sha="$(requirements | sha256sum | cut -d' ' -f1)"
   cat > "$check_stage" <<EOF
@@ -553,14 +624,13 @@ DEV_USER="\$dev_user"
 DEV_HOME=$q_home
 expected_owner=$q_owner
 requirements=$q_requirements
-git_approval=$GIT_APPROVAL
-approval_gates=$q_gates
-git_hook=$q_hook
+git_hook=$(printf %q "$git_hook")
+hook_policy_sha=$(approval_hash "$hook_rules")
 git_hook_sha=$hook_sha
 # Report every refusal that does not depend on a failed read, in this order.
 refusals=0
 refuse() { printf 'codex-policy-check: %s\\n' "\$*" >&2; refusals=\$((refusals + 1)); }
-$(declare -f check_git_approval_hook dev_owned_directory standalone_shadow_state is_release_target)
+$(declare -f approval_file_present check_approval_hash check_git_approval_hook dev_owned_directory standalone_shadow_state is_release_target)
 requirements_present=0
 if [ -f "\$requirements" ] && [ ! -L "\$requirements" ]; then
   requirements_present=1
@@ -571,12 +641,12 @@ fi
   && [ "\$(stat -c '%a:%u:%g' "\$(dirname "\$requirements")" 2>/dev/null)" = "755:\$expected_owner" ] \
   || refuse "managed approval requirements directory drifted"
 if [ "\$requirements_present" = 1 ]; then
-  [ "\$(stat -c '%a:%u:%g' "\$requirements")" = "644:\$expected_owner" ] \
-    || refuse "managed approval requirements permissions drifted"
-  [ "\$(sha256sum "\$requirements" | cut -d' ' -f1)" = '$requirements_sha' ] \
-    || refuse "managed approval requirements drifted; run yard init"
+  check_approval_hash "\$requirements" '$requirements_sha' 644 'managed approval requirements'
 fi
-[ -z "\$approval_gates" ] || check_git_approval_hook "\$git_hook" "\$git_hook_sha" "\$expected_owner"
+check_approval_hash $(printf %q "$git_policy") '$(approval_hash "$git_rules")' 644 'managed Git approval policy'
+check_approval_hash $(printf %q "$sudo_policy") '$(approval_hash "$sudo_rules")' 644 'managed sudo approval policy'
+check_approval_hash $(printf %q "$hook_policy") "\$hook_policy_sha" 644 'managed approval hook registration'
+[ -z "\$hook_policy_sha" ] || check_git_approval_hook
 target="\$(readlink "\$install_root/codex" 2>/dev/null)" || target=''
 runtime="\$install_root/\$target"
 runtime_present=0

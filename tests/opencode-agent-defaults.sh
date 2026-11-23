@@ -7,8 +7,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; }
 need jq
 
-# The public policies contain no provider, model, or credentials. The base policy asks for
-# nothing; each approval variant adds only its gate's ask patterns.
+# The public policies contain no provider, model, or credentials.
 dir="$ROOT/config/agents/opencode"
 jq -e '
   .permission == {"*": "allow", "bash": {"*": "allow"}} and
@@ -16,11 +15,11 @@ jq -e '
 ' "$dir/opencode.jsonc" >/dev/null || fail "OpenCode yard policy contract is invalid"
 git_ask='["git commit", "git commit *", "git push", "git push *"]'
 sudo_ask='["sudo", "sudo *", "su", "su *", "doas", "doas *", "pkexec", "pkexec *", "sudoedit", "sudoedit *", "run0", "run0 *"]'
-for variant in git:"$git_ask" sudo:"$sudo_ask" git-sudo:"$(jq -cn --argjson a "$git_ask" --argjson b "$sudo_ask" '$a + $b')"; do
-  name="${variant%%:*}"
-  diff -u <(jq --argjson ask "${variant#*:}" '.permission.bash += ($ask | map({(.): "ask"}) | add)' "$dir/opencode.jsonc") \
-    <(jq . "$dir/opencode-$name.jsonc") \
-    || fail "OpenCode $name policy must add only its approval prompts"
+for entry in 50-subyard-git-approval:"$git_ask" 51-subyard-sudo-approval:"$sudo_ask"; do
+  name="${entry%%:*}"
+  jq -e --argjson ask "${entry#*:}" '
+    . == {permission: {bash: ($ask | map({(.): "ask"}) | add)}}
+  ' "$dir/$name.jsonc" >/dev/null || fail "OpenCode $name policy has unexpected rules"
 done
 
 manifest="$dir/integration.json"
@@ -28,7 +27,7 @@ jq -e '
   .schema_version == 2 and .command == "opencode" and .provision == "provision.sh" and
   (.artifacts | length) == 2 and
   (.artifacts[0] | .id == "config" and .source == "opencode.jsonc" and
-    .approval_sources == {"git": "opencode-git.jsonc", "sudo": "opencode-sudo.jsonc", "git sudo": "opencode-git-sudo.jsonc"} and
+    .approval_sources == {"git": "50-subyard-git-approval.jsonc", "sudo": "51-subyard-sudo-approval.jsonc"} and
     .destination == ".config/opencode/opencode.jsonc" and .format == "destination") and
   (.artifacts[1] | .kind == "instructions" and .source_setting == "HOST_OPENCODE_AGENTS_MD" and
     .destination == ".config/opencode/AGENTS.md")

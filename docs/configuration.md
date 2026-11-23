@@ -234,14 +234,14 @@ hosts are updated, and until then keep it at host or yard scope.
 an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the
 Docker or Incus socket bypass it. `no` removes only Subyard's managed sudoers grant: the developer
 account stays in the guest's `docker` group, which is root-equivalent inside the guest, so remove
-that access as well when the agent must not become root. Provisioning writes the prompt rules to
-the same policies as [Git approval](#commit-and-push-approval-prompts):
+that access as well when the agent must not become root. Provisioning reconciles the sudo
+rules independently of [Git approval](#commit-and-push-approval-prompts):
 
-- Claude: `permissions.ask` entries in the root-owned managed drop-in, plus the managed hook's
-  `sudo` gate.
-- Codex: `prompt` prefix rules in the root-owned `/etc/codex/requirements.toml`, plus the
-  managed hook's `sudo` gate.
-- OpenCode: `ask` entries for `permission.bash` in the shipped home template
+- Claude: `permissions.ask` entries in the root-owned `51-subyard-sudo-approval.json`
+  drop-in, plus the managed hook's sudo gate.
+- Codex: `prompt` prefix rules in `51-subyard-sudo-approval.rules.inc` under `/etc/codex`,
+  projected into the native requirements alongside the managed hook's sudo gate.
+- OpenCode: `ask` entries from `51-subyard-sudo-approval.jsonc` in the shipped home template
   `~/.config/opencode/opencode.jsonc`. This policy lives in the developer's home, not a root-owned
   file. A custom `AGENT_opencode_CONFIG` source gets no sudo ask entries, and OpenCode's project,
   agent and UI permissions, including an `always` answer, can allow sudo again.
@@ -879,7 +879,9 @@ yard -Y <yard> init
 Shared or host scope applies the choice to more yards. After an upgrade, the next
 `yard init` removes the managed prompts on yards without an explicit `prompt` setting.
 Until `yard init` applies a change, it is listed as a pending init-owned setting.
-`off` removes the Git prompt rules and disables the Claude and Codex Git hook. The Claude update lock and the Codex
+`off` removes the Git prompt rules. Claude and Codex keep their single Bash hook registration while
+either policy is active. The hook reads which policies are installed and evaluates them together.
+The Claude update lock and the Codex
 approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
 mode and accept either correctly installed policy. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
@@ -971,6 +973,8 @@ Codex provisioning installs root-owned `/etc/codex/requirements.toml` using Code
 It requires `on-request`, the `user` reviewer and, in `prompt` mode, commit/push prompt rules
 independently of the home rules. Project settings, profiles, alternate `CODEX_HOME` and client flags cannot remove
 these requirements. Incompatible overrides such as `never` or automatic review cannot take effect.
+Subyard combines the independently reconciled Git and sudo rule fragments and the single hook
+registration into the requirements file Codex loads.
 The home config supplies the existing `danger-full-access` yard sandbox default; stricter sandbox
 choices remain available. Use **Custom** in clients that offer permission presets: unrestricted
 filesystem access and mandatory command approval are separate settings.
@@ -1041,18 +1045,47 @@ auto mode the default, with **Yes** preselected; decline it. Accepting writes
 `permissions.defaultMode = "auto"` to `~/.claude/settings.json`, which `yard config status` reports as drift
 and `yard config apply` restores. Declining leaves `yard config status` clean.
 
-Claude provisioning installs its own root-owned drop-in at
-`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds the update lock described
-above, plus the ask rules and Bash hook in `prompt` mode. Provisioning preserves other managed
+Claude provisioning installs root-owned drop-ins under `/etc/claude-code/managed-settings.d/`.
+The update lock lives in `48-subyard-update-lock.json`, the Bash hook registration in
+`49-subyard-approval-hook.json` and the Git and sudo ask rules in their respective `50-` and
+`51-` drop-ins. Provisioning preserves other managed
 files and user/project denies and
 refuses foreign files at its own managed path. It does not enable `allowManagedPermissionRulesOnly`,
 which would discard those user/project restrictions. `claude-policy-check` verifies the managed
 runtime and its command link, the drop-in and hook, and the absence of a native
 self-installed link; it does not show that an active client loaded the policy. Both `claude-policy-check`
-and `codex-policy-check` report every refusal they can determine, not only the first.
+and `codex-policy-check` report every refusal they can determine.
 In a new client, inspect `/status` for the managed file/drop-ins source and `/permissions` for
 the effective rules. A higher-priority enterprise policy or a CLI without native drop-in support
 needs its own native acceptance; file presence does not prove that the client loaded it.
+
+Rollback to 0.31.0 replaces `50-subyard-git-approval.json` and leaves the newer drop-ins
+in place. Claude continues to read those files, so sudo prompts or the shared hook can survive
+that rollback. With both gates off, the surviving hook blocks wrapped Git and sudo forms
+instead of prompting for them. The [0.31.0 provisioner](https://github.com/subyard/subyard/blob/0fd4adec242550461bad568cf3b4193a69248737/config/agents/claude/provision.sh#L359)
+publishes only the Git drop-in.
+
+After rolling back to a release without split policies, such as 0.31.0, remove the
+leftover drop-ins by hand. `48-subyard-update-lock.json` only repeats the update lock, but
+`49-subyard-approval-hook.json` keeps the hook running and `51-subyard-sudo-approval.json`
+keeps the sudo prompts, so `DEV_SUDO` no longer controls them and wrapped forms can be
+blocked. Stop agent sessions before rollback, then back up these files in each affected yard
+before removing them. Preserve operator-owned policies and account for custom installation paths.
+From the owner host:
+
+```sh
+yard shell --root -- rm -f /etc/claude-code/managed-settings.d/48-subyard-update-lock.json \
+  /etc/claude-code/managed-settings.d/49-subyard-approval-hook.json \
+  /etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json
+yard init
+```
+
+Restart agent sessions only after this cleanup. Codex also leaves inert files under `/etc/codex/`:
+`49-subyard-approval-hook.toml`, `50-subyard-git-approval.rules.inc` and
+`51-subyard-sudo-approval.rules.inc`. Back up and remove these Subyard-managed fragments
+before `yard init`; 0.31.0 restores its combined `requirements.toml`.
+The rollback plan and result list the surviving files and manual recovery instructions.
+
 Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
 standard bypass mode is also covered by the SDK fixture. A native CLI terminal check using
 `--permission-mode default --settings <fixture>` offered only Yes/No, approved two separate

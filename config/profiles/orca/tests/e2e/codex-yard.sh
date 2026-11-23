@@ -39,6 +39,7 @@ fi
 if [ "${CODEX_APPROVALS_ONLY:-0}" = 0 ]; then
 stage 'checking installed Claude policy delivery and repeat reconciliation'
 claude_policy=/etc/claude-code/managed-settings.d/50-subyard-git-approval.json
+claude_sudo_policy=/etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json
 guest_root claude-policy-check >/dev/null || die 'installed Claude managed policy is unavailable'
 guest_root sh -c 'printf "{\"permissions\":{\"deny\":[\"Bash(foreign-private-fixture *)\"]}}\\n" > /etc/claude-code/managed-settings.d/10-foreign-fixture.json'
 claude_foreign_before="$(guest_root sha256sum /etc/claude-code/managed-settings.d/10-foreign-fixture.json)"
@@ -122,7 +123,7 @@ guest_root rm -f -- "$guest_helper"
 # The remaining checks run without sudo prompts.
 yard config set DEV_SUDO yes --scope yard --yes >/dev/null || die 'DEV_SUDO=yes was refused'
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=yes'
-if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'DEV_SUDO=yes kept the Claude sudo ask rules'; fi
+guest_root test ! -e "$claude_sudo_policy" || die 'DEV_SUDO=yes kept the Claude sudo policy'
 if guest_root grep -Fq '{ token = "sudo" }' /etc/codex/requirements.toml; then die 'DEV_SUDO=yes kept the Codex sudo rules'; fi
 guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=yes removed the passwordless grant'
 

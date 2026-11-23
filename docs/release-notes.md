@@ -2,8 +2,29 @@
 
 ## Unreleased
 
+### Agent approval policies
+
+- Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.
+  Existing combined policies migrate on reprovision; the configured approval behavior stays the same.
+
+### Rollback to 0.31.0
+
+- **Agent cleanup is manual and does not refuse rollback.** Stop agent sessions before rollback.
+  The plan output and result list the surviving files from the
+  [sealed cleanup declaration](../config/release-rollback.json):
+  `/etc/claude-code/managed-settings.d/48-subyard-update-lock.json`,
+  `/etc/claude-code/managed-settings.d/49-subyard-approval-hook.json`,
+  `/etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json`,
+  `/etc/codex/49-subyard-approval-hook.toml`, `/etc/codex/50-subyard-git-approval.rules.inc`, and
+  `/etc/codex/51-subyard-sudo-approval.rules.inc`. After rollback, back up and remove only these
+  Subyard-managed files in each affected yard, then run `yard init` before restarting agents.
+  The surviving Claude hook and sudo rules otherwise remain active; Codex's fragments are inert.
+  Preserve operator-owned policies and account for custom installation paths. See
+  [agent permission modes](configuration.md#other-agent-permission-modes).
+
 ### Rollback to v0.30.0
 
+- Complete the 0.31.0 cleanup above as well as the following steps.
 - **Agent cleanup is manual and does not refuse rollback.** Stop agent sessions before rolling
   back. The rollback plan output and result list the surviving files from this release's
   [sealed cleanup declaration](../config/release-rollback.json):

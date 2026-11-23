@@ -142,6 +142,10 @@ for gates in each(([], ["git"])):
     for command in ("/usr/bin/sudo id", "env sudo id", "bash -c 'sudo id'", "man sudo"):
         allowed(gates, command)
 
+# A direct Git segment makes the sudo mention inert when both policies are active.
+for gates in each((["git", "sudo"],)):
+    allowed(gates, "echo sudo | git push")
+
 # Compound commands, substitutions, heredocs, stdin-fed shells and command-running operands.
 for gates, name, call in ((["sudo"], "sudo", "sudo id"), (["git", "sudo"], "sudo", "sudo id"),
                           (["git"], "git push", "git push"), (["git", "sudo"], "git commit", "git commit")):
