@@ -83,10 +83,10 @@ func (view *orderedSettingsV2View) ReadSnapshot(label string) (config.Persistent
 	view.hostRead = true
 	return config.PersistentFileSnapshot{}, errors.New("later unsafe source")
 }
-func TestSettingsV2PreservesInheritedFailureOrder(t *testing.T) {
+func TestSettingsV2CollectsIndependentInheritedFailures(t *testing.T) {
 	view := &orderedSettingsV2View{}
 	plan, err := newTestVMSettingsV2Capability("logical-config-home", nil, view).Inspect()
-	if err != nil || len(plan.Blockers) != 1 || view.hostRead || !strings.Contains(plan.Blockers[0].Message, "overrides/shared/config.env:1") {
-		t.Fatalf("source precedence changed: plan=%#v err=%v hostRead=%v", plan, err, view.hostRead)
+	if err != nil || len(plan.Blockers) != 1 || !view.hostRead || !strings.Contains(plan.Blockers[0].Message, "overrides/shared/config.env:1") || !strings.Contains(plan.Blockers[0].Message, "logical-config-home/config.env") {
+		t.Fatalf("independent source refusals missing: plan=%#v err=%v hostRead=%v", plan, err, view.hostRead)
 	}
 }

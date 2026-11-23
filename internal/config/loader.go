@@ -77,6 +77,7 @@ type Loaded struct {
 	ProspectiveFiles      *ProspectiveFiles
 	ignored               []IgnoredAssignment
 	deprecated            []DeprecatedAssignment
+	dead                  []DeadAssignment
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -139,6 +140,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		ProspectiveFiles:      options.ProspectiveFiles,
 		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
 		deprecated:            tracker.deprecatedAssignments(ctx.YardName, ctx.Paths.ConfigHome),
+		dead:                  tracker.dead,
 	}, nil
 }
 

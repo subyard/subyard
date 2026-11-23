@@ -184,6 +184,7 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		cli.brokerActivationReconciler(request),
 		cli.networkGuardActivationReconciler(request),
 		cli.powerActivationReconciler(request),
+		&deadSettingsActivation{cli: cli, home: request.ConfigHome},
 	}...)
 }
 

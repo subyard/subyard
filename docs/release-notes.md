@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Before you update
+
+- **Dead private-overlay references are removed automatically.** Update removes a host
+  `AGENT_*` file assignment only when it uses the exact
+  `$SUBYARD_CONFIG_DIR/../private/agents/...` reference (or its braced form), names a
+  declared artifact, points to a confirmed missing path, and has a protected host file
+  override. `yard update --check` and `yard config validate` identify the line to remove
+  and the file-settings source that takes precedence. Update preserves the settings
+  file's owner and mode. Other `$NAME` and `${…}` references still require literal values;
+  verify their intended source before replacing them.
+- **Legacy telemetry cleanup accepts materializer ownership.** Home agent files owned
+  by the developer's `uid:uid` need no group change before updating. The developer's
+  primary group remains supported; a foreign owner is reported with the expected owner
+  and a repair command, alongside specific unsafe-file or parsing failures.
+
 ### Agent approval policies
 
 - Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.
@@ -50,7 +65,8 @@
   overlay was not in effect: delete it or merge it by hand. Do not move it key by key with
   `yard config set`.
 - **Literal settings only.** User settings files refuse `$NAME` and `${…}` references, including
-  `${NAME:=value}`; replace each with its value. See
+  `${NAME:=value}`; replace live references with their intended literal value. Later updates
+  remove proven dead private-overlay file references automatically, as described above. See
   [scalar settings](configuration.md#scalar-settings).
 
 ### Default changes

@@ -47,7 +47,7 @@ def safe(path):
         raise ValueError('native configuration is not regular')
 
 
-def snapshot(path, max_bytes=CONFIG_LIMIT, *, dir_fd=None):
+def snapshot(path, max_bytes=CONFIG_LIMIT, *, dir_fd=None, legacy=False):
     if dir_fd is None:
         safe(path)
     try:
@@ -57,6 +57,9 @@ def snapshot(path, max_bytes=CONFIG_LIMIT, *, dir_fd=None):
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > max_bytes:
+            if legacy:
+                raise LegacyConfigError('type' if not stat.S_ISREG(info.st_mode) else
+                                        'links' if info.st_nlink != 1 else 'size')
             raise ValueError('unsafe native file')
         content = stream.read(max_bytes+1)
     if len(content) > max_bytes:
@@ -167,7 +170,7 @@ def developer_files(uid, gid):
         yield
         return
     groups, old_gid = os.getgroups(), os.getegid()
-    os.setgroups([])
+    os.setgroups([uid])
     os.setegid(gid)
     os.seteuid(uid)
     try:
@@ -281,8 +284,31 @@ def legacy_path(path):
     from records import safefs
 
     if any(parent.is_symlink() for parent in path.parents):
-        raise ValueError('unsafe native path')
+        raise ValueError('symlinked legacy parent')
     return Path(safefs.resolve_file(path))
+
+
+class LegacyConfigError(ValueError):
+    def __init__(self, code, *detail):
+        self.reason = (code, *detail)
+        super().__init__(code)
+
+
+def legacy_config_failure(agent, error):
+    # Only bounded identifiers and numeric metadata cross the guest boundary.
+    # Parser and OS exception text can contain credentials or document contents.
+    if isinstance(error, LegacyConfigError):
+        return ('legacy-config', agent, *error.reason)
+    if isinstance(error, OSError):
+        return ('legacy-config', agent, 'access')
+    from records import safefs
+    if isinstance(error, safefs.Unsafe) and error.reason == safefs.SYMLINK:
+        return ('legacy-config', agent, 'symlink')
+    code = {'symlinked legacy parent': 'symlink', 'unsafe native path': 'symlink',
+            'native configuration is not regular': 'type',
+            'native file has multiple hard links': 'links',
+            'native file exceeds size bound': 'size'}.get(str(error), 'parse')
+    return ('legacy-config', agent, code)
 
 
 def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
@@ -310,10 +336,19 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                 continue
             try:
                 target = legacy_path(path)
-                raw = snapshot(target)
+                try:
+                    info = target.lstat()
+                except FileNotFoundError:
+                    continue
+                if info.st_uid != uid or info.st_gid not in (uid, gid):
+                    raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid)
+                raw = snapshot(target, legacy=True)
                 if raw is None or not raw.strip():
                     continue
-                document = parse(agent, raw)
+                try:
+                    document = parse(agent, raw)
+                except (ValueError, TypeError, RecursionError):
+                    raise LegacyConfigError('parse') from None
                 restored_values = []
                 fields = document.get(section)
                 if isinstance(fields, dict) and fields:
@@ -341,12 +376,12 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     failures.append(('legacy-token-remains', agent))
                 elif payload != raw:
                     info = target.lstat()
-                    if info.st_uid != uid or info.st_gid != gid:
-                        raise ValueError('foreign home configuration')
+                    if info.st_uid != uid or info.st_gid not in (uid, gid):
+                        raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid)
                     # Any rewritten home document can contain user credentials.
-                    edits.append((path, target, payload, raw, info.st_mode & 0o600))
-            except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
-                failures.append(('legacy-config', agent))
+                    edits.append((path, target, payload, raw, info.st_mode & 0o600, info.st_gid))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as error:
+                failures.append(legacy_config_failure(agent, error))
     return before, edits, tokens, covered
 
 
@@ -388,6 +423,14 @@ def field_paths(fields, prefix=''):
             yield from field_paths(value, path)
 
 
+LEGACY_CONFIG_REASONS = {
+    'symlink': 'unsafe symbolic link', 'type': 'not a regular file',
+    'links': 'multiple hard links; expected one link',
+    'size': f'file exceeds size bound ({CONFIG_LIMIT} bytes)',
+    'parse': 'document cannot be parsed safely', 'access': 'file cannot be accessed',
+}
+
+
 def refusal_messages(reasons):
     """Render known identifiers against local policy, without using guest text."""
     if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= 11:
@@ -408,8 +451,14 @@ def refusal_messages(reasons):
                                 '/var/lib/subyard/telemetry-control/native.json and retry')
             case ('legacy-token-remains', agent) if agent in AGENTS:
                 messages.append('collector token remains in legacy '+agent+' configuration')
-            case ('legacy-config', agent) if agent in AGENTS:
-                messages.append('cannot clean legacy '+agent+' configuration')
+            case ('legacy-config', agent, 'owner', actual_uid, actual_gid, uid, gid) if agent in AGENTS and all(
+                    type(value) is int and 0 <= value < 2**32 for value in (actual_uid, actual_gid, uid, gid)):
+                path = '~/'+AGENTS[agent][1]
+                messages.append(f'cannot clean legacy {agent} configuration {path}: actual owner '
+                                f'{actual_uid}:{actual_gid}, expected {uid}:{uid} (materializer) or {uid}:{gid} '
+                                f'(developer primary group); as root inside the yard, run chown {uid}:{uid} -- {path} and retry')
+            case ('legacy-config', agent, code) if agent in AGENTS and code in LEGACY_CONFIG_REASONS:
+                messages.append('cannot clean legacy '+agent+' configuration ~/'+AGENTS[agent][1]+': '+LEGACY_CONFIG_REASONS[code])
             case ('unsafe-policy', agent) if agent in AGENTS:
                 messages.append('unsafe or foreign telemetry policy /etc/'+AGENTS[agent][0])
             case ('unreadable-policy', agent) if agent in AGENTS:
@@ -492,17 +541,17 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
         raise ValueError('collector token required before writing policy')
     if receipt is not None:
         with developer_files(uid, gid):
-            for path, target, payload, before, mode in edits:
+            for path, target, payload, before, mode, owner_gid in edits:
                 if legacy_path(path) != target:
                     raise ValueError('native configuration changed')
-                publish(target, payload, before, mode=mode)
+                publish(target, payload, before, uid=uid, gid=owner_gid, mode=mode)
             for agent, (_, relative, _) in AGENTS.items():
                 try:
-                    if any(value.encode() in (snapshot(legacy_path(home/relative)) or b'') if agent in covered
+                    if any(value.encode() in (snapshot(legacy_path(home/relative), legacy=True) or b'') if agent in covered
                            else contains_token(home/relative, value) for value in legacy):
                         failures.append(('legacy-token-remains', agent))
-                except (OSError, ValueError):
-                    failures.append(('legacy-config', agent))
+                except (OSError, ValueError) as error:
+                    failures.append(legacy_config_failure(agent, error))
         if failures:
             raise Refusal(failures)
         if snapshot(receipt_path) != receipt:

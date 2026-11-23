@@ -144,6 +144,15 @@ func (batch *localBatch) setAvailable(name string, available bool) {
 
 func (tracker *settingTracker) applyScalarSource(path, source string, values environment, scope SettingScope, syncable bool, observe assignmentObserver, ignore ignoredObserver) error {
 	batch := tracker.batch
+	if batch == nil && scope == ScopeHost && path == filepath.Join(values["SUBYARD_CONFIG_HOME"], "config.env") && source == path && len(tracker.fileOverrides) == 0 {
+		plan, err := tracker.catalog.PlanDeadAssignments(values["SUBYARD_CONFIG_HOME"], values["SUBYARD_CONFIG_DIR"], tracker.prospectiveFiles)
+		// Only an exact protected observation can relax literal parsing. If
+		// proof fails, retain the ordinary loader and its existing refusals.
+		if err == nil && len(plan.Removed) != 0 {
+			tracker.dead = append(tracker.dead, plan.Removed...)
+			return tracker.catalog.evaluateScalarSource(bytes.NewReader(plan.Preview()), path, values, scope, syncable, observe, ignore, nil)
+		}
+	}
 	if batch == nil {
 		return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, syncable, observe, ignore, tracker.prospectiveReader())
 	}

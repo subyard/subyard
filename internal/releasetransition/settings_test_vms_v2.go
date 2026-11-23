@@ -260,27 +260,36 @@ func (capability *testVMSettingsV2Capability) observeInheritedSettings() (
 		{Role: "shared", Label: "overrides/shared/config.env"},
 		{Role: "host", Label: "config.env"},
 	}
+	var refusals []error
 	for index := range resources {
 		resource := &resources[index]
 		path := filepath.Join(capability.configHome, filepath.FromSlash(resource.Label))
 		snapshot, err := capability.snapshotView.ReadSnapshot(path)
 		if err != nil {
-			// Only the native view may inspect root identity. Synthetic/prospective
-			// observers must never fall through to the physical config home.
+			// Only the native view may inspect root identity. A failed source read
+			// skips its dependent findings, while the other source stays independent.
 			if _, native := capability.snapshotView.(posixV2SettingsSnapshotView); native {
 				if _, rootErr := os.Lstat(capability.configHome); rootErr != nil {
 					return nil, "", nil, rootErr
 				}
 			}
-			return nil, "", &Blocker{Code: CodePreconditionBlocked, Resource: "settings.inherited", Message: capability.sourceDiagnostic(path, "", 0, "inherited persistent settings cannot be observed safely", err), Retry: "run yard -Y default config status"}, nil
+			refusals = append(refusals, errors.New(capability.sourceDiagnostic(path, "", 0, "inherited persistent settings cannot be observed safely", err)))
+			continue
+		}
+		snapshot, err = effectiveSettingsSnapshot(capability.configHome, capability.candidateConfigDir, path, snapshot, capability.snapshotView)
+		if err != nil {
+			refusals = append(refusals, errors.New(capability.sourceDiagnostic(path, "", 0, "inherited persistent settings cannot be classified safely", err)))
+			continue
 		}
 		resource.Snapshot = snapshot
-		// Preserve source-order failure precedence before observing the next
-		// resource. Classification stays pure and bounded to two sources.
-		_, _, blocker, classifyErr := classifySettingsV2Inheritance(resources[:index+1], nil)
-		if classifyErr != nil || blocker != nil {
-			return nil, "", blocker, classifyErr
+		_, _, blocker, classifyErr := classifySettingsV2Inheritance([]settingsV2InheritedSnapshot{*resource}, nil)
+		refusals = append(refusals, classifyErr)
+		if blocker != nil {
+			refusals = append(refusals, errors.New(blocker.Message))
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, "", &Blocker{Code: CodePreconditionBlocked, Resource: "settings.inherited", Message: err.Error(), Retry: "run yard -Y default config status"}, nil
 	}
 	command := make([]string, 0, len(capability.inherited))
 	for setting := range capability.inherited {
