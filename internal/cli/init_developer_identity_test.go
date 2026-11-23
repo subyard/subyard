@@ -9,10 +9,12 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +101,42 @@ func TestIdentityContinuationScope(t *testing.T) {
 		if err := identityContinuationScope(approved, []domain.OperationStep{changed}); !errors.Is(err, domain.ErrPlanStale) {
 			t.Fatalf("changed continuation admitted: %v", err)
 		}
+	}
+}
+
+func TestIdentityContinuationProjectHookCountersAreDescriptive(t *testing.T) {
+	incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Stopped"}}}
+	runtime := reconcileruntime.Runtime{RepositoryRoot: repositoryRoot(t), Incus: incus, Profiles: []profile.Definition{{Name: "synthetic", Runtime: &profile.RuntimeHook{ActivationID: "synthetic-runtime", ProjectsChangedHooks: []string{"/usr/local/libexec/subyard/visible"}}}}, Integrations: []profile.IntegrationDefinition{}}
+	// The stopped guest cannot supply its installed projects yet.
+	before, err := runtime.PrepareProjectHooks(context.Background(), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := []domain.ProjectRecord{{ProjectID: "captured-id", YardPath: "/srv/workspaces/visible/src"}}
+	before.CaptureOwnerProjects(projects)
+	approved := before.OperationStep("project/yard")
+	// The guest inventory becomes visible only after its temporary start.
+	incus.Reconcile.Instance.Status = "Running"
+	incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + strings.Repeat("a", 64) + `","wiring":"` + strings.Repeat("b", 64) + `","roots":["/srv/workspaces/visible"],"hooks":["/usr/local/libexec/subyard/visible"]}`)}}}
+	runtime.Executor = incus
+	after, err := runtime.PrepareProjectHooks(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.CaptureOwnerProjects(projects)
+	if err := before.CheckContinuationScope(after); err != nil {
+		t.Fatal(err)
+	}
+	current := after.OperationStep("project/yard")
+	if approved.Observed == current.Observed || approved.Target != current.Target {
+		t.Fatal("hook counts changed resource identity or disappeared")
+	}
+	if err := identityContinuationScope([]domain.OperationStep{approved}, []domain.OperationStep{current}); err != nil {
+		t.Fatal(err)
+	}
+	current.ID = "init.new-resource"
+	if err := identityContinuationScope([]domain.OperationStep{approved}, []domain.OperationStep{current}); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatal("new step admitted", err)
 	}
 }
 

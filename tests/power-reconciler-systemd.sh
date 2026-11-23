@@ -20,6 +20,11 @@ command -v systemd-analyze >/dev/null 2>&1 \
 grep -Fxq 'Wants=network-online.target incus.service incus.socket' "$TEMPLATE" \
   || fail 'production reconciler does not start Incus before using its socket'
 
+# These source-level contracts complement the real PID1 retry cases in the owning VM lane.
+for setting in Restart=on-failure RestartForceExitStatus=75 StartLimitIntervalSec=0 RestartSec=30s RuntimeMaxSec=120; do
+  grep -Fxq "$setting" "$TEMPLATE" || fail "missing retry contract: $setting"
+done
+
 systemd_version="$(systemd-analyze --version | awk 'NR == 1 { print $2 }')"
 [[ "$systemd_version" =~ ^[0-9]+$ ]] \
   || fail "cannot identify systemd version: $systemd_version"

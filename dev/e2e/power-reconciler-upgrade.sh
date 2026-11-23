@@ -43,6 +43,7 @@ PROJECT_MUTATION_ARMED="$STATE_ROOT/.project-mutation-armed"
 PHASE_STATE="$STATE_ROOT/phase"
 BOOT_ID_STATE="$STATE_ROOT/boot-id"
 DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
+LATE_STORAGE="/run/subyard-p0-late-storage-$TOKEN"
 OLD_RELEASE_TARGET_STATE="$STATE_ROOT/old-release-target"
 CANDIDATE_RELEASE_TARGET_STATE="$STATE_ROOT/candidate-release-target"
 ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
@@ -261,6 +262,15 @@ cleanup() {
     operator_yard teardown --yes >/dev/null 2>&1 || true
   fi
   [ "$project_owned" = 0 ] || delete_owned_project || cleanup_failed=1
+  if [ "$(cat "$STATE_ROOT/late-storage/marker" 2>/dev/null)" = "$MARKER" ] && [ ! -L "$LATE_STORAGE" ]; then
+    if mountpoint -q "$LATE_STORAGE"; then
+      [ "$(sudo -n cat "$LATE_STORAGE/marker" 2>/dev/null)" = "$MARKER" ] \
+        && sudo -n umount "$LATE_STORAGE" || cleanup_failed=1
+    fi
+    if [ -d "$LATE_STORAGE" ] && ! mountpoint -q "$LATE_STORAGE"; then
+      sudo -n rmdir "$LATE_STORAGE" || cleanup_failed=1
+    fi
+  fi
   if [ "$(cat "$SNAPSHOT_COMPLETE" 2>/dev/null)" = "$MARKER" ]; then
     sudo -n systemctl stop subyard-power-reconcile.service >/dev/null 2>&1 || true
     restore_host_runtime || cleanup_failed=1
@@ -384,20 +394,21 @@ assert_unit_matches() {
     || die 'cannot observe installed power reconciler manager state'
   grep -Fxq "LoadState=$expected_load" <<<"$manager_state" \
     && grep -Fxq 'NeedDaemonReload=no' <<<"$manager_state" \
-    && grep -Fxq 'Restart=no' <<<"$manager_state" \
     && grep -Fxq 'RestartForceExitStatus=75' <<<"$manager_state" \
     && grep -Fxq 'TimeoutStartUSec=2min' <<<"$manager_state" \
     || die 'installed power reconciler manager state is stale or incomplete'
   case "$contract" in
     released)
-      grep -Fxq 'Type=exec' <<<"$manager_state" \
+      grep -Fxq 'Restart=no' <<<"$manager_state" \
+        && grep -Fxq 'Type=exec' <<<"$manager_state" \
         && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
         && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
         && grep -Fxq 'RestartUSec=30s' <<<"$manager_state" \
         || die "released power reconciler manager properties differ: ${manager_state//$'\n'/, }"
       ;;
     candidate)
-      grep -Fxq 'Type=exec' <<<"$manager_state" \
+      grep -Fxq 'Restart=on-failure' <<<"$manager_state" \
+        && grep -Fxq 'Type=exec' <<<"$manager_state" \
         && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
         && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
         && grep -Fxq 'RestartUSec=30s' <<<"$manager_state" \
@@ -489,6 +500,48 @@ load_release_targets() {
   OLD_RELEASE_TARGET="$(read_fixture_value "$OLD_RELEASE_TARGET_STATE")"
   CANDIDATE_RELEASE_TARGET="$(read_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE")"
   OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
+}
+
+# /run disappears at reboot. The required disk blocks Incus startup until a
+# login-time mount appears, without changing desired power or restarting the unit.
+prepare_late_storage() {
+  [ ! -e "$LATE_STORAGE" ] && [ ! -L "$LATE_STORAGE" ] || die 'late storage path already exists'
+  mkdir -m 0700 "$STATE_ROOT/late-storage"
+  printf '%s\n' "$MARKER" > "$STATE_ROOT/late-storage/marker"
+  sudo -n mkdir -m 0700 "$LATE_STORAGE"
+  sudo -n mount --bind "$STATE_ROOT/late-storage" "$LATE_STORAGE"
+  incus config device add "$INSTANCE" late-storage disk "source=$LATE_STORAGE" path=/mnt/late-storage --project "$PROJECT"
+}
+
+restore_late_storage_after_login() {
+  local deadline=$((SECONDS + 150)) retries
+  [ ! -e "$LATE_STORAGE" ] && [ ! -L "$LATE_STORAGE" ] || die 'late storage unexpectedly survived boot'
+  while (( SECONDS < deadline )); do
+    retries="$(sudo -n systemctl show subyard-power-reconcile.service --property=NRestarts --value)"
+    if [[ "$retries" =~ ^[1-9][0-9]*$ ]]; then break; fi
+    sleep 1
+  done
+  [[ "$retries" =~ ^[1-9][0-9]*$ ]] || die 'boot service did not retry the missing storage'
+  [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = STOPPED ] \
+    || die 'yard started without its required storage'
+  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
+    || die 'missing storage changed desired power'
+  sudo -n mkdir -m 0700 "$LATE_STORAGE"
+  sudo -n mount --bind "$STATE_ROOT/late-storage" "$LATE_STORAGE"
+  deadline=$((SECONDS + 150))
+  while (( SECONDS < deadline )); do
+    if [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
+      && [ "$(sudo -n systemctl show subyard-power-reconcile.service --property=ActiveState --value)" = inactive ]; then break; fi
+    sleep 1
+  done
+  [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
+    || die 'yard did not start automatically after the login mount'
+  incus exec "$INSTANCE" --project "$PROJECT" -- cat /mnt/late-storage/marker \
+    | grep -Fx "$MARKER" >/dev/null || die 'yard did not receive the late mounted storage'
+  incus config device remove "$INSTANCE" late-storage --project "$PROJECT"
+  sudo -n umount "$LATE_STORAGE"
+  sudo -n rmdir "$LATE_STORAGE"
+  ok 'desired-running yard recovered automatically after a login-time storage mount'
 }
 
 record_reboot_baseline() {
@@ -661,6 +714,7 @@ case "$MODE" in
     exercise_activation_only_repair
     establish_registered_ownership
     if [ "$MODE" = prepare ]; then
+      prepare_late_storage
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready
       PRESERVE_FIXTURE=1
@@ -674,6 +728,7 @@ case "$MODE" in
     assert_state_root
     CLEANUP_ARMED=1
     assert_fixture_phase candidate-ready
+    restore_late_storage_after_login
     assert_post_reboot_candidate
     info 'checking repeatable init with limited legacy authority and boot reconciliation'
     verify_historical_init_boundary

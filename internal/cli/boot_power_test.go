@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -116,54 +117,62 @@ func TestRunBootPowerPublicationConflictKeepsOtherYardRetry(t *testing.T) {
 }
 
 func TestRunBootPowerRecoversAfterAsyncStorageUnavailable(t *testing.T) {
-	server, err := testkit.NewIncusServer(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = server.Close() })
-	// The named yard sorts before the default yard, as in the boot failure.
-	for project, desired := range map[string]string{
-		"subyard-test": "running", "subyard": "running", "subyard-stopped": "stopped",
-	} {
-		config := map[string]string{
-			"user.subyard.managed": "true", "user.subyard.initialized": "true",
-			"user.subyard.desired_power": desired, "user.subyard.bridge": "incusbr0",
-			"boot.autostart": "false",
-		}
-		server.SetInstance(project, "yard", map[string]any{
-			"name": "yard", "project": project, "type": "container", "status": "Stopped",
-			"config": config, "expanded_config": config,
+	for _, test := range []struct {
+		message string
+		exit    int
+	}{{`Storage pool "default" unavailable on this server`, 75}, {"disk source is not mounted yet", 1}} {
+		t.Run(test.message, func(t *testing.T) {
+			server, err := testkit.NewIncusServer(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			// The named yard sorts before the default yard, as in the boot failure.
+			for project, desired := range map[string]string{
+				"subyard-test": "running", "subyard": "running", "subyard-stopped": "stopped",
+			} {
+				config := map[string]string{
+					"user.subyard.managed": "true", "user.subyard.initialized": "true",
+					"user.subyard.desired_power": desired, "user.subyard.bridge": "incusbr0",
+					"boot.autostart": "false",
+				}
+				server.SetInstance(project, "yard", map[string]any{
+					"name": "yard", "project": project, "type": "container", "status": "Stopped",
+					"config": config, "expanded_config": config,
+				})
+			}
+			server.QueuePowerErrors(test.message)
+			client := incusclient.New(server.SocketPath)
+			reconciler := application.BootPowerReconciler{
+				Inventory: client, Instances: client, Power: client, Network: bootNetworkGuard{},
+				NetworkPolicy: bootNetworkPolicyStub{}, EnsureNetworkLock: bootLockStub,
+			}
+			var stdout, stderr bytes.Buffer
+			if code := RunBootPower(context.Background(), nil, &stdout, &stderr, reconciler); code != test.exit {
+				t.Fatalf("async storage failure returned %d, want retryable service failure: %s", code, stderr.String())
+			}
+			if calls := server.PowerCalls(); len(calls) != 1 || calls[0].Project != "subyard-test" {
+				t.Fatalf("unexpected failed boot start: %+v", calls)
+			}
+			for range 2 {
+				if code := RunBootPower(context.Background(), nil, &stdout, &stderr, reconciler); code != 0 {
+					t.Fatalf("recovery returned %d: %s", code, stderr.String())
+				}
+			}
+			if calls := server.PowerCalls(); len(calls) != 3 ||
+				calls[1].Project != "subyard-test" || calls[2].Project != "subyard" {
+				t.Fatalf("retry did not restore both yards exactly once: %+v", calls)
+			}
+			for project, status := range map[string]string{
+				"subyard-test": "Running", "subyard": "Running", "subyard-stopped": "Stopped",
+			} {
+				instance, err := client.Instance(context.Background(), project, "yard")
+				if err != nil || instance.Status != status || instance.Config["user.subyard.desired_power"] != strings.ToLower(status) {
+					t.Fatalf("unexpected recovered state for %s: %+v, %v", project, instance, err)
+				}
+			}
+
 		})
-	}
-	server.QueuePowerErrors(`Storage pool "default" unavailable on this server`)
-	client := incusclient.New(server.SocketPath)
-	reconciler := application.BootPowerReconciler{
-		Inventory: client, Instances: client, Power: client, Network: bootNetworkGuard{},
-		NetworkPolicy: bootNetworkPolicyStub{}, EnsureNetworkLock: bootLockStub,
-	}
-	var stdout, stderr bytes.Buffer
-	if code := RunBootPower(context.Background(), nil, &stdout, &stderr, reconciler); code != 75 {
-		t.Fatalf("async storage failure returned %d, want retry: %s", code, stderr.String())
-	}
-	if calls := server.PowerCalls(); len(calls) != 1 || calls[0].Project != "subyard-test" {
-		t.Fatalf("unexpected failed boot start: %+v", calls)
-	}
-	for range 2 {
-		if code := RunBootPower(context.Background(), nil, &stdout, &stderr, reconciler); code != 0 {
-			t.Fatalf("recovery returned %d: %s", code, stderr.String())
-		}
-	}
-	if calls := server.PowerCalls(); len(calls) != 3 ||
-		calls[1].Project != "subyard-test" || calls[2].Project != "subyard" {
-		t.Fatalf("retry did not restore both yards exactly once: %+v", calls)
-	}
-	for project, status := range map[string]string{
-		"subyard-test": "Running", "subyard": "Running", "subyard-stopped": "Stopped",
-	} {
-		instance, err := client.Instance(context.Background(), project, "yard")
-		if err != nil || instance.Status != status || instance.Config["user.subyard.desired_power"] != strings.ToLower(status) {
-			t.Fatalf("unexpected recovered state for %s: %+v, %v", project, instance, err)
-		}
 	}
 }
 
@@ -210,5 +219,42 @@ func TestRunBootPowerHasManagedExitCodes(t *testing.T) {
 	}
 	if code := RunBootPower(context.Background(), []string{"unknown"}, &bytes.Buffer{}, &bytes.Buffer{}, reconciler); code != 2 {
 		t.Fatalf("unknown argument returned %d", code)
+	}
+}
+
+func TestBootGuardRefusalStaysClosedUntilFixThenConverges(t *testing.T) {
+	for _, state := range []string{"unbound", "unread-init", "unread-migration"} {
+		t.Run(state, func(t *testing.T) {
+			reconciler := bootPowerFailureReconciler(nil)
+			fake := reconciler.Inventory.(*testkit.Incus)
+			reconciler.Power = fake
+			current := state
+			reconciler.Network = hostruntime.NetworkGuard{AutomaticRetry: true, State: func() string { return current }, Lookup: func(name string) (string, bool) { return name, true }, Run: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+				switch name {
+				case "systemctl":
+					return []byte("active"), nil
+				case "NetworkManager":
+					return []byte("[device-subyard]\nmatch-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0\nmanaged=0"), nil
+				case "nmcli":
+					return []byte("incusbr0:unmanaged"), nil
+				case "ip":
+					return []byte(`[]`), nil
+				}
+				return nil, errors.New("unexpected guard command")
+			}}
+			var output bytes.Buffer
+			for range 2 {
+				if code := RunBootPower(context.Background(), nil, &output, &output, reconciler); code != 1 || len(fake.PowerUpdates) != 0 {
+					t.Fatalf("guard failure powered yard: %d %+v", code, fake.PowerUpdates)
+				}
+			}
+			if !strings.Contains(output.String(), "reboot the host once") || !strings.Contains(output.String(), "retries automatically") || strings.Contains(output.String(), "yard start") || state == "unbound" && !strings.Contains(output.String(), "run yard init") {
+				t.Fatal("guard remedy missing", output.String())
+			}
+			current = "loaded"
+			if code := RunBootPower(context.Background(), nil, &output, &output, reconciler); code != 0 || len(fake.PowerUpdates) != 1 {
+				t.Fatalf("retry after fix did not restore desired power: %d %+v %s", code, fake.PowerUpdates, output.String())
+			}
+		})
 	}
 }

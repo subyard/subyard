@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -435,6 +436,72 @@ func TestUpdateWithPendingSourceWorkEndsReadyForEveryBrokerState(t *testing.T) {
 			}
 			if len(calls.calls) != 0 {
 				t.Fatalf("unexpected children: %v", calls.calls)
+			}
+		})
+	}
+}
+
+// Refusal happens before both the transition journal and the first destructive child.
+func TestRecreationStartPrerequisitesRefuseBeforeJournalAndTeardown(t *testing.T) {
+	for _, state := range []string{"unread-init", "unread-migration", "unbound"} {
+		t.Run(state, func(t *testing.T) {
+			program, _, _, broker, calls := serviceRecreationFixture(t)
+			home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+			currentState := state
+			prepared := 0
+			calls.prepareRecreation = func() error {
+				prepared++
+				if currentState == "unbound" {
+					currentState = "unread-init"
+				}
+				return nil
+			}
+			unsafeRoute := true
+			calls.checkRecreation = func() error {
+				guard := hostruntime.NetworkGuard{
+					State: func() string { return currentState }, NextStep: "yard update",
+					Lookup: func(name string) (string, bool) { return name, true },
+					Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+						switch name {
+						case "systemctl":
+							return []byte("active"), nil
+						case "NetworkManager":
+							return []byte("[device-subyard]\nmatch-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0\nmanaged=0"), nil
+						case "nmcli":
+							return []byte("incusbr0:unmanaged"), nil
+						case "ip":
+							if unsafeRoute {
+								return []byte(`[{"dev":"incusbr0"}]`), nil
+							}
+							return []byte(`[]`), nil
+						}
+						return nil, errors.New("unexpected guard command")
+					},
+				}
+				return guard.Check(context.Background(), []string{"incusbr0"})
+			}
+			update := brokerUpdate(t, program, broker, false)
+			result := update()
+			if result.Outcome.Status != releasetransition.StatusOperatorActionRequired || prepared != 1 || len(calls.calls) != 0 {
+				t.Fatalf("unsafe recreation changed runtime or lost preparation: %+v prepared=%d calls=%v", result.Outcome, prepared, calls.calls)
+			}
+			for _, finding := range []string{"has not read", "default route", "yard update"} {
+				if !strings.Contains(result.Outcome.Message+result.Outcome.Retry, finding) {
+					t.Errorf("missing %s: %+v", finding, result.Outcome)
+				}
+			}
+			store, err := releasetransition.NewPOSIXV2Store(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if journal, err := store.ReadCurrentJournal(); err != nil || journal.Exists {
+				t.Fatalf("refusal opened transition: %+v %v", journal, err)
+			}
+			// One reboot loads the prepared binding; a fresh approved update can recreate.
+			currentState, unsafeRoute = "loaded", false
+			result = update()
+			if result.Outcome.Status != releasetransition.StatusReady || len(calls.calls) != 3 {
+				t.Fatalf("retry did not recreate: %+v %v", result.Outcome, calls.calls)
 			}
 		})
 	}

@@ -793,6 +793,28 @@ func TestTeardownKeepsSharedIncusForAnotherRegisteredLocalYard(t *testing.T) {
 	}
 }
 
+func TestRecreationTeardownKeepsSharedIncusForItsReplacement(t *testing.T) {
+	fixture := newFixture(t)
+	incus := lifecycleIncus()
+	incus.Reconcile.InstanceFound = true
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+		Schema: 1, OperationID: "teardown-shared-test", Status: "ok",
+	}}}}
+	runner.Steps[0].Apply = func(domain.AdapterRequest) {
+		incus.Reconcile.InstanceFound = false
+		incus.Instances = map[string]ports.InstanceInfo{}
+	}
+	program := fixture.New(Options{Arguments: []string{"teardown", "--yes"}, Environment: append(fixture.Environment, "SUBYARD_OPERATION_ID=teardown-shared-test"), AdapterRunner: runner, Prompt: &testkit.Prompt{}, Incus: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)), NetworkPolicy: allowTestNetworkPolicy()})
+	program.releaseTransitionChild = true
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("teardown failed with %d", code)
+	}
+	if len(runner.Requests) != 1 ||
+		runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_SHARED"] != "1" {
+		t.Fatalf("shared Incus lifecycle was not preserved: %#v", runner.Requests)
+	}
+}
+
 func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	fixture := newFixture(t, withEnv("NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=retire-legacy"), withCommands("scripts/e2e-lab/invoke.sh"))
 	incus := lifecycleIncus()

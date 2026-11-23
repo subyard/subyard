@@ -489,7 +489,9 @@ func (cli *CLI) executeTeardown(ctx context.Context, orchestrator *application.O
 // re-enters public execution or acquires a second network/owner lock.
 func (cli *CLI) executeTeardownYards(ctx context.Context, orchestrator *application.Orchestrator, current config.Loaded, plan domain.OperationPlan, execution *teardownExecution, diagnostics io.Writer, before, after func() error, leaf func(string, map[string]string) error) (domain.AdapterResult, error) {
 	result := domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}
-	execution.holdShared = execution.full
+	// A release child immediately reinstalls this service. Retain the bridge and
+	// its bound guard so recreation does not manufacture another reboot.
+	execution.holdShared = execution.full || cli.releaseTransitionChild
 	if execution.full && (len(execution.Yards) > 0 || len(execution.Shared) > 0) && cli.options.AdapterRunner == nil {
 		values := structuredCommandContext(current)
 		values["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath

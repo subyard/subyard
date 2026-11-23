@@ -203,16 +203,19 @@ case "$mode" in
     esac
     ;;
   exit-one)
-    exit 1
+    [ "$attempts" -ne 1 ] || exit 1
+    exit 0
     ;;
   signal)
-    exec /bin/sh -c 'kill -KILL $$'
+    [ "$attempts" -ne 1 ] || exec /bin/sh -c 'kill -KILL $$'
+    exit 0
     ;;
   timeout)
-    sleep 300
+    [ "$attempts" -ne 1 ] || sleep 300
+    exit 0
     ;;
   retry-late)
-    if [ "$attempts" -le 8 ]; then exit 75; fi
+    if [ "$attempts" -le 8 ]; then exit 1; fi
     if [ "$attempts" -eq 9 ]; then exit 0; fi
     exit 76
     ;;
@@ -298,22 +301,22 @@ wait_for 'one retry after exit 75, followed by success' \
 
 materialize_unit exit-one
 start_case
-wait_for 'terminal exit 1 without a restart' \
-  has_unit_state failed failed exit-code 1
-[ "$(attempt_count)" = 1 ] || die 'permanent failure was restarted'
+wait_for 'recovery from an unclassified exit 1' \
+  has_unit_state inactive dead success 0
+[ "$(attempt_count)" = 2 ] || die 'unclassified failure did not retry exactly once'
 
 materialize_unit signal
 start_case
-wait_for 'terminal signal without a restart' \
-  has_terminal_state failed failed signal
-[ "$(attempt_count)" = 1 ] || die 'signal failure was restarted'
+wait_for 'recovery from a signal' \
+  has_unit_state inactive dead success 0
+[ "$(attempt_count)" = 2 ] || die 'signal failure did not retry exactly once'
 
 materialize_unit timeout
 set_runtime_max_test_override
 start_case
-wait_for 'terminal runtime timeout without a restart' \
-  has_terminal_state failed failed timeout
-[ "$(attempt_count)" = 1 ] || die 'runtime timeout was restarted'
+wait_for 'recovery from a bounded runtime timeout' \
+  has_unit_state inactive dead success 0
+[ "$(attempt_count)" = 2 ] || die 'runtime timeout did not retry exactly once'
 
 materialize_unit retry-late
 start_case

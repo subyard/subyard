@@ -17,6 +17,19 @@
   primary group remains supported; a foreign owner is reported with the expected owner
   and a repair command, alongside specific unsafe-file or parsing failures.
 
+### Update and boot recovery
+
+- Service recreation checks the replacement's host network safety before opening a release
+  transition or deleting the old runtime. It records an unbound NetworkManager guard first;
+  when a reboot is required, reboot once, then rerun `yard update`. Recreation retains the shared
+  bridge, storage pool and guard binding so reinstalling the last yard does not require another reboot.
+- `yard init` on a stopped yard accepts newly visible project-hook counts after its temporary
+  identity inspection start; a new resource or operation step still refuses as a stale plan.
+- Boot power reconciliation retries failed attempts every 30 seconds, including storage that
+  becomes available only at login, without relying on Incus error text. NetworkManager guard
+  failures still prevent starts. The journal and `yard status` name the required init or reboot;
+  desired-running yards start automatically after the cause is resolved.
+
 ### Agent approval policies
 
 - Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.

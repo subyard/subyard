@@ -1082,6 +1082,21 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 	}).Run(ctx, hostruntime.CheckOptions{Strict: true, BasePresent: basePresent})
 }
 
+// PrepareServiceRecreation binds an existing guard before a refused recreation
+// asks for a reboot. It never reloads NetworkManager or stops a yard.
+func (runtime Runtime) PrepareServiceRecreation(ctx context.Context) error {
+	operator, err := runtime.operatorIdentity()
+	if err != nil {
+		return err
+	}
+	return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_USER": operator.Username},
+		"install-power-reconciler.sh", "--prepare-recreation", "--yes")
+}
+
+func (runtime Runtime) CheckServiceRecreation(ctx context.Context) error {
+	return (hostruntime.NetworkGuard{State: hostruntime.LocalNetworkManagerGuardState, NextStep: "yard update"}).Check(ctx, []string{runtime.Yard.IncusBridge})
+}
+
 func (runtime Runtime) Teardown(ctx context.Context) error {
 	if runtime.LegacyContinuation != nil {
 		return errors.New("legacy continuation cannot authorize reset or teardown")

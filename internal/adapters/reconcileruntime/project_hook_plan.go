@@ -357,7 +357,7 @@ func (plan *ProjectHookPlan) OperationStep(target string) domain.OperationStep {
 	}
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
-	target += fmt.Sprintf(":%d captured projects; %d captured hook paths", len(ids), len(plan.allowedHooks))
+	observed += fmt.Sprintf("; %d captured projects; %d captured hook paths", len(ids), len(plan.allowedHooks))
 	return domain.OperationStep{ID: "init.project-hooks", Target: target, Observed: observed, Desired: "successful installed hooks for captured owner project roots", Decision: decision,
 		Preconditions: []string{"captured project inventory and hook inputs remain unchanged", "guest hook paths remain inside the captured installed and declared scope"}, Verify: "native dispatcher exits successfully and captured project inputs remain unchanged", Consequence: "retry installed project hooks once for active resources"}
 }

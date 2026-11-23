@@ -1961,6 +1961,12 @@ with an explicit `--version` it refuses the unfinished below-anchor installation
 `source-anchor-required`. These two recoveries require their historical registries, which differ
 from v0.28.x and the current release.
 
+Destructive activation owners can implement `V2ActivationPreflighter`. After consent, the transition
+runs these checks under its update lock before opening a journal and again on interrupted resume;
+independent refusals use `domain.CollectRefusals`. Service recreation uses this boundary to prepare
+the NetworkManager guard binding and verify guard and route safety before removing its runtime.
+Preparation preserves the runtime and is repeatable after interruption.
+
 Registry v2 contains only compiled, typed one-time capabilities. Activation reconcilers separately
 refresh materialized config, an already-active test-VM broker and an installed host power runtime;
 they do not change the migration ledger and never start an inactive service as an update side
