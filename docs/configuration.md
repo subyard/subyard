@@ -1059,17 +1059,19 @@ In a new client, inspect `/status` for the managed file/drop-ins source and `/pe
 the effective rules. A higher-priority enterprise policy or a CLI without native drop-in support
 needs its own native acceptance; file presence does not prove that the client loaded it.
 
-Rollback to v0.30.0 replaces `50-subyard-git-approval.json` and leaves the newer drop-ins
+Rollback to 0.31.0 replaces `50-subyard-git-approval.json` and leaves the newer drop-ins
 in place. Claude continues to read those files, so sudo prompts or the shared hook can survive
 that rollback. With both gates off, the surviving hook blocks wrapped Git and sudo forms
-instead of prompting for them. The [v0.30.0 provisioner](https://github.com/subyard/subyard/blob/e2b31943dac13e05837e1b392416d023911abfd0/config/agents/claude/provision.sh#L155-L164)
+instead of prompting for them. The [0.31.0 provisioner](https://github.com/subyard/subyard/blob/0fd4adec242550461bad568cf3b4193a69248737/config/agents/claude/provision.sh#L359)
 publishes only the Git drop-in.
 
-After rolling back to a release without split policies, such as v0.30.0, remove the
+After rolling back to a release without split policies, such as 0.31.0, remove the
 leftover drop-ins by hand. `48-subyard-update-lock.json` only repeats the update lock, but
 `49-subyard-approval-hook.json` keeps the hook running and `51-subyard-sudo-approval.json`
 keeps the sudo prompts, so `DEV_SUDO` no longer controls them and wrapped forms can be
-blocked. From the owner host:
+blocked. Stop agent sessions before rollback, then back up these files in each affected yard
+before removing them. Preserve operator-owned policies and account for custom installation paths.
+From the owner host:
 
 ```sh
 yard shell --root -- rm -f /etc/claude-code/managed-settings.d/48-subyard-update-lock.json \
@@ -1077,6 +1079,12 @@ yard shell --root -- rm -f /etc/claude-code/managed-settings.d/48-subyard-update
   /etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json
 yard init
 ```
+
+Restart agent sessions only after this cleanup. Codex also leaves inert files under `/etc/codex/`:
+`49-subyard-approval-hook.toml`, `50-subyard-git-approval.rules.inc` and
+`51-subyard-sudo-approval.rules.inc`. Back up and remove these Subyard-managed fragments
+before `yard init`; 0.31.0 restores its combined `requirements.toml`.
+The rollback plan and result list the surviving files and manual recovery instructions.
 
 Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
 standard bypass mode is also covered by the SDK fixture. A native CLI terminal check using
