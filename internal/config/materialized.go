@@ -100,6 +100,8 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			}
 			asset := MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format}
 			if source == artifact.Source {
+				_, variants := artifact.ApprovalSources["git sudo"]
+				var activeGates []string
 				for _, gate := range []struct {
 					name   string
 					active bool
@@ -107,9 +109,15 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 					{"git", !GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"])},
 					{"sudo", SudoApprovalPrompt(values["DEV_SUDO"])},
 				} {
-					if path := artifact.ApprovalSources[gate.name]; gate.active && path != "" {
+					if gate.active {
+						activeGates = append(activeGates, gate.name)
+					}
+					if path := artifact.ApprovalSources[gate.name]; !variants && gate.active && path != "" {
 						asset.ApprovalSources = append(asset.ApprovalSources, path)
 					}
+				}
+				if variant := artifact.ApprovalSources[strings.Join(activeGates, " ")]; variants && variant != "" {
+					asset.Source = variant
 				}
 			}
 			assets = append(assets, asset)

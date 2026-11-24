@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,82 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+// These are the unmodified declaration and policies from the published 0.31.0
+// linux-amd64 bundle (SHA-256 fd0504fff2cd4155fc65cae8291f2f8fbd3e5a0aff645fed971afce8b3f3365f).
+// Current code reads target declarations while preparing rollback, even when
+// the integration is not selected. The target's variants replace the base.
+func TestPublishedOpenCodeApprovalVariants(t *testing.T) {
+	root := syntheticResourceRoot(t)
+	packageRoot := filepath.Join(root, "config/agents/opencode")
+	if err := os.MkdirAll(packageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"v0.31.0-integration.json", "opencode.jsonc", "opencode-git.jsonc", "opencode-sudo.jsonc", "opencode-git-sudo.jsonc"} {
+		content, err := os.ReadFile(filepath.Join("testdata/opencode-variants", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "v0.31.0-integration.json" {
+			name = "integration.json"
+		}
+		testkit.WriteFile(t, filepath.Join(packageRoot, name), content, 0o644)
+	}
+	testkit.WriteFile(t, filepath.Join(packageRoot, "provision.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	for _, test := range []struct{ git, sudo, variant string }{
+		{"off", "yes", "opencode.jsonc"},
+		{"prompt", "yes", "opencode-git.jsonc"},
+		{"off", "prompt", "opencode-sudo.jsonc"},
+		{"prompt", "prompt", "opencode-git-sudo.jsonc"},
+	} {
+		t.Run(test.variant+"/"+test.git+"/"+test.sudo, func(t *testing.T) {
+			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{
+				"CODING_TOOL_INTEGRATIONS": "opencode", "CODING_TOOL_GIT_APPROVAL": test.git, "DEV_SUDO": test.sudo,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
+				sources, err := SelectMaterializationSources(loaded.Environment, "dev", scope, loaded.Catalog.Integrations()...)
+				sources = slices.DeleteFunc(sources, func(source MaterializationSource) bool { return source.PreviewInstructions })
+				if err != nil || len(sources) != 1 {
+					t.Fatalf("%s: sources=%#v, %v", scope, sources, err)
+				}
+				asset := sources[0].Asset
+				if asset.Source != filepath.Join(packageRoot, test.variant) || len(asset.ApprovalSources) != 0 {
+					t.Fatalf("%s: published variant was composed as overlays: %#v", scope, asset)
+				}
+				got, err := asset.ReadContent(func(source MaterializedAsset) ([]byte, error) { return source.ReadSource() })
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := os.ReadFile(filepath.Join("testdata/opencode-variants", test.variant))
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("%s: published policy changed: %v", scope, err)
+				}
+				for _, override := range []string{"/operator/custom.jsonc", ""} {
+					loaded.Environment["AGENT_opencode_CONFIG"] = override
+					assets, err := MaterializedAssets(loaded.Environment, "dev", loaded.Catalog.Integrations()...)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if override == "" {
+						if len(assets) != 0 {
+							t.Fatal("empty operator config was replaced by a published variant")
+						}
+					} else if len(assets) != 1 || assets[0].Source != override || len(assets[0].ApprovalSources) != 0 {
+						t.Fatalf("operator config was replaced by a published variant: %#v", assets)
+					}
+				}
+				loaded.Environment["AGENT_opencode_CONFIG"] = filepath.Join(packageRoot, "opencode.jsonc")
+			}
+		})
+	}
+	// Package declarations are read before selection during rollback admission.
+	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": ""}}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestMaterializationComposesIndependentApprovalOverlays(t *testing.T) {
 	root := testkit.TempDir(t)

@@ -224,6 +224,30 @@ func TestIntegrationMetadataOwnsApprovalSources(t *testing.T) {
 	}
 }
 
+func TestIntegrationApprovalSourcesValidation(t *testing.T) {
+	for _, gates := range []string{"git", "sudo", "git sudo"} {
+		for _, source := range []string{"policy.json", "../policy.json", "/policy.json", "", "policy\n.json"} {
+			for _, kind := range []string{"config", "instructions"} {
+				artifact := IntegrationArtifact{ID: "config", Kind: kind, Source: "base.json", Destination: ".sample/config", Format: "destination", ApprovalSources: map[string]string{gates: source}}
+				if kind == "instructions" {
+					artifact.ID, artifact.Source, artifact.SourceSetting, artifact.Format = "instructions", "", "SAMPLE_INSTRUCTIONS", "raw"
+				}
+				_, err := (IntegrationDefinition{SchemaVersion: 2, Name: "sample", Artifacts: []IntegrationArtifact{artifact}}).Metadata()
+				valid := kind == "config" && source == "policy.json"
+				if (err == nil) != valid {
+					t.Fatalf("kind=%q gates=%q source=%q: valid=%v, err=%v", kind, gates, source, valid, err)
+				}
+			}
+		}
+	}
+	for _, gates := range []string{"", "sudo git", "git  sudo", "git sudo other", "other", "git\nsudo"} {
+		_, err := DecodeIntegration("sample", []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"base.json","approval_sources":{`+strconv.Quote(gates)+`:"policy.json"},"destination":".sample/config","format":"destination"}]}`))
+		if err == nil {
+			t.Fatalf("unsupported approval gates accepted: %q", gates)
+		}
+	}
+}
+
 func TestRuntimeFormatsDeclareOnePreparedEarlierFormat(t *testing.T) {
 	runtime := func(fields string) []byte {
 		return []byte(`{"schema_version":1,"runtime":{"activation_id":"synthetic-runtime","handler":"runtime.sh"` + fields + `}}`)

@@ -13,6 +13,8 @@ import (
 // IntegrationArtifact is semantic data; native sources are bound by the package loader.
 // Modes and ownership retain the existing raw and structured writer policies.
 // ApprovalSources are JSON overlays on the shipped Source, one per prompt gate.
+// A "git sudo" entry identifies the published schema-2 complete-variant format;
+// those sources replace Source for the exact set of active gates.
 type IntegrationArtifact struct {
 	ID              string            `json:"id"`
 	Label           string            `json:"label,omitempty"`
@@ -58,7 +60,7 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 			return errors.New("invalid integration artifact format")
 		}
 		for gate, path := range artifact.ApprovalSources {
-			if artifact.Kind != "config" || (gate != "git" && gate != "sudo") || !textSafe(path) || !relative(path) {
+			if artifact.Kind != "config" || (gate != "git" && gate != "sudo" && gate != "git sudo") || !textSafe(path) || !relative(path) {
 				return errors.New("invalid approval artifact source")
 			}
 		}
