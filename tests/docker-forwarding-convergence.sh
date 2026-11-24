@@ -68,11 +68,8 @@ SH
 cat >"$TMP/bin/journalctl" <<'SH'
 #!/bin/sh
 printf 'journalctl %s\n' "$*" >>"$TEST_LOG"
-i=0
-while [ "$i" -lt 30 ]; do
-  printf 'sshd[1]: line %s %0300d\n' "$i" 0
-  i=$((i + 1))
-done
+printf '%s\n' 'PRIVATE_JOURNAL_PAYLOAD'
+exit 99
 SH
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/iptables" "$TMP/bin/docker" "$TMP/bin/timeout" \
   "$TMP/bin/journalctl"
@@ -124,16 +121,17 @@ for TEST_SERVICE_FAIL in 0 1; do
       ! grep -Fq 'docker ' "$TEST_LOG" \
         || { printf 'FAIL: failed service start reached Docker API\n' >&2; exit 1; }
       python3 - "$TMP" <<'PY'
-import os, pathlib, re, sys
+import os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 lines = (root / "stderr").read_text().splitlines()
 result = "exit-code" if os.environ["TEST_COMPARE_EXIT"] == "0" else "unknown"
 assert lines[0] == f"yard service ssh.service failed to start: result={result}", lines
 assert not any("docker.service" in line for line in lines), lines
-journal = lines[lines.index("ssh.service journal for this start:") + 1:]
-assert len(journal) == 20 and all(len(line) == 240 for line in journal), journal
-calls = (root / "log").read_text()
-assert re.search(r"^journalctl --no-pager --quiet -o cat -u ssh.service --since @[0-9]+ -n 20$", calls, re.M), calls
+assert lines == [
+    f"yard service ssh.service failed to start: result={result}",
+    "inspect journal: journalctl -u ssh.service -b",
+], lines
+assert "journalctl " not in (root / "log").read_text()
 PY
     fi
     python3 - "$TMP" <<'PY'
@@ -185,7 +183,7 @@ PY
   done
 done
 
-# Independent unit failures both retain their own bounded journal and stable order.
+# Independent unit failures retain inspection commands in stable order.
 export TEST_SERVICE_FAIL=1 TEST_COMPARE_EXIT=0 TEST_DOCKER_UNIT_EXIT=3
 status=0
 bash -euo pipefail "$services" >"$TMP/stdout" 2>"$TMP/stderr" || status=$?
@@ -193,11 +191,10 @@ bash -euo pipefail "$services" >"$TMP/stdout" 2>"$TMP/stderr" || status=$?
 python3 - "$TMP/stderr" <<'PY_UNITS'
 import pathlib, sys
 lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
-assert len(lines) == 44, lines
-for offset, unit in ((0, "ssh.service"), (22, "docker.service")):
+assert len(lines) == 4, lines
+for offset, unit in ((0, "ssh.service"), (2, "docker.service")):
     assert lines[offset] == f"yard service {unit} failed to start: result=exit-code", lines
-    assert lines[offset + 1] == f"{unit} journal for this start:", lines
-    assert all(len(line) == 240 for line in lines[offset + 2:offset + 22]), lines
+    assert lines[offset + 1] == f"inspect journal: journalctl -u {unit} -b", lines
 PY_UNITS
 unset TEST_DOCKER_UNIT_EXIT
 

@@ -187,25 +187,22 @@ chown root:yard "${srv_skel[@]}"
 chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit the yard group
 
 # Services live in the container's own systemd (does not touch host systemd).
-# A failed start reports each inactive unit's result and this attempt's bounded journal tail.
-yard_service_failure_diagnostics() { # <start epoch>
+# Report unit results without exposing service output that may contain secrets.
+yard_service_failure_diagnostics() {
   local unit result
   for unit in ssh.service docker.service; do
     ! timeout --kill-after=1 3 systemctl is-active --quiet "$unit" || continue
     result="$(timeout --kill-after=1 3 systemctl show "$unit" --property=Result --value 2>/dev/null)" || result=
     [[ "$result" =~ ^[a-z-]{1,32}$ ]] || result=unknown
     printf 'yard service %s failed to start: result=%s\n' "$unit" "$result"
-    printf '%s journal for this start:\n' "$unit"
-    timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u "$unit" --since "@$1" -n 20 2>/dev/null \
-      | sed -n '1,20p' | cut -c1-240
+    printf 'inspect journal: journalctl -u %s -b\n' "$unit"
   done
 }
-services_started="$(date +%s)"
 if systemctl enable --now ssh docker; then
   :
 else
   services_exit=$?
-  yard_service_failure_diagnostics "$services_started" >&2 || true
+  yard_service_failure_diagnostics >&2 || true
   exit "$services_exit"
 fi
 # Verify the inventory API used by native callers; provisioning consumes no info fields.
