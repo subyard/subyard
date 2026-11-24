@@ -6,6 +6,22 @@ p0_capacity_die() {
   return 2
 }
 
+# <literal comma-separated nonsensitive fixture settings> <script> <arguments...>
+# Preserve names through sudo, never values in argv/logs. Private aliases avoid
+# sudo's secure_path and runuser's HOME reset; restore them after dropping root.
+p0_reexec_incus_group() {
+  local preserve=P0_REEXEC_HOME,P0_REEXEC_PATH,SUBYARD_E2E_VM
+  [ -z "$1" ] || preserve+=",$1"
+  shift
+  printf 'p0-capacity: activating process-local incus-admin group\n'
+  export P0_REEXEC_HOME="$HOME" P0_REEXEC_PATH="$PATH"
+  exec sudo -n "--preserve-env=$preserve" -- \
+    /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
+    bash -c 'export HOME="$P0_REEXEC_HOME" PATH="$P0_REEXEC_PATH"
+      unset P0_REEXEC_HOME P0_REEXEC_PATH
+      exec bash "$@"' p0-incus-group "$@"
+}
+
 p0_capacity_init() {
   local token="${1:-}"
   [[ "$token" =~ ^[0-9]+$ ]] || p0_capacity_die 'allocation token must be numeric' || return

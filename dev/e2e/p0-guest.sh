@@ -1795,11 +1795,9 @@ capacity_preflight() {
   # Give only this recovery process access; yard init still owns membership.
   if command -v incus >/dev/null 2>&1 && [ "$(id -u)" != 0 ] \
     && ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
-    local -a caller_env=()
-    mapfile -d '' -t caller_env < <(env -0)
-    exec sudo -n -- /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
-      env "${caller_env[@]}" HOME="$HOME" PATH="$PATH" \
-      bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
+    p0_reexec_incus_group \
+      P0_E2E_INCUS_QUERY_TIMEOUT,P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS,P0_REAL_INCUS_CONTAINER_CACHE_ALIAS \
+      "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
   fi
   recover_stale_source_upgrade_fixture
   recover_stale_real_incus_fixture
