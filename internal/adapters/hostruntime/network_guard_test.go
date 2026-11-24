@@ -359,7 +359,7 @@ func TestNetworkManagerFileIDMatchesShell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.TrimSpace(string(output)), networkManagerFileID(guard); got != want {
+	if got, want := strings.TrimSpace(string(output)), NetworkManagerFileID(guard); got != want {
 		t.Fatalf("shell identity %q, Go identity %q", got, want)
 	}
 }
