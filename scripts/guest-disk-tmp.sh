@@ -166,7 +166,7 @@ policy_guard() {
       # Apply restores the mode of our own root-owned file with current content
       # unless group or other could have written it.
       if [ "$1" != check ] && actual=$(stat -c '%a' "$file" 2>/dev/null) \
-        && [ $(( 8#$actual & 8#7022 )) = 0 ]; then
+        && [ $(( 0$actual & 07022 )) = 0 ]; then
         mode=$actual
       fi
       [ -f "$file" ] && [ ! -L "$file" ] \
