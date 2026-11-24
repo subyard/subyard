@@ -333,11 +333,15 @@ prepare_operator() {
 }
 
 update_baseline_hop() { # <version>
+  local provision="$SHARED_ROOT/hop-codex-provision.sh"
   # The immutable hop predates the Codex anonymous-REST-quota fix. Use the
   # verified candidate's hook for this command only, retaining the real hop's
   # running-yard activation and its own configuration and approval defaults.
+  # Its guest transport does not forward DEV_SUDO; the hop had no sudo prompts.
+  install -m 0644 /dev/null "$provision"
+  { printf '%s\n' 'export DEV_SUDO=no'; cat "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh"; } > "$provision"
   operator_no_go env \
-    AGENT_codex_PROVISION="$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" \
+    AGENT_codex_PROVISION="$provision" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$1" --yes
 }
 

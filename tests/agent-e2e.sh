@@ -6125,6 +6125,8 @@ IFS=$'\t' read -r HOP_VERSION _ HOP_SHA _ < <(published_hop)
 BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
 PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard
 install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$SHARED_ROOT"
+install -d -m 0755 "$CANDIDATE_A_REPOSITORY/config/agents/codex"
+printf '# candidate provisioner\n' > "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh"
 trace="$F/trace"
 eval "$BASELINE_FUNCTION"
 die() { printf '%s\n' "$*" >&2; exit 2; }
@@ -6165,7 +6167,7 @@ operator_yard() {
   printf 'yard %s\n' "$*" >> "$trace"
 }
 operator_no_go() {
-  [ "$1" = env ] && [ "$2" = "AGENT_codex_PROVISION=$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" ] \
+  [ "$1" = env ] && [ "$2" = "AGENT_codex_PROVISION=$SHARED_ROOT/hop-codex-provision.sh" ] \
     && [ "$3" = "$OPERATOR_HOME/.local/bin/yard" ] || exit 93
   printf 'hop provisioner candidate\n' >> "$trace"
   shift 3
@@ -6470,22 +6472,28 @@ done
 # Only the immutable hop gets the fixed provisioner; retain native failures and
 # leave the candidate update's command environment untouched.
 for hop_status in 0 23; do
+  hop_root="$TMP/source-hop-$hop_status"
+  mkdir -p "$hop_root/candidate/config/agents/codex" "$hop_root/shared"
+  printf '# candidate provisioner\n' > "$hop_root/candidate/config/agents/codex/provision.sh"
   hop_rc=0
   bash -e -c '
     eval "$1"
-    hop_status="$2"
-    OPERATOR_HOME=/operator CANDIDATE_A_REPOSITORY=/candidate
+    hop_status="$3"
+    OPERATOR_HOME=/operator CANDIDATE_A_REPOSITORY="$2/candidate" SHARED_ROOT="$2/shared"
     AGENT_codex_PROVISION=original
     incus() { exit 91; }
     operator_no_go() {
       printf "%s\n" "$*"
+      [ "$(head -n 1 "$SHARED_ROOT/hop-codex-provision.sh")" = "export DEV_SUDO=no" ]
+      tail -n +2 "$SHARED_ROOT/hop-codex-provision.sh" | cmp "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" -
+      [ "$(stat -c %a "$SHARED_ROOT/hop-codex-provision.sh")" = 644 ]
       return "$hop_status"
     }
     update_baseline_hop 0.28.1
     [ "$AGENT_codex_PROVISION" = original ]
   ' _ "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop)" \
-    "$hop_status" > "$TMP/source-hop.log" || hop_rc=$?
-  expected='env AGENT_codex_PROVISION=/candidate/config/agents/codex/provision.sh /operator/.local/bin/yard update --version 0.28.1 --yes'
+    "$hop_root" "$hop_status" > "$TMP/source-hop.log" || hop_rc=$?
+  expected="env AGENT_codex_PROVISION=$hop_root/shared/hop-codex-provision.sh /operator/.local/bin/yard update --version 0.28.1 --yes"
   [ "$hop_rc" = "$hop_status" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
     || fail "source hop lost its command-scoped provisioner or native exit $hop_status"
 done

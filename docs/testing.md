@@ -206,10 +206,11 @@ refusal remain host-free.
 
 The optional Periodic-only `p0:source-upgrade` lane creates schema-1 settings on pinned v0.11.0, updates through
 the published v0.28.1 hop, and covers explicit test-owner recreation, retained ordinary-yard state and later installed updates.
-The hop uses a command-scoped `AGENT_codex_PROVISION` override pointing to the verified
-candidate's hook to avoid its anonymous Codex release-metadata API request. The ordinary
-yard stays running, with Codex selected and the hop's approval defaults, preserving
-candidate activation and policy migration coverage.
+The hop uses a command-scoped `AGENT_codex_PROVISION` override wrapping the verified
+candidate's hook to avoid its anonymous Codex release-metadata API request. The wrapper
+sets the hop's legacy approval default because its guest transport does not forward
+`DEV_SUDO`. The ordinary yard stays running with Codex selected, preserving candidate
+activation and policy migration coverage.
 Fresh pre-v0.11.0 source upgrades are outside the
 [approved support boundary](reference/legacy-migration-support.md).
 
