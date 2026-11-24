@@ -1308,10 +1308,7 @@ outer_exec sh -eu -c 'incus version; qemu-system-x86_64 --version | head -n 1; d
 printf 'STAGING_NATIVE_VERSIONS_END\n'
 # No QMP socket or consumptive console/ringbuf access while lifecycle is active.
 # The watcher reads only verified QEMU proc state and parsed counters.
-# Rust timeout 0.8 reports external TERM as expiry; preserve the distinction.
-SAMPLER_TIMEOUT="$(command -v gnutimeout || command -v timeout)"
-printf 'STAGING_OBSERVER_TIMEOUT=%s\n' "$SAMPLER_TIMEOUT"
-"$SAMPLER_TIMEOUT" --signal=TERM --kill-after=10 6400 incus exec "$INSTANCE" --project "$PROJECT" -- \
+timeout --signal=TERM --kill-after=10 6400 incus exec "$INSTANCE" --project "$PROJECT" -- \
   python3 - <<'PYTHON' > "$STATE_PARENT/boot-samples.jsonl" 2> "$STATE_PARENT/boot-samples.stderr" &
 import hashlib,json,math,os,pathlib,re,signal,subprocess,time
 P=pathlib.Path

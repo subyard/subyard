@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	guestDependencyRevision = "subyard-test-vms-dependencies-v3"
+	guestDependencyRevision = "subyard-test-vms-dependencies-v4"
 	guestToolchainTimeout   = 30 * time.Minute
 	guestToolchainKillAfter = 10 * time.Second
 )
@@ -188,7 +188,10 @@ command -v shellcheck >/dev/null &&
 command -v sshd >/dev/null &&
 command -v sudo >/dev/null &&
 command -v sg >/dev/null &&
-command -v zsh >/dev/null`
+command -v zsh >/dev/null &&
+install --version 2>/dev/null | grep -q 'GNU coreutils' &&
+stat --version 2>/dev/null | grep -q 'GNU coreutils' &&
+timeout --version 2>/dev/null | grep -q 'GNU coreutils'`
 	_, err := runtime.guest(ctx, vm, []string{"DEPENDENCY_REVISION=" + guestDependencyRevision}, "sh", "-c", check)
 	return err
 }
@@ -204,6 +207,17 @@ if ! command -v sg >/dev/null 2>&1; then group_tools=util-linux-extra; fi
 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
 apt-get -o "$apt_options" -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends \
   build-essential ca-certificates curl expect git golang-go jq make openssh-client openssh-server ripgrep shellcheck sudo tar xz-utils zsh $group_tools
+# Ubuntu keeps the GNU commands alongside its Rust defaults. The fixtures need
+# GNU stdin copying, nanosecond stat precision and timeout signal exit statuses.
+install -d -m 0755 /usr/local/bin
+for tool in install stat timeout; do
+  if "$tool" --version 2>/dev/null | grep -q 'GNU coreutils'; then continue; fi
+  gnu_tool="/usr/bin/gnu$tool"
+  test -x "$gnu_tool"
+  ln -sT "$gnu_tool" "/usr/local/bin/$tool"
+  hash -r
+  "$tool" --version 2>/dev/null | grep -q 'GNU coreutils'
+done
 install -d -m 0755 /var/lib/subyard
 temp="$(mktemp /var/lib/subyard/.e2e-dependencies.XXXXXX)"
 trap 'rm -f "$temp"' EXIT

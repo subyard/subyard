@@ -96,8 +96,8 @@ func TestImageSelectionRecipeIdentity(t *testing.T) {
 	cfg := fixtureConfig(t)
 	cfg.RecipeRoot = testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("recipe"), 0600)
-	// Pinned Debian pair identity with dependency revision v3 and manifest bytes "recipe".
-	const debianPair = "26896c78b59b2ef231e84613d4e8b1119852e2dd2d11a1841d22224967340b43"
+	// Pinned Debian pair identity with dependency revision v4 and manifest bytes "recipe".
+	const debianPair = "2e39b12a4763b4af73cbff0efbf940f0a307b433ae05728fd57e3a4d5093fc31"
 	seen := map[string]bool{}
 	for _, image := range []string{DefaultImage, "ubuntu-24.04", "ubuntu-26.04"} {
 		selected, err := cfg.withImage(image)
