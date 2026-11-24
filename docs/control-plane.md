@@ -3085,9 +3085,10 @@ with an unchanged engine are repaired in place by the native owner. After provin
 project, instance, UUID and ownership) it interrupts the runtime's open SSH sessions with the
 approved migration stop, runs ordinary `yard -Y YARD teardown --yes`, then
 `yard service install ID --yard YARD [--pool POOL] --yes`. The plan names the interrupted sessions,
-the deleted instance, Incus project and `/srv` volume with their VMs, leases and base images, and the
-shared bridge, storage pool and power reconciler when it is the last managed yard. Yard settings are
-kept; the registration is recreated with the new runtime UUID. A running runtime and a stopped one
+the deleted instance, Incus project and `/srv` volume with their VMs, leases and base images.
+The shared bridge, storage pool, guard binding, power reconciler and yard settings are preserved,
+including for the last managed yard; the power owner updates its retained unit. The registration
+is recreated with the new runtime UUID. A running runtime and a stopped one
 whose desired power is `running` are recreated when their engine changed; a runtime stopped by
 the operator is left untouched. An unproven, foreign, remote or multiply registered runtime keeps its previous engine
 with a warning naming `yard service remove`, then `yard service install`; later gates keep that
