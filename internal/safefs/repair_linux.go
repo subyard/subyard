@@ -9,8 +9,9 @@ import (
 
 // RepairMode narrows an open regular file or directory by clearing the
 // permission bits in deny through the same descriptor. A regular file also
-// loses set-ID and sticky bits and a directory loses set-ID bits. A state
-// without those bits, including a narrower mode, is left unchanged. Any other
+// loses set-ID and sticky bits; a directory keeps its set-group-ID and sticky
+// bits, which only steer new entries. A state without those bits, including a
+// narrower mode, is left unchanged. Any other
 // file type is refused. A needed change is refused for another owner and for
 // a regular file with more than one hard link, so a repair never changes an
 // inode that is not the caller's alone.
@@ -43,7 +44,6 @@ func repairMode(fd int, path string, deny fs.FileMode) error {
 	case unix.S_IFREG:
 		denied |= 0o7000
 	case unix.S_IFDIR:
-		denied |= unix.S_ISUID | unix.S_ISGID
 	case unix.S_IFLNK:
 		return refusal(path, ErrSymlink)
 	default:

@@ -30,7 +30,8 @@ func TestRepairPathStates(t *testing.T) {
 		{"setuid file", func(path string) { testkit.WriteFile(t, path, nil, 0o600|fs.ModeSetuid) }, 0o077, 0o600, nil},
 		{"broader directory", admitFixtureDir(t, 0o755), 0o077, 0o700 | fs.ModeDir, nil},
 		{"sticky directory", admitFixtureDir(t, 0o777|fs.ModeSticky), 0o077, 0o700 | fs.ModeSticky | fs.ModeDir, nil},
-		{"setgid directory", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o077, 0o700 | fs.ModeDir, nil},
+		{"setgid directory", admitFixtureDir(t, 0o755|fs.ModeSetgid), 0o077, 0o700 | fs.ModeSetgid | fs.ModeDir, nil},
+		{"setgid private directory", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o077, 0o700 | fs.ModeSetgid | fs.ModeDir, nil},
 		{"symlink", func(path string) {
 			testkit.WriteFile(t, path+".target", nil, 0o644)
 			admitFixtureLink(t, path+".target", path)

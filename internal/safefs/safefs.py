@@ -510,7 +510,7 @@ def repair_mode(target, deny, *, dir_fd=None):
     """Narrow a caller-owned regular file or directory, given as a path or an open descriptor.
 
     Clear the permission bits in deny through the same descriptor; a regular file also loses
-    set-ID and sticky bits and a directory loses set-ID bits. A narrower state is kept.
+    set-ID and sticky bits, while a directory keeps them. A narrower state is kept.
     Another type refuses; a needed change refuses another owner and extra hard links.
     """
     if isinstance(target, int):
@@ -528,9 +528,7 @@ def repair_mode(target, deny, *, dir_fd=None):
         actual, denied = stat.S_IMODE(info.st_mode), deny & 0o777
         if stat.S_ISREG(info.st_mode):
             denied |= 0o7000
-        elif stat.S_ISDIR(info.st_mode):
-            denied |= _SET_ID
-        else:
+        elif not stat.S_ISDIR(info.st_mode):
             _regular(info, path)
         if not actual & denied:
             return
