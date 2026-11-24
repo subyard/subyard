@@ -1912,6 +1912,35 @@ for peer_sync_case in two-successes one-busy wrong-refusal; do
     || fail "peer sync $peer_sync_case lost launch, inventory, recovery or teardown ordering"
 done
 
+# Execute the proxy fixture's cold-cache branch, then reuse its populated cache.
+(
+  proxy_cache="$TMP/proxy-product-cache"
+  proxy_calls="$TMP/proxy-product-cache.calls"
+  incus_local() {
+    [ "$*" = 'image info subyard-e2e-debian-13-container --project default' ] \
+      || fail "unexpected proxy cache query: $*"
+    [ -f "$proxy_cache" ]
+  }
+  timeout() {
+    [ "$1 $2 $3" = '--foreground --kill-after=10 300' ] || return 42
+    shift 3
+    "$@"
+  }
+  sudo() { [ "$1" = -n ] || return 42; shift; "$@"; }
+  incus() {
+    [ "$*" = 'image copy images:debian/13 local: --alias subyard-e2e-debian-13-container --project default' ] \
+      || fail "proxy fixture populated the product cache with the wrong image: $*"
+    printf '%s\n' "$*" >> "$proxy_calls"
+    : > "$proxy_cache"
+  }
+  proxy_cache_code="$(sed -n '/^IMAGE=/,/^sudo -n ip link add/p' "$ROOT/dev/e2e/proxy-address-wait.sh" | sed '$d')"
+  [ -n "$proxy_cache_code" ] || fail 'proxy cache branch is absent'
+  eval "$proxy_cache_code"
+  [ -f "$proxy_cache" ] || fail 'cold proxy fixture did not populate its product cache'
+  eval "$proxy_cache_code"
+  [ "$(wc -l < "$proxy_calls")" = 1 ] || fail 'warm proxy fixture copied the product image again'
+)
+
 # A warm legacy cloud cache must never satisfy the product-image cache.
 # Execute the fixture's actual default and cache preparation, then pin its image.
 # shellcheck disable=SC2034
