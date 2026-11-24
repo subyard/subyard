@@ -36,6 +36,39 @@ fi
   && [ "$(ssh_yard_snippet_name demo)" = subyard-demo.config ] \
   || fail 'default and named yard snippet naming diverged'
 
+# A default ACL overrides umask for shell redirections. Exercise the real
+# filesystem rather than simulating stat output, including adjacent private files.
+if command -v setfacl >/dev/null 2>&1; then
+  acl_home="$TMP/acl-data"
+  mkdir -m 0700 "$acl_home"
+  setfacl -d -m u::rwx,g::rwx,o::r-x "$acl_home"
+  (umask 077; : > "$acl_home/umask-only")
+  [ "$(stat -c %a "$acl_home/umask-only")" = 664 ] \
+    || fail 'default ACL fixture did not override umask'
+  acl_identity="$(ssh_transport_identity_prepare "$acl_home")" \
+    || fail 'default ACL prevented transport identity creation'
+  [ "$(stat -c %a "$acl_home/ssh")" = 700 ] \
+    && [ "$(stat -c %a "$acl_identity")" = 600 ] \
+    && [ "$(stat -c %a "$acl_identity.pub")" = 644 ] \
+    || fail 'default ACL changed identity permissions'
+  acl_fingerprint="$(ssh-keygen -lf "$acl_identity" | awk '{print $2}')"
+  ssh_transport_identity_prepare "$acl_home" >/dev/null \
+    || fail 'default ACL prevented repeated identity preparation'
+  [ "$(ssh-keygen -lf "$acl_identity" | awk '{print $2}')" = "$acl_fingerprint" ] \
+    || fail 'default ACL rotated the transport identity'
+  ssh_config_prepend_once "$acl_home/ssh/config" 'Include subyard.config' \
+    || fail 'default ACL prevented SSH config publication'
+  ssh_known_host_replace "$acl_home/ssh/known_hosts" '[127.0.0.1]:2223' "$(cat "$acl_identity.pub")" \
+    || fail 'default ACL prevented known-host publication'
+  for acl_file in .identity.lock .subyard-config.lock .subyard-known-hosts.lock config known_hosts; do
+    [ -f "$acl_home/ssh/$acl_file" ] && [ ! -L "$acl_home/ssh/$acl_file" ] \
+      && [ "$(stat -c '%u:%a' "$acl_home/ssh/$acl_file")" = "$(id -u):600" ] \
+      || fail "default ACL changed private file ownership or mode: $acl_file"
+  done
+else
+  printf 'SKIP: default-ACL transport identity regression (setfacl unavailable)\n'
+fi
+
 race_home="$TMP/race-data"
 ssh_transport_identity_prepare "$race_home" >"$TMP/race-a.out" 2>"$TMP/race-a.err" &
 race_a=$!
@@ -69,6 +102,23 @@ assert_rejected() {
   fi
   [ ! -s "$TMP/$name.out" ] || fail "$name failure printed an identity path"
 }
+
+make_bad_lock_mode() {
+  mkdir -m 700 "$1/ssh"
+  : > "$1/ssh/.identity.lock"
+  chmod 644 "$1/ssh/.identity.lock"
+}
+assert_rejected bad-lock-mode make_bad_lock_mode
+[ "$(stat -c %a "$TMP/reject-bad-lock-mode/ssh/.identity.lock")" = 644 ] \
+  || fail 'prepare repaired an existing unsafe lock'
+
+make_symlink_lock() {
+  mkdir -m 700 "$1/ssh"
+  : > "$1/target"
+  chmod 600 "$1/target"
+  ln -s "$1/target" "$1/ssh/.identity.lock"
+}
+assert_rejected symlink-lock make_symlink_lock
 
 make_incomplete() {
   mkdir -m 700 "$1/ssh"

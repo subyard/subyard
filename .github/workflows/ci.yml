@@ -132,7 +132,7 @@ jobs:
           cache: false
       - name: Install system test tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          sudo apt-get update -qq && sudo apt-get install -y acl binutils curl gcc jq openssh-server ripgrep shellcheck zsh
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi

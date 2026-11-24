@@ -56,7 +56,22 @@ ssh_transport_identity_prepare() {
 
   lockfile="$keydir/.identity.lock"
   if [ ! -e "$lockfile" ] && [ ! -L "$lockfile" ]; then
-    (umask 077; set -C; : > "$lockfile") 2>/dev/null || true
+    # An inherited default ACL can override umask. Secure only a newly created
+    # descriptor; existing lock ownership, mode and symlinks remain validated below.
+    python3 - "$lockfile" 2>/dev/null <<'PY_LOCK' || true
+import os
+import sys
+
+try:
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except FileExistsError:
+    pass
+else:
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+PY_LOCK
   fi
   [ -f "$lockfile" ] && [ ! -L "$lockfile" ] \
     || { ssh_transport_identity_error "key creation lock must be a regular non-symlink file"; return 1; }
