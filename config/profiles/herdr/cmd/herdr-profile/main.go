@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -54,14 +56,24 @@ func stop(path string, pid int) error {
 	if err := call(path, "server.stop", nil, nil); err != nil {
 		return err
 	}
+	var probeErr error
 	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
 		core, err := readCore(path)
+		// Core can close an accepted probe while its shutdown is still in progress.
+		if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+			probeErr = err
+			continue
+		}
 		if err != nil || core == nil {
 			return err
 		}
+		probeErr = nil
 		if core.PID != pid {
 			return errors.New("Herdr Core restarted while stopping")
 		}
+	}
+	if probeErr != nil {
+		return fmt.Errorf("Herdr Core shutdown could not be verified: %w", probeErr)
 	}
 	return errors.New("Herdr Core is still running")
 }

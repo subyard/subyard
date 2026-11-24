@@ -22,10 +22,18 @@ func fakeCore(t *testing.T, replies ...string) string {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer listener.Close()
 		for _, reply := range replies {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
+			}
+			if reply == "reset" {
+				// Closing with unread request bytes resets the accepted Unix connection.
+				var first [1]byte
+				conn.Read(first[:])
+				conn.Close()
+				continue
 			}
 			var request struct {
 				ID     int
@@ -34,12 +42,49 @@ func fakeCore(t *testing.T, replies ...string) string {
 			if err := json.NewDecoder(conn).Decode(&request); err != nil || request.ID != 1 || request.Method == "" {
 				t.Errorf("invalid request: %v, %v", request, err)
 			}
-			fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":1,%s}`+"\n", reply)
+			if reply != "" {
+				fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":1,%s}`+"\n", reply)
+			}
 			conn.Close()
 		}
 	}()
 	t.Cleanup(func() { listener.Close(); <-done })
 	return path
+}
+
+func TestStopWaitsForSocketToClose(t *testing.T) {
+	status := `"result":{"core":{"id":"fixture"},"pid":42,"version":"0.1.21"}`
+	for _, interrupted := range []string{"hello", "server.status"} {
+		for _, reply := range []string{"", "reset"} {
+			t.Run(interrupted+"/"+reply, func(t *testing.T) {
+				replies := []string{`"result":{}`}
+				if interrupted == "server.status" {
+					replies = append(replies, `"result":{"generation":1}`)
+				}
+				replies = append(replies, reply, `"result":{"generation":1}`, status)
+				if err := stop(fakeCore(t, replies...), 42); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestStopRejectsRestartAndProtocolErrors(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		replies []string
+		want    string
+	}{
+		{"restart", []string{`"result":{}`, `"result":{"generation":1}`, `"result":{"core":{"id":"fixture"},"pid":43,"version":"0.1.21"}`}, "restarted while stopping"},
+		{"protocol", []string{`"result":{}`, `"result":{"generation":7}`}, "generation 7"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := stop(fakeCore(t, test.replies...), 42); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("stop: %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestCoreObservation(t *testing.T) {
