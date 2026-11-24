@@ -6115,7 +6115,7 @@ SOURCE_FLOW
 done
 
 # The supported predecessor creates the legacy owner through its own config CLI.
-BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" prepare_baseline_yards)" \
+BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop prepare_baseline_yards)" \
   bash -s -- "$TMP/published-owner" "$ROOT" <<'PUBLISHED_OWNER'
 set -euo pipefail
 F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared ROOT=$2
@@ -6175,6 +6175,7 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
+[ "$(tail -n 3 "$trace")" = $'incus stop yard --project subyard\n'"yard update --version $HOP_VERSION --yes"$'\nincus start yard --project subyard' ]
 # The creation runtime removes the DEV_SUDO assignment before the hop update.
 [ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
   -e "yard update --version $HOP_VERSION --yes" "$trace")" \
@@ -6456,6 +6457,39 @@ RECREATE
     sync-change) [ "$recreate_rc" = 2 ] && [ "$(cat "$recreate_root/trace")" = 'config sync checkout --yes' ] ;;
     *) [ "$recreate_rc" = 2 ] && [ ! -e "$recreate_root/trace" ] ;;
   esac || fail "source owner recreation lost $recreate_case protection"
+done
+
+# The immutable hop must not reprovision Codex through its anonymous REST API.
+# Restart the original guest before the candidate update; never hide a failed hop.
+for hop_case in success stop-failure update-failure start-failure; do
+  hop_rc=0
+  bash -e -c '
+    eval "$1"
+    hop_case="$2"
+    DEFAULT_INSTANCE=yard DEFAULT_PROJECT=subyard
+    incus() {
+      printf "incus %s\n" "$*"
+      [ "$hop_case:$1" != stop-failure:stop ] || return 21
+      [ "$hop_case:$1" != start-failure:start ] || return 23
+    }
+    operator_yard() {
+      printf "yard %s\n" "$*"
+      [ "$hop_case" != update-failure ] || return 22
+    }
+    update_baseline_hop 0.28.1
+  ' _ "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop)" \
+    "$hop_case" > "$TMP/source-hop.log" || hop_rc=$?
+  expected=$'incus stop yard --project subyard'
+  case "$hop_case" in
+    stop-failure) expected_rc=21 ;;
+    update-failure) expected_rc=22; expected+=$'\nyard update --version 0.28.1 --yes' ;;
+    *)
+      expected_rc=0
+      [ "$hop_case" != start-failure ] || expected_rc=23
+      expected+=$'\nyard update --version 0.28.1 --yes\nincus start yard --project subyard' ;;
+  esac
+  [ "$hop_rc" = "$expected_rc" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
+    || fail "source hop lost $hop_case ordering or failure"
 done
 
 # Published baseline selection must be explicit and precede its real init.

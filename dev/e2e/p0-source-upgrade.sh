@@ -332,6 +332,15 @@ prepare_operator() {
     _ "$OPERATOR_HOME"
 }
 
+update_baseline_hop() { # <version>
+  # The immutable hop's Codex provisioner still uses anonymous GitHub REST
+  # metadata. Keep both legacy yards stopped during that hop, then restore the
+  # ordinary yard so the candidate upgrades its authentic v0.11.0 guest state.
+  incus stop "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
+  operator_yard update --version "$1" --yes
+  incus start "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
+}
+
 prepare_baseline_yards() {
   local checkout hop_version hop_sha manifest_before
   local BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256
@@ -404,7 +413,7 @@ BASELINE_CONFIG
   manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
   # A below-anchor install follows the printed route through the hop release.
   IFS=$'\t' read -r hop_version _ hop_sha _ < <(published_hop)
-  operator_yard update --version "$hop_version" --yes
+  update_baseline_hop "$hop_version"
   [ "$(operator_yard --version)" = "yard $hop_version" ] || die 'hop update did not activate'
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$hop_version/subyard-$hop_version-linux-amd64.tar.gz" | awk '{print $1}')" = "$hop_sha" ] \
     || die 'hop archive differs from its immutable pin'
