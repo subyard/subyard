@@ -6158,7 +6158,7 @@ operator_yard() {
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
-    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|'migrate --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
@@ -6175,7 +6175,7 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
-[ "$(tail -n 3 "$trace")" = $'incus stop yard --project subyard\n'"yard update --version $HOP_VERSION --yes"$'\nyard start --yes' ]
+[ "$(tail -n 4 "$trace")" = $'incus stop yard --project subyard\n'"yard update --version $HOP_VERSION --yes"$'\nyard start --yes\nyard migrate --yes' ]
 # The creation runtime removes the DEV_SUDO assignment before the hop update.
 [ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
   -e "yard update --version $HOP_VERSION --yes" "$trace")" \
@@ -6461,7 +6461,7 @@ done
 
 # The immutable hop must not reprovision Codex through its anonymous REST API.
 # Restart the original guest before the candidate update; never hide a failed hop.
-for hop_case in success stop-failure update-failure start-failure; do
+for hop_case in success stop-failure update-failure start-failure migrate-failure; do
   hop_rc=0
   bash -e -c '
     eval "$1"
@@ -6475,6 +6475,7 @@ for hop_case in success stop-failure update-failure start-failure; do
       printf "yard %s\n" "$*"
       [ "$hop_case:$1" != update-failure:update ] || return 22
       [ "$hop_case:$1" != start-failure:start ] || return 23
+      [ "$hop_case:$1" != migrate-failure:migrate ] || return 24
     }
     update_baseline_hop 0.28.1
   ' _ "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop)" \
@@ -6486,7 +6487,11 @@ for hop_case in success stop-failure update-failure start-failure; do
     *)
       expected_rc=0
       [ "$hop_case" != start-failure ] || expected_rc=23
-      expected+=$'\nyard update --version 0.28.1 --yes\nyard start --yes' ;;
+      expected+=$'\nyard update --version 0.28.1 --yes\nyard start --yes'
+      if [ "$hop_case" != start-failure ]; then
+        expected+=$'\nyard migrate --yes'
+        [ "$hop_case" != migrate-failure ] || expected_rc=24
+      fi ;;
   esac
   [ "$hop_rc" = "$expected_rc" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
     || fail "source hop lost $hop_case ordering or failure"

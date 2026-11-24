@@ -338,9 +338,10 @@ update_baseline_hop() { # <version>
   # ordinary yard so the candidate upgrades its authentic v0.11.0 guest state.
   incus stop "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
   operator_yard update --version "$1" --yes
-  # The hop's start completes its deferred disk-/tmp migration without agent
-  # reprovisioning; a raw Incus start leaves the hop's migration gate pending.
+  # Follow the hop's stopped-yard retry: start completes disk-/tmp, then migrate
+  # closes the installed release's readiness before selecting the candidate.
   operator_yard start --yes
+  operator_yard migrate --yes
 }
 
 prepare_baseline_yards() {
