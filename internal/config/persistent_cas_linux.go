@@ -14,6 +14,7 @@ import (
 
 // CompareAndSwapPersistentFile publishes a complete protected settings file
 // only when bytes, inode identity and security metadata still match Inspect.
+// Replacements preserve ownership, permission bits and the existing access ACL.
 // Every traversal and the final rename are relative to pinned directory FDs.
 func CompareAndSwapPersistentFile(
 	configHome string,
@@ -26,7 +27,7 @@ func CompareAndSwapPersistentFile(
 	}, nil, false)
 }
 
-// CompareAndSwapLocalSettingsFile preserves an existing local file's mode and
+// CompareAndSwapLocalSettingsFile preserves existing local metadata and
 // can create an exactly absent target without replacing a concurrent file.
 func CompareAndSwapLocalSettingsFile(configHome, path string, expected PersistentFileSnapshot, desired []byte) error {
 	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error { return checkLocalSettingsTargetWritable(configHome, path) }, nil, true)

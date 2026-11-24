@@ -197,7 +197,8 @@ class NativeTest(unittest.TestCase):
         self.assertNotIn('~/.claude/settings.json', message)
         self.assertIn(f'actual owner {self.uid}:{self.gid}', message)
         self.assertIn(f'expected {self.uid+1}:{self.uid+1}', message)
-        self.assertIn(f'chown {self.uid+1}:{self.uid+1} -- {shlex.quote(str(path))}', message)
+        repair = message.split('; as root inside the yard, run ', 1)[1].removesuffix(' and retry')
+        self.assertEqual(shlex.split(repair), ['chown', f'{self.uid+1}:{self.uid+1}', '--', str(path)])
         self.assertNotIn(self.token, message)
         self.assertEqual(path.read_bytes(), before)
 
