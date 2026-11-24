@@ -207,8 +207,9 @@ refusal remain host-free.
 The optional Periodic-only `p0:source-upgrade` lane creates schema-1 settings on pinned v0.11.0, updates through
 the published v0.28.1 hop, and covers explicit test-owner recreation, retained ordinary-yard state and later installed updates.
 Both yards stay stopped during the hop to avoid its anonymous Codex release-metadata API
-request. The ordinary yard restarts before the candidate update, retaining the authentic
-v0.11.0 Codex installation for the candidate's provisioning and policy migration checks.
+request. The hop's `yard start` finishes its deferred disk-backed `/tmp` migration
+before the candidate update, retaining the authentic v0.11.0 Codex installation for
+the candidate's provisioning and policy migration checks.
 Fresh pre-v0.11.0 source upgrades are outside the
 [approved support boundary](reference/legacy-migration-support.md).
 
