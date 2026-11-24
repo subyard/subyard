@@ -66,7 +66,7 @@ case "$*" in
       # Stop this caller before its physical Incus/systemd fixture starts.
       exit 0
     fi
-    [ "$preserve" = P0_REEXEC_HOME,P0_REEXEC_PATH,SUBYARD_E2E_VM,P0_E2E_INCUS_QUERY_TIMEOUT,P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS,P0_REAL_INCUS_CONTAINER_CACHE_ALIAS ] || exit 96
+    [ "$preserve" = P0_REEXEC_HOME,P0_REEXEC_PATH,SUBYARD_E2E_VM,P0_E2E_INCUS_QUERY_TIMEOUT,P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS,P0_REAL_INCUS_COMMAND_TIMEOUT,P0_REAL_INCUS_OBSERVE_TIMEOUT,P0_REAL_INCUS_CLEANUP_WAIT_SECONDS,P0_REAL_INCUS_CLEANUP_POLL_SECONDS,P0_REAL_INCUS_DELETE_RETRY_SECONDS ] || exit 96
     shift 9
     [ "$1" = bash ] || exit 2
     preserved=()
@@ -435,7 +435,8 @@ printf '%s\n' \
   'if [ "${P0_FAKE_REEXECUTED:-0}" = 1 ]; then' \
   '  [ "$HOME" = "$P0_FAKE_EXPECTED_HOME" ] && [ "$PATH" = "$P0_FAKE_EXPECTED_PATH" ] || exit 98' \
   '  [ "$SUBYARD_E2E_VM" = 1 ] && [ "$P0_E2E_INCUS_QUERY_TIMEOUT" = 31 ] || exit 98' \
-  '  [ "$P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS" = 7 ] || exit 98' \
+  '  [ "$P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS" = 7 ] && [ "$P0_REAL_INCUS_CLEANUP_WAIT_SECONDS" = 17 ] || exit 98' \
+  '  [ ! -v P0_REAL_INCUS_CONTAINER_CACHE_ALIAS ] || exit 98' \
   '  [ ! -v GH_TOKEN ] && [ ! -v P0_SUDO_SECRET_CANARY ] || exit 98' \
   'fi' \
   'case "$*" in' \
@@ -524,7 +525,8 @@ export P0_FAKE_EXPECTED_HOME="$HOME"
 handoff_path="$PATH:$TMP/path with spaces"$'\nand equals=value'
 export P0_FAKE_EXPECTED_PATH="$handoff_path"
 P0_FAKE_ACTIVE_GROUP='' PATH="$handoff_path" P0_E2E_INCUS_QUERY_TIMEOUT=31 \
-  P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS=7 \
+  P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS=7 P0_REAL_INCUS_CLEANUP_WAIT_SECONDS=17 \
+  P0_REAL_INCUS_CONTAINER_CACHE_ALIAS=unused-by-capacity \
   run_recovery_preflight 142 /var/tmp/subyard-nested-teardown.fixture/storage
 [ "$(cat "$P0_FAKE_SUDO_LOG")" = activate-incus-group ] \
   || fail 'fresh preflight did not activate Incus access exactly once'
