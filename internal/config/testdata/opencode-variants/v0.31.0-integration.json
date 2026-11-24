@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "provision": "provision.sh",
+  "command": "opencode",
+  "persist": "\n.local/share/opencode/opencode.db:/mnt/host/agent-sessions/opencode/opencode.db:file\n",
+  "artifacts": [
+    {
+      "id": "config",
+      "kind": "config",
+      "source": "opencode.jsonc",
+      "approval_sources": {
+        "git": "opencode-git.jsonc",
+        "sudo": "opencode-sudo.jsonc",
+        "git sudo": "opencode-git-sudo.jsonc"
+      },
+      "destination": ".config/opencode/opencode.jsonc",
+      "format": "destination"
+    },
+    {
+      "id": "instructions",
+      "label": "OpenCode instructions",
+      "kind": "instructions",
+      "source_setting": "HOST_OPENCODE_AGENTS_MD",
+      "destination": ".config/opencode/AGENTS.md",
+      "format": "raw"
+    }
+  ]
+}
