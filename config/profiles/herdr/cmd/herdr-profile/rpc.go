@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"syscall"
@@ -39,7 +40,11 @@ func call(socket, method string, params, result any) error {
 	lines := bufio.NewScanner(conn)
 	lines.Buffer(make([]byte, 4096), 4<<20)
 	if !lines.Scan() {
-		return fmt.Errorf("no reply to %s: %w", method, errors.Join(lines.Err(), errors.New("Core connection ended")))
+		err := lines.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		return fmt.Errorf("no reply to %s: %w", method, err)
 	}
 	var reply struct {
 		JSONRPC string
