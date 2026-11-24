@@ -183,10 +183,20 @@ def directory(path, *, create=True):
             path.chmod(0o700)
         except FileExistsError:
             pass
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        fd = None
+    if fd is not None:
+        try:
+            info = os.fstat(fd)
+            if info.st_uid == os.getuid() and info.st_mode & 0o077:
+                # The skill ships without the shared safefs module; like
+                # safefs.repair_mode, a directory keeps its set-ID and sticky bits.
+                os.fchmod(fd, stat.S_IMODE(info.st_mode) & ~0o077)
+        finally:
+            os.close(fd)
     info = path.lstat()
-    if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077:
-        path.chmod(stat.S_IMODE(info.st_mode) & ~0o077 & ~stat.S_ISUID & ~stat.S_ISGID)
-        info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise BridgeError('state directories must be owned by you with mode 0700')
 

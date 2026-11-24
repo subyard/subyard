@@ -93,12 +93,19 @@ def restore_metadata(path, mode, uid, gid, repair):
     Another owner, or group or other write that may have changed the entry, is left
     for the caller to refuse.
     """
-    st = path.lstat()
-    if (repair and st.st_uid == uid and (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
-            and not stat.S_IMODE(st.st_mode) & 0o022 & ~mode
-            and (stat.S_IMODE(st.st_mode), st.st_gid) != (mode, gid)):
-        os.chown(path, uid, gid, follow_symlinks=False)
-        os.chmod(path, mode, follow_symlinks=False)
+    if not repair:
+        return
+    # Change the pinned inode, never a name that could be swapped meanwhile.
+    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if (st.st_uid == uid and (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
+                and not stat.S_IMODE(st.st_mode) & 0o022 & ~mode
+                and (stat.S_IMODE(st.st_mode), st.st_gid) != (mode, gid)):
+            os.chown(f'/proc/self/fd/{fd}', uid, gid)
+            os.chmod(f'/proc/self/fd/{fd}', mode)
+    finally:
+        os.close(fd)
 
 
 def validate_sources(result):

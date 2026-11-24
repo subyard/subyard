@@ -63,11 +63,17 @@ def directory(path, create=False):
 
 
 def repair_private(fd):
-    """Narrow our own broader single-link file or directory in place."""
+    """Narrow our own broader single-link file or directory in place.
+
+    This source also runs inside the guest through python3 -c, where the shared
+    safefs module is absent; it mirrors safefs.repair_mode: a regular file loses
+    set-ID and sticky bits, a directory keeps them.
+    """
     info = os.fstat(fd)
+    keep = 0o7700 if stat.S_ISDIR(info.st_mode) else 0o700
     if (info.st_uid == os.getuid() and info.st_mode & 0o077
             and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink == 1)):
-        os.fchmod(fd, stat.S_IMODE(info.st_mode) & 0o1700)
+        os.fchmod(fd, stat.S_IMODE(info.st_mode) & keep)
 
 
 def read_state(fd):

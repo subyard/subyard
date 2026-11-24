@@ -1532,7 +1532,12 @@ class Pool:
             info = path.lstat()
             if (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
                     and stat.S_IMODE(info.st_mode) != 0o600):
-                os.chmod(path, 0o600, follow_symlinks=False)
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                try:
+                    if os.path.samestat(os.fstat(fd), info):
+                        os.fchmod(fd, 0o600)
+                finally:
+                    os.close(fd)
                 info = path.lstat()
             require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 16384,
                     'observation', 'unsafe observer record')
