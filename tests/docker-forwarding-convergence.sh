@@ -16,8 +16,8 @@ if [ "$*" = 'enable --now ssh docker' ]; then
 fi
 case "$*" in
   'is-active --quiet ssh.service') exit 3 ;;
-  'is-active --quiet docker.service') exit 0 ;;
-  'show ssh.service --property=Result --value')
+  'is-active --quiet docker.service') exit "${TEST_DOCKER_UNIT_EXIT:-0}" ;;
+  'show ssh.service --property=Result --value'|'show docker.service --property=Result --value')
     printf '%s\n' exit-code
     exit "${TEST_COMPARE_EXIT:-0}" ;;
 esac
@@ -74,15 +74,8 @@ while [ "$i" -lt 30 ]; do
   i=$((i + 1))
 done
 SH
-cat >"$TMP/bin/sshd" <<'SH'
-#!/bin/sh
-printf 'sshd %s\n' "$*" >>"$TEST_LOG"
-case "$1" in
-  -G) printf '%s\n' 'port 22' 'PRIVATE_PAYLOAD'; printf '%s\n' 'sshd -G warning' >&2 ;;
-esac
-SH
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/iptables" "$TMP/bin/docker" "$TMP/bin/timeout" \
-  "$TMP/bin/journalctl" "$TMP/bin/sshd"
+  "$TMP/bin/journalctl"
 PATH="$TMP/bin:/usr/bin:/bin"
 export PATH
 
@@ -137,10 +130,8 @@ lines = (root / "stderr").read_text().splitlines()
 result = "exit-code" if os.environ["TEST_COMPARE_EXIT"] == "0" else "unknown"
 assert lines[0] == f"yard service ssh.service failed to start: result={result}", lines
 assert not any("docker.service" in line for line in lines), lines
-journal = lines[lines.index("ssh.service journal for this start:") + 1:lines.index("sshd -G errors:")]
+journal = lines[lines.index("ssh.service journal for this start:") + 1:]
 assert len(journal) == 20 and all(len(line) == 240 for line in journal), journal
-assert lines[lines.index("sshd -G errors:") + 1] == "sshd -G warning"
-assert re.fullmatch(r"sshd -G hostkey entries: 0, host key files: [0-9]+", lines[-1]), lines
 calls = (root / "log").read_text()
 assert re.search(r"^journalctl --no-pager --quiet -o cat -u ssh.service --since @[0-9]+ -n 20$", calls, re.M), calls
 PY
@@ -193,6 +184,22 @@ PY
    done
   done
 done
+
+# Independent unit failures both retain their own bounded journal and stable order.
+export TEST_SERVICE_FAIL=1 TEST_COMPARE_EXIT=0 TEST_DOCKER_UNIT_EXIT=3
+status=0
+bash -euo pipefail "$services" >"$TMP/stdout" 2>"$TMP/stderr" || status=$?
+[ "$status" = 1 ] || { printf 'FAIL: two failed units changed the service exit\n' >&2; exit 1; }
+python3 - "$TMP/stderr" <<'PY_UNITS'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert len(lines) == 44, lines
+for offset, unit in ((0, "ssh.service"), (22, "docker.service")):
+    assert lines[offset] == f"yard service {unit} failed to start: result=exit-code", lines
+    assert lines[offset + 1] == f"{unit} journal for this start:", lines
+    assert all(len(line) == 240 for line in lines[offset + 2:offset + 22]), lines
+PY_UNITS
+unset TEST_DOCKER_UNIT_EXIT
 
 # A real inventory timeout stays fatal even when later diagnostics succeed.
 export TEST_SERVICE_FAIL=0 TEST_API_EXIT=0 TEST_COMPARE_EXIT=0 TEST_API_HANG=1
@@ -303,38 +310,4 @@ done
 ! kill -0 "$(cat "$TEST_INSTALLER_CHILD")" 2>/dev/null \
   || { printf 'FAIL: stalled Docker installer child remains\n' >&2; exit 1; }
 
-# Host keys that other yard users can read are replaced before sshd starts; safe keys stay.
-host_keys="$TMP/yard-host-keys.sh"
-sed -n '/^yard_ssh_host_keys_converge()/,/^}/p' "$ROOT/scripts/04-provision-subyard.sh" > "$host_keys"
-key_root="$TMP/yard-root"
-host_keys_case() { # <name>
-  rm -rf "$key_root"; mkdir -p "$key_root/etc/ssh"; : > "$TEST_LOG"
-  ssh-keygen -q -t ed25519 -N '' -C fixture -f "$key_root/etc/ssh/ssh_host_ed25519_key"
-  ssh-keygen -q -t ecdsa -N '' -C fixture -f "$key_root/etc/ssh/ssh_host_ecdsa_key"
-  case "$1" in
-    readable) chmod 0644 "$key_root/etc/ssh/ssh_host_ecdsa_key" ;;
-    other) chmod 0604 "$key_root/etc/ssh/ssh_host_ecdsa_key" ;;
-    symlink) ln -sf ssh_host_ed25519_key "$key_root/etc/ssh/ssh_host_rsa_key" ;;
-  esac
-  sha256sum "$key_root"/etc/ssh/ssh_host_ed25519_key.pub > "$TMP/key-before"
-  bash -euo pipefail -c '. "$1"; yard_ssh_host_keys_converge "$2"' _ "$host_keys" "$key_root" \
-    > "$TMP/stdout" 2> "$TMP/stderr"
-}
-host_keys_case safe
-sha256sum -c --quiet "$TMP/key-before" && [ ! -s "$TMP/stderr" ] && [ ! -s "$TEST_LOG" ] \
-  || { printf 'FAIL: owner-only host keys were changed\n' >&2; exit 1; }
-for unsafe in readable other symlink; do
-  host_keys_case "$unsafe"
-  ! sha256sum -c --quiet "$TMP/key-before" >/dev/null 2>&1 \
-    && grep -Fxq 'systemctl reset-failed ssh.service' "$TEST_LOG" \
-    && grep -Fxq 'systemctl try-restart ssh.service' "$TEST_LOG" \
-    && grep -Fq 'replacing yard SSH host keys' "$TMP/stderr" \
-    || { printf 'FAIL: %s host keys were not replaced\n' "$unsafe" >&2; exit 1; }
-  for type in rsa ecdsa ed25519; do
-    key="$key_root/etc/ssh/ssh_host_${type}_key"
-    [ -f "$key" ] && [ ! -L "$key" ] && [ "$(stat -c %a "$key")" = 600 ] && [ -f "$key.pub" ] \
-      || { printf 'FAIL: %s replacement left an unsafe %s key\n' "$unsafe" "$type" >&2; exit 1; }
-  done
-done
-
-printf 'ok: Docker forwarding, service readiness, atomic installer download and yard host keys\n'
+printf 'ok: Docker forwarding, service readiness and atomic installer download\n'

@@ -2,7 +2,7 @@
 # Resolve a default-project cache entry for init in a private image namespace.
 p0_container_image_reference() {
   local alias="$1" remote fingerprint info remotes
-  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13/cloud}"
+  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13}"
   [[ "$source" =~ ^([[:alnum:]_.-]+):[^[:space:]]+$ ]] \
     || die 'fixture requires a public image remote'
   remote="${BASH_REMATCH[1]}"

@@ -1826,8 +1826,8 @@ EOF_PEER_INSTALL
   }
   peer_contract_yard() {
     local state
-    [ "$(sed -n 's/^BASE_IMAGE=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
-      && [ "$(sed -n 's/^BASE_IMAGE_FALLBACK=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
+    [ "$(sed -n 's/^BASE_IMAGE=//p' "$PEER_ROOT/config/config.env")" = images:debian/13 ] \
+      && [ "$(sed -n 's/^BASE_IMAGE_FALLBACK=//p' "$PEER_ROOT/config/config.env")" = images:debian/13 ] \
       || fail 'fresh peer image is unavailable in its isolated project'
     state="$(cat "$peer_state")"
     printf '%s %s\n' "$*" "$state" >> "$peer_calls"

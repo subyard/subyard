@@ -665,7 +665,7 @@ prepare_owner_image_cache_project() {
 }
 
 ensure_owner_base_image() {
-  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13/cloud}"
+  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13}"
   if incus image info "$OWNER_BASE_IMAGE" --project default >/dev/null 2>&1; then
     return
   fi
@@ -1139,7 +1139,7 @@ peer_prepare_finish() {
 }
 
 peer_yard_start() {
-  local base_image=images:debian/13/cloud
+  local base_image=images:debian/13
   exec </dev/null
   [ "$SUBYARD_E2E_VM" = 2 ] || die 'remote project target requires VM2'
   if [ -e "$PEER_REAL_YARD_MARKER" ]; then
