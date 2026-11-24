@@ -64,7 +64,7 @@ configure_published_agents() {
 
 # Published init renders the config variant for its active approval prompts. The fixture
 # leaves Git approval unset. Sudo also uses the published default except for the
-# 0.31.0 retained-default scenario, which starts with a grant and no prompts.
+# 0.30.0 grant scenario, which starts with a grant and no Codex sudo prompts.
 published_agent_config_source() { # runtime agent source: prints the source published init renders
   operator_env python3 - "$1/config/agents/$2/integration.json" "$3" \
     "$OPERATOR_HOME/.config/subyard/config.env" <<'PY'
@@ -293,22 +293,23 @@ migrate_retained_git_settings() {
 prepare_retained_codex_sudo_default() {
   guest python3 -c 'import pathlib,tomllib
 policy=tomllib.loads(pathlib.Path("/etc/codex/requirements.toml").read_text())
-assert "rules" not in policy and "hooks" not in policy
+assert not any(part.get("token") == "sudo" for rule in policy.get("rules",{}).get("prefix_rules",[]) for part in rule["pattern"])
 for name in ("49-subyard-approval-hook.toml", "50-subyard-git-approval.rules.inc", "51-subyard-sudo-approval.rules.inc"):
     path=pathlib.Path("/etc/codex")/name
     assert not path.exists() and not path.is_symlink()'
   guest codex-policy-check >/dev/null || die 'published no-prompt Codex policy is not ready'
   guest runuser -u dev -- sudo -n true || die 'published no-prompt installation has no passwordless sudo grant'
-  # Explicit yes is an operator preference that activation must preserve. Reopen
-  # the historical default instead: no authored setting and no retained field
-  # for the then-absent setting, while leaving the valid no-prompt guest intact.
-  operator_env sed -i '/^DEV_SUDO=yes$/d' "$OPERATOR_HOME/.config/subyard/config.env"
+  # The old Boolean grants sudo but does not control agent prompts or enter the
+  # applied integration snapshot. Withdraw it so the candidate uses its default;
+  # the running guest retains its real published policy and grant until update.
+  operator_env sed -i '/^DEV_SUDO=1$/d' "$OPERATOR_HOME/.config/subyard/config.env"
   guest python3 -c 'import json,pathlib
-path=pathlib.Path("/var/lib/subyard/integrations/inventory.json")
-value=json.loads(path.read_text())
-assert value["applied_settings"].pop("DEV_SUDO") == "yes"
-path.write_text(json.dumps(value)+"\n")'
-  ok 'synthetic retained default: running Codex has no sudo prompts and passwordless sudo works'
+value=json.loads(pathlib.Path("/var/lib/subyard/integrations/inventory.json").read_text())
+assert "DEV_SUDO" not in value["applied_settings"]'
+  operator_yard migrate --check --json >"$STATE_ROOT/no-prompt-ready.log" 2>&1 \
+    && jq -e '(.outcome // .inspection.outcome).status == "ready"' "$STATE_ROOT/no-prompt-ready.log" >/dev/null \
+    || die 'published no-prompt source does not report Ready'
+  ok 'published retained default: running Codex has no sudo prompts, passwordless sudo works and source is Ready'
 }
 
 verify_combined_codex_policy_migration() {
@@ -374,9 +375,9 @@ image_reference="$(p0_container_image_reference "$CACHED_IMAGE")" || exit $?
 
 prepare_fixture
 configure_published_agents
-if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+if [ "$OLD_VERSION" = 0.30.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
   # Use the fixed published provisioner to create the retained no-prompt state.
-  operator_env sh -c 'printf "%s\n" DEV_SUDO=yes >> "$1"' _ "$OPERATOR_HOME/.config/subyard/config.env"
+  operator_env sh -c 'printf "%s\n" DEV_SUDO=1 >> "$1"' _ "$OPERATOR_HOME/.config/subyard/config.env"
 fi
 # Published init creates its own project. Resolve the cached image through its public remote
 # so both the old and new runtime can use it within the private project image namespace.
@@ -409,7 +410,7 @@ OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/cur
 write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
 assert_published_agent_configs
 ok 'published runtime created a running yard'
-if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+if [ "$OLD_VERSION" = 0.30.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
   prepare_retained_codex_sudo_default
 fi
 prepare_retained_git_settings
@@ -430,7 +431,7 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSI
   }
 CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
 write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
-if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+if [ "$OLD_VERSION" = 0.30.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
   operator_yard config show DEV_SUDO | grep -Fx 'effective: prompt' >/dev/null \
     || die 'candidate does not default DEV_SUDO to prompt'
   guest grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
