@@ -289,6 +289,44 @@ migrate_retained_git_settings() {
   ok 'candidate sync migrated retained schema-1 settings without changing yard identity, power or data'
 }
 
+verify_combined_codex_policy_migration() {
+  # Reopen the combined layout after the supported published release hands off
+  # to the candidate. Its ordinary init must split the owned policy.
+  guest bash -e -s <<'COMBINED_APPROVAL'
+rm -f /etc/codex/49-subyard-approval-hook.toml \
+  /etc/codex/50-subyard-git-approval.rules.inc /etc/codex/51-subyard-sudo-approval.rules.inc
+cat > /etc/codex/requirements.toml <<'REQUIREMENTS'
+# Managed by Subyard Codex provision.
+allowed_approval_policies = ["on-request"]
+allowed_approvals_reviewers = ["user"]
+check_for_update_on_startup = false
+[rules]
+prefix_rules = [
+  { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt" },
+  { pattern = [{ token = "sudo" }], decision = "prompt" },
+]
+[features]
+hooks = true
+[hooks]
+managed_dir = "/etc/codex"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/etc/codex/subyard-git-approval-hook --plain git sudo"
+timeout = 3
+REQUIREMENTS
+COMBINED_APPROVAL
+  operator_yard init --yes || die 'init did not reprovision the combined Codex policy'
+  guest grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
+    || die 'init did not split the combined Codex policy'
+  guest codex-policy-check >/dev/null \
+    || die 'migrated Codex policies failed readiness'
+  guest test ! -e /etc/codex/50-subyard-git-approval.rules.inc \
+    || die 'sudo-only migration kept the Git approval policy'
+  printf 'ok: ordinary yard reprovisioned the combined Codex policy\n'
+}
+
 # Cleanup removes the journal, so a failed update reports its stopping point first.
 report_failed_transition() {
   operator_env jq -c '{checkpoint, goal, steps: [.steps[] | {id, checkpoint}]}' "$V2_JOURNAL" >&2 || true
@@ -363,6 +401,10 @@ case " $PUBLISHED_AGENTS " in *" claude "*)
   grep -Fxq 'CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1' "$STATE_ROOT/shell-environment"
   ;;
 esac
+if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+  verify_combined_codex_policy_migration
+  assert_ready
+fi
 ok 'update reached Ready with the same instance and guest data'
 
 # A published release that ships the candidate's exact registry stays its rollback target.
