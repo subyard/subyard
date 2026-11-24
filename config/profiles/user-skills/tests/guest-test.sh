@@ -28,7 +28,8 @@ done
 [ -z "$(find "$store" -name '.tmp-*')" ] || fail 'left a temporary clone'
 # Credentials in a source never reach a warning, error or path.
 run apply "https://user:canary-pw@example.invalid/" "file://$work/missing/repo.git?access_token=canary-token" 2>"$work/stderr"
-grep -q 'could not clone source;' "$work/stderr" && grep -q 'could not clone .*/missing/repo;' "$work/stderr" || fail 'missing source warnings'
+run apply "https://example.invalid?access_token=/canary/leaf" 2>>"$work/stderr"
+[ "$(grep -c 'could not clone source;' "$work/stderr")" = 2 ] && grep -q 'could not clone .*/missing/repo;' "$work/stderr" || fail 'missing source warnings'
 ! grep -q canary "$work/stderr" || fail 'a warning shows a credential'
 [ -z "$(find "$work/home" -name '*canary*')" ] || fail 'a path contains a credential'
 printf 'local\n' >"$clone/skills/demo/SKILL.md"
@@ -44,6 +45,14 @@ mkdir -p "$clone/skills/gone" "$work/elsewhere"
 ln -s "$clone/skills/gone" "$work/home/.agents/skills/gone"
 ln -s "$work/elsewhere" "$work/home/.agents/skills/foreign"
 ln -s "$work/missing" "$work/home/.agents/skills/foreign-dangling"
+# Store-prefixed targets outside the physical store, and a symlinked harness directory.
+ln -s "$work/elsewhere" "$store/redirect"
+ln -s "$store/../foreign/x" "$work/home/.agents/skills/foreign-dotdot"
+ln -s "$store/redirect/x" "$work/home/.agents/skills/foreign-redirect"
+mkdir -p "$work/home/.config/opencode" "$work/outside"
+ln -s "$clone/skills/demo" "$work/outside/demo-elsewhere"
+mv -T "$work/home/.config/opencode/skills" "$work/opencode-skills"
+ln -s "$work/outside" "$work/home/.config/opencode/skills"
 rmdir "$clone/skills/gone"
 [ "$(run check "$good")" = work ] || fail 'check missed a dangling link'
 run apply "$good"
@@ -52,9 +61,11 @@ run apply "$good"
 [ "$(run check-remove)" = work ] || fail 'check-remove missed our links'
 run remove
 [ -z "$(run check-remove)" ] || fail 'links remain after remove'
-for harness in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do
+for harness in .agents/skills .claude/skills .pi/agent/skills .hermes/skills; do
   [ ! -L "$work/home/$harness/demo" ] || fail "kept $harness link"
 done
-[ -L "$work/home/.agents/skills/foreign" ] && [ -L "$work/home/.agents/skills/foreign-dangling" ] || fail 'removed a foreign link'
+for kept in .agents/skills/foreign .agents/skills/foreign-dangling .agents/skills/foreign-dotdot .agents/skills/foreign-redirect .config/opencode/skills/demo-elsewhere; do
+  [ -L "$work/home/$kept" ] || fail "removed foreign link $kept"
+done
 [ "$(cat "$work/home/.claude/skills/taken")" = mine ] && [ -f "$clone/skills/demo/SKILL.md" ] || fail 'removed a file or clone'
 printf 'ok: user-skills guest hook\n'

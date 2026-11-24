@@ -9,11 +9,19 @@ cd "$HOME"
 store="$HOME/.local/share/subyard-user-skills"
 harnesses=(.agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills)
 work=0
-# Only our links: symlinks whose own target lies in the store. Apply unlinks dangling ones.
+# Only our links: absolute targets without . or .. segments whose canonical form lies in the
+# physical store; harness directories reached through a symlink are skipped. Apply unlinks
+# dangling ones.
+home="$(realpath -e -- "$HOME")"
+physical="$(realpath -e -- "$store" 2>/dev/null)" || physical=""
 for harness in "${harnesses[@]}"; do
+  [ -n "$physical" ] && [ "$(realpath -m -- "$HOME/$harness")" = "$home/$harness" ] || continue
   for link in "$HOME/$harness"/*; do
     [ -L "$link" ] || continue
-    case "$(readlink "$link")" in "$store"/*) ;; *) continue ;; esac
+    target="$(readlink -- "$link")"
+    case "$target/" in /*) ;; *) continue ;; esac
+    case "$target/" in */./*|*/../*) continue ;; esac
+    case "$(realpath -m -- "$target")" in "$physical"/*) ;; *) continue ;; esac
     case "$mode" in remove|check-remove) ;; *) [ ! -e "$link" ] || continue ;; esac
     case "$mode" in apply|remove) unlink "$link" ;; *) work=1 ;; esac
   done
@@ -22,11 +30,12 @@ case "$mode" in remove|check-remove) set -- ;; esac
 clones=()
 for url in "$@"; do
   # Directory from the repository path only: never userinfo, host, query or fragment.
-  case "$url" in
-    *://*) path="${url#*://}"; path="${path#*/}" ;;
-    *) path="${url#*:}" ;;
+  # Query and fragment go first, then the authority (with userinfo) or the SCP host.
+  path="${url%%[?#]*}"
+  case "$path" in
+    *://*) path="${path#*://}"; case "$path" in */*) path="${path#*/}" ;; *) path="" ;; esac ;;
+    *) path="${path#*:}" ;;
   esac
-  path="${path%%[?#]*}"
   path="${path%/}"
   path="${path%.git}"
   path="${path%/}"
