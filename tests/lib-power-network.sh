@@ -233,6 +233,10 @@ PY
   stat() { return 99; }
   [ "$(power_nm_file_id "$tmp/nm-identity")" = "$identity" ]
 ) || fail 'guard identity depends on the host stat implementation'
+(
+  unset SUBYARD_DISPATCHER_PATH
+  [ "$(power_nm_file_id "$tmp/nm-identity")" = "$identity" ]
+) || fail 'standalone guard identity cannot find its native engine'
 power_nm_binary() { printf '%s\n' "$tmp/bin/NetworkManager"; }
 power_operator_terminal() { [ "$MOCK_TERMINAL" = 1 ]; }
 # Until the guard section, the read state is not under test.

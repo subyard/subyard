@@ -202,8 +202,8 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
 # Use the same native lstat as the Go reader, retaining nanoseconds on hosts whose stat
 # command truncates them. Links, FIFOs and other non-regular files are never opened.
 power_nm_file_id() { # <path>
-  local engine="${SUBYARD_DISPATCHER_PATH:-}"
-  [ -n "$engine" ] && [ -x "$engine" ] || return 1
+  local engine="${SUBYARD_DISPATCHER_PATH:-${BASH_SOURCE[0]%/*}/../bin/yard}"
+  [ -x "$engine" ] || return 1
   "$engine" _nm-guard-file-id "$1"
 }
 
