@@ -246,11 +246,15 @@ class LifecycleTest(unittest.TestCase):
                 self.assertTrue(runtime.raw_refused())
                 marker.write_bytes(b'private-canary\n')
                 self.assertFalse(runtime.raw_refused())
+                marker.chmod(0o644)
+                marker.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00Z\n')
+                self.assertTrue(runtime.raw_refused())
+                self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
                 for unsafe in ('mode', 'link', 'symlink'):
                     marker.unlink()
                     target = data/'target'
                     target.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00Z\n')
-                    target.chmod(0o600 if unsafe != 'mode' else 0o644)
+                    target.chmod(0o600 if unsafe != 'mode' else 0o400)
                     if unsafe == 'mode':
                         target.rename(marker)
                     elif unsafe == 'link':
@@ -554,7 +558,6 @@ assert launcher.launch(args) == 0
                 (producer, 'invalid', {}, None),
                 (producer, 'invalid', {**original_producer, 'source_id': 'not-a-producer'}, None),
                 (producer, 'invalid', {**original_producer, 'origin_id': '1'*32}, None),
-                (producer, 'invalid', original_producer, 0o644),
                 (producer, 'invalid', {}, 0o600),
             )
             with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True), \
@@ -603,8 +606,9 @@ assert launcher.launch(args) == 0
             self.assertEqual(runtime.auth.read_bytes(), before)
             runtime.auth.unlink()
             runtime.operational.chmod(0o750)
-            with self.assertRaisesRegex(ValueError, refusal):
-                runtime.prepare_auth()
+            runtime.prepare_auth()
+            self.assertEqual(stat.S_IMODE(runtime.operational.stat().st_mode), 0o700)
+            runtime.auth.unlink()
             runtime.operational.rmdir()
             runtime.operational.symlink_to(runtime.data)
             runtime.data.mkdir(mode=0o700)
@@ -715,7 +719,10 @@ assert launcher.launch(args) == 0
             apply()
             self.assertTrue(history.is_file())
             history.unlink()
-            for refused in ('file', 'shared'):
+            data.chmod(0o750)
+            apply()
+            self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o700)
+            for refused in ('file',):
                 with self.subTest(refused=refused):
                     data.rmdir()
                     if refused == 'file':

@@ -37,7 +37,7 @@ def checked(path, mode=None):
             if parent == Path('/tmp') and info.st_uid == 0 and info.st_mode & stat.S_ISVTX: continue
             raise ValueError('unsafe Orca identity parent')
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_gid != os.getgid() or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 2**20 or (mode is not None and stat.S_IMODE(info.st_mode) != mode):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 2**20 or (mode is not None and stat.S_IMODE(info.st_mode) != mode):
         raise ValueError('unsafe Orca identity artifact')
     return path.read_bytes()
 

@@ -600,6 +600,9 @@ def main():
     with open('/run/subyard-amnezia.lock', 'a', opener=lambda path, flags: os.open(
             path, flags | os.O_NOFOLLOW, 0o600)) as lock:
         info = os.fstat(lock.fileno())
+        if info.st_uid == 0 and stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(lock.fileno(), 0o600)
+            info = os.fstat(lock.fileno())
         if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600 or not stat.S_ISREG(info.st_mode):
             raise RuntimeError('VPN environment lock has unsafe ownership or permissions')
         fcntl.flock(lock, fcntl.LOCK_EX)

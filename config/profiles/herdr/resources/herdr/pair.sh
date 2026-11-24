@@ -34,6 +34,9 @@ key_operation() {
 write_key() (
   # Init uses this same lock while it installs the owner SSH key.
   path="$SUBYARD_CONFIG_HOME/generated/integration-locks/${YARD_NAME:-default}.lock"
+  if [ ! -L "$path" ] && [ -f "$path" ] && [ "$(stat -c '%u:%h' "$path")" = "$(id -u):1" ]; then
+    chmod 0600 "$path" 2>/dev/null || true
+  fi
   [ ! -L "$path" ] && [ -f "$path" ] && [ "$(stat -c '%u:%a:%h' "$path")" = "$(id -u):600:1" ] ||
     die 'Herdr could not verify the yard operation lock; reconcile SSH with yard init'
   exec {pair_lock}< "$path"

@@ -47,7 +47,7 @@ def migrate(home, uid, inventory):
         if before not in (entry['digest'], entry.get('pending_digest'), entry.get('config_pending_digest')):
             raise ValueError('owned instruction drift: ' + str(path))
         metadata = path.stat()
-        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid,metadata.st_gid) != (uid,uid) or stat.S_IMODE(metadata.st_mode) != 0o644:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != uid or metadata.st_mode & 0o022:
             raise ValueError('unsafe instruction metadata: ' + str(path))
         after = data.replace(block, b'', 1)
         # Publish both identities before replacement so an interrupted migration

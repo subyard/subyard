@@ -79,9 +79,16 @@ publish_receipt() {
   mv -f -- "$temporary" "$RECEIPT"
 }
 
+# Owned by us and without the denied permission bits; content proves ownership.
+owned_mode() {
+  local mode owner
+  IFS=: read -r mode owner < <(stat -c '%a:%u' "$1") || return 1
+  [ "$owner" = "$(id -u)" ] && (( (8#$mode & 8#$2) == 0 ))
+}
+
 receipt_current() {
   [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] \
-    && [ "$(stat -c '%a:%u' "$RECEIPT")" = "600:$(id -u)" ] \
+    && owned_mode "$RECEIPT" 077 \
     && cmp -s <(render_receipt) "$RECEIPT"
 }
 
@@ -93,7 +100,7 @@ units_owned() {
   local path
   for path in "$SERVICE" "$TIMER"; do
     if [ -e "$path" ]; then
-      [ -f "$path" ] && [ "$(stat -c '%a:%u' "$path")" = "644:$(id -u)" ] || return 1
+      [ -f "$path" ] && owned_mode "$path" 022 || return 1
     fi
   done
   if [ -e "$RECEIPT" ]; then

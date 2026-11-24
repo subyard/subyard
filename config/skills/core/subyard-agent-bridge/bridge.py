@@ -146,8 +146,9 @@ def private_open(path, flags, mode, *, require_private=True):
     fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or (require_private and (info.st_mode & 0o077 or info.st_nlink != 1))):
+        # Caller-supplied read-only inputs need only be regular files.
+        if not stat.S_ISREG(info.st_mode) or (require_private and (
+                info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1)):
             raise BridgeError('unsafe state file')
         return os.fdopen(fd, mode)
     except BaseException:
@@ -183,6 +184,9 @@ def directory(path, *, create=True):
         except FileExistsError:
             pass
     info = path.lstat()
+    if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077:
+        path.chmod(stat.S_IMODE(info.st_mode) & ~0o077 & ~stat.S_ISUID & ~stat.S_ISGID)
+        info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise BridgeError('state directories must be owned by you with mode 0700')
 

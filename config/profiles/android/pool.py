@@ -1530,6 +1530,10 @@ class Pool:
             if not re.fullmatch('[0-9]{20}-[0-9a-f]{16}', path.stem) or (not gap and path.stem <= cursor):
                 continue
             info = path.lstat()
+            if (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) != 0o600):
+                os.chmod(path, 0o600, follow_symlinks=False)
+                info = path.lstat()
             require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 16384,
                     'observation', 'unsafe observer record')
             event = json.loads(path.read_text())

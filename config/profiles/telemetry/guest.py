@@ -312,10 +312,11 @@ class Runtime:
                         os.stat(path.name, dir_fd=parent, follow_symlinks=False)
                     except FileNotFoundError:
                         self.create_developer_directory(parent, path.name)
-                fd, _ = safefs.open_dir(path.name, dir_fd=parent, owner=(self.uid, self.gid))
+                # The owner is the boundary; a broader own directory is narrowed.
+                fd, _ = safefs.open_dir(path.name, dir_fd=parent, owner=(self.uid, -1), existing=safefs.REPAIR)
                 try:
                     info = os.fstat(fd)
-                    if stat.S_IMODE(info.st_mode) != 0o700 or info.st_gid != self.gid:
+                    if not records.private_mode(info, 0o700):
                         raise ValueError(refusal)
                 finally:
                     os.close(fd)
@@ -604,9 +605,10 @@ class Runtime:
         finally:
             os.close(directory)
         try:
+            records.repair_private(fd)
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
-                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 128):
+                    or not records.private_mode(info, 0o600) or info.st_size > 128):
                 raise ValueError('foreign telemetry refusal marker')
             return re.fullmatch(rb'raw_otlp_refused_since=[0-9TZ:.-]{1,40}\n', os.pread(fd, 129, 0)) is not None
         finally:
@@ -755,9 +757,10 @@ class Runtime:
                 info = None
             else:
                 try:
+                    records.repair_private(fd)
                     info = os.fstat(fd)
                     if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
-                            or stat.S_IMODE(info.st_mode) != 0o600):
+                            or not records.private_mode(info, 0o600)):
                         raise ValueError('foreign telemetry database')
                     version = int.from_bytes(os.pread(fd, 4, 60), 'big')
                 finally:
@@ -779,8 +782,9 @@ class Runtime:
             value = dict(device=info.st_dev if info else 0, inode=info.st_ino if info else 0,
                          archive=name, nonce=secrets.token_hex(16), started=records.timestamp(records.now()))
         else:
+            records.repair_private(receipt)
             info = receipt.lstat()
-            if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o600:
+            if info.st_uid != self.uid or not records.private_mode(info, 0o600):
                 raise ValueError('foreign telemetry cutover receipt')
             value = json.loads(existing)
         # The collector validates the receipt, staging and archive when it publishes the archive.
@@ -1046,7 +1050,7 @@ class Runtime:
         except FileNotFoundError:
             raise unconverged from None
         if (len(set(tokens.values())) != 1 or not stat.S_ISDIR(info.st_mode) or info.st_uid != self.uid
-                or stat.S_IMODE(info.st_mode) != 0o700 or not self.reconcile_native(check=True)):
+                or not records.private_mode(info, 0o700) or not self.reconcile_native(check=True)):
             raise unconverged
         facts['token'] = sorted(tokens)
         if 'private' in tokens:

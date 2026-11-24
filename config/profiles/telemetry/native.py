@@ -233,8 +233,13 @@ def legacy_receipt(receipt_path):
     before = snapshot(receipt_path)
     if before is None:
         return None, None
+    from records import safefs
+    try:
+        safefs.repair_mode(receipt_path, 0o077)
+    except (OSError, safefs.Unsafe):
+        pass
     info = receipt_path.lstat()
-    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise ValueError('unsafe legacy telemetry receipt')
     receipt = json.loads(before)
     entries = receipt.get('agents') if isinstance(receipt, dict) and receipt.get('schema') == 1 else None
@@ -341,7 +346,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     info = target.lstat()
                 except FileNotFoundError:
                     continue
-                if info.st_uid != uid or info.st_gid not in (uid, gid):
+                if info.st_uid != uid:
                     raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid, str(home))
                 raw = snapshot(target, legacy=True)
                 if raw is None or not raw.strip():
@@ -377,7 +382,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     failures.append(('legacy-token-remains', agent))
                 elif payload != raw:
                     info = target.lstat()
-                    if info.st_uid != uid or info.st_gid not in (uid, gid):
+                    if info.st_uid != uid:
                         raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid, str(home))
                     # Any rewritten home document can contain user credentials.
                     edits.append((path, target, payload, raw, info.st_mode & 0o600, info.st_gid))

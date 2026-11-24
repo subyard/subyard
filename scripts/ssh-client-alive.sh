@@ -19,6 +19,13 @@ case "${1:-}" in
 esac
 # Earlier operator directives can override these defaults.
 if matches; then exit 0; fi
+# Our root-owned file with the managed content only needs its mode restored.
+if [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u' "$policy")" = 0 ] &&
+    [ $(( 0$(stat -c '%a' "$policy") & 07022 )) = 0 ] &&
+    printf '%s\n' "$desired" | cmp -s - "$policy"; then
+    chmod 0644 "$policy"
+    matches && exit 0
+fi
 if [ -e "$policy" ] || [ -L "$policy" ]; then
     printf 'SSH ClientAlive policy differs from the managed file: %s\n' "$policy" >&2
     exit 1

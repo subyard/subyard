@@ -363,6 +363,8 @@ read_agent_observations() {
   local cursor="$1" client status
   [[ "$cursor" = - || "$cursor" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || die 'invalid observer cursor'
   [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || die 'no controller lease history'
+  [ "$(stat -c '%u' "$STATE_ROOT/client-id")" = "$(id -u)" ] || die 'unsafe controller identity owner'
+  [ "$(stat -c '%a' "$STATE_ROOT/client-id")" = 600 ] || chmod 0600 "$STATE_ROOT/client-id" || true
   [ "$(stat -c '%a' "$STATE_ROOT/client-id")" = 600 ] || die 'unsafe controller identity mode'
   read -r client < "$STATE_ROOT/client-id"
   [[ "$client" =~ ^[0-9a-f]{32}$ ]] || die 'invalid controller identity'

@@ -44,7 +44,9 @@ def epoch():
   fd=os.open(epoch_path,os.O_RDONLY|os.O_NOFOLLOW)
  except FileNotFoundError:return "0"
  try:
-  info=os.fstat(fd);body=os.read(fd,32)
+  info=os.fstat(fd)
+  if stat.S_ISREG(info.st_mode) and info.st_uid==uid and info.st_nlink==1 and stat.S_IMODE(info.st_mode)!=0o600:os.fchmod(fd,0o600);info=os.fstat(fd)
+  body=os.read(fd,32)
   if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=uid or not body.endswith(b"\n") or not body[:-1].isdigit():raise ValueError()
   return body[:-1].decode("ascii")
  finally:os.close(fd)
@@ -59,6 +61,7 @@ try:
  try:directory.mkdir(mode=0o700);directory.chmod(0o700)
  except FileExistsError:pass
  directory_info=directory.lstat()
+ if stat.S_ISDIR(directory_info.st_mode) and directory_info.st_uid==uid and stat.S_IMODE(directory_info.st_mode)!=0o700:directory.chmod(0o700);directory_info=directory.lstat()
  if not stat.S_ISDIR(directory_info.st_mode) or stat.S_IMODE(directory_info.st_mode)!=0o700 or directory_info.st_uid!=uid:raise ValueError()
  inherited=os.environ.get("SUBYARD_INSTALL_OWNER_FD")
  if inherited:
@@ -71,6 +74,7 @@ try:
    except FileExistsError:fd=os.open(path.name,os.O_RDWR|os.O_NOFOLLOW,dir_fd=parent)
   finally:os.close(parent)
   info=os.fstat(fd)
+  if stat.S_ISREG(info.st_mode) and info.st_uid==uid and info.st_nlink==1 and stat.S_IMODE(info.st_mode)!=0o600:os.fchmod(fd,0o600);info=os.fstat(fd)
  if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=uid:raise ValueError()
  deadline=time.monotonic()+600
  while True:
