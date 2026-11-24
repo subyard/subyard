@@ -88,6 +88,8 @@ esac
 # Reuse disposable operator, guarded runtime snapshot/restore and marker-owned project cleanup.
 # shellcheck source=dev/e2e/power-reconciler-upgrade.sh
 . "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
+# shellcheck source=dev/e2e/lib-p0-incus-image.sh
+. "$ROOT/dev/e2e/lib-p0-incus-image.sh"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
@@ -263,7 +265,7 @@ assert_release() {
   done
   [ "$(sudo -n stat -c %a "$RECONCILER")" = 755 ] \
     && [ "$(sudo -n stat -c %a "$UNIT")" = 644 ] || die 'unexpected boot runtime permissions'
-  assert_unit_matches "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" loaded 5
+  assert_unit_matches "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" loaded candidate
   snapshot="$(sudo -n systemctl show subyard-power-reconcile.service -p FragmentPath -p DropInPaths)"
   grep -Fxq "FragmentPath=$UNIT" <<<"$snapshot" \
     && grep -Fxq 'DropInPaths=' <<<"$snapshot" || die 'unexpected boot unit override'
@@ -442,6 +444,7 @@ GUEST
 }
 
 prepare_proxy() {
+  local image_reference
   [[ "$TOKEN" =~ ^[0-9]{1,10}$ ]] || die 'token is too long for dummy interface'
   assert_source
   ensure_platform
@@ -452,12 +455,16 @@ prepare_proxy() {
     timeout --foreground --kill-after=10 300 sudo -n incus image copy images:debian/13 local: \
       --alias subyard-e2e-debian-13-container --project default >/dev/null
   fi
+  image_reference="$(p0_container_image_reference subyard-e2e-debian-13-container)" || exit $?
   ! ip link show dev "$INTERFACE" >/dev/null 2>&1 || die 'dummy interface already exists'
   ! ip -j address show | jq -e --arg address "$ADDRESS" \
     'any(.[].addr_info[]; .local == $address)' >/dev/null || die 'synthetic address already exists'
   sudo -n test ! -e "$ADDRESS_UNIT_PATH" && sudo -n test ! -L "$ADDRESS_UNIT_PATH" \
     || die 'address unit already exists'
   prepare_fixture
+  # Init creates a private image namespace; use the exact cached image through its public remote.
+  operator_env sed -i -E "s/^(BASE_IMAGE|BASE_IMAGE_FALLBACK)=.*/\1=$image_reference/" \
+    "$OPERATOR_HOME/.config/subyard/config.env"
   write_fixture_value "$SOURCE_BUNDLE_STATE" "$SOURCE_BUNDLE_SHA256"
   p0_capacity_reset_build_cache
   if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
@@ -480,15 +487,14 @@ prepare_proxy() {
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" \
     "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-  incus project create "$PROJECT" -c features.images=false \
-    -c user.p0-power-systemd="$MARKER" >/dev/null
   operator_yard init --yes
+  incus project set "$PROJECT" user.p0-power-systemd="$MARKER"
   operator_yard start --yes
   sudo -n ip link add "$INTERFACE" type dummy
   sudo -n ip link set dev "$INTERFACE" alias "$MARKER"
   sudo -n ip link set dev "$INTERFACE" up
   sudo -n ip address add "$ADDRESS/32" dev "$INTERFACE"
-  incus init subyard-e2e-debian-13-container "$WAITING" --project "$PROJECT" --storage default \
+  incus init "$image_reference" "$WAITING" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$WAITING" \
@@ -496,7 +502,7 @@ prepare_proxy() {
   incus config device add "$WAITING" delayed-address proxy --project "$PROJECT" \
     listen="tcp:$ADDRESS:38473" connect=tcp:127.0.0.1:22 bind=host nat=false >/dev/null
   incus start "$WAITING" --project "$PROJECT"
-  incus init subyard-e2e-debian-13-container "$READY" --project "$PROJECT" --storage default \
+  incus init "$image_reference" "$READY" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$READY" \
