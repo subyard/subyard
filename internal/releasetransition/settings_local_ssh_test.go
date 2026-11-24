@@ -459,8 +459,8 @@ func TestLocalSSHMigrationOverlappingSettingsResumeAndRejectDrift(t *testing.T) 
 							t.Fatalf("authorized file differs: %q %v", content, err)
 						}
 						info, err := os.Stat(localPath)
-						if err != nil || info.Mode().Perm() != 0o600 {
-							t.Fatal("SSH pin did not preserve the canonical predecessor mode")
+						if err != nil || info.Mode().Perm() != 0o640 {
+							t.Fatal("SSH pin did not preserve the original file mode")
 						}
 						git, err := os.ReadFile(filepath.Join(configHome, ".sync/settings/yards/named/config.env"))
 						if err != nil || string(git) != "SSH_PORT=2241\n" {

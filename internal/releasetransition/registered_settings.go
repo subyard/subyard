@@ -30,6 +30,10 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 		if err != nil {
 			return snapshot, path, "", err
 		}
+		input, err = effectiveSettingsSnapshot(t.options.ConfigHome, t.options.CandidateConfigDir, name, input, view)
+		if err != nil {
+			return snapshot, path, "", err
+		}
 		inputs[name] = settingsV2SnapshotFingerprint(input)
 	}
 	payload, err := json.Marshal(inputs)

@@ -133,6 +133,10 @@ func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2Setting
 		if err != nil {
 			return expected, path, "", err
 		}
+		snapshot, err = effectiveSettingsSnapshot(transition.options.ConfigHome, transition.options.CandidateConfigDir, layer.Path, snapshot, view)
+		if err != nil {
+			return expected, path, "", err
+		}
 		inputs[layer.Path] = settingsV2SnapshotFingerprint(snapshot)
 	}
 	payload, err := json.Marshal(inputs)

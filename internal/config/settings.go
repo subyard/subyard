@@ -96,6 +96,7 @@ type settingTracker struct {
 	order                 int
 	ignored               []IgnoredAssignment
 	deprecated            []DeprecatedAssignment
+	dead                  []DeadAssignment
 }
 
 func newSettingTracker() *settingTracker {

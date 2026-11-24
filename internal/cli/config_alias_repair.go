@@ -420,6 +420,7 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		Diagnostic string   `json:"diagnostic,omitempty"`
 		Retry      string   `json:"retry,omitempty"`
 		Deprecated []string `json:"deprecated,omitempty"`
+		Dead       []string `json:"deadAssignments,omitempty"`
 	}
 	var rows []row
 	failed := err != nil
@@ -433,6 +434,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 			continue
 		}
 		result := row{Yard: name, Valid: err == nil}
+		for _, assignment := range loaded.DeadAssignments() {
+			result.Dead = append(result.Dead, assignment.String())
+		}
 		for _, assignment := range loaded.DeprecatedAssignments() {
 			result.Deprecated = append(result.Deprecated, assignment.String())
 		}
@@ -454,6 +458,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		for _, result := range rows {
 			if result.Valid {
 				fmt.Fprintf(cli.options.Stdout, "yard %s: configuration schema valid\n", result.Yard)
+				for _, note := range result.Dead {
+					fmt.Fprintf(cli.options.Stdout, "  %s\n", note)
+				}
 				for _, note := range result.Deprecated {
 					fmt.Fprintf(cli.options.Stdout, "  deprecated: %s\n", note)
 				}

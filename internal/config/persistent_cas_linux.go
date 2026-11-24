@@ -14,6 +14,7 @@ import (
 
 // CompareAndSwapPersistentFile publishes a complete protected settings file
 // only when bytes, inode identity and security metadata still match Inspect.
+// Replacements preserve ownership, permission bits and the existing access ACL.
 // Every traversal and the final rename are relative to pinned directory FDs.
 func CompareAndSwapPersistentFile(
 	configHome string,
@@ -26,7 +27,7 @@ func CompareAndSwapPersistentFile(
 	}, nil, false)
 }
 
-// CompareAndSwapLocalSettingsFile preserves an existing local file's mode and
+// CompareAndSwapLocalSettingsFile preserves existing local metadata and
 // can create an exactly absent target without replacing a concurrent file.
 func CompareAndSwapLocalSettingsFile(configHome, path string, expected PersistentFileSnapshot, desired []byte) error {
 	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error { return checkLocalSettingsTargetWritable(configHome, path) }, nil, true)
@@ -199,10 +200,17 @@ func compareAndSwapPersistentFileAt(root int, displayRoot string, parts []string
 	}
 	pending := "." + name + ".release-transition.pending"
 	mode := uint32(0o600)
-	if local && expected.Exists {
+	owner := PersistentFileIdentity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	var acl []byte
+	if expected.Exists {
 		mode = expected.Identity.Mode & 0o777
+		owner = expected.Identity
+		acl, err = persistentAccessACLAt(current, name, expected.Identity)
+		if err != nil {
+			return err
+		}
 	}
-	if err := preparePersistentPendingAt(current, pending, desired, mode); err != nil {
+	if err := preparePersistentPendingAt(current, pending, desired, mode, owner, acl); err != nil {
 		return err
 	}
 	if fault != nil {
@@ -216,6 +224,15 @@ func compareAndSwapPersistentFileAt(root int, displayRoot string, parts []string
 	}
 	if !samePersistentFileSnapshotExact(observed, expected) {
 		return ErrPersistentTargetStale
+	}
+	if expected.Exists {
+		currentACL, err := persistentAccessACLAt(current, name, expected.Identity)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(currentACL, acl) {
+			return ErrPersistentTargetStale
+		}
 	}
 	if fault != nil {
 		if err := fault("before-publish"); err != nil {
@@ -278,7 +295,7 @@ func validatePersistentDirectoryFD(fd int) error {
 }
 
 func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, error) {
-	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return PersistentFileSnapshot{}, nil
 	}
@@ -323,7 +340,34 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 	}, nil
 }
 
-func preparePersistentPendingAt(parent int, name string, desired []byte, mode uint32) error {
+// Read ACLs through the same pinned parent and bind them to the observed inode.
+// Unsupported ACL filesystems are equivalent to an absent access ACL.
+func persistentAccessACLAt(parent int, name string, expected PersistentFileIdentity) ([]byte, error) {
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, err
+	}
+	identity := PersistentFileIdentity{Device: uint64(st.Dev), Inode: st.Ino, Mode: st.Mode, UID: st.Uid, GID: st.Gid, Links: uint64(st.Nlink)}
+	if identity != expected {
+		return nil, ErrPersistentTargetStale
+	}
+	data := make([]byte, 64<<10)
+	n, err := unix.Fgetxattr(fd, "system.posix_acl_access", data)
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func preparePersistentPendingAt(parent int, name string, desired []byte, mode uint32, owner PersistentFileIdentity, acl []byte) error {
 	fd, err := unix.Openat(
 		parent, name,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
@@ -334,10 +378,30 @@ func preparePersistentPendingAt(parent int, name string, desired []byte, mode ui
 		if readErr != nil {
 			return readErr
 		}
-		if !pending.Exists || (!bytes.Equal(pending.Content, desired) || pending.Identity.Mode&0o777 != mode) {
+		// Staging has no authority. Only a validated prefix of the independently
+		// reconstructed payload can be an interrupted attempt at this write.
+		if !pending.Exists || !bytes.HasPrefix(desired, pending.Content) {
 			return ErrPersistentTargetStale
 		}
-		return nil
+		current, readErr := readPersistentSnapshotAt(parent, name)
+		if readErr != nil {
+			return readErr
+		}
+		if !samePersistentFileSnapshotExact(current, pending) {
+			return ErrPersistentTargetStale
+		}
+		if err := unix.Unlinkat(parent, name, 0); err != nil {
+			return err
+		}
+		if err := unix.Fsync(parent); err != nil {
+			return err
+		}
+		// Start over with private permissions and restore metadata from the target,
+		// not from an unbound or only partially initialized staging inode.
+		fd, err = unix.Openat(parent, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if errors.Is(err, unix.EEXIST) {
+			return ErrPersistentTargetStale
+		}
 	}
 	if err != nil {
 		return err
@@ -348,15 +412,27 @@ func preparePersistentPendingAt(parent int, name string, desired []byte, mode ui
 			_ = unix.Close(fd)
 		}
 	}()
-	if err := unix.Fchmod(fd, mode); err != nil {
-		return err
-	}
 	for remaining := desired; len(remaining) > 0; {
 		written, writeErr := unix.Write(fd, remaining)
 		if writeErr != nil {
 			return writeErr
 		}
 		remaining = remaining[written:]
+	}
+	// Keep staging private until all bytes are written. Chown can clear mode
+	// bits; install the original access policy only after setting ownership.
+	if err := unix.Fchown(fd, int(owner.UID), int(owner.GID)); err != nil {
+		return err
+	}
+	if err := unix.Fremovexattr(fd, "system.posix_acl_access"); err != nil && !errors.Is(err, unix.ENODATA) && !errors.Is(err, unix.ENOTSUP) {
+		return err
+	}
+	if len(acl) != 0 {
+		if err := unix.Fsetxattr(fd, "system.posix_acl_access", acl, 0); err != nil {
+			return err
+		}
+	} else if err := unix.Fchmod(fd, mode); err != nil {
+		return err
 	}
 	if err := unix.Fsync(fd); err != nil {
 		return err

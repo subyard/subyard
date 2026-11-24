@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import stat
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -162,6 +164,72 @@ class NativeTest(unittest.TestCase):
         self.reconcile(['codex'])
         self.assertTrue(codex.is_symlink())
         self.assertNotIn(self.token.encode(), target.read_bytes())
+
+    def test_legacy_cleanup_accepts_materializer_group_with_a_different_primary_group(self):
+        self.legacy()(self.home, self.receipt, list(native.AGENTS), self.endpoint, self.token,
+                      tomli_w, self.uid, self.gid)
+        for path in self.documents.values():
+            os.chown(path, self.uid, self.uid)
+        before = {agent: path.stat() for agent, path in self.documents.items()}
+        # Host-free: the files really have the materializer's uid:uid owner,
+        # while the native API receives a distinct developer primary group.
+        self.assertEqual({info.st_gid for info in before.values()}, {self.uid})
+        self.gid = self.uid + 100
+        self.reconcile([])
+        for agent, path in self.documents.items():
+            self.assertNotIn(self.token.encode(), path.read_bytes())
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid), (before[agent].st_uid, before[agent].st_gid))
+        self.assertFalse(self.receipt.exists())
+
+    def test_legacy_cleanup_names_foreign_owner_without_echoing_contents(self):
+        self.home = self.root/"developer's home"
+        self.legacy()(self.home, self.receipt, ['claude'], self.endpoint, self.token,
+                      tomli_w, self.uid, self.gid)
+        path = self.home/native.AGENTS['claude'][1]
+        before = path.read_bytes()
+        failures = []
+        with patch.object(native, 'developer_files', return_value=nullcontext()):
+            native.legacy_edits(self.receipt, self.home, self.token, tomli_w,
+                                self.uid + 1, self.gid + 1, failures)
+        message = str(native.Refusal(failures))
+        self.assertIn(str(path), message)
+        self.assertNotIn('~/.claude/settings.json', message)
+        self.assertIn(f'actual owner {self.uid}:{self.gid}', message)
+        self.assertIn(f'expected {self.uid+1}:{self.uid+1}', message)
+        repair = message.split('; as root inside the yard, run ', 1)[1].removesuffix(' and retry')
+        self.assertEqual(shlex.split(repair), ['chown', f'{self.uid+1}:{self.uid+1}', '--', str(path)])
+        self.assertNotIn(self.token, message)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_legacy_cleanup_reports_each_concrete_failure_before_writes(self):
+        for case, code in [('parse', 'parse'), ('links', 'links'), ('size', 'size'), ('symlink', 'symlink')]:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+                    home, receipt = Path(directory)/'home', Path(directory)/'receipt.json'
+                    self.legacy()(home, receipt, list(native.AGENTS), self.endpoint, self.token,
+                                  tomli_w, self.uid, self.gid)
+                    paths = [home/parts[1] for parts in native.AGENTS.values()]
+                    for path in paths:
+                        if case == 'parse':
+                            path.write_bytes(b'private-parser-canary invalid document')
+                        elif case == 'links':
+                            os.link(path, path.with_name('hardlink'))
+                        elif case == 'size':
+                            path.write_bytes(b'x'*(native.CONFIG_LIMIT+1))
+                        else:
+                            moved = path.parent.with_name(path.parent.name+'-real')
+                            path.parent.rename(moved)
+                            path.parent.symlink_to(moved, target_is_directory=True)
+                    before = [path.read_bytes() for path in paths]
+                    with self.assertRaises(native.Refusal) as refused:
+                        native.reconcile(self.etc, home, receipt, [], self.endpoint, self.token,
+                                         tomli_w, self.uid, self.gid, {}, False)
+                    self.assertEqual(refused.exception.reasons,
+                                     [('legacy-config', agent, code) for agent in native.AGENTS])
+                    self.assertNotIn('private-parser-canary', str(refused.exception))
+                    self.assertTrue(receipt.exists())
+                    self.assertEqual([path.read_bytes() for path in paths], before)
 
     def test_template_conflicts_compare_desired_fields_without_home_or_secret_output(self):
         agents = list(self.paths)
