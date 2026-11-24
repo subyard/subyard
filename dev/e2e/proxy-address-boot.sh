@@ -448,9 +448,9 @@ prepare_proxy() {
   incus list --all-projects --format json | jq -e \
     'all(.[]; (.expanded_config["user.subyard.managed"] // .config["user.subyard.managed"] // "false") != "true")' \
     >/dev/null || die 'unexpected managed yards on disposable host'
-  if ! incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null 2>&1; then
-    timeout --foreground --kill-after=10 300 sudo -n incus image copy images:debian/13/cloud local: \
-      --alias subyard-e2e-debian-13-cloud-container --project default >/dev/null
+  if ! incus image info subyard-e2e-debian-13-container --project default >/dev/null 2>&1; then
+    timeout --foreground --kill-after=10 300 sudo -n incus image copy images:debian/13 local: \
+      --alias subyard-e2e-debian-13-container --project default >/dev/null
   fi
   ! ip link show dev "$INTERFACE" >/dev/null 2>&1 || die 'dummy interface already exists'
   ! ip -j address show | jq -e --arg address "$ADDRESS" \
@@ -488,7 +488,7 @@ prepare_proxy() {
   sudo -n ip link set dev "$INTERFACE" alias "$MARKER"
   sudo -n ip link set dev "$INTERFACE" up
   sudo -n ip address add "$ADDRESS/32" dev "$INTERFACE"
-  incus init subyard-e2e-debian-13-cloud-container "$WAITING" --project "$PROJECT" --storage default \
+  incus init subyard-e2e-debian-13-container "$WAITING" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$WAITING" \
@@ -496,7 +496,7 @@ prepare_proxy() {
   incus config device add "$WAITING" delayed-address proxy --project "$PROJECT" \
     listen="tcp:$ADDRESS:38473" connect=tcp:127.0.0.1:22 bind=host nat=false >/dev/null
   incus start "$WAITING" --project "$PROJECT"
-  incus init subyard-e2e-debian-13-cloud-container "$READY" --project "$PROJECT" --storage default \
+  incus init subyard-e2e-debian-13-container "$READY" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
     -c user.subyard.desired_power=running -c user.subyard.name="$READY" \

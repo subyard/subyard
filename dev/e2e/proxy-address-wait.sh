@@ -157,7 +157,7 @@ BINARY_HASH="$(sha256sum "$YARD_BIN" | awk '{print $1}')"
 sudo -n install -D -m 0755 "$YARD_BIN" "$BINARY_PATH"
 printf 'evidence: binary_sha256=%s\n' "$BINARY_HASH"
 BINARY_ARMED=1
-IMAGE=subyard-e2e-debian-13-cloud-container
+IMAGE=subyard-e2e-debian-13-container
 if ! incus_local image info "$IMAGE" --project default >/dev/null 2>&1; then
   timeout --foreground --kill-after=10 300 sudo -n incus image copy images:debian/13/cloud local: \
     --alias "$IMAGE" --project default >/dev/null

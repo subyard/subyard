@@ -276,7 +276,7 @@ handle_signal() { # <128+signal>
 }
 
 write_fixture_config() {
-  local base_image="${P0_V0111_BASE_IMAGE:-subyard-e2e-debian-13-cloud-container}"
+  local base_image="${P0_V0111_BASE_IMAGE:-subyard-e2e-debian-13-container}"
   local ssh_port=2291
   install -d -m 0700 "$CONFIG_HOME/yards/$YARD_NAME" "$BIN_ROOT" "$HOME_ROOT/host"
   printf 'AGENTS=\n' > "$CONFIG_HOME/config.env"

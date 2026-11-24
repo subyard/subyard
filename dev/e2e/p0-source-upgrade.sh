@@ -39,7 +39,7 @@ ADDRESS_INSTANCE="yard-$ADDRESS_YARD"
 STATE_ROOT="$SHARED_ROOT"
 # The existing published-upgrade pins and local P0 VM matrix are amd64.
 BASELINE_ARM64_SHA256=''
-BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
+BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}"
 FIXTURE_DEV_UID=1001
 source_next_version() {
   local core="${1%%[-+]*}" major minor patch

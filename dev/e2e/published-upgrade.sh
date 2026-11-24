@@ -144,7 +144,7 @@ else
 fi
 INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
 GUEST_MARKER=/var/tmp/subyard-published-upgrade-data
-CACHED_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
+CACHED_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}"
 
 die() {
   printf 'published-upgrade: %s: %s\n' "$OLD_VERSION" "$*" >&2

@@ -217,7 +217,7 @@ case "$mode" in
     incus info >/dev/null
     incus storage show default >/dev/null
     incus network show incusbr0 >/dev/null
-    incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null
+    incus image info subyard-e2e-debian-13-container --project default >/dev/null
     sudo -n test -d /run/systemd/system
     sudo -n ss -H -lnt >/dev/null
     printf 'ok: held leased VM has actual Incus, systemd, cached image and privilege prerequisites\n'
@@ -291,8 +291,8 @@ ENVIRONMENT_PROFILES=
 FORWARD_SSH_AGENT=0
 SHIFT_MODE=acl
 DEV_UID=1001
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
-BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container
+BASE_IMAGE=subyard-e2e-debian-13-container
+BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-container
 CONFIG
 chmod 600 "$1/config/config.env"
 for pair in neighbor:24223 stopped:24224; do name=${pair%:*}; port=${pair#*:}; printf "SSH_PORT=%s\nINCUS_PROJECT=subyard-full-%s-%s\nYARD_INSTANCE_NAME=yard-%s\nHOST_BASE=%s/host-%s\nRESTRICTED_DISK_PATHS=%s/host-%s\n" "$port" "$2" "$name" "$name" "$1" "$name" "$1" "$name" > "$1/config/yards/$name.env"; chmod 600 "$1/config/yards/$name.env"; done' _ "$state" "$token"
@@ -466,7 +466,7 @@ chmod 644 "$HOME/.config/systemd/user/$1"' _ "$foreign_unit"
     create_fixture_project "$foreign"
     incus profile device add default root disk pool=default path=/ --project "$foreign" >/dev/null
     incus profile device add default eth0 nic network=incusbr0 --project "$foreign" >/dev/null
-    incus launch subyard-e2e-debian-13-cloud-container control --project "$foreign" >/dev/null
+    incus launch subyard-e2e-debian-13-container control --project "$foreign" >/dev/null
     incus storage volume create "$pool" "foreign-$token" --project default >/dev/null
     relay_ip="$(incus list yard --project "subyard-full-$token" -f json | jq -er 'first(.[0].state.network.eth0.addresses[] | select(.family=="inet" and .scope=="global") | .address)')"
     operator_env env SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_CONFIG_DIR="$state/runtime/current/config" \

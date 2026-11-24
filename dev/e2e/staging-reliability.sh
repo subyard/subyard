@@ -390,7 +390,7 @@ reclaim_supported_upgrade_inputs() {
   if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
     [[ "$OWNER_BASE_IMAGE_FINGERPRINT" =~ ^[a-f0-9]{64}$ ]] || return 1
     actual="$(incus image list --project default --format json | jq -er \
-      --arg alias "${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}" \
+      --arg alias "${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}" \
       '.[] | select(any(.aliases[]; .name==$alias)) | .fingerprint')" || return
     [ "$actual" = "$OWNER_BASE_IMAGE_FINGERPRINT" ] || return 1
     ! grep -Fxq "$actual" <<<"$OWNER_BASELINE_IMAGES" || return 1

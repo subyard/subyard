@@ -43,8 +43,8 @@ ENVIRONMENT_PROFILES=
 FORWARD_SSH_AGENT=0
 SHIFT_MODE=acl
 DEV_UID=1001
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
-BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container
+BASE_IMAGE=subyard-e2e-debian-13-container
+BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-container
 CONFIG
 chmod 600 "$1/legacy-config/config.env"' _ "$state" "$token"
   # Use the original release's read-only interface before native setup.

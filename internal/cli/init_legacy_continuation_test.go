@@ -525,7 +525,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 	if len(implicitDefault) != 0 && implicitDefault[0] {
 		// Published v0.8 default init consumes host config and does not author a
 		// per-yard registration. Match the owning physical predecessor producer.
-		writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "AGENTS=none\nBASE_IMAGE=subyard-e2e-debian-13-cloud-container\nBASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container\nDEV_UID=2000\n")
+		writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "AGENTS=none\nBASE_IMAGE=subyard-e2e-debian-13-container\nBASE_IMAGE_FALLBACK=subyard-e2e-debian-13-container\nDEV_UID=2000\n")
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatal("implicit old default unexpectedly has a registration", err)
 		}

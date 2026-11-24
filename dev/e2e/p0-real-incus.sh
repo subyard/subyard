@@ -6,8 +6,8 @@ PROJECT=subyard-p0-real-incus
 MARKER=agent-e2e-p0
 CONTAINER_IMAGE="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13}"
 VM_IMAGE="${P0_REAL_INCUS_VM_IMAGE:-images:debian/13/cloud}"
-# Keep the cache alias shared by the other acceptance controllers.
-CONTAINER_CACHE_ALIAS="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
+# Keep the product-image cache separate from the legacy cloud-image alias.
+CONTAINER_CACHE_ALIAS="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}"
 VM_CACHE_ALIAS="${P0_REAL_INCUS_VM_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-vm}"
 TMP=''
 
