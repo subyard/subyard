@@ -2030,6 +2030,10 @@ func (runtime Runtime) sshConverged(ctx context.Context) (bool, error) {
 	}
 	result, err = runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-s", "--", "check"}, Stdin: keepalive})
+	var guestExit *ports.GuestExitError
+	if result.ExitCode == 1 && errors.As(err, &guestExit) && guestExit.Code == 1 {
+		return false, nil
+	}
 	return result.ExitCode == 0 && err == nil, err
 }
 
