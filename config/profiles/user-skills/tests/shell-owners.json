@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/user-skills/guest.sh", "kind": "embedded", "owner": "config/profiles/user-skills/owner.sh", "reference": "guest.sh"}
+  ]
+}

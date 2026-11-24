@@ -2,7 +2,7 @@
 # guest.sh against a local source and an unreachable one, as the current user.
 set -euo pipefail
 guest="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/guest.sh"
-work="$(mktemp -d /tmp/subyard-user-skills-test.XXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-user-skills-test.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 fail() { printf 'user-skills guest test: %s\n' "$*" >&2; exit 1; }
 run() { HOME="$work/home" PATH="$work/bin:$PATH" bash "$guest" "$@"; }
