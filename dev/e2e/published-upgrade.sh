@@ -293,10 +293,9 @@ migrate_retained_git_settings() {
 verify_combined_codex_policy_migration() {
   # Reopen the combined layout after the supported published release hands off
   # to the candidate. Its ordinary init must split the owned policy.
-  guest bash -e -s <<'COMBINED_APPROVAL'
-rm -f /etc/codex/49-subyard-approval-hook.toml \
-  /etc/codex/50-subyard-git-approval.rules.inc /etc/codex/51-subyard-sudo-approval.rules.inc
-cat > /etc/codex/requirements.toml <<'REQUIREMENTS'
+  local combined_policy combined_hash guest_hash
+  combined_policy="$(mktemp /tmp/subyard-combined-codex-policy.XXXXXX)"
+  cat > "$combined_policy" <<'REQUIREMENTS'
 # Managed by Subyard Codex provision.
 allowed_approval_policies = ["on-request"]
 allowed_approvals_reviewers = ["user"]
@@ -317,7 +316,18 @@ type = "command"
 command = "/etc/codex/subyard-git-approval-hook --plain git sudo"
 timeout = 3
 REQUIREMENTS
-COMBINED_APPROVAL
+  # The bounded Incus wrapper closes stdin, so transfer the seed as a file.
+  incus file push "$combined_policy" "$INSTANCE/etc/codex/requirements.toml" --project "$PROJECT"
+  guest chmod 0644 /etc/codex/requirements.toml
+  guest rm -f -- /etc/codex/49-subyard-approval-hook.toml \
+    /etc/codex/50-subyard-git-approval.rules.inc /etc/codex/51-subyard-sudo-approval.rules.inc
+  combined_hash="$(sha256sum "$combined_policy" | awk '{print $1}')"
+  guest_hash="$(guest sha256sum /etc/codex/requirements.toml | awk '{print $1}')"
+  [ "$guest_hash" = "$combined_hash" ] || die 'combined Codex policy seed was not installed'
+  guest test ! -e /etc/codex/49-subyard-approval-hook.toml
+  guest test ! -e /etc/codex/50-subyard-git-approval.rules.inc
+  guest test ! -e /etc/codex/51-subyard-sudo-approval.rules.inc
+  ok 'combined Codex policy seed installed: exact bytes and no split fragments before init'
   operator_yard init --yes || die 'init did not reprovision the combined Codex policy'
   guest grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
     || die 'init did not split the combined Codex policy'
