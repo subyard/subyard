@@ -12,23 +12,48 @@ yard [-Y NAME] config set USER_SKILL_SOURCES 'https://github.com/OWNER/skills gi
 yard [-Y NAME] init
 ```
 
-Init clones each source once, as the yard developer, into
-`~/.local/share/subyard-user-skills/<repository path>` (for example `OWNER/skills` or
-`group/subgroup/skills`), with ordinary Git access and the `subyard-github` broker for GitHub
-HTTPS. Update clones with plain Git. Each `skills/<skill>/SKILL.md` is linked into
-`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills` and
-`~/.hermes/skills` where that path is free. Skills named `subyard-*` are skipped. Two sources
-that map to one clone directory are a configuration error: init warns and skips the later one,
-and status shows `ready: false`.
+Update clones with plain Git; Subyard never updates, restores or deletes a clone.
 
-Subyard never restores a clone or skill folder. To turn off one skill, delete its folder in the
-clone; the next init removes its dangling links. Removing only a link gets it re-added.
-`yard profile disable user-skills`, or deselecting the profile and running `yard init`, removes
-only the links that point into the clone store and keeps the clones.
+## Rules
 
-A clone tries plain Git, then `subyard-github run`; each attempt is stopped after 60 seconds
-(killed 10 seconds later), so a source takes at most about 140 seconds. If both fail, init
-prints a warning naming the repository and completes, as does `yard profile enable user-skills`;
-the next enable or init retries.
-`yard profile status user-skills` shows `ready: false` while a configured clone directory is
-missing or empty, a free link path has no link, or a link into the clone store is dangling.
+`guest.sh` runs as the yard developer in a running yard; a stopped yard is a no-op that
+reports converged. Check reports drift, apply converges, and the post-apply check (verify)
+accepts skipped sources.
+
+- **Name.** From each URL, the query and fragment are dropped first, then the authority with
+  any userinfo, or the SCP host. The name is the last two path segments, without a trailing
+  `.git`, and must match `SEG/SEG` with `SEG` = `[A-Za-z0-9][A-Za-z0-9._-]*`. For example,
+  `https://github.com/OWNER/skills` and `git@example.org:group/sub/skills` give `OWNER/skills`
+  and `sub/skills`. Credentials in URLs are unsupported: use public or SSH-key repositories.
+- **Skipped sources.** A source is skipped when its name is invalid, equals an earlier name, or
+  its clone fails. Apply prints a warning that names only the source position or the validated
+  name, never URL text; check reports drift, so status shows `ready: false`; verify accepts it,
+  so init and `yard profile enable user-skills` complete and the next enable or init retries.
+- **Clone.** Only when `~/.local/share/subyard-user-skills/<name>` is missing or empty: one
+  `git clone` with `GIT_ALLOW_PROTOCOL=https:ssh:file`, no terminal prompt and no input, stopped
+  after 60 seconds (killed 10 seconds later), into a sibling temporary directory that is then
+  moved into place. A non-empty directory is never touched.
+- **Link.** Each `skills/<skill>/SKILL.md`, except `subyard-*` names, is linked as
+  `<harness>/<skill>` → `<store>/<name>/skills/<skill>` in `~/.agents/skills`,
+  `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills` and `~/.hermes/skills`,
+  only where that path is free. An existing entry is never replaced.
+- **Harness directories** are used as given: a symlinked harness directory is followed for
+  linking and cleanup. A harness directory that cannot be created fails apply.
+- **Ours.** A link is ours only when its text is exactly `<store>/<name>/skills/<link name>`
+  with a valid name. Paths are compared as strings and never resolved, so hand-made, relative or
+  differently spelled links are never touched.
+- **Unlink.** Apply unlinks each of our links unless its name is a configured, non-skipped
+  source and its target still has `SKILL.md`. So `yard profile disable user-skills`,
+  deselecting the profile and running `yard init`, removing a source, deleting a skill folder or
+  deleting the store all remove those links and keep the clones. To disable one skill, delete its
+  folder in the clone; removing only its link gets it re-added.
+- Concurrent edits by the same user during a run are not guarded.
+
+Out of scope:
+
+- the same-user race between reading and unlinking a link: there is no atomic primitive, and
+  the user already has the same rights;
+- relative or differently spelled links into the store;
+- a hand-made link with our exact spelling, which is treated as ours;
+- updating clones or deciding whether a source is trusted;
+- a `.tmp-*` directory left in the store after the clone is killed with SIGKILL.
