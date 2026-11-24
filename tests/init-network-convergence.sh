@@ -63,7 +63,7 @@ export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
 cat > "$TMP/bin/yard-engine" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "${1:-}" != _nm-guard-violations ] || exec "$TEST_NM_VALIDATOR" "$@"
+case "${1:-}" in _nm-guard-violations|_nm-guard-file-id) exec "$TEST_NM_VALIDATOR" "$@" ;; esac
 case "$*" in
   "_network-lock check")
     [ "${MOCK_REQUIRE_NOAUTH:-0}" != 1 ] || [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ] || exit 1

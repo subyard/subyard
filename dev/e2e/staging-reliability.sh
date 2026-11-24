@@ -1317,7 +1317,11 @@ outer_exec sh -eu -c 'incus version; qemu-system-x86_64 --version | head -n 1; d
 printf 'STAGING_NATIVE_VERSIONS_END\n'
 # No QMP socket or consumptive console/ringbuf access while lifecycle is active.
 # The watcher reads only verified QEMU proc state and parsed counters.
-timeout --signal=TERM --kill-after=10 6400 incus exec "$INSTANCE" --project "$PROJECT" -- \
+# Only this harness observer needs GNU's external-TERM exit status. Keep the product
+# on the host's default tools so this diagnostic exercises Rust coreutils on Ubuntu.
+observer_timeout="$(command -v gnutimeout || command -v timeout)"
+printf 'STAGING_OBSERVER_TIMEOUT=%s\n' "$observer_timeout"
+"$observer_timeout" --signal=TERM --kill-after=10 6400 incus exec "$INSTANCE" --project "$PROJECT" -- \
   python3 - <<'PYTHON' > "$STATE_PARENT/boot-samples.jsonl" 2> "$STATE_PARENT/boot-samples.stderr" &
 import hashlib,json,math,os,pathlib,re,signal,subprocess,time
 P=pathlib.Path

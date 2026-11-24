@@ -41,21 +41,55 @@ printf '%s\n' \
   '  *) exit 2 ;;' \
   'esac' > "$TMP/bin/go"
 chmod 0700 "$TMP/bin/go"
-printf '%s\n' \
-  '#!/bin/bash' \
-  'set -euo pipefail' \
-  'case "$*" in' \
-  '  "-n -E /usr/sbin/runuser -u dev -g incus-admin -- "*)' \
-  '    printf "activate-incus-group\n" >> "$P0_FAKE_SUDO_LOG"' \
-  '    [ "${P0_FAKE_GROUP_DENIED:-0}" = 0 ] || exit 1' \
-  '    shift 8; export P0_FAKE_ACTIVE_GROUP=incus-admin; exec "$@" ;;' \
-  '  "-n systemctl restart incus.service")' \
-  '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
-  '    ;;' \
-  '  "-n systemctl disable --now "*|"-n systemctl stop "*)' \
-  '    shift; exec "$@" ;;' \
-  '  *) exit 2 ;;' \
-  'esac' > "$TMP/bin/sudo"
+cat > "$TMP/bin/sudo" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+if [ -n "${P0_SUDO_SECRET_CANARY:-}" ]; then
+  for argument in "$@"; do
+    [[ "$argument" != *"$P0_SUDO_SECRET_CANARY"* ]] || {
+      printf 'FAIL: secret canary appeared in sudo argv\n' >&2
+      exit 98
+    }
+  done
+fi
+case "$*" in
+  "-n --preserve-env="*" -- /usr/sbin/runuser -u dev -g incus-admin -- "*)
+    preserve="${2#*=}"
+    [ "$P0_REEXEC_HOME" = "$P0_FAKE_EXPECTED_HOME" ] \
+      && [ "$P0_REEXEC_PATH" = "$P0_FAKE_EXPECTED_PATH" ] || exit 97
+    printf 'activate-incus-group\n' >> "$P0_FAKE_SUDO_LOG"
+    [ "${P0_FAKE_GROUP_DENIED:-0}" = 0 ] || exit 1
+    if [[ "${@: -3:1}" = */tests/real-host/p0-cleanup-recovery.sh ]]; then
+      [ "$preserve" = P0_REEXEC_HOME,P0_REEXEC_PATH,SUBYARD_E2E_VM,P0_REAL_INCUS_CONTAINER_IMAGE,P0_REAL_INCUS_CONTAINER_CACHE_ALIAS,P0_REAL_INCUS_COMMAND_TIMEOUT,P0_E2E_INCUS_APPARMOR_DROPIN ] || exit 96
+      [ "${@: -2:1}" = sink-lifecycle ] && [ "${@: -1}" = 142 ] || exit 95
+      # The common wrapper is exercised below by the real capacity re-exec.
+      # Stop this caller before its physical Incus/systemd fixture starts.
+      exit 0
+    fi
+    [ "$preserve" = P0_REEXEC_HOME,P0_REEXEC_PATH,SUBYARD_E2E_VM,P0_E2E_INCUS_QUERY_TIMEOUT,P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS,P0_REAL_INCUS_COMMAND_TIMEOUT,P0_REAL_INCUS_OBSERVE_TIMEOUT,P0_REAL_INCUS_CLEANUP_WAIT_SECONDS,P0_REAL_INCUS_CLEANUP_POLL_SECONDS,P0_REAL_INCUS_DELETE_RETRY_SECONDS ] || exit 96
+    shift 9
+    [ "$1" = bash ] || exit 2
+    preserved=()
+    IFS=, read -r -a names <<< "$preserve"
+    for name in "${names[@]}"; do
+      [ ! -v "$name" ] || preserved+=("$name=${!name}")
+    done
+    # Keep only fixture controls in addition to the production allowlist.
+    while IFS= read -r name; do
+      [[ "$name" = P0_FAKE_* ]] || continue
+      preserved+=("$name=${!name}")
+    done < <(compgen -e)
+    # Simulate sudo secure_path and runuser resetting HOME. The shared wrapper
+    # must restore the caller's values without putting them in command arguments.
+    exec env -i HOME=/root PATH=/usr/bin:/bin "${preserved[@]}" \
+      P0_FAKE_ACTIVE_GROUP=incus-admin P0_FAKE_REEXECUTED=1 "$@" ;;
+  "-n systemctl restart incus.service")
+    printf '%s\n' "$*" >> "$P0_FAKE_SUDO_LOG" ;;
+  "-n systemctl disable --now "*|"-n systemctl stop "*)
+    shift; exec "$@" ;;
+  *) exit 2 ;;
+esac
+SCRIPT
 chmod 0700 "$TMP/bin/sudo"
 printf '%s\n' \
   '#!/bin/bash' \
@@ -398,6 +432,13 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'source_path() { sed -n "s/^  source: //p" "$P0_FAKE_INCUS_STATE"; }' \
+  'if [ "${P0_FAKE_REEXECUTED:-0}" = 1 ]; then' \
+  '  [ "$HOME" = "$P0_FAKE_EXPECTED_HOME" ] && [ "$PATH" = "$P0_FAKE_EXPECTED_PATH" ] || exit 98' \
+  '  [ "$SUBYARD_E2E_VM" = 1 ] && [ "$P0_E2E_INCUS_QUERY_TIMEOUT" = 31 ] || exit 98' \
+  '  [ "$P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS" = 7 ] && [ "$P0_REAL_INCUS_CLEANUP_WAIT_SECONDS" = 17 ] || exit 98' \
+  '  [ ! -v P0_REAL_INCUS_CONTAINER_CACHE_ALIAS ] || exit 98' \
+  '  [ ! -v GH_TOKEN ] && [ ! -v P0_SUDO_SECRET_CANARY ] || exit 98' \
+  'fi' \
   'case "$*" in' \
   '  "storage show default --project default")' \
   '    [ -r "$P0_FAKE_INCUS_STATE" ] || exit 1' \
@@ -478,11 +519,24 @@ run_recovery_preflight 124 /var/tmp/subyard-nested-teardown.fixture/storage
 
 # The fresh operator has no persisted membership; recovery gets a process-local group.
 : > "$P0_FAKE_SUDO_LOG"
-P0_FAKE_ACTIVE_GROUP='' run_recovery_preflight 142 /var/tmp/subyard-nested-teardown.fixture/storage
+export P0_SUDO_SECRET_CANARY='synthetic-p0-credential-canary'
+export GH_TOKEN="$P0_SUDO_SECRET_CANARY"
+export P0_FAKE_EXPECTED_HOME="$HOME"
+handoff_path="$PATH:$TMP/path with spaces"$'\nand equals=value'
+export P0_FAKE_EXPECTED_PATH="$handoff_path"
+P0_FAKE_ACTIVE_GROUP='' PATH="$handoff_path" P0_E2E_INCUS_QUERY_TIMEOUT=31 \
+  P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS=7 P0_REAL_INCUS_CLEANUP_WAIT_SECONDS=17 \
+  P0_REAL_INCUS_CONTAINER_CACHE_ALIAS=unused-by-capacity \
+  run_recovery_preflight 142 /var/tmp/subyard-nested-teardown.fixture/storage
 [ "$(cat "$P0_FAKE_SUDO_LOG")" = activate-incus-group ] \
   || fail 'fresh preflight did not activate Incus access exactly once'
+: > "$P0_FAKE_SUDO_LOG"
+P0_FAKE_ACTIVE_GROUP='' PATH="$handoff_path" SUBYARD_E2E_VM=1 \
+  bash "$ROOT/tests/real-host/p0-cleanup-recovery.sh" sink-lifecycle 142
+[ "$(cat "$P0_FAKE_SUDO_LOG")" = activate-incus-group ] \
+  || fail 'sink lifecycle did not use the restricted group re-exec'
 : > "$P0_FAKE_INCUS_LOG"
-if P0_FAKE_ACTIVE_GROUP='' P0_FAKE_GROUP_DENIED=1 SUBYARD_E2E_VM=1 \
+if P0_FAKE_ACTIVE_GROUP='' P0_FAKE_GROUP_DENIED=1 P0_FAKE_EXPECTED_PATH="$PATH" SUBYARD_E2E_VM=1 \
   bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight 143 >/dev/null 2>&1; then
   fail 'preflight accepted denied Incus group activation'
 fi

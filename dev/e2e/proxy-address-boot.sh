@@ -383,7 +383,7 @@ chmod 0644 "$root/index.html"
  printf '# %s\n[Unit]\nDescription=%s preview workload\nAfter=network.target\n' "$marker" "$marker"
  printf '[Service]\nExecStart=/usr/bin/python3 -m http.server 8765 --bind 127.0.0.1 --directory %s\n' "$root"
  printf '[Install]\nWantedBy=multi-user.target\n'
-} | install -o root -g root -m 0644 /dev/stdin "/etc/systemd/system/$unit"
+} | install -D -o root -g root -m 0644 /dev/stdin "/etc/systemd/system/$unit"
 systemctl daemon-reload
 systemctl enable --now "$unit"
 GUEST
@@ -534,13 +534,13 @@ for _ in $(seq 1 150); do
     && [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
     && incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --max-time 3 --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null; then
     printf '%s\n' "$snapshot" \
-      | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.properties"
+      | install -D -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.properties"
     incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null
     incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -e '.status == "Running" and .config["user.subyard.desired_power"] == "running" and .devices["subyard-preview"] == null and .config["user.subyard.deferred_publication.subyard-preview"] != null' >/dev/null
     incus exec "$INSTANCE" --project "$PROJECT" -- cat /proc/sys/kernel/random/boot_id > "$STATE_ROOT/optional-boot-id"
     incus exec "$INSTANCE" --project "$PROJECT" -- systemctl show "$PREVIEW_UNIT" -p MainPID --value > "$STATE_ROOT/optional-preview-pid"
     printf '%s\n' "waiting-for-address $PROJECT/$WAITING: $ADDRESS optional-running=$PROJECT/$INSTANCE local-preview=reachable independent-ready=RUNNING" \
-      | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.proof"
+      | install -D -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.proof"
     sleep 35
     [ "$(incus list "$WAITING" --project "$PROJECT" --format csv -c s)" = STOPPED ]
     [ "$(incus list "$READY" --project "$PROJECT" --format csv -c s)" = RUNNING ]
@@ -548,7 +548,7 @@ for _ in $(seq 1 150); do
     ip address add "$OWNER_ADDRESS/32" dev "$INTERFACE"
     ip address add "$ADDRESS/32" dev "$INTERFACE"
     printf '%s\n' "$MARKER" \
-      | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/address-delivered"
+      | install -D -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/address-delivered"
     exit 0
   fi
   sleep 1
@@ -556,13 +556,13 @@ done
 printf 'delayed-address boot never reached expected waiting state\n' >&2
 exit 1
 DELIVER
-  } | sudo -n install -o root -g root -m 0700 /dev/stdin "$ADDRESS_SCRIPT"
+  } | sudo -n install -D -o root -g root -m 0700 /dev/stdin "$ADDRESS_SCRIPT"
   {
     printf '# %s\n' "$MARKER"
     printf '[Unit]\nDescription=Marker-owned delayed proxy address\nAfter=incus.service incus.socket\nWants=incus.service incus.socket\n'
     printf '[Service]\nType=oneshot\nExecStart=/bin/bash %s\nTimeoutStartSec=300\nRemainAfterExit=yes\n' "$ADDRESS_SCRIPT"
     printf '[Install]\nWantedBy=multi-user.target\n'
-  } | sudo -n install -o root -g root -m 0644 /dev/stdin "$ADDRESS_UNIT_PATH"
+  } | sudo -n install -D -o root -g root -m 0644 /dev/stdin "$ADDRESS_UNIT_PATH"
   sudo -n systemctl daemon-reload
   sudo -n systemctl enable "$ADDRESS_UNIT"
   write_fixture_value "$PHASE_STATE" proxy-ready

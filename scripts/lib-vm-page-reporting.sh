@@ -161,7 +161,9 @@ vm_page_reporting_prepare_guest() { # <project> <instance>
       if [ -e "$rule" ] || [ -L "$rule" ]; then
         [ -f "$rule" ] && [ ! -L "$rule" ] || exit 1
       fi
-      install -o 0 -g 0 -m 0644 /dev/stdin "$rule"
+      # -D copies through file descriptors; Rust install otherwise canonicalizes
+      # the pipe source when replacing an existing rule.
+      install -D -o 0 -g 0 -m 0644 /dev/stdin "$rule"
       systemd-tmpfiles --create "$rule"
     ' || {
       printf 'could not install or apply VM Free Page Reporting guest tmpfiles rule\n' >&2

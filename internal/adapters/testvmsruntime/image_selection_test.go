@@ -96,8 +96,8 @@ func TestImageSelectionRecipeIdentity(t *testing.T) {
 	cfg := fixtureConfig(t)
 	cfg.RecipeRoot = testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("recipe"), 0600)
-	// Pinned from master 8c18dbf7, before image selection, with manifest bytes "recipe".
-	const legacy = "c755d79f5eaacebe9feac8231a59e5a87da00336b72665693b20b04a0f6e2e1d"
+	// Pinned Debian pair identity with dependency revision v5 and manifest bytes "recipe".
+	const debianPair = "0f48bd168016e987fa7ef638825e6894009ed491766a5a2c0beb3a8f2449b4a1"
 	seen := map[string]bool{}
 	for _, image := range []string{DefaultImage, "ubuntu-24.04", "ubuntu-26.04"} {
 		selected, err := cfg.withImage(image)
@@ -110,8 +110,8 @@ func TestImageSelectionRecipeIdentity(t *testing.T) {
 				t.Fatalf("shared recipe identity: %s %s %v", image, name, err)
 			}
 			seen[digest] = true
-			if image == DefaultImage && name == EnvironmentPair && digest != legacy {
-				t.Fatal("legacy Debian identity changed")
+			if image == DefaultImage && name == EnvironmentPair && digest != debianPair {
+				t.Fatal("Debian pair identity changed")
 			}
 		}
 	}

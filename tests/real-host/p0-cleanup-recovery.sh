@@ -15,9 +15,12 @@ observe() { timeout --foreground 30 incus "$@" </dev/null; }
 
 # Keep the physical systemd contract beside the existing P0 cleanup fixture.
 sink_lifecycle() (
+  # shellcheck source=dev/e2e/lib-p0-capacity.sh
+  . "$ROOT/dev/e2e/lib-p0-capacity.sh"
   if ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
-    exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
-      env HOME="$HOME" PATH="$PATH" bash "$0" sink-lifecycle "$token"
+    p0_reexec_incus_group \
+      P0_REAL_INCUS_CONTAINER_IMAGE,P0_REAL_INCUS_CONTAINER_CACHE_ALIAS,P0_REAL_INCUS_COMMAND_TIMEOUT,P0_E2E_INCUS_APPARMOR_DROPIN \
+      "$ROOT/tests/real-host/p0-cleanup-recovery.sh" sink-lifecycle "$token"
   fi
   # Reuse the marker-owned P0 owner bootstrap and its exact artifact cleanup.
   # shellcheck disable=SC1090

@@ -85,7 +85,7 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		reboot = true
 	case "unbound":
 		// Only init can tell what NetworkManager holds: it records the guard as unread.
-		if _, err := os.Lstat(NetworkManagerGuardPath); err == nil && networkManagerFileID(NetworkManagerGuardPath) == "" {
+		if _, err := os.Lstat(NetworkManagerGuardPath); err == nil && NetworkManagerFileID(NetworkManagerGuardPath) == "" {
 			violations = append(violations, "the Subyard guard "+NetworkManagerGuardPath+" is not a regular file (a link, for example); init replaces it with a file")
 		} else {
 			violations = append(violations, "no Subyard record binds the guard on disk to what NetworkManager read")
@@ -419,9 +419,9 @@ func NetworkManagerGuardState(record, boot, fileID, hash string) string {
 	}
 }
 
-// networkManagerFileID matches power_nm_file_id: one lstat of the path itself, which must be a
-// regular file (never a link, FIFO or anything a read could block on).
-func networkManagerFileID(path string) string {
+// NetworkManagerFileID supplies both Go and shell guard readers: one lstat of the path itself,
+// which must be a regular file (never a link, FIFO or anything a read could block on).
+func NetworkManagerFileID(path string) string {
 	var stat syscall.Stat_t
 	if err := syscall.Lstat(path, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		return ""
@@ -467,13 +467,13 @@ func networkManagerGuardStateAt(statePath, guardPath, bootPath string) string {
 	}
 	// Subyard writes a regular file; a link could be retargeted and restored behind the record,
 	// and the type is part of the identity read, so nothing else is ever opened.
-	fileID := networkManagerFileID(guardPath)
+	fileID := NetworkManagerFileID(guardPath)
 	if fileID == "" {
 		return "unbound"
 	}
 	guard, err := readRegularGuard(guardPath, fileID)
 	// The identity is read again after the content: a concurrent rewrite changes it.
-	if fileID == "" || err != nil || networkManagerFileID(guardPath) != fileID {
+	if fileID == "" || err != nil || NetworkManagerFileID(guardPath) != fileID {
 		return "unbound"
 	}
 	record, err := os.ReadFile(statePath)
