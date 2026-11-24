@@ -334,15 +334,20 @@ prepare_operator() {
 
 update_baseline_hop() { # <version>
   local provision="$SHARED_ROOT/hop-codex-provision.sh"
+  local configuration="$OPERATOR_HOME/.config/subyard/config.env"
+  local before="$OPERATOR_HOME/.config/subyard/hop-config.before"
   # The immutable hop predates the Codex anonymous-REST-quota fix. Use the
-  # verified candidate's hook for this command only, retaining the real hop's
+  # verified candidate's hook for this hop only, retaining the real hop's
   # running-yard activation and its own configuration and approval defaults.
   # Its guest transport does not forward DEV_SUDO; the hop had no sudo prompts.
   install -m 0644 /dev/null "$provision"
   { printf '%s\n' 'export DEV_SUDO=no'; cat "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh"; } > "$provision"
-  operator_no_go env \
-    AGENT_codex_PROVISION="$provision" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$1" --yes
+  # The legacy release handoff drops command-scoped file overrides. Its local
+  # configuration survives that handoff; restore its exact bytes afterwards.
+  operator_env install -m 0600 "$configuration" "$before"
+  operator_env bash -c 'printf "AGENT_codex_PROVISION=%q\n" "$1" >> "$2"' _ "$provision" "$configuration"
+  operator_yard update --version "$1" --yes
+  operator_env install -m 0600 "$before" "$configuration"
 }
 
 prepare_baseline_yards() {

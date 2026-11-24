@@ -6124,7 +6124,9 @@ CANDIDATE_A_REPOSITORY=$1/candidate
 IFS=$'\t' read -r HOP_VERSION _ HOP_SHA _ < <(published_hop)
 BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
 PROJECT=subyard-e2e-yard INSTANCE=yard-e2e-yard DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard
-install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$SHARED_ROOT"
+install -d -m 0700 "$OPERATOR_HOME/.local/bin" "$OPERATOR_HOME/.config/subyard" "$SHARED_ROOT"
+install -m 0600 /dev/null "$OPERATOR_HOME/.config/subyard/config.env"
+printf 'CODING_TOOL_INTEGRATIONS=codex\n' > "$OPERATOR_HOME/.config/subyard/config.env"
 install -d -m 0755 "$CANDIDATE_A_REPOSITORY/config/agents/codex"
 printf '# candidate provisioner\n' > "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh"
 trace="$F/trace"
@@ -6157,7 +6159,9 @@ operator_env() {
 operator_yard() {
   case "$*" in
     --version) printf 'yard %s\n' "$(cat "$F/active-version")"; return ;;
-    "update --version $HOP_VERSION --yes") printf '%s\n' "$HOP_VERSION" > "$F/active-version" ;;
+    "update --version $HOP_VERSION --yes")
+      grep -Fxq "AGENT_codex_PROVISION=$SHARED_ROOT/hop-codex-provision.sh" "$OPERATOR_HOME/.config/subyard/config.env"
+      printf '%s\n' "$HOP_VERSION" > "$F/active-version" ;;
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
@@ -6165,13 +6169,6 @@ operator_yard() {
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
-}
-operator_no_go() {
-  [ "$1" = env ] && [ "$2" = "AGENT_codex_PROVISION=$SHARED_ROOT/hop-codex-provision.sh" ] \
-    && [ "$3" = "$OPERATOR_HOME/.local/bin/yard" ] || exit 93
-  printf 'hop provisioner candidate\n' >> "$trace"
-  shift 3
-  operator_yard "$@"
 }
 prepare_baseline_yards
 [ "$(head -n 2 "$trace")" = $'install 0.11.0\nconfig sync' ]
@@ -6185,7 +6182,8 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
-[ "$(tail -n 2 "$trace")" = $'hop provisioner candidate\n'"yard update --version $HOP_VERSION --yes" ]
+[ "$(tail -n 1 "$trace")" = "yard update --version $HOP_VERSION --yes" ]
+! grep -q '^AGENT_codex_PROVISION=' "$OPERATOR_HOME/.config/subyard/config.env"
 # The creation runtime removes the DEV_SUDO assignment before the hop update.
 [ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
   -e "yard update --version $HOP_VERSION --yes" "$trace")" \
@@ -6470,32 +6468,39 @@ RECREATE
 done
 
 # Only the immutable hop gets the fixed provisioner; retain native failures and
-# leave the candidate update's command environment untouched.
+# restore the exact original configuration before selecting the candidate.
 for hop_status in 0 23; do
   hop_root="$TMP/source-hop-$hop_status"
-  mkdir -p "$hop_root/candidate/config/agents/codex" "$hop_root/shared"
+  mkdir -p "$hop_root/candidate/config/agents/codex" "$hop_root/shared" "$hop_root/operator/.config/subyard"
   printf '# candidate provisioner\n' > "$hop_root/candidate/config/agents/codex/provision.sh"
+  install -m 0600 /dev/null "$hop_root/operator/.config/subyard/config.env"
+  printf 'CODING_TOOL_INTEGRATIONS=codex\n' > "$hop_root/operator/.config/subyard/config.env"
   hop_rc=0
   bash -e -c '
     eval "$1"
     hop_status="$3"
-    OPERATOR_HOME=/operator CANDIDATE_A_REPOSITORY="$2/candidate" SHARED_ROOT="$2/shared"
+    OPERATOR_HOME="$2/operator" CANDIDATE_A_REPOSITORY="$2/candidate" SHARED_ROOT="$2/shared"
     AGENT_codex_PROVISION=original
     incus() { exit 91; }
-    operator_no_go() {
+    operator_env() { "$@"; }
+    operator_yard() {
       printf "%s\n" "$*"
       [ "$(head -n 1 "$SHARED_ROOT/hop-codex-provision.sh")" = "export DEV_SUDO=no" ]
       tail -n +2 "$SHARED_ROOT/hop-codex-provision.sh" | cmp "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" -
       [ "$(stat -c %a "$SHARED_ROOT/hop-codex-provision.sh")" = 644 ]
+      grep -Fxq "AGENT_codex_PROVISION=$SHARED_ROOT/hop-codex-provision.sh" "$OPERATOR_HOME/.config/subyard/config.env"
+      grep -Fxq "CODING_TOOL_INTEGRATIONS=codex" "$OPERATOR_HOME/.config/subyard/config.env"
       return "$hop_status"
     }
     update_baseline_hop 0.28.1
     [ "$AGENT_codex_PROVISION" = original ]
+    cmp "$OPERATOR_HOME/.config/subyard/hop-config.before" "$OPERATOR_HOME/.config/subyard/config.env"
+    [ "$(stat -c %a "$OPERATOR_HOME/.config/subyard/config.env")" = 600 ]
   ' _ "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop)" \
     "$hop_root" "$hop_status" > "$TMP/source-hop.log" || hop_rc=$?
-  expected="env AGENT_codex_PROVISION=$hop_root/shared/hop-codex-provision.sh /operator/.local/bin/yard update --version 0.28.1 --yes"
+  expected='update --version 0.28.1 --yes'
   [ "$hop_rc" = "$hop_status" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
-    || fail "source hop lost its command-scoped provisioner or native exit $hop_status"
+    || fail "source hop lost its temporary provisioner or native exit $hop_status"
 done
 
 # Published baseline selection must be explicit and precede its real init.
