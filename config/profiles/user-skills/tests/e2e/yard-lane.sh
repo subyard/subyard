@@ -144,8 +144,14 @@ git -C "$work" -c user.name=lane -c user.email=lane@example.org commit -q -m ski
 git clone -q --bare "$work" "$HOME/lane-skills.git"
 '
 
-printf 'user-skills_e2e_stage=unavailable\n'
+printf 'user-skills_e2e_stage=enable-unavailable\n'
 yard "$first" config set USER_SKILL_SOURCES "$source_url" --scope yard --yes
+yard "$first" profile enable user-skills --yes 2>"$STATE/enable-unavailable.log"
+grep -F >/dev/null 'user-skills: warning: could not clone home/dev/lane-skills;' "$STATE/enable-unavailable.log" \
+  || die 'missing enable retry warning'
+[ "$(ready "$first")" = false ] || die 'enable with an unreachable source reported ready'
+
+printf 'user-skills_e2e_stage=unavailable\n'
 yard "$first" config set ENVIRONMENT_PROFILES 'user-skills' --scope yard --yes
 yard "$first" init --yes 2>"$STATE/unavailable.log"
 grep -F >/dev/null 'user-skills: warning: could not clone home/dev/lane-skills;' "$STATE/unavailable.log" \
