@@ -791,7 +791,7 @@ resume belong to `full-uninstall`; older product recovery readers retain host-fr
 | `reboot-verify` | VM1, real Incus and cached image preparation; published-anchor upgrade, refused anchor rollback and a candidate-built compatible rollback/roll-forward fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full; release acceptance runs it as `vm:p0-legacy-continuation` |
 | `yard-maintenance` | VM1, frozen candidate and pinned published 0.28.0 → 0.28.1 hop; one container and two bounded VMs, one weighted | Explicit synthetic pending-marker/foreign-policy drift after the supported hop on anchor-created VM yards, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
-| `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
+| `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, config apply/status and a configured guest file hash, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, shared published anchor, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton retained-data/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke and full both cover fresh init/projects/RPC, offline projects and credentials |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -858,7 +858,10 @@ dev/e2e/disabled-components-release.sh --slot "$slot"
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
 fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0
 with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1 hop has no release
-check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
+check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free.
+That hop lane also seeds explicitly synthetic retained schema-1 Git settings, verifies
+that candidate update preserves them, then migrates them with `config sync` without
+changing the running yard identity, power intent or retained data. A later
 previous release distinct from both remains a direct baseline. When the baseline ships the
 candidate's exact registry bytes, the lane also rolls back to it, checks Ready and unchanged
 migration history, and updates to the candidate again. An owning profile lane can pass a

@@ -222,6 +222,73 @@ assert_source_refusal() {
   done
 }
 
+# The supported hop can retain schema-1 Git ownership from an earlier install.
+# Derive valid source identities and digests with its own sync, then explicitly
+# reopen that retained format; no unsupported release is installed.
+prepare_retained_git_settings() {
+  [ "$OLD_VERSION" = "$HOP_VERSION" ] || return 0
+  RETAINED_SETTINGS_SOURCE="$(operator_env mktemp -d /tmp/subyard-published-settings.XXXXXX)"
+  operator_env bash -se -- "$RETAINED_SETTINGS_SOURCE" <<'SH'
+cd "$1"
+install -d -m 0700 shared
+printf '{"schemaVersion":1}\n' > subyard-config.json
+printf "GIT_USER_NAME='Published Sync Author'\n" > shared/config.env
+chmod 0600 subyard-config.json shared/config.env
+git init -q
+git add subyard-config.json shared
+git -c user.name=Fixture -c user.email=fixture@example.invalid -c core.hooksPath=/dev/null commit -qm 'Configure retained published settings'
+SH
+  operator_yard config sync "$RETAINED_SETTINGS_SOURCE" --yes
+  operator_env python3 - "$OPERATOR_HOME/.config/subyard" <<'PY_SETTINGS'
+import hashlib, json, pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+manifest = root / '.sync/manifest.json'
+value = json.loads(manifest.read_text())
+assert value['schemaVersion'] == 2 and value['generation'] == 1
+assert len(value['files']) == 1
+file = value['files'][0]
+assert file['path'] == '.sync/settings/overrides/shared/config.env'
+cached = root / file['path']
+assert hashlib.sha256(cached.read_bytes()).hexdigest() == file['digest']
+assert cached.stat().st_mode & 0o777 == file['mode'] == 0o600
+for directory in (root / 'overrides', root / 'overrides/shared'):
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+retained = root / 'overrides/shared/config.env'
+assert not retained.exists() and not retained.is_symlink()
+cached.rename(retained)
+file['path'] = 'overrides/shared/config.env'
+value['schemaVersion'] = 1
+manifest.write_text(json.dumps(value) + '\n')
+manifest.chmod(0o600)
+PY_SETTINGS
+  RETAINED_SETTINGS_DIGEST="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" \
+    "$OPERATOR_HOME/.config/subyard/overrides/shared/config.env")"
+  RETAINED_SETTINGS_POWER="$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")"
+  ok 'supported hop retains explicitly synthetic schema-1 Git settings'
+}
+
+migrate_retained_git_settings() {
+  [ "$OLD_VERSION" = "$HOP_VERSION" ] || return 0
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" \
+    "$OPERATOR_HOME/.config/subyard/overrides/shared/config.env")" = "$RETAINED_SETTINGS_DIGEST" ] \
+    || die 'candidate update changed retained schema-1 Git settings before sync'
+  operator_yard config sync "$RETAINED_SETTINGS_SOURCE" --yes
+  operator_env jq -e '.schemaVersion == 2 and .generation == 2 and (.files | length) == 1 and
+    .files[0].path == ".sync/settings/overrides/shared/config.env"' \
+    "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null
+  operator_env cmp "$RETAINED_SETTINGS_SOURCE/shared/config.env" \
+    "$OPERATOR_HOME/.config/subyard/.sync/settings/overrides/shared/config.env"
+  operator_env test ! -e "$OPERATOR_HOME/.config/subyard/overrides/shared/config.env"
+  operator_env test ! -L "$OPERATOR_HOME/.config/subyard/overrides/shared/config.env"
+  [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = "$RETAINED_SETTINGS_POWER" ] \
+    || die 'settings migration changed the running yard power intent'
+  assert_ready
+  operator_env find "$RETAINED_SETTINGS_SOURCE" -depth -delete
+  ok 'candidate sync migrated retained schema-1 settings without changing yard identity, power or data'
+}
+
 # Cleanup removes the journal, so a failed update reports its stopping point first.
 report_failed_transition() {
   operator_env jq -c '{checkpoint, goal, steps: [.steps[] | {id, checkpoint}]}' "$V2_JOURNAL" >&2 || true
@@ -268,6 +335,7 @@ OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/cur
 write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
 assert_published_agent_configs
 ok 'published runtime created a running yard'
+prepare_retained_git_settings
 
 if [ "$PUBLISHED_MODE" != direct ]; then
   assert_source_refusal
@@ -286,6 +354,7 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSI
 CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
 write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
 assert_ready
+migrate_retained_git_settings
 case " $PUBLISHED_AGENTS " in *" claude "*)
   [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
     || die 'updated Claude login-shell environment is missing'
