@@ -47,7 +47,7 @@ prepare_fixture
 install -d "$RELEASE_ROOT"
 cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
-operator_env bash -c 'printf "%s\n" "AGENTS=none" "CODING_TOOL_INTEGRATIONS=" "ENVIRONMENT_PROFILES=" "YARD_IMAGE=subyard-e2e-debian-13-cloud-container" "YARD_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container" "DEV_UID=2000" > "$HOME/.config/subyard/config.env"; chmod 0600 "$HOME/.config/subyard/config.env"'
+operator_env bash -c 'printf "%s\n" "AGENTS=none" "CODING_TOOL_INTEGRATIONS=" "ENVIRONMENT_PROFILES=" "YARD_IMAGE=subyard-e2e-debian-13-container" "YARD_IMAGE_FALLBACK=subyard-e2e-debian-13-container" "DEV_UID=2000" > "$HOME/.config/subyard/config.env"; chmod 0600 "$HOME/.config/subyard/config.env"'
 read -r creation installer_sha archive_sha _ < <(awk -F '\t' '$1=="0.21.3" && $4=="pin"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")
 [ "$creation" = 0.21.3 ] || die 'creation baseline missing'
 curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/Subyard/Subyard/releases/download/v$creation/subyard-install.sh" -o "$INSTALLER"

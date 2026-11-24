@@ -414,7 +414,7 @@ id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
 ok 'public installer completed the cold release transition without Incus access'
 
 
-base_image=subyard-e2e-debian-13-cloud-container
+base_image=subyard-e2e-debian-13-container
 if ! incus image info "$base_image" --project default >/dev/null 2>&1; then
   base_image=images:debian/13
 fi

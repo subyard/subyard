@@ -4,7 +4,7 @@
 # shellcheck disable=SC2034 # consumed by the sourcing payload
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
+BASE_IMAGE=subyard-e2e-debian-13-container
 IFS=$'\t' read -r BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256 _ < <(
   published_anchor
 )
@@ -33,7 +33,7 @@ ensure_platform() {
   incus network show incusbr0 --project default >/dev/null
   if ! incus image info "$BASE_IMAGE" --project default >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=10 900 sudo -n /usr/bin/incus image copy \
-      images:debian/13/cloud local: --alias "$BASE_IMAGE" --project default >/dev/null
+      images:debian/13 local: --alias "$BASE_IMAGE" --project default >/dev/null
   fi
 }
 

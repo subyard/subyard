@@ -67,7 +67,7 @@ func TestRealIncusProjectMetadataLegacyBindRepair(t *testing.T) {
 		}
 		cli("project", "delete", project)
 	})
-	cli("launch", "subyard-e2e-debian-13-cloud-container", instance, "--project", project, "--storage", "default", "-c", "user.subyard.acceptance_fixture="+marker)
+	cli("launch", "subyard-e2e-debian-13-container", instance, "--project", project, "--storage", "default", "-c", "user.subyard.acceptance_fixture="+marker)
 	client := incusclient.New("/var/lib/incus/unix.socket")
 	ctx := context.Background()
 	guest := func(program string, payload []byte) []byte {

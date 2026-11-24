@@ -1826,8 +1826,8 @@ EOF_PEER_INSTALL
   }
   peer_contract_yard() {
     local state
-    [ "$(sed -n 's/^BASE_IMAGE=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
-      && [ "$(sed -n 's/^BASE_IMAGE_FALLBACK=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
+    [ "$(sed -n 's/^BASE_IMAGE=//p' "$PEER_ROOT/config/config.env")" = images:debian/13 ] \
+      && [ "$(sed -n 's/^BASE_IMAGE_FALLBACK=//p' "$PEER_ROOT/config/config.env")" = images:debian/13 ] \
       || fail 'fresh peer image is unavailable in its isolated project'
     state="$(cat "$peer_state")"
     printf '%s %s\n' "$*" "$state" >> "$peer_calls"
@@ -1911,6 +1911,76 @@ for peer_sync_case in two-successes one-busy wrong-refusal; do
   [ "$(cat "$peer_sync_dir/trace")" = "$peer_sync_expected"$'\nteardown' ] \
     || fail "peer sync $peer_sync_case lost launch, inventory, recovery or teardown ordering"
 done
+
+# Execute the proxy fixture's cold-cache branch, then reuse its populated cache.
+(
+  proxy_cache="$TMP/proxy-product-cache"
+  proxy_calls="$TMP/proxy-product-cache.calls"
+  incus_local() {
+    [ "$*" = 'image info subyard-e2e-debian-13-container --project default' ] \
+      || fail "unexpected proxy cache query: $*"
+    [ -f "$proxy_cache" ]
+  }
+  timeout() {
+    [ "$1 $2 $3" = '--foreground --kill-after=10 300' ] || return 42
+    shift 3
+    "$@"
+  }
+  sudo() { [ "$1" = -n ] || return 42; shift; "$@"; }
+  incus() {
+    [ "$*" = 'image copy images:debian/13 local: --alias subyard-e2e-debian-13-container --project default' ] \
+      || fail "proxy fixture populated the product cache with the wrong image: $*"
+    printf '%s\n' "$*" >> "$proxy_calls"
+    : > "$proxy_cache"
+  }
+  proxy_cache_code="$(sed -n '/^IMAGE=/,/^sudo -n ip link add/p' "$ROOT/dev/e2e/proxy-address-wait.sh" | sed '$d')"
+  [ -n "$proxy_cache_code" ] || fail 'proxy cache branch is absent'
+  eval "$proxy_cache_code"
+  [ -f "$proxy_cache" ] || fail 'cold proxy fixture did not populate its product cache'
+  eval "$proxy_cache_code"
+  [ "$(wc -l < "$proxy_calls")" = 1 ] || fail 'warm proxy fixture copied the product image again'
+)
+
+# A warm legacy cloud cache must never satisfy the product-image cache.
+# Execute the fixture's actual default and cache preparation, then pin its image.
+# shellcheck disable=SC2034
+(
+  unset P0_REAL_INCUS_CONTAINER_IMAGE P0_REAL_INCUS_CONTAINER_CACHE_ALIAS
+  eval "$(sed -n '/^OWNER_BASE_IMAGE=/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  [ "$OWNER_BASE_IMAGE" != subyard-e2e-debian-13-cloud-container ] \
+    || fail 'product fixture still accepts the legacy cloud cache alias'
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" ensure_owner_base_image)"
+  # shellcheck source=dev/e2e/lib-p0-incus-image.sh
+  . "$ROOT/dev/e2e/lib-p0-incus-image.sh"
+  calls="$TMP/product-image-cache.calls"
+  cached="$TMP/product-image-cache.ready"
+  product_hash="$(printf 'b%.0s' {1..64})"
+  legacy_cloud_hash="$(printf 'c%.0s' {1..64})"
+  die() { fail "$*"; }
+  timeout() { shift 2; "$@"; }
+  incus() {
+    printf '%s\n' "$*" >> "$calls"
+    case "$*" in
+      'image info subyard-e2e-debian-13-cloud-container --project default')
+        printf 'Fingerprint: %s\nType: container\n' "$legacy_cloud_hash" ;;
+      "image info $OWNER_BASE_IMAGE --project default")
+        [ -f "$cached" ] || return 1
+        printf 'Fingerprint: %s\nType: container\n' "$product_hash" ;;
+      "image copy images:debian/13 local: --alias $OWNER_BASE_IMAGE") : > "$cached" ;;
+      'remote list --format=json') printf '{"images":{"Public":true,"Protocol":"simplestreams"}}\n' ;;
+      "image info images:$product_hash") printf 'Fingerprint: %s\nType: container\n' "$product_hash" ;;
+      *) fail "unexpected product image-cache command: $*" ;;
+    esac
+  }
+  OWNER_BASE_IMAGE_CREATED=0
+  ensure_owner_base_image >/dev/null
+  [ "$OWNER_BASE_IMAGE_CREATED" = 1 ] || fail 'warm cloud cache prevented product image creation'
+  ensure_owner_base_image >/dev/null
+  [ "$(grep -c '^image copy ' "$calls")" = 1 ] || fail 'product cache was not reused'
+  [ "$(p0_container_image_reference "$OWNER_BASE_IMAGE")" = "images:$product_hash" ] \
+    || fail 'product fixture selected the warm cloud fingerprint'
+  ! grep -Fq "$legacy_cloud_hash" "$calls" || fail 'product fixture queried the cloud fingerprint'
+)
 
 # Fresh owner init must also create its own project, using the exact cached image.
 # Globals below are consumed by the extracted fixture helpers.
@@ -5509,7 +5579,7 @@ for dispatcher_mode in prepare login resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_registered_ownership\nprepare_late_storage\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_registered_ownership\nprepare_late_storage\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     login)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nrestore_late_storage_after_login\nexit preserve=1 cleanup=1'

@@ -641,7 +641,7 @@ stage cached-image-dev-uid
 ! incus project show "$IMAGE_PROBE_PROJECT" >/dev/null 2>&1 || die 'UID probe project already exists'
 IMAGE_PROBE_CLAIMED=1
 incus project create "$IMAGE_PROBE_PROJECT" -c features.images=false -c "user.activation-fixture=$STATE"
-incus launch subyard-e2e-debian-13-cloud-container uid-probe --project "$IMAGE_PROBE_PROJECT" --storage default \
+incus launch subyard-e2e-debian-13-container uid-probe --project "$IMAGE_PROBE_PROJECT" --storage default \
   -c "user.activation-fixture=$STATE" -c limits.memory=512MiB -c limits.cpu=1
 incus exec uid-probe --project "$IMAGE_PROBE_PROJECT" -- sh -s -- "$FIXTURE_DEV_UID" < "$STATE/check-dev-uid.sh" \
   || die 'configured fixture DEV_UID is occupied, mismatched or unavailable in the cached image'
@@ -691,8 +691,8 @@ FORWARD_SSH_AGENT=0
 HOST_CLAUDE_MD=$STATE/preview-host-instructions
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
-BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container
+BASE_IMAGE=subyard-e2e-debian-13-container
+BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-container
 EOF
 printf 'Keep these unmarked operator instructions.\n' > "$STATE/preview-host-instructions"
 chmod 0600 "$STATE/preview-host-instructions"

@@ -378,7 +378,7 @@ prepare_operator() {
   operator_env install -d -m 0700 "$OPERATOR_HOME/.config/subyard" "$OPERATOR_HOME/.local/bin"
   operator_env bash -c 'printf "%s" "$2" > "$1"' _ \
     "$OPERATOR_HOME/.config/subyard/config.env" \
-    $'AGENTS=none\nBASE_IMAGE=subyard-e2e-debian-13-cloud-container\nBASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container\nDEV_UID=2000\n'
+    $'AGENTS=none\nBASE_IMAGE=subyard-e2e-debian-13-container\nBASE_IMAGE_FALLBACK=subyard-e2e-debian-13-container\nDEV_UID=2000\n'
   operator_env chmod 0600 "$OPERATOR_HOME/.config/subyard/config.env"
 }
 
@@ -709,7 +709,7 @@ done
 incus info >/dev/null || die 'initialized Incus is required'
 case "$MODE" in
   run|prepare)
-    incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null \
+    incus image info subyard-e2e-debian-13-container --project default >/dev/null \
       || die 'the P0 Debian image cache is required'
     prepare_candidate
     exercise_activation_only_repair

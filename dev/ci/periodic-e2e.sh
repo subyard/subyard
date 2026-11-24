@@ -9,7 +9,7 @@ RESULTS="${RUNNER_TEMP:-/var/tmp}/hosted-logs/results.tsv"
 LOGS="${RUNNER_TEMP:-/var/tmp}/hosted-logs"
 # Controllers attribute leases from the managed workspace path.
 WORKSPACE=/srv/workspaces/Subyard/src
-PACKAGES=(build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
+PACKAGES=(acl build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
 
 die() { printf 'periodic-e2e: %s\n' "$*" >&2; exit 2; }
 
@@ -95,6 +95,9 @@ prepare_packages() {
 
 prepare_host() {
   prepare_packages
+  # Hosted images grant runner access to future homes through a default ACL.
+  # Disposable fixture homes must honor their own creation modes and umasks.
+  sudo -n setfacl -k /home
   if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
     sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
   fi
