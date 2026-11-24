@@ -117,6 +117,8 @@ def plan(root=ROOT, image=IMAGES[0]):
         if "vm:published-upgrade/" + catalog_version not in declared:
             include.append({"id": "published:" + version,
                             "command": published_upgrade(version, "none" if expectation in ("direct", "anchor", "hop") else "refusal")})
+    include += [{"id": "p0:init-settings", "manual": True,
+                 "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "init-settings", *SLOT]}]
     include += PERIODIC_ONLY
     include += [veranda_short(name, options) for name, options in VERANDA.items()]
     include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]

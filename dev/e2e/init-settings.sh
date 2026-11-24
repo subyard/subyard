@@ -92,8 +92,7 @@ chmod 0755 /usr/local/bin/fixture-hook
 SH
 chmod 0600 "$STATE/provision.sh"
 printf '{"fixture":"before"}\n' > "$STATE/claude.json"
-printf 'fixture instructions before\n' > "$STATE/CLAUDE.md"
-chmod 0600 "$STATE/claude.json" "$STATE/CLAUDE.md"
+chmod 0600 "$STATE/claude.json"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((35000 + $$ % 10000))
 cat > "$SUBYARD_CONFIG_HOME/yards/$name/config.env" <<EOF
@@ -105,7 +104,6 @@ CODING_TOOL_INTEGRATIONS=
 CODING_TOOL_GIT_APPROVAL=prompt
 AGENT_claude_PROVISION=$STATE/provision.sh
 AGENT_claude_CONFIG=$STATE/claude.json
-HOST_CLAUDE_MD=$STATE/CLAUDE.md
 AGENT_claude_COMMAND=fixture-agent
 AGENT_claude_CHECK=fixture-check
 AGENT_claude_PERSIST=
@@ -174,7 +172,6 @@ yard start --yes
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("diagnostics",None); open(p,"w").write(json.dumps(value))'
 yard init --yes
 printf '{"fixture":"after"}\n' > "$STATE/claude.json"
-printf 'fixture instructions after\n' > "$STATE/CLAUDE.md"
 drift_exit=0
 yard config status > "$STATE/config-drift.log" 2>&1 || drift_exit=$?
 if [ "$drift_exit" != 1 ] || ! grep -Fq 'AGENT_claude_CONFIG  content changed' "$STATE/config-drift.log"; then
@@ -198,8 +195,8 @@ if ! yard config status > "$STATE/config-converged.log" 2>&1 \
   cat "$STATE/config-converged.log" >&2
   printf 'init-settings: config apply did not converge the live yard\n' >&2; exit 1
 fi
-host_hash="$(sha256sum "$STATE/CLAUDE.md" | cut -d' ' -f1)"
-guest_hash="$(guest sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)"
+host_hash="$(sha256sum "$STATE/claude.json" | cut -d' ' -f1)"
+guest_hash="$(guest sha256sum /home/dev/.claude/settings.json | cut -d' ' -f1)"
 [ "$host_hash" = "$guest_hash" ]
 printf 'PASS: installed config apply converges live drift and materializes the configured guest file hash\n'
 # Seed the protected legacy inventory shape, preserving its native ownership.

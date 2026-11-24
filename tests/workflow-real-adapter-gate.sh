@@ -563,7 +563,8 @@ assert {kind: {"include": [entry for entry in group["include"] if entry["id"] no
 plan = default_plan
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
-for only in ("", config_sync["id"],
+assert next(entry for entry in plan["checks"]["include"] if entry["id"] == "p0:init-settings")["manual"]
+for only in ("", "p0:init-settings", config_sync["id"],
              *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,

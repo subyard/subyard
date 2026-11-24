@@ -826,7 +826,8 @@ Published upgrade lanes use only v0.28.0 or newer. The retired schema-1 source-u
 and below-anchor published-refusal lanes are absent from the planner. Host-free
 `compatibility` exercises the actual v0.28.0 updater against the packaged candidate,
 including read-only inspection and retained settings/data. Config apply/status with a
-guest file hash belongs to `p0:init-settings`. The `published:0.28.1` lane seeds an
+guest file hash belongs to the manual `p0:init-settings` Periodic check.
+The `published:0.28.1` lane seeds an
 explicitly synthetic retained schema-1 Git settings manifest on the supported hop,
 checks that candidate update preserves it, then migrates it with `config sync`.
 
