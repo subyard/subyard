@@ -28,6 +28,8 @@ func TestAdmitDirStates(t *testing.T) {
 		{"narrower setuid", admitFixtureDir(t, 0o500|fs.ModeSetuid), 0o500 | fs.ModeSetuid | fs.ModeDir},
 		{"narrower sticky", admitFixtureDir(t, 0o500|fs.ModeSticky), 0o700 | fs.ModeSticky | fs.ModeDir},
 		{"exact setgid", admitFixtureDir(t, 0o700|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
+		{"broader setgid", admitFixtureDir(t, 0o755|fs.ModeSetgid), 0o700 | fs.ModeSetgid | fs.ModeDir},
+		{"broader setgid sticky", admitFixtureDir(t, 0o775|fs.ModeSetgid|fs.ModeSticky), 0o700 | fs.ModeSetgid | fs.ModeSticky | fs.ModeDir},
 		{"regular file", func(path string) { testkit.WriteFile(t, path, nil, 0o600) }, 0o600},
 		{"dangling symlink", func(path string) { admitFixtureLink(t, filepath.Join(root, "absent-target"), path) }, 0},
 		{"symlink to file", func(path string) {

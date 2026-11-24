@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -65,11 +66,13 @@ func EnsureDir(path string, o DirOptions) error {
 func EnsurePrivateDir(path string) error { return EnsureDir(path, DirOptions{}) }
 
 // AdmitDir runs before a caller's own directory policy and never replaces it.
-// It sets mode on a directory the caller owns that has no setuid or setgid
-// bit, keeping the sticky bit, so both narrower and broader owned directories
-// reach the caller's policy in the expected state. Every other state,
-// including absence, a symlink, another owner, set-ID bits, lookup errors and
-// a failed chmod, is left unchanged for the caller's policy to handle.
+// It sets mode on a directory the caller owns, keeping the sticky bit, so both
+// narrower and broader owned directories reach the caller's policy in the
+// expected state. A set-ID directory only loses access outside mode and keeps
+// its set-ID bits; it is left unchanged when the kernel would clear its
+// set-group-ID bit. Every other state, including absence, a symlink, another
+// owner, lookup errors and a failed chmod, is left unchanged for the caller's
+// policy to handle.
 func AdmitDir(path string, mode fs.FileMode) error {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -81,15 +84,28 @@ func AdmitDir(path string, mode fs.FileMode) error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return nil
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) {
 		return nil
 	}
 	want, have := uint32(mode.Perm()), stat.Mode&0o777
-	if stat.Uid == uint32(os.Geteuid()) && stat.Mode&0o6000 == 0 && have != want {
-		// A failed finish leaves the directory for the caller's policy.
+	// A failed finish leaves the directory for the caller's policy.
+	switch {
+	case have == want:
+	case stat.Mode&0o6000 == 0:
 		_ = dir.chmod(want | stat.Mode&0o1000)
+	case have&^want != 0 && keepsSetGID(stat):
+		_ = dir.chmod(have&want | stat.Mode&0o7000)
 	}
 	return nil
+}
+
+// keepsSetGID reports whether a chmod by the caller keeps the set-group-ID bit.
+func keepsSetGID(stat unix.Stat_t) bool {
+	if stat.Mode&unix.S_ISGID == 0 || os.Geteuid() == 0 || stat.Gid == uint32(os.Getegid()) {
+		return true
+	}
+	groups, err := os.Getgroups()
+	return err == nil && slices.Contains(groups, int(stat.Gid))
 }
 
 func SyncDir(path string) error {

@@ -714,3 +714,20 @@ func TestReservationRefusesSymlinkedReservationFile(t *testing.T) {
 		t.Fatalf("reservation read through a symlink: %v", err)
 	}
 }
+
+func TestFileStoreNarrowsBroaderSetGIDStateDirectory(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Put(context.Background(), fixtureRecord("setgid")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.Directory(), 0o755|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), fixtureRecord("setgid")); err != nil {
+		t.Fatalf("operator-owned set-group-ID state directory was not narrowed: %v", err)
+	}
+	info, err := os.Stat(store.Directory())
+	if err != nil || info.Mode()&(os.ModePerm|os.ModeSetgid) != 0o700|os.ModeSetgid {
+		t.Fatalf("state directory mode = %v (%v)", info.Mode(), err)
+	}
+}
