@@ -1,5 +1,5 @@
 {
-  "comment": "Shared remote URL vectors: domain.NormalizeRemoteURL and the user-skills sync helper both read this file.",
+  "comment": "Remote URL normalization and refusal vectors for domain.NormalizeRemoteURL.",
   "normalized": {
     "https://GitHub.com/Owner/dev-flow.git/": "https://github.com/Owner/dev-flow",
     "https://github.com:443/owner/repo": "https://github.com/owner/repo",

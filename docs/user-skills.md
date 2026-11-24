@@ -36,7 +36,7 @@ refusal names the item by position, never by value. An empty value means no sour
 
 Each source is an ordinary Git clone under `~/.local/share/subyard-user-skills/<name>`,
 where `<name>` combines the repository name and a hash of the configured URL.
-Subyard clones only a missing directory. It never pulls, updates or deletes an existing clone.
+Subyard clones only a missing or empty target directory. It never pulls, updates or deletes an existing clone.
 Each real `skills/<skill>` directory containing `SKILL.md` is linked into
 `~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`,
 `~/.pi/agent/skills` and `~/.hermes/skills`.
@@ -52,3 +52,4 @@ allows init to complete. The next init retries. `yard profile status user-skills
 `ready: false` while a configured clone or link is missing; this is derived from the
 filesystem, without a state file or lock. Each clone attempt is bounded to 60 seconds,
 with a 300-second total clone budget per init.
+The next init also removes abandoned temporary clone directories owned by the hook.

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The user-skills guest sync helper reads the same vectors.
+// Remote URL normalization and refusals use the table-driven vectors below.
 func TestNormalizeRemoteURL(t *testing.T) {
 	data, err := os.ReadFile("testdata/remote-urls.json")
 	if err != nil {

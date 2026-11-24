@@ -102,6 +102,40 @@ class CloneLinks(unittest.TestCase):
         self.assertEqual(self.run_hook('check', url)[0], 0)
         self.assertTrue((self.home / '.claude/skills/alpha').is_symlink())
 
+    def test_empty_target_is_cloned_on_the_next_init(self):
+        url = self.repository('empty-target')
+        target = self.target(url).parents[1]
+        target.mkdir(parents=True)
+        self.assertEqual(self.run_hook('check', url)[0], 1)
+        self.assertEqual(self.run_hook('apply', url), (0, ''))
+        self.assertTrue((target / '.git').is_dir())
+        self.assertEqual(os.readlink(self.home / '.claude/skills/alpha'), str(self.target(url)))
+
+    def test_next_init_removes_only_owned_temporary_clone_directories(self):
+        url = self.repository('interrupted')
+        self.assertEqual(self.run_hook('apply', url), (0, ''))
+        prefix = '.tmp-' + clone.source_name(url) + '-'
+        stale = Path(tempfile.mkdtemp(prefix=prefix, dir=self.root))
+        (stale / 'partial').write_text('interrupted clone')
+        unrelated = self.root / '.tmp-unrelated'
+        unrelated.mkdir()
+        elsewhere = self.base / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'keep').write_text('mine')
+        link = self.root / (prefix + 'abcdef12')
+        link.symlink_to(elsewhere)
+        regular = self.root / (prefix + 'abcdef13')
+        regular.write_text('mine')
+        self.assertEqual(self.run_hook('check', url)[0], 1)
+        self.assertEqual(self.run_hook('apply', url), (0, ''))
+        self.assertFalse(stale.exists())
+        self.assertTrue(unrelated.is_dir())
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((elsewhere / 'keep').read_text(), 'mine')
+        self.assertEqual(regular.read_text(), 'mine')
+        self.assertTrue((self.target(url).parents[1] / '.git').is_dir())
+        self.assertEqual(self.run_hook('check', url)[0], 0)
+
     def test_first_source_wins_and_foreign_paths_and_reserved_names_stay(self):
         first = self.repository('first', ('alpha', 'beta', 'subyard-own'))
         second = self.repository('second', ('alpha', 'gamma'))

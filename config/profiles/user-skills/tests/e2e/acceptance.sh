@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One leased VM: the installed candidate creates a named yard with the profile, then
-# checks source access, agent sync, disable/enable, deselection and named-yard enable.
+# checks source access retry, disable/enable, deselection and named-yard enable.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 slot=''

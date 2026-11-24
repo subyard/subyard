@@ -25,6 +25,7 @@ ATTEMPT_TIMEOUT = 60
 CLONE_BUDGET = 300
 SKILL_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
 SOURCE_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}')
+TEMP_NAME = re.compile(r'\.tmp-' + SOURCE_NAME.pattern + r'-[a-z0-9_]{8}')
 
 
 def source_name(normalized):
@@ -69,6 +70,14 @@ def harness_directories(home):
     return usable, skipped
 
 
+def temporary_clones(root):
+    if not root.is_dir():
+        return []
+    # Init and scoped profile operations already hold the core's per-yard lock.
+    return [path for path in sorted(root.iterdir()) if TEMP_NAME.fullmatch(path.name)
+            and stat.S_ISDIR((info := path.lstat()).st_mode) and info.st_uid == os.geteuid()]
+
+
 def inspect(home, root, sources):
     """Plan without effects: missing clones, wanted links, removals and skips."""
     missing, wanted, skipped = [], {}, []
@@ -79,6 +88,9 @@ def inspect(home, root, sources):
             continue
         if os.path.islink(clone) or not clone.is_dir():
             skipped.append(f"skipped {clone}: not a directory")
+            continue
+        if not any(clone.iterdir()):
+            missing.append(source)
             continue
         skills = clone / 'skills'
         if os.path.islink(skills) or not skills.is_dir():
@@ -109,7 +121,8 @@ def inspect(home, root, sources):
                 create.append((link, target))
             elif not os.path.islink(link) or os.readlink(link) != target:
                 skipped.append(f'skipped {link}: path is occupied')
-    return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped}
+    return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped,
+            'temporary': temporary_clones(root)}
 
 
 def _die_with_parent(parent):
@@ -185,6 +198,11 @@ def clone(source, home, root, deadline, report):
         try:
             if run_bounded(prefix + [source['url'], str(temporary)], home, root, min(ATTEMPT_TIMEOUT, remaining)) == 0:
                 os.chmod(temporary, 0o755)
+                try:
+                    target.rmdir()  # Only an empty target can be retired before publication.
+                except OSError as error:
+                    if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR):
+                        raise
                 rename_noreplace(temporary, target)
                 return True
         except FileExistsError:
@@ -205,8 +223,11 @@ def run(mode, urls, home, post_apply=False):
                for url in urls]
     plan = inspect(home, root, sources)
     if mode == 'check':
-        return int(bool(plan['remove'] or plan['create'] or (plan['missing'] and not post_apply)))
+        return int(bool(plan['remove'] or plan['create']
+                        or ((plan['missing'] or plan['temporary']) and not post_apply)))
     report = []
+    for temporary in plan['temporary']:
+        remove_tree(temporary, report)
     if sources:
         root.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + CLONE_BUDGET

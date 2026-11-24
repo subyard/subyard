@@ -83,8 +83,8 @@ func NormalizeRemoteURL(item string) (string, error) {
 	if !supported {
 		return "", errors.New("uses an unsupported scheme")
 	}
-	// The authority is parsed by hand, exactly as the guest sync helper does:
-	// no unescaping, so a percent-encoded user or host is never reinterpreted.
+	// Parse the authority without unescaping, so a percent-encoded user or host
+	// is never reinterpreted.
 	authority, path := rest, ""
 	if slash := strings.Index(rest, "/"); slash >= 0 {
 		authority, path = rest[:slash], rest[slash:]
