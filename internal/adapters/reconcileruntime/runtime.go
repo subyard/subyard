@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1094,7 +1095,23 @@ func (runtime Runtime) PrepareServiceRecreation(ctx context.Context) error {
 }
 
 func (runtime Runtime) CheckServiceRecreation(ctx context.Context) error {
-	return (hostruntime.NetworkGuard{State: hostruntime.LocalNetworkManagerGuardState, NextStep: "yard update"}).Check(ctx, []string{runtime.Yard.IncusBridge})
+	return runtime.serviceRecreationNetworkGuard().Check(ctx, []string{runtime.Yard.IncusBridge})
+}
+
+func (runtime Runtime) serviceRecreationNetworkGuard() hostruntime.NetworkGuard {
+	return hostruntime.NetworkGuard{
+		State: hostruntime.LocalNetworkManagerGuardState, NextStep: "yard update",
+		Run: func(ctx context.Context, name string, arguments ...string) ([]byte, error) {
+			if filepath.Base(name) == "NetworkManager" && slices.Equal(arguments, []string{"--print-config"}) {
+				var output bytes.Buffer
+				err := runtime.runScript(ctx, &output, "install-power-reconciler.sh", "--print-network-manager-config")
+				return output.Bytes(), err
+			}
+			command := exec.CommandContext(ctx, name, arguments...)
+			command.Env = runtime.Environment
+			return command.CombinedOutput()
+		},
+	}
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
