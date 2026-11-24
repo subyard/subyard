@@ -13,6 +13,8 @@ REAL_INSTANCE=''
 REAL_VOLUME=''
 E2E_POOL='subyard-sudo-terminal'
 POOL_OWNED=0
+SUDO_PROMPT_PATTERN='\[sudo\] password for|\[sudo: authenticate\] Password:'
+SUDO_RETRY_PATTERN='Sorry, try again\.|Authentication failed, try again\.'
 
 die() { printf 'sudo-terminal-ownership: %s\n' "$*" >&2; exit 2; }
 
@@ -181,6 +183,13 @@ SH
 chmod 0755 "$TMP/run-teardown"
 
 if [ "${1:-}" = --check-fixture ]; then
+  for transcript in $'[sudo] password for fixture: \nSorry, try again.\n[sudo] password for fixture: ' \
+    $'[sudo: authenticate] Password: \nsudo: Authentication failed, try again.\n[sudo: authenticate] Password: '; do
+    [ "$(grep -Eo "$SUDO_PROMPT_PATTERN" <<<"$transcript" | wc -l)" -eq 2 ] \
+      || die 'native sudo prompt count differs'
+    grep -Eq "$SUDO_RETRY_PATTERN" <<<"$transcript" || die 'native sudo retry was not recognized'
+  done
+  ! grep -Eq "$SUDO_PROMPT_PATTERN" <<<'application Password:' || die 'non-sudo prompt was accepted'
   "$TMP/run-teardown" config show CODING_TOOL_INTEGRATIONS >/dev/null
   # Exercise the staged guard used by native teardown planning without Incus or sudo.
   printf '{"Path":"%s"}\n' "$fixture_home" \
@@ -235,7 +244,7 @@ run_prompted_pty() {
     count=$((count + 1))
     deadline=$((SECONDS + 30))
     # sudo can discard input during the delay before a retry prompt.
-    until [ "$(grep -Fc '[sudo] password for' "$output" || true)" -ge "$count" ]; do
+    until [ "$(grep -Ec "$SUDO_PROMPT_PATTERN" "$output" || true)" -ge "$count" ]; do
       if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
         kill "$pid" 2>/dev/null || true
         exec {input_fd}>&-
@@ -275,13 +284,13 @@ if ! run_prompted_pty "$pty_output" 90s "sudo -k; '$TMP/run-teardown'; '$TMP/run
     | tail -n 120 >&2
   die "interactive PTY check failed (child status $pty_child_rc)"
 fi
-grep -Fq '[sudo] password for' "$pty_output" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$pty_output" \
   || die 'standard sudo password prompt was not visible'
-grep -Fq 'Sorry, try again.' "$pty_output" \
+grep -Eq "$SUDO_RETRY_PATTERN" "$pty_output" \
   || die 'standard sudo retry after an incorrect password was not visible'
 [ "$(grep -Fc 'root-step=0' "$pty_output")" -eq 2 ] \
   || die 'the authorized command did not continue twice'
-[ "$(grep -Fo '[sudo] password for' "$pty_output" | wc -l)" -eq 2 ] \
+[ "$(grep -Eo "$SUDO_PROMPT_PATTERN" "$pty_output" | wc -l)" -eq 2 ] \
   || die 'the cached credential opened an extra password prompt'
 grep -Fq "$password" "$pty_output" && die 'password leaked into the PTY transcript'
 printf '  [ ok ] standard retry and cached credential verified\n'
@@ -304,7 +313,7 @@ printf '  [ .. ] checking Ctrl-C at the standard sudo prompt\n'
 run_prompted_pty "$interrupt_output" 90s "sudo -k; '$TMP/run-teardown'" $'\003' \
   || die 'could not complete the Ctrl-C PTY exchange'
 [ "$pty_child_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
-grep -Fq '[sudo] password for' "$interrupt_output" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$interrupt_output" \
   || die 'Ctrl-C fixture did not reach the sudo prompt'
 grep -Fq 'root-step=' "$interrupt_output" \
   && die 'Ctrl-C reached the root mutation'
@@ -502,7 +511,7 @@ run_real_pty() {
 real_init_output="$TMP/real-init.out"
 run_real_pty 'running real yard init with password-required sudo' "$real_init_output" \
   init --yes
-grep -Fq '[sudo] password for' "$real_init_output" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$real_init_output" \
   || die 'real yard init did not show the standard sudo prompt'
 grep -Fq 'Subyard initialized' "$real_init_output" \
   || die 'real yard init did not complete'
@@ -516,7 +525,7 @@ run_real_checked 'real yard stop' "$TMP/real-stop.out" stop --force --yes
 run_real_as_fixture sudo -k
 run_real_checked 'real yard start' "$TMP/real-start.out" start --yes
 grep -Fq 'started' "$TMP/real-start.out" || die 'real lifecycle start did not complete'
-grep -Fq '[sudo] password for' "$TMP/real-start.out" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$TMP/real-start.out" \
   && die 'inactive NetworkManager caused an unnecessary lifecycle sudo prompt'
 incus exec "$REAL_INSTANCE" --project "$REAL_PROJECT" -- rm -f -- /var/lib/subyard-sudo-smoke
 run_real_checked 'second real yard stop' "$TMP/real-restop.out" stop --force --yes
@@ -525,14 +534,14 @@ run_real_checked 'real stopped-yard provision' "$TMP/real-provision.out" \
   provision sudo-smoke --yes
 grep -Fq 'provisioned sudo-smoke' "$TMP/real-provision.out" \
   || die 'real stopped-yard provision did not complete'
-grep -Fq '[sudo] password for' "$TMP/real-provision.out" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$TMP/real-provision.out" \
   && die 'inactive NetworkManager caused an unnecessary provision sudo prompt'
 printf '  [ ok ] real lifecycle and stopped-yard provision completed without an unneeded prompt\n'
 
 real_teardown_output="$TMP/real-teardown.out"
 run_real_pty 'running real yard teardown with password-required sudo' "$real_teardown_output" \
   teardown --yes
-grep -Fq '[sudo] password for' "$real_teardown_output" \
+grep -Eq "$SUDO_PROMPT_PATTERN" "$real_teardown_output" \
   || die 'real yard teardown did not show the standard sudo prompt'
 incus project show "$REAL_PROJECT" >/dev/null 2>&1 \
   && die 'real yard teardown left its isolated project'
