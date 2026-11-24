@@ -346,7 +346,7 @@ func TestNetworkManagerGuardRuleRequiresEveryRenderedEntry(t *testing.T) {
 
 func bindGuardRecord(t *testing.T, record, guard, boot, contents, state string) {
 	t.Helper()
-	testkit.WriteFile(t, record, []byte(boot+" "+networkManagerFileID(guard)+" "+NetworkManagerGuardStaticHash(contents)+" "+state+" init\n"), 0o644)
+	testkit.WriteFile(t, record, []byte(boot+" "+NetworkManagerFileID(guard)+" "+NetworkManagerGuardStaticHash(contents)+" "+state+" init\n"), 0o644)
 }
 
 func TestNetworkManagerFileIDMatchesShell(t *testing.T) {

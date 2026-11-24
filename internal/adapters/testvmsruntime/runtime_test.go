@@ -330,7 +330,6 @@ func TestCloudConfigLeavesToolchainToExplicitReconciliation(t *testing.T) {
 func TestEnsureGuestToolsReconcilesShellToolsOnRetainedVM(t *testing.T) {
 	cfg := fixtureConfig(t)
 	var checkedZsh, installedZsh, checkedSg, installedSg, usedCurrentRevision bool
-	var checkedGNU, installedGNU bool
 	var installArguments []string
 	installCommands := 0
 	runner := &fakeRunner{handler: func(
@@ -342,18 +341,13 @@ func TestEnsureGuestToolsReconcilesShellToolsOnRetainedVM(t *testing.T) {
 			strings.Contains(joined, "command -v git"):
 			checkedZsh = strings.Contains(joined, "command -v zsh")
 			checkedSg = strings.Contains(joined, "command -v sg")
-			checkedGNU = strings.Contains(joined, "install --version") &&
-				strings.Contains(joined, "stat --version") && strings.Contains(joined, "timeout --version")
 			usedCurrentRevision = strings.Contains(joined,
-				"DEPENDENCY_REVISION=subyard-test-vms-dependencies-v4")
+				"DEPENDENCY_REVISION=subyard-test-vms-dependencies-v5")
 			return nil, nil, errors.New("retained VM is missing shell tools")
 		case strings.Contains(joined, "apt-get") && strings.Contains(joined, "build-essential"):
 			installCommands++
 			installArguments = append([]string(nil), arguments...)
 			installedZsh = strings.Contains(joined, " zsh")
-			installedGNU = strings.Contains(joined, "for tool in install stat timeout; do") &&
-				strings.Contains(joined, "gnu_tool=\"/usr/bin/gnu$tool\"") &&
-				strings.Contains(joined, "ln -sT")
 			installedSg = strings.Contains(joined, "command -v sg") &&
 				strings.Contains(joined, "group_tools=util-linux-extra") &&
 				strings.Contains(joined, "zsh $group_tools")
@@ -381,9 +375,6 @@ func TestEnsureGuestToolsReconcilesShellToolsOnRetainedVM(t *testing.T) {
 	}
 	if !checkedSg || !installedSg {
 		t.Fatalf("group tool reconciliation is incomplete: checked-sg=%t installed-sg=%t", checkedSg, installedSg)
-	}
-	if !checkedGNU || !installedGNU {
-		t.Fatalf("GNU tool reconciliation is incomplete: checked=%t installed=%t", checkedGNU, installedGNU)
 	}
 	if installCommands != 1 {
 		t.Fatalf("toolchain install commands=%d, want 1", installCommands)

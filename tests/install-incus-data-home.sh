@@ -145,7 +145,7 @@ fi
 [ -x "$TEST_NM_VALIDATOR" ] || fail "test engine is unavailable"
 cat > "$TMP/bin/dispatcher" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" != _nm-guard-violations ] || exec "$TEST_NM_VALIDATOR" "$@"
+case "${1:-}" in _nm-guard-violations|_nm-guard-file-id) exec "$TEST_NM_VALIDATOR" "$@" ;; esac
 [ "$#" = 2 ] && [ "$1" = _incus-operator-access ] && [ "$2" = "$(/usr/bin/id -u)" ] || exit 96
 SH
 chmod 0755 "$TMP/bin"/*
@@ -157,7 +157,8 @@ seed_read_guard() {
   printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
     'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' \
     > "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
-  bash -c '. "$1"; printf "earlier-boot %s %s held init\n" "$(power_nm_file_id "$2")" "$(power_nm_guard_static_hash "$2")"' \
+  SUBYARD_DISPATCHER_PATH="$TMP/bin/dispatcher" \
+    bash -c '. "$1"; printf "earlier-boot %s %s held init\n" "$(power_nm_file_id "$2")" "$(power_nm_guard_static_hash "$2")"' \
     _ "$ROOT/scripts/lib-power.sh" "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf" \
     > "$TMP/var/lib/subyard/nm-guard-state"
 }

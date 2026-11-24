@@ -155,6 +155,21 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_nm-guard-file-id" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: _nm-guard-file-id <path>")
+			os.Exit(2)
+		}
+		identity := hostruntime.NetworkManagerFileID(os.Args[2])
+		if identity == "" {
+			os.Exit(1)
+		}
+		if _, err := fmt.Fprintln(os.Stdout, identity); err != nil {
+			fmt.Fprintf(os.Stderr, "write NetworkManager guard identity: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_nm-guard-violations" {
 		config, err := io.ReadAll(os.Stdin)
 		if err != nil {

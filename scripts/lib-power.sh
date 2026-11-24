@@ -199,15 +199,12 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
   power_nm_guard_text_hash "$content"
 }
 
-# The guard file's identity, as hostruntime.networkManagerFileID: one lstat of the path itself,
-# which must be a regular file (never a link, FIFO or anything a read could block on).
+# Use the same native lstat as the Go reader, retaining nanoseconds on hosts whose stat
+# command truncates them. Links, FIFOs and other non-regular files are never opened.
 power_nm_file_id() { # <path>
-  local guard_identity
-  guard_identity="$(LC_ALL=C stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
-  case "${guard_identity%%|*}" in
-    'regular file'|'regular empty file') printf '%s\n' "${guard_identity#*|}" ;;
-    *) return 1 ;;
-  esac
+  local engine="${SUBYARD_DISPATCHER_PATH:-}"
+  [ -n "$engine" ] && [ -x "$engine" ] || return 1
+  "$engine" _nm-guard-file-id "$1"
 }
 
 # The pure read-state rule, shared with hostruntime.NetworkManagerGuardState and checked on

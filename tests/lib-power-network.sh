@@ -209,7 +209,7 @@ export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
 cat > "$tmp/bin/dispatcher" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  _nm-guard-violations) exec "$TEST_NM_VALIDATOR" "$@" ;;
+  _nm-guard-violations|_nm-guard-file-id) exec "$TEST_NM_VALIDATOR" "$@" ;;
   _publications) exit 0 ;;
   *) exit 90 ;;
 esac
@@ -220,6 +220,19 @@ export SUBYARD_DISPATCHER_PATH="$tmp/bin/dispatcher"
 # shellcheck source=scripts/lib-power.sh
 # shellcheck disable=SC1091
 . "$ROOT/scripts/lib-power.sh"
+# The shell writer and native reader must agree even when the host stat command
+# drops ctime nanoseconds (Rust coreutils on Ubuntu 26.04).
+install -m 0644 /dev/null "$tmp/nm-identity"
+identity="$(python3 - "$tmp/nm-identity" <<'PY'
+import os, sys
+st = os.lstat(sys.argv[1])
+print(f'{st.st_ino}:{st.st_ctime_ns // 1_000_000_000}.{st.st_ctime_ns % 1_000_000_000:09d}')
+PY
+)"
+(
+  stat() { return 99; }
+  [ "$(power_nm_file_id "$tmp/nm-identity")" = "$identity" ]
+) || fail 'guard identity depends on the host stat implementation'
 power_nm_binary() { printf '%s\n' "$tmp/bin/NetworkManager"; }
 power_operator_terminal() { [ "$MOCK_TERMINAL" = 1 ]; }
 # Until the guard section, the read state is not under test.
