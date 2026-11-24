@@ -6119,6 +6119,7 @@ BASELINE_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" upda
   bash -s -- "$TMP/published-owner" "$ROOT" <<'PUBLISHED_OWNER'
 set -euo pipefail
 F=$1 OPERATOR_HOME=$1/operator SHARED_ROOT=$1/shared ROOT=$2
+CANDIDATE_A_REPOSITORY=$1/candidate
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 IFS=$'\t' read -r HOP_VERSION _ HOP_SHA _ < <(published_hop)
 BASELINE_VERSION=0.11.0 BASE_IMAGE=fixture-cache FIXTURE_DEV_UID=1001
@@ -6158,10 +6159,17 @@ operator_yard() {
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
-    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|'migrate --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
+    'config set '*|'config unset DEV_SUDO --scope host --yes'|'-Y e2e-yard config set '*|'init --yes'|'start --yes'|check|'-Y e2e-yard start --yes'|'-Y e2e-yard check') : ;;
     *) exit 92 ;;
   esac
   printf 'yard %s\n' "$*" >> "$trace"
+}
+operator_no_go() {
+  [ "$1" = env ] && [ "$2" = "AGENT_codex_PROVISION=$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" ] \
+    && [ "$3" = "$OPERATOR_HOME/.local/bin/yard" ] || exit 93
+  printf 'hop provisioner candidate\n' >> "$trace"
+  shift 3
+  operator_yard "$@"
 }
 prepare_baseline_yards
 [ "$(head -n 2 "$trace")" = $'install 0.11.0\nconfig sync' ]
@@ -6175,7 +6183,7 @@ grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
-[ "$(tail -n 4 "$trace")" = $'incus stop yard --project subyard\n'"yard update --version $HOP_VERSION --yes"$'\nyard start --yes\nyard migrate --yes' ]
+[ "$(tail -n 2 "$trace")" = $'hop provisioner candidate\n'"yard update --version $HOP_VERSION --yes" ]
 # The creation runtime removes the DEV_SUDO assignment before the hop update.
 [ "$(grep -Fx -e 'yard config unset DEV_SUDO --scope host --yes' \
   -e "yard update --version $HOP_VERSION --yes" "$trace")" \
@@ -6459,42 +6467,27 @@ RECREATE
   esac || fail "source owner recreation lost $recreate_case protection"
 done
 
-# The immutable hop must not reprovision Codex through its anonymous REST API.
-# Restart the original guest before the candidate update; never hide a failed hop.
-for hop_case in success stop-failure update-failure start-failure migrate-failure; do
+# Only the immutable hop gets the fixed provisioner; retain native failures and
+# leave the candidate update's command environment untouched.
+for hop_status in 0 23; do
   hop_rc=0
   bash -e -c '
     eval "$1"
-    hop_case="$2"
-    DEFAULT_INSTANCE=yard DEFAULT_PROJECT=subyard
-    incus() {
-      printf "incus %s\n" "$*"
-      [ "$hop_case:$1" != stop-failure:stop ] || return 21
-    }
-    operator_yard() {
-      printf "yard %s\n" "$*"
-      [ "$hop_case:$1" != update-failure:update ] || return 22
-      [ "$hop_case:$1" != start-failure:start ] || return 23
-      [ "$hop_case:$1" != migrate-failure:migrate ] || return 24
+    hop_status="$2"
+    OPERATOR_HOME=/operator CANDIDATE_A_REPOSITORY=/candidate
+    AGENT_codex_PROVISION=original
+    incus() { exit 91; }
+    operator_no_go() {
+      printf "%s\n" "$*"
+      return "$hop_status"
     }
     update_baseline_hop 0.28.1
+    [ "$AGENT_codex_PROVISION" = original ]
   ' _ "$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" update_baseline_hop)" \
-    "$hop_case" > "$TMP/source-hop.log" || hop_rc=$?
-  expected=$'incus stop yard --project subyard'
-  case "$hop_case" in
-    stop-failure) expected_rc=21 ;;
-    update-failure) expected_rc=22; expected+=$'\nyard update --version 0.28.1 --yes' ;;
-    *)
-      expected_rc=0
-      [ "$hop_case" != start-failure ] || expected_rc=23
-      expected+=$'\nyard update --version 0.28.1 --yes\nyard start --yes'
-      if [ "$hop_case" != start-failure ]; then
-        expected+=$'\nyard migrate --yes'
-        [ "$hop_case" != migrate-failure ] || expected_rc=24
-      fi ;;
-  esac
-  [ "$hop_rc" = "$expected_rc" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
-    || fail "source hop lost $hop_case ordering or failure"
+    "$hop_status" > "$TMP/source-hop.log" || hop_rc=$?
+  expected='env AGENT_codex_PROVISION=/candidate/config/agents/codex/provision.sh /operator/.local/bin/yard update --version 0.28.1 --yes'
+  [ "$hop_rc" = "$hop_status" ] && [ "$(cat "$TMP/source-hop.log")" = "$expected" ] \
+    || fail "source hop lost its command-scoped provisioner or native exit $hop_status"
 done
 
 # Published baseline selection must be explicit and precede its real init.

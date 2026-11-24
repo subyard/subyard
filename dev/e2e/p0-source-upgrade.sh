@@ -333,15 +333,12 @@ prepare_operator() {
 }
 
 update_baseline_hop() { # <version>
-  # The immutable hop's Codex provisioner still uses anonymous GitHub REST
-  # metadata. Keep both legacy yards stopped during that hop, then restore the
-  # ordinary yard so the candidate upgrades its authentic v0.11.0 guest state.
-  incus stop "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
-  operator_yard update --version "$1" --yes
-  # Follow the hop's stopped-yard retry: start completes disk-/tmp, then migrate
-  # closes the installed release's readiness before selecting the candidate.
-  operator_yard start --yes
-  operator_yard migrate --yes
+  # The immutable hop predates the Codex anonymous-REST-quota fix. Use the
+  # verified candidate's hook for this command only, retaining the real hop's
+  # running-yard activation and its own configuration and approval defaults.
+  operator_no_go env \
+    AGENT_codex_PROVISION="$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$1" --yes
 }
 
 prepare_baseline_yards() {
