@@ -239,6 +239,7 @@ git add subyard-config.json shared
 git -c user.name=Fixture -c user.email=fixture@example.invalid -c core.hooksPath=/dev/null commit -qm 'Configure retained published settings'
 SH
   operator_yard config sync "$RETAINED_SETTINGS_SOURCE" --yes
+  operator_yard init --yes
   operator_env python3 - "$OPERATOR_HOME/.config/subyard" <<'PY_SETTINGS'
 import hashlib, json, pathlib
 import sys
