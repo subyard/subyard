@@ -58,7 +58,7 @@ func captureTree(tree Tree, private bool) (Tree, error) {
 			exclusions = append(exclusions, relative)
 		}
 		_ = withParent(tree.Path, "", func(parent int, name string) error {
-			grantOwnerAccess(parent, name, maxEntries, exclusions)
+			grantOwnerAccess(parent, name, maxEntries, exclusions, tree.OwnedPaths, tree.Scoped)
 			return nil
 		})
 	}

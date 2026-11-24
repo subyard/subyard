@@ -225,11 +225,12 @@ func repairAt(parent int, name string, deny fs.FileMode) {
 // directory it owns in a private tree, outside exclusions, so the approved
 // tree can be captured and removed. It is best effort: capture reports every
 // entry it still cannot observe.
-func grantOwnerAccess(fd int, name string, limit int, exclusions []string) {
+// A scoped tree is entered only along its owned paths, as capture does.
+func grantOwnerAccess(fd int, name string, limit int, exclusions, owned []string, scoped bool) {
 	visited := 0
 	var walk func(int, string, string)
 	walk = func(parent int, child, relative string) {
-		if excluded(relative, exclusions) || visited >= limit {
+		if excluded(relative, exclusions) || scoped && !withinOwned(relative, owned) || visited >= limit {
 			return
 		}
 		visited++
