@@ -96,7 +96,7 @@ def private_directory(path):
             fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
         else:
             fd, _ = safefs.open_dir(path, owner=(os.getuid(), -1), parent_mode=0o700,
-                                    durability=safefs.BEST_EFFORT)
+                                    existing=safefs.REPAIR, durability=safefs.BEST_EFFORT)
     except safefs.Unsafe as error:
         if error.reason == safefs.SYMLINK:
             raise ValueError('unsafe directory') from None
