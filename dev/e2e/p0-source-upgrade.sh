@@ -332,24 +332,6 @@ prepare_operator() {
     _ "$OPERATOR_HOME"
 }
 
-update_baseline_hop() { # <version>
-  local provision="$SHARED_ROOT/hop-codex-provision.sh"
-  local configuration="$OPERATOR_HOME/.config/subyard/config.env"
-  local before="$OPERATOR_HOME/.config/subyard/hop-config.before"
-  # The immutable hop predates the Codex anonymous-REST-quota fix. Use the
-  # verified candidate's hook for this hop only, retaining the real hop's
-  # running-yard activation and its own configuration and approval defaults.
-  # Its guest transport does not forward DEV_SUDO; the hop had no sudo prompts.
-  install -m 0644 /dev/null "$provision"
-  { printf '%s\n' 'export DEV_SUDO=no'; cat "$CANDIDATE_A_REPOSITORY/config/agents/codex/provision.sh"; } > "$provision"
-  # The legacy release handoff drops command-scoped file overrides. Its local
-  # configuration survives that handoff; restore its exact bytes afterwards.
-  operator_env install -m 0600 "$configuration" "$before"
-  operator_env bash -c 'printf "AGENT_codex_PROVISION=%q\n" "$1" >> "$2"' _ "$provision" "$configuration"
-  operator_yard update --version "$1" --yes
-  operator_env install -m 0600 "$before" "$configuration"
-}
-
 prepare_baseline_yards() {
   local checkout hop_version hop_sha manifest_before
   local BASELINE_VERSION BASELINE_INSTALLER_SHA256 BASELINE_AMD64_SHA256
@@ -422,7 +404,7 @@ BASELINE_CONFIG
   manifest_before="$(operator_env sha256sum "$OPERATOR_HOME/.config/subyard/.sync/manifest.json")"
   # A below-anchor install follows the printed route through the hop release.
   IFS=$'\t' read -r hop_version _ hop_sha _ < <(published_hop)
-  update_baseline_hop "$hop_version"
+  operator_yard update --version "$hop_version" --yes
   [ "$(operator_yard --version)" = "yard $hop_version" ] || die 'hop update did not activate'
   [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$hop_version/subyard-$hop_version-linux-amd64.tar.gz" | awk '{print $1}')" = "$hop_sha" ] \
     || die 'hop archive differs from its immutable pin'
