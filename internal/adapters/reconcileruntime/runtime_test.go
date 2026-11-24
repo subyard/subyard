@@ -1001,7 +1001,20 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	if err := os.Chmod(identity, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	assertStage(t, runtime, "ssh", false, "unsafe transport identity")
+	assertStage(t, runtime, "ssh", true, "operator-owned broader transport identity is repaired")
+	if info, err := os.Stat(identity); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("transport identity mode = %v (%v)", info.Mode(), err)
+	}
+	if err := os.Chmod(identity, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(identity, identity+".alias"); err != nil {
+		t.Fatal(err)
+	}
+	assertStage(t, runtime, "ssh", false, "shared broader transport identity")
+	if err := os.Remove(identity + ".alias"); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(identity, 0o600); err != nil {
 		t.Fatal(err)
 	}

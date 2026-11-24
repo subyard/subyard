@@ -83,7 +83,7 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		return sourceSnapshot{}, err
 	}
 	manifestPath := filepath.Join(root, "subyard-config.json")
-	manifestContent, err := readSourceFile(root, manifestPath, maxConfigBytes, false)
+	manifestContent, err := readSourceFile(root, manifestPath, maxConfigBytes)
 	if err != nil {
 		return sourceSnapshot{}, fmt.Errorf("source manifest: %w", err)
 	}
@@ -264,7 +264,7 @@ func (snapshot *sourceSnapshot) readConfig(
 	scope config.SettingScope,
 	required bool,
 ) error {
-	content, err := readOptionalSourceFile(snapshot.root, source, maxConfigBytes, false)
+	content, err := readOptionalSourceFile(snapshot.root, source, maxConfigBytes)
 	if err != nil {
 		return err
 	}
@@ -348,7 +348,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 			unknown = append(unknown, fmt.Errorf("unknown file setting %q", filepath.ToSlash(relative)))
 			return nil
 		}
-		content, err := readSourceFile(snapshot.root, path, maxAssetBytes, false)
+		content, err := readSourceFile(snapshot.root, path, maxAssetBytes)
 		if err != nil {
 			refusals = append(refusals, err)
 			return nil
@@ -516,7 +516,7 @@ func readOptionalDirectory(sourceRoot, path string) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
-func readOptionalSourceFile(root, path string, maximum int64, executable bool) ([]byte, error) {
+func readOptionalSourceFile(root, path string, maximum int64) ([]byte, error) {
 	_, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -524,10 +524,10 @@ func readOptionalSourceFile(root, path string, maximum int64, executable bool) (
 	if err != nil {
 		return nil, config.OwnerMetadataError(path, "source file", config.MetadataAccessReason(err), "", err)
 	}
-	return readSourceFile(root, path, maximum, executable)
+	return readSourceFile(root, path, maximum)
 }
 
-func readSourceFile(root, path string, maximum int64, executable bool) ([]byte, error) {
+func readSourceFile(root, path string, maximum int64) ([]byte, error) {
 	if !pathWithin(path, root) {
 		return nil, errors.New("source path escaped its worktree")
 	}
@@ -540,14 +540,6 @@ func readSourceFile(root, path string, maximum int64, executable bool) ([]byte, 
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, metadataSafetyError(path, "source file must be a regular non-symlink file", "type=regular", info)
-	}
-	if executable != (info.Mode().Perm()&0o111 != 0) {
-		if executable {
-			return nil, metadataSafetyError(path, "source file must be executable", "executable mask nonzero (mask=0111)", info)
-		}
-		if info.Mode().Perm()&0o111 != 0 {
-			return nil, metadataSafetyError(path, "source file must not be executable", "executable mask=0000 (mask=0111)", info)
-		}
 	}
 	if info.Size() > maximum {
 		return nil, config.OwnerMetadataError(path, "source file", fmt.Sprintf("exceeds its size limit; observed bytes=%d, required maximum=%d", info.Size(), maximum), "", nil)

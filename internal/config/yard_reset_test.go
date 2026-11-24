@@ -110,24 +110,20 @@ func TestYardResetKeepsGitSourceAndAllowsFlatRegistration(t *testing.T) {
 }
 
 func TestYardResetRejectsUnsafeMarkers(t *testing.T) {
-	for _, kind := range []string{"malformed", "permissions", "symlink", "hardlink"} {
+	for _, kind := range []string{"malformed", "symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			path := YardResetMarkerPath(root, "named")
 			content := yardResetMarkerContent
-			mode := os.FileMode(0600)
 			if kind == "malformed" {
 				content = "unknown\n"
-			}
-			if kind == "permissions" {
-				mode = 0644
 			}
 			if kind == "symlink" {
 				if err := os.Symlink("missing", path); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				testkit.WriteFile(t, path, []byte(content), mode)
+				testkit.WriteFile(t, path, []byte(content), 0o600)
 			}
 			if kind == "hardlink" {
 				if err := os.Link(path, path+".alias"); err != nil {
@@ -152,5 +148,13 @@ func TestYardResetMarkerModeDoesNotDependOnUmask(t *testing.T) {
 	reset, err := YardFallbackReset(root, "named")
 	if err != nil || !reset {
 		t.Fatalf("exact marker mode did not survive restrictive umask: %v", err)
+	}
+}
+
+func TestYardResetAcceptsReadableMarker(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, YardResetMarkerPath(root, "named"), []byte(yardResetMarkerContent), 0o664)
+	if reset, err := YardFallbackReset(root, "named"); err != nil || !reset {
+		t.Fatalf("readable marker: reset=%v err=%v", reset, err)
 	}
 }

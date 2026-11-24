@@ -49,6 +49,19 @@ func captureTree(tree Tree, private bool) (Tree, error) {
 		tree.Entries = root.Entries
 		return tree, nil
 	}
+	if private {
+		exclusions := []string{}
+		for _, relative := range tree.Exclusions {
+			if filepath.IsAbs(relative) {
+				relative, _ = filepath.Rel(tree.Path, relative)
+			}
+			exclusions = append(exclusions, relative)
+		}
+		_ = withParent(tree.Path, "", func(parent int, name string) error {
+			grantOwnerAccess(parent, name, maxEntries, exclusions)
+			return nil
+		})
+	}
 	captured, err := tree.capture()
 	err = classify("capture-tree", err)
 	if private && errors.Is(err, os.ErrPermission) {

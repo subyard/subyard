@@ -825,7 +825,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 }
 
 func TestLegacyContinuationMissingConfigHomeAssessment(t *testing.T) {
-	for _, scenario := range []string{"plain", "explicit", "unsafe-link", "unsafe-directory"} {
+	for _, scenario := range []string{"plain", "explicit", "unsafe-link", "broad-directory"} {
 		t.Run(scenario, func(t *testing.T) {
 			cliFixture := newFixture(t, withWorkingDir(""))
 			root, environment := cliFixture.Root, cliFixture.Environment
@@ -844,7 +844,7 @@ func TestLegacyContinuationMissingConfigHomeAssessment(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if scenario == "unsafe-directory" {
+			if scenario == "broad-directory" {
 				if err := os.Mkdir(configHome, 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -856,7 +856,8 @@ func TestLegacyContinuationMissingConfigHomeAssessment(t *testing.T) {
 			runtime.Incus = &testkit.Incus{}
 			execution := &initExecution{loaded: loaded, platform: runtime}
 			err = program.prepareLegacyContinuation(context.Background(), execution, initArguments{continueLegacy: scenario == "explicit"})
-			if scenario == "plain" {
+			if scenario == "plain" || scenario == "broad-directory" {
+				// An operator-owned broader root is narrowed, not refused.
 				if err != nil {
 					t.Fatal("ordinary fresh native assessment rejected missing config root", err)
 				}
@@ -868,9 +869,9 @@ func TestLegacyContinuationMissingConfigHomeAssessment(t *testing.T) {
 				if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
 					t.Fatal("assessment changed unsafe link")
 				}
-			} else if scenario == "unsafe-directory" {
-				if statErr != nil || info.Mode().Perm() != 0777 {
-					t.Fatal("unsafe directory metadata changed", statErr)
+			} else if scenario == "broad-directory" {
+				if statErr != nil || info.Mode().Perm() != 0755 {
+					t.Fatal("broad directory was not narrowed", info.Mode(), statErr)
 				}
 				entries, err := os.ReadDir(configHome)
 				if err != nil || len(entries) != 0 {
@@ -920,7 +921,11 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "unsafe-host-mode":
+				// Another hard link keeps the broader file from being repaired.
 				if err := os.Chmod(hostPath, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(hostPath, hostPath+".alias"); err != nil {
 					t.Fatal(err)
 				}
 			case "unsafe-host-link":
@@ -935,6 +940,9 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 					t.Fatal(err)
 				}
 				testkit.WriteFile(t, yardPath, []byte("SSH_PORT=2222\n"), 0644)
+				if err := os.Link(yardPath, yardPath+".alias"); err != nil {
+					t.Fatal(err)
+				}
 			case "unsafe-yard-link":
 				if err := os.MkdirAll(filepath.Dir(yardPath), 0700); err != nil {
 					t.Fatal(err)
@@ -954,16 +962,12 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 				if err == nil {
 					t.Fatal("unsafe or non-default source authorized continuation", scenario)
 				}
-				if scenario == "missing-host" || scenario == "named-missing" || scenario == "unsafe-host-mode" || scenario == "unsafe-yard-mode" {
+				if scenario == "missing-host" || scenario == "named-missing" {
 					diagnostic, ok := config.OwnerSourceDiagnostic(err)
 					if !ok || !strings.Contains(diagnostic, "config.env") {
 						t.Fatal("registration source facts lost", diagnostic, err)
 					}
-					if strings.HasPrefix(scenario, "unsafe-") {
-						if !strings.Contains(diagnostic, "observed mode=0644, required mode=0600") {
-							t.Fatal(diagnostic)
-						}
-					} else if !strings.Contains(diagnostic, "source is missing (observed metadata unavailable)") {
+					if !strings.Contains(diagnostic, "source is missing (observed metadata unavailable)") {
 						t.Fatal(diagnostic)
 					}
 				}
@@ -1216,7 +1220,7 @@ func TestLegacyContinuationInstallationDiagnostics(t *testing.T) {
 		want []string
 	}{
 		{"missing", []string{"source is missing"}},
-		{"unsafe-mode", []string{"observed type=regular, mode=0644", "required type=regular, mode=0600"}},
+		{"unsafe-mode", []string{"observed type=regular, mode=0644", "required type=regular, no group or other access"}},
 		{"invalid-json", []string{"JSON format"}},
 		{"configHome", nil}, {"runtimeRoot", nil}, {"both", nil},
 		{"unsafe-config-ancestor", []string{"installation inventory configHome", "uninstall artifact ancestor", "observed type=symlink", "required type=directory"}},
@@ -1231,7 +1235,8 @@ func TestLegacyContinuationInstallationDiagnostics(t *testing.T) {
 			case "missing":
 				err = os.Remove(path)
 			case "unsafe-mode":
-				err = os.Chmod(path, 0644)
+				// Another hard link keeps the broader inventory from being repaired.
+				err = errors.Join(os.Chmod(path, 0644), os.Link(path, path+".alias"))
 			case "invalid-json":
 				testkit.WriteFile(t, path, []byte(`{"SECRET_JSON":`), 0600)
 			default:

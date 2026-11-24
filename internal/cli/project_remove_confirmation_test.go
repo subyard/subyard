@@ -372,22 +372,6 @@ func TestProjectRemovalRejectsUnsafeStateDirectoryBeforePrompt(t *testing.T) {
 		setup func(*testing.T, string, domain.ProjectRecord)
 	}{
 		{
-			name: "broad permissions",
-			setup: func(t *testing.T, directory string, record domain.ProjectRecord) {
-				t.Helper()
-				store, err := state.NewFileStore(directory)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := store.Put(context.Background(), record); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(directory, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
 			name: "symlink",
 			setup: func(t *testing.T, directory string, record domain.ProjectRecord) {
 				t.Helper()

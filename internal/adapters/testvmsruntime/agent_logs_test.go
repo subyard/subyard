@@ -195,8 +195,11 @@ func TestAgentLogsRejectUnsafeArchiveRecordsAndBoundOutput(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recorder.readAgentEvents(owner, "-", 1); err == nil {
-		t.Fatal("public archive record was accepted")
+	if _, err := recorder.readAgentEvents(owner, "-", 1); err != nil {
+		t.Fatalf("operator-owned public archive record was not repaired: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("archive record mode = %v (%v)", info.Mode(), err)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)

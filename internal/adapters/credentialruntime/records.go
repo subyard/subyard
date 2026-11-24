@@ -533,6 +533,10 @@ func (runtime *Runtime) validateImportPath(path string) (string, error) {
 }
 
 func (runtime *Runtime) validateImportSource(path string, protected bool) (string, error) {
+	if protected {
+		// Narrow the caller's own single-link source before the checks below.
+		_ = safefs.RepairPath(path, 0o077)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("credential source is not a regular file: %s", path)
@@ -540,8 +544,8 @@ func (runtime *Runtime) validateImportSource(path string, protected bool) (strin
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("credential import refuses non-regular files and symlinks: %s", path)
 	}
-	if protected && info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 {
-		return "", fmt.Errorf("credential source must have mode 0600 or 0400: %s", path)
+	if protected && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("credential source must not be accessible by group or others: %s", path)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) {

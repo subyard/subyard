@@ -80,11 +80,19 @@ func TestArtifactGuardOutcomesGiveReasons(t *testing.T) {
 	if _, err = Capture(private); err != os.ErrPermission {
 		t.Fatalf("capture-tree permission outcome changed: %v", err)
 	}
-	if opaque, err := CapturePrivate(private); err != nil || !opaque.Opaque || len(opaque.Entries) != 1 {
-		t.Fatalf("private capture lost its opaque fallback: %+v %v", opaque, err)
-	}
 	if _, err = CaptureArtifact(private); err != os.ErrPermission {
 		t.Fatalf("capture-artifact permission outcome changed: %v", err)
 	}
 	assertStale(t, "check-tree", "permission denied", approved.Check())
+	// A private capture gives the operator access to its own directories.
+	repaired, err := CapturePrivate(private)
+	if err != nil || repaired.Opaque || len(repaired.Entries) != 2 {
+		t.Fatalf("private capture did not repair owner access: %+v %v", repaired, err)
+	}
+	if info, err := os.Stat(filepath.Join(private, "sealed")); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("sealed directory mode = %v (%v)", info.Mode(), err)
+	}
+	if err := repaired.Remove(); err != nil {
+		t.Fatal(err)
+	}
 }

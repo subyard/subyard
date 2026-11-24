@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -51,9 +53,11 @@ func CanonicalPublicKey(dataHome string) (string, bool) {
 	}
 	keyDir := filepath.Dir(canonical)
 	uid := os.Geteuid()
-	if !safePath(keyDir, true, 0o700, uid) ||
-		!safePath(canonical, false, 0o600, uid) ||
-		!safePath(canonical+".pub", false, 0o644, uid) {
+	// The public key is checked against the private key below, so its mode
+	// does not matter.
+	if !safePath(keyDir, true, 0o077, uid) ||
+		!safePath(canonical, false, 0o077, uid) ||
+		!safePath(canonical+".pub", false, 0, uid) {
 		return "", false
 	}
 	public, err := os.ReadFile(canonical + ".pub")
@@ -84,9 +88,14 @@ func canonicalPath(dataHome string) (string, bool) {
 	return filepath.Join(abs, "ssh", "id_ed25519"), true
 }
 
-func safePath(path string, directory bool, mode os.FileMode, uid int) bool {
+// safePath first clears deny on the operator's own entry, then checks the
+// state that repair leaves.
+func safePath(path string, directory bool, deny os.FileMode, uid int) bool {
+	if deny != 0 {
+		_ = safefs.RepairPath(path, deny)
+	}
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != mode {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&deny != 0 {
 		return false
 	}
 	if directory != info.IsDir() || (!directory && !info.Mode().IsRegular()) {
@@ -97,9 +106,10 @@ func safePath(path string, directory bool, mode os.FileMode, uid int) bool {
 }
 
 func snippetIdentity(path string) (string, bool) {
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm() != 0o600 {
+		info.Mode().Perm()&0o077 != 0 {
 		return "", false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)

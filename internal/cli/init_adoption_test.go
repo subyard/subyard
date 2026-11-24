@@ -688,7 +688,7 @@ func TestYardAdoptionSSHNativeBoundary(t *testing.T) {
 }
 
 func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
-	for _, scenario := range []string{"legacy", "current", "unregistered", "other-yard", "sync", "source", "path", "options", "expanded", "inherited", "collision", "symlink", "malformed", "unsafe-directory", "stale-record"} {
+	for _, scenario := range []string{"legacy", "current", "unregistered", "other-yard", "sync", "source", "path", "options", "expanded", "inherited", "collision", "symlink", "malformed", "broad-directory", "stale-record"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, execution, fake := adoptionFixture(t)
 			runtime := execution.platform.(reconcileruntime.Runtime)
@@ -731,7 +731,7 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 			if scenario == "malformed" {
 				testkit.WriteFile(t, path, []byte("{}"), 0600)
 			}
-			if scenario == "unsafe-directory" {
+			if scenario == "broad-directory" {
 				if err := os.Chmod(directory, 0777); err != nil {
 					t.Fatal(err)
 				}
@@ -765,7 +765,8 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 			before := operationStateDigest(fake.Reconcile.Instance)
 			err = program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true})
 			// Registry integrity and inconsistent effective devices still refuse.
-			refused := slices.Contains([]string{"expanded", "inherited", "collision", "symlink", "malformed", "unsafe-directory"}, scenario)
+			// An operator-owned broader state directory is not a refusal.
+			refused := slices.Contains([]string{"expanded", "inherited", "collision", "symlink", "malformed"}, scenario)
 			if (err != nil) != refused {
 				t.Fatalf("refused=%t: %v", refused, err)
 			}
@@ -776,7 +777,7 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 				return
 			}
 			selected, err := runtime.YardAdoptionProjects(context.Background(), fake.Reconcile.Instance)
-			proven := scenario == "legacy" || scenario == "current" || scenario == "stale-record"
+			proven := scenario == "legacy" || scenario == "current" || scenario == "stale-record" || scenario == "broad-directory"
 			if err != nil || (len(selected) == 1) != proven || !proven && len(selected) != 0 {
 				t.Fatalf("selected=%v proven=%t: %v", selected, proven, err)
 			}

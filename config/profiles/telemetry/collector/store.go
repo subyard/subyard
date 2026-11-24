@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
@@ -91,8 +92,13 @@ func privateDir(path string) error {
 			return err
 		}
 	}
-	if st.Mode().Perm() != 0700 {
-		return errors.New("data directory must have mode 0700")
+	// Narrow the collector's own broader directory, then check the result.
+	_ = safefs.RepairPath(path, 0o077)
+	if st, err = os.Lstat(path); err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("telemetry directory %s must not be accessible by group or others", path)
 	}
 	if x, ok := st.Sys().(*syscall.Stat_t); !ok || int(x.Uid) != os.Geteuid() {
 		return errors.New("data directory has another owner")
@@ -115,6 +121,10 @@ func privateFile(path string) error {
 }
 
 func checkPrivateFile(path string, mode os.FileMode) error {
+	if mode != 0 {
+		// Narrow the collector's own broader file before the exact check.
+		_ = safefs.RepairPath(path, 0o077)
+	}
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err

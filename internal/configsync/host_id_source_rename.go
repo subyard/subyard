@@ -569,7 +569,7 @@ func verifyRenameSubtree(root, commit, oldID, currentID string) error {
 		if !ok {
 			return errors.New("rename subtree contains unrelated files")
 		}
-		if _, err := readSourceFile(root, path, maxAssetBytes, false); err != nil {
+		if _, err := readSourceFile(root, path, maxAssetBytes); err != nil {
 			return err
 		}
 		actual, err := gitOutput(root, "hash-object", "--", path)
@@ -674,11 +674,12 @@ func lockRenameIndex(source *hostSourceRename) (func(), error) {
 	} else if err != nil {
 		return nil, err
 	}
+	_ = safefs.RepairPath(imagePath, 0o077)
 	image, err := os.Lstat(imagePath)
 	if err != nil {
 		return nil, err
 	}
-	if !image.Mode().IsRegular() || image.Mode().Perm() != 0o600 {
+	if !image.Mode().IsRegular() || image.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("source rename index image is unsafe")
 	}
 	if err := validateOwnedMode(imagePath, image, false); err != nil {

@@ -108,7 +108,7 @@ func TestHardenConfigCandidateReplacesHardLinkedFile(t *testing.T) {
 	}
 }
 
-func TestCleanupJournalDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
+func TestCleanupJournalDirectoryFinishesNarrowAndBroad(t *testing.T) {
 	root := testkit.TempDir(t)
 	parent := filepath.Join(root, "cleanup", "yard")
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -128,11 +128,11 @@ func TestCleanupJournalDirectoryFinishesNarrowAndRefusesBroad(t *testing.T) {
 	if err := os.Chmod(parent, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveHardCleanup(path, journal); err == nil || err.Error() != "unsafe hard cleanup recovery directory" {
-		t.Fatalf("broad journal directory: %v", err)
+	if err := saveHardCleanup(path, journal); err != nil {
+		t.Fatalf("broad owned journal directory: %v", err)
 	}
-	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != 0o750 {
-		t.Fatalf("broad journal directory changed: %v %v", info, err)
+	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("broad journal directory not narrowed: %v %v", info, err)
 	}
 }
 
@@ -162,7 +162,7 @@ func TestCleanupJournalFinishesOuterDirectoryWithoutSearchPermission(t *testing.
 	}
 }
 
-func TestCleanupJournalRefusesBroadOuterBeforeFinishingInner(t *testing.T) {
+func TestCleanupJournalNarrowsBroadOuterBeforeFinishingInner(t *testing.T) {
 	root := testkit.TempDir(t)
 	outer := filepath.Join(root, "cleanup")
 	parent := filepath.Join(outer, "yard")
@@ -177,10 +177,10 @@ func TestCleanupJournalRefusesBroadOuterBeforeFinishingInner(t *testing.T) {
 		t.Fatal(err)
 	}
 	journal := &hardCleanupJournal{Schema: 1, Token: "0123456789abcdef0123456789abcdef", Phase: "recreate"}
-	if err := saveHardCleanup(filepath.Join(parent, "journal.json"), journal); err == nil || err.Error() != "unsafe hard cleanup recovery directory" {
+	if err := saveHardCleanup(filepath.Join(parent, "journal.json"), journal); err != nil {
 		t.Fatalf("broad outer journal directory: %v", err)
 	}
-	for directory, want := range map[string]os.FileMode{outer: 0o750, parent: 0o500} {
+	for directory, want := range map[string]os.FileMode{outer: 0o700, parent: 0o700} {
 		if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != want {
 			t.Fatalf("journal directory %s changed: %v %v", directory, info, err)
 		}

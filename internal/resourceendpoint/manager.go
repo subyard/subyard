@@ -373,6 +373,8 @@ func canonicalState(current state) state {
 }
 
 func readState(directory string) (state, error) {
+	// Narrow the operator's own broader state; the checks below report the rest.
+	_ = safefs.RepairPath(directory, 0o077)
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
 		return emptyState(), nil
@@ -384,6 +386,7 @@ func readState(directory string) (state, error) {
 		return state{}, errors.New("endpoint state directory has unsafe type or permissions")
 	}
 	path := filepath.Join(directory, "state.json")
+	_ = safefs.RepairPath(path, 0o077)
 	info, err = os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return emptyState(), nil
@@ -452,11 +455,15 @@ func ensureStateDirectory(directory string) error {
 		}
 		info, err = os.Lstat(parent)
 	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !ownedByUser(info) {
+	// The state directory itself is private. Only a parent that anyone can
+	// write without the sticky bit could replace it; group write (umask 002)
+	// is accepted.
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByUser(info) ||
+		info.Mode().Perm()&0o002 != 0 && info.Mode()&os.ModeSticky == 0 {
 		if err != nil {
 			return fmt.Errorf("inspect endpoint state parent: %w", err)
 		}
-		return fmt.Errorf("endpoint state parent has unsafe type or permissions: %o", info.Mode().Perm())
+		return fmt.Errorf("endpoint state parent %s must be an operator-owned real directory that others cannot write", parent)
 	}
 	created := false
 	err = os.Mkdir(directory, 0o700)
@@ -490,6 +497,7 @@ func ensureStateDirectory(directory string) error {
 }
 
 func acquireLock(ctx context.Context, directory string) (*safefs.LockFile, error) {
+	_ = safefs.RepairPath(filepath.Join(directory, ".lock"), 0o077)
 	lock, err := safefs.OpenLock(filepath.Join(directory, ".lock"), 0o600)
 	if err != nil {
 		return nil, err

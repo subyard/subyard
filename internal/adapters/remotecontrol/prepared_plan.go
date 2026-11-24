@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,7 +79,17 @@ func (runtime Runtime) preparedFilesAt(prepared domain.RemotePrepared, config st
 		if err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() || (!identityPaths[path] && info.Mode().Perm()&0o077 != 0) || (identityPaths[path] && !strings.HasSuffix(path, ".pub") && info.Mode().Perm()&0o077 != 0) {
+		// Like ssh, configuration refuses only group or other write and private
+		// identities refuse any group or other access. Apply rewrites
+		// Subyard's own files with mode 0600.
+		deny := fs.FileMode(0o022)
+		if identityPaths[path] {
+			deny = 0
+			if !strings.HasSuffix(path, ".pub") {
+				deny = 0o077
+			}
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&deny != 0 {
 			return nil, errors.New("unsafe remote configuration target")
 		}
 		fact.Exists, fact.Mode = true, info.Mode()

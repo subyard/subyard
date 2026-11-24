@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // Protected input is observed as metadata only. Its value is supplied to the
@@ -27,6 +28,7 @@ func protectedFileMetadata(path string) (protectedFileFact, error) {
 	if path == "" {
 		return fact, nil
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fact, nil
@@ -34,7 +36,7 @@ func protectedFileMetadata(path string) (protectedFileFact, error) {
 	if err != nil {
 		return fact, err
 	}
-	if !info.Mode().IsRegular() || (info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400) {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		return fact, errors.New("unsafe protected credential target")
 	}
 	fact.Exists, fact.Mode, fact.Size, fact.Modified = true, info.Mode(), info.Size(), info.ModTime().UnixNano()

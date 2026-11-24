@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type hardCleanupRetirement struct {
@@ -39,12 +40,13 @@ func readHardRetirement(yard domain.Context) (*hardCleanupRetirement, error) {
 		return nil, err
 	}
 	defer file.Close()
+	_ = safefs.RepairMode(file, 0o077)
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 || info.Size() > 32<<20 {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 || info.Size() > 32<<20 {
 		return nil, errors.New("unsafe hard cleanup retirement receipt")
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 32<<20))

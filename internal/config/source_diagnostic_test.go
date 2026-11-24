@@ -146,7 +146,11 @@ func TestPersistentSourceDiagnosticsDistinguishSafetyChecks(t *testing.T) {
 		prepare      func(*testing.T, string)
 	}{
 		{"mode", "target is group/world writable", func(t *testing.T, path string) {
+			// Another hard link keeps the writable file from being repaired.
 			testkit.WriteFile(t, path, []byte("SSH_PORT=2222\n"), 0o622)
+			if err := os.Link(path, path+".alias"); err != nil {
+				t.Fatal(err)
+			}
 		}},
 		{"type", "regular non-symlink file", func(t *testing.T, path string) {
 			if err := os.Mkdir(path, 0o700); err != nil {

@@ -368,8 +368,19 @@ func TestProtectedCreationModes(t *testing.T) {
 	}
 }
 
+func TestPrepareRepairsWritableOperatorConfig(t *testing.T) {
+	filename := filepath.Join(testkit.TempDir(t), "config.json")
+	testkit.WriteFile(t, filename, []byte(`{"version":1,"remoteConnections":[]}`), 0o620)
+	if _, err := Prepare(filename, input(), nil); err != nil {
+		t.Fatalf("operator-owned writable config refused: %v", err)
+	}
+	if info, err := os.Stat(filename); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config mode = %v (%v)", info.Mode(), err)
+	}
+}
+
 func TestRejectUnsafeTargetsAndAncestors(t *testing.T) {
-	for _, kind := range []string{"symlink", "hardlink", "fifo", "writable-file", "writable-directory", "symlink-directory", "unsafe-backup", "oversize"} {
+	for _, kind := range []string{"symlink", "hardlink", "fifo", "writable-directory", "symlink-directory", "unsafe-backup", "oversize"} {
 		t.Run(kind, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			filename := filepath.Join(root, "config.json")
@@ -389,8 +400,6 @@ func TestRejectUnsafeTargetsAndAncestors(t *testing.T) {
 				if err := unix.Mkfifo(filename, 0o600); err != nil {
 					t.Fatal(err)
 				}
-			case "writable-file":
-				testkit.WriteFile(t, filename, valid, 0o620)
 			case "writable-directory":
 				if err := os.Chmod(root, 0o770); err != nil {
 					t.Fatal(err)

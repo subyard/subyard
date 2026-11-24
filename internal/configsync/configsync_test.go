@@ -856,11 +856,9 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		fixture.commit("executable")
-		if _, err := BuildPlan(fixture.options(false)); err == nil ||
-			!strings.Contains(err.Error(), "must not be executable") {
-			t.Fatalf("executable source setting was accepted: %v", err)
-		} else if diagnostic, ok := config.OwnerSourceDiagnostic(err); !ok || !strings.Contains(diagnostic, "mode=0700") || !strings.Contains(diagnostic, "config.env") || strings.Contains(err.Error(), fixture.source) {
-			t.Fatal("source safety facts lost or public path exposed", diagnostic, err)
+		// The executable bit follows Git core.fileMode and umask; it is not a safety fact.
+		if _, err := BuildPlan(fixture.options(false)); err != nil {
+			t.Fatalf("executable source setting was refused: %v", err)
 		}
 	})
 
@@ -1378,9 +1376,22 @@ func TestHostIDDiagnosticsDoNotRenderInvalidIdentity(t *testing.T) {
 		t.Fatal(diagnostic, err)
 	}
 	testkit.WriteFile(t, path, []byte("owner\n"), 0644)
+	if hostID, _, err := ResolveHostID(root, nil); err != nil || hostID != "owner" {
+		t.Fatalf("readable host ID was not repaired: %q %v", hostID, err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("host ID mode = %v (%v)", info.Mode(), err)
+	}
+	// Another hard link keeps a broader host ID from being repaired.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, path+".alias"); err != nil {
+		t.Fatal(err)
+	}
 	_, _, err = ResolveHostID(root, nil)
 	diagnostic, ok = config.OwnerSourceDiagnostic(err)
-	if !ok || !strings.Contains(diagnostic, "observed mode=0644, required mode=0600") {
+	if !ok || !strings.Contains(diagnostic, "observed mode=0644, required no group or other access") {
 		t.Fatal(diagnostic, err)
 	}
 }
@@ -1388,13 +1399,13 @@ func TestHostIDDiagnosticsDoNotRenderInvalidIdentity(t *testing.T) {
 func TestSourceExecutableDiagnosticEscapesPathAndOmitsContents(t *testing.T) {
 	root := testkit.TempDir(t)
 	path := filepath.Join(root, "tool\n\x1b.sh")
-	testkit.WriteFile(t, path, []byte("SECRET_CONTENT"), 0600)
-	content, err := readSourceFile(root, path, 1024, true)
+	testkit.WriteFile(t, path, []byte("SECRET_CONTENT"), 0620)
+	content, err := readSourceFile(root, path, 1024)
 	diagnostic, ok := config.OwnerSourceDiagnostic(err)
-	if len(content) != 0 || !ok || !strings.Contains(diagnostic, "mode=0600") || !strings.Contains(diagnostic, "mask=0111") || strings.ContainsAny(diagnostic, "\n\x1b") || strings.Contains(diagnostic, "SECRET_CONTENT") || strings.Contains(err.Error(), root) {
+	if len(content) != 0 || !ok || !strings.Contains(diagnostic, "mode=0620") || !strings.Contains(diagnostic, "mask=0022") || strings.ContainsAny(diagnostic, "\n\x1b") || strings.Contains(diagnostic, "SECRET_CONTENT") || strings.Contains(err.Error(), root) {
 		t.Fatal(diagnostic, err)
 	}
-	_, err = readSourceFile(root, filepath.Join(root, "missing"), 1024, false)
+	_, err = readSourceFile(root, filepath.Join(root, "missing"), 1024)
 	var pathError *os.PathError
 	if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathError) {
 		t.Fatal("source read cause lost", err)
@@ -1403,7 +1414,7 @@ func TestSourceExecutableDiagnosticEscapesPathAndOmitsContents(t *testing.T) {
 	if err := os.Symlink(root, ancestor); err != nil {
 		t.Fatal(err)
 	}
-	_, err = readSourceFile(root, filepath.Join(ancestor, "asset"), 1024, false)
+	_, err = readSourceFile(root, filepath.Join(ancestor, "asset"), 1024)
 	diagnostic, ok = config.OwnerSourceDiagnostic(err)
 	if !ok || !strings.Contains(diagnostic, "non-directory or symlink ancestor") || !strings.Contains(diagnostic, "required type=directory") || !strings.Contains(diagnostic, "asset") || strings.Contains(err.Error(), root) {
 		t.Fatal("source ancestor facts or provenance lost", diagnostic, err)

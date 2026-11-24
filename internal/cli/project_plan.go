@@ -155,8 +155,8 @@ func (execution *projectExecution) checkPreparedSource(ctx context.Context, cli 
 	}
 	if execution.bindSourceBefore != nil {
 		current, err := os.Lstat(execution.Record.HostPath)
-		if err != nil || !current.IsDir() || !os.SameFile(execution.bindSourceBefore, current) || current.Mode().Perm() != execution.bindSourceBefore.Mode().Perm() {
-			return fmt.Errorf("%w: prepared bind source identity or permissions changed", domain.ErrPlanStale)
+		if err != nil || !current.IsDir() || !os.SameFile(execution.bindSourceBefore, current) {
+			return fmt.Errorf("%w: prepared bind source identity changed", domain.ErrPlanStale)
 		}
 	}
 	if (execution.cloneRevision != "" || execution.cloneUnborn) && execution.Record.HostPath != execution.sourceIdentity {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // DeveloperIdentityMarker survives guest/account cuts and fences owner runtime
@@ -38,12 +39,13 @@ func PendingDeveloperIdentities(root string) ([]DeveloperIdentityMarker, error) 
 		if !strings.HasPrefix(entry.Name(), ".developer-identity-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
+		_ = safefs.RepairPath(filepath.Join(root, entry.Name()), 0o077)
 		snapshot, err := ReadPersistentFileSnapshot(root, filepath.Join(root, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
 		var marker DeveloperIdentityMarker
-		if !snapshot.Exists || snapshot.Identity.Mode&0o777 != 0o600 || json.Unmarshal(snapshot.Content, &marker) != nil || marker.Schema != 1 || !domain.SafeName(marker.Yard) || filepath.Base(DeveloperIdentityMarkerPath(root, marker.Yard)) != entry.Name() || len(marker.Inputs) != 64 || len(marker.Identity) != 64 || len(marker.Release) != 64 {
+		if !snapshot.Exists || snapshot.Identity.Mode&0o077 != 0 || json.Unmarshal(snapshot.Content, &marker) != nil || marker.Schema != 1 || !domain.SafeName(marker.Yard) || filepath.Base(DeveloperIdentityMarkerPath(root, marker.Yard)) != entry.Name() || len(marker.Inputs) != 64 || len(marker.Identity) != 64 || len(marker.Release) != 64 {
 			return nil, errors.New("unsafe pending developer identity authority")
 		}
 		result = append(result, marker)

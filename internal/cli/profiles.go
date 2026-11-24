@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerapi"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // ProfileServiceRuntime applies only the named profile's declared owner hook.
@@ -135,13 +136,14 @@ func (cli *CLI) profileConnection(loaded config.Loaded, definition profile.Defin
 		return "", err
 	}
 	path := filepath.Join(loaded.Context.Paths.ConfigHome, schema.ConfigFile)
+	_ = safefs.RepairPath(path, 0o077)
 	before, err := readInitSelectionSnapshot(loaded.Context.Paths.ConfigHome, path)
 	if err != nil {
 		return "", err
 	}
 	var values map[string]any
 	if before.Exists {
-		if before.Identity.Mode&0o777 != 0o600 && before.Identity.Mode&0o777 != 0o400 {
+		if before.Identity.Mode&0o077 != 0 {
 			return "", errors.New("profile settings are unprotected")
 		}
 		values, err = schema.Decode(before.Content)

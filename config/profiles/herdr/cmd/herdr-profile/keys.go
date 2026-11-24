@@ -129,7 +129,8 @@ func manageKeys(args []string) error {
 	}
 	path := filepath.Join(dir, "authorized_keys")
 	uid := uint32(os.Getuid())
-	options := safefs.ReadOptions{MaxBytes: 1 << 20, OwnerUID: &uid, DenyPerm: 0o077, SingleLink: true}
+	// Public keys: like sshd, refuse only group or other write.
+	options := safefs.ReadOptions{MaxBytes: 1 << 20, OwnerUID: &uid, DenyPerm: 0o022, SingleLink: true}
 	contents, err := safefs.ReadRegular(path, options)
 	if err != nil {
 		return err

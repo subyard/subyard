@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -175,6 +176,7 @@ func openSpoolFile(path string, flags int, limit int64) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = safefs.RepairMode(f, 0o077)
 	info, err := f.Stat()
 	if err == nil && (checkPrivateInfo(info, 0600) != nil || info.Size() > limit) {
 		err = errInvalidRecord

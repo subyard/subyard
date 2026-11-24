@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -130,6 +131,8 @@ func readAt(parent int, name string) (snapshot, error) {
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
+	// Clear group and other write on the operator's own config first.
+	_ = safefs.RepairMode(f, 0o022)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return snapshot{}, err

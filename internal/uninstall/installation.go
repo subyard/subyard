@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const ManifestName = "installation.json"
@@ -115,6 +116,7 @@ func InspectInstallation(directory string, identity Installation) (*Installation
 	if err != nil {
 		return fail(err)
 	}
+	repairAt(int(root.Fd()), ManifestName, 0o077)
 	inspection.Snapshot, err = config.ReadPersistentSnapshotAt(root, ManifestName)
 	if err != nil {
 		if diagnostic, ok := config.SourceDiagnostic(directory, err); ok {
@@ -126,8 +128,8 @@ func InspectInstallation(directory string, identity Installation) (*Installation
 		inspection.State, inspection.Installation = "missing", identity
 		return inspection, nil
 	}
-	if inspection.Snapshot.Identity.Mode&07777 != 0600 || len(inspection.Snapshot.Content) > 65536 {
-		return fail(config.OwnerMetadataError(filepath.Join(directory, ManifestName), "installation inventory", "must be a bounded mode 0600 file", fmt.Sprintf("observed mode=%04o, bytes=%d; required mode=0600, maximum bytes=65536", inspection.Snapshot.Identity.Mode&07777, len(inspection.Snapshot.Content)), nil))
+	if inspection.Snapshot.Identity.Mode&07077 != 0 || len(inspection.Snapshot.Content) > 65536 {
+		return fail(config.OwnerMetadataError(filepath.Join(directory, ManifestName), "installation inventory", "must be a bounded private file", fmt.Sprintf("observed mode=%04o, bytes=%d; required mode without group or other access, maximum bytes=65536", inspection.Snapshot.Identity.Mode&07777, len(inspection.Snapshot.Content)), nil))
 	}
 	inspection.Installation, err = decodeInstallation(bytes.NewReader(inspection.Snapshot.Content), identity.DataHome, identity.OperatorUID)
 	if err != nil {
@@ -208,17 +210,18 @@ func ReadInstallationFile(path, dataHome string, uid uint32) (Installation, erro
 	failure := func(reason string, cause error) (Installation, error) {
 		return installation, config.OwnerMetadataError(path, "installation inventory", reason, "", cause)
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return failure(config.MetadataAccessReason(err), err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || stat.Mode&07777 != 0600 || stat.Uid != uid || stat.Nlink != 1 {
+	if !ok || !info.Mode().IsRegular() || stat.Mode&07077 != 0 || stat.Uid != uid || stat.Nlink != 1 {
 		details := config.FileMetadata(info)
 		if ok {
 			details += fmt.Sprintf("; observed native mode=%04o, links=%d", stat.Mode&07777, stat.Nlink)
 		}
-		return failure(fmt.Sprintf("must be an operator-owned regular mode 0600 file with one link; %s; required type=regular, mode=0600, uid=%d, links=1", details, uid), nil)
+		return failure(fmt.Sprintf("must be an operator-owned private regular file with one link; %s; required type=regular, no group or other access, uid=%d, links=1", details, uid), nil)
 	}
 	if info.Size() > 65536 {
 		return failure(fmt.Sprintf("installation ownership inventory exceeds its size bound; observed bytes=%d, required maximum=65536", info.Size()), nil)

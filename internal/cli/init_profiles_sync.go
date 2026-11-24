@@ -19,7 +19,7 @@ func (cli *CLI) prepareSyncedInitProfile(ctx context.Context, execution *initExe
 	schema := setup.definition.Setup
 	if setup.before.Exists {
 		values, err := schema.Decode(setup.before.Content)
-		if err != nil || setup.before.Identity.Mode&0o777 != 0o600 && setup.before.Identity.Mode&0o777 != 0o400 {
+		if err != nil || setup.before.Identity.Mode&0o077 != 0 {
 			fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s settings are invalid or unprotected; repair %s on the owner host. Existing settings were kept.\n", setup.definition.Name, schema.ConfigFile)
 			return nil, nil
 		}

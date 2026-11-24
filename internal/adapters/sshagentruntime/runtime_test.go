@@ -343,15 +343,18 @@ func TestWorkerConfigKeepsControlFileChecksBeforeReplacement(t *testing.T) {
 		}
 	}
 	testkit.WriteFile(t, path, []byte("preserve"), 0o644)
-	if err := writeWorkerConfig(path, []byte("{}")); err == nil || err.Error() != "unsafe SSH agent control file" {
-		t.Fatalf("broad control file: %v", err)
-	}
-	assertPreserved("broad mode")
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	link := filepath.Join(dir, "linked")
 	if err := os.Link(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkerConfig(path, []byte("{}")); err == nil || err.Error() != "unsafe SSH agent control file" {
+		t.Fatalf("hard-linked broad control file: %v", err)
+	}
+	assertPreserved("hard link")
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("shared control file mode changed: %v %v", info, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeWorkerConfig(path, []byte("{}")); err == nil || err.Error() != "unsafe SSH agent control file" {

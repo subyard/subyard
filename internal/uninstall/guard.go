@@ -7,17 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -206,6 +209,59 @@ func withinOwned(path string, owned []string) bool {
 	return path == "." || slices.ContainsFunc(owned, func(item string) bool {
 		return path == item || strings.HasPrefix(path, item+"/") || strings.HasPrefix(item, path+"/")
 	})
+}
+
+// repairAt clears deny on the operator's own entry name under parent. Every
+// state it leaves is reported by the caller's own checks.
+func repairAt(parent int, name string, deny fs.FileMode) {
+	fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err == nil {
+		_ = safefs.RepairFD(fd, name, deny)
+		_ = unix.Close(fd)
+	}
+}
+
+// grantOwnerAccess gives the operator read, write and search access to each
+// directory it owns in a private tree, outside exclusions, so the approved
+// tree can be captured and removed. It is best effort: capture reports every
+// entry it still cannot observe.
+func grantOwnerAccess(fd int, name string, limit int, exclusions []string) {
+	visited := 0
+	var walk func(int, string, string)
+	walk = func(parent int, child, relative string) {
+		if excluded(relative, exclusions) || visited >= limit {
+			return
+		}
+		visited++
+		pinned, err := unix.Openat(parent, child, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return
+		}
+		defer unix.Close(pinned)
+		var stat unix.Stat_t
+		if unix.Fstat(pinned, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) {
+			return
+		}
+		if stat.Mode&0o700 != 0o700 && unix.Chmod("/proc/self/fd/"+strconv.Itoa(pinned), stat.Mode&0o7777|0o700) != nil {
+			return
+		}
+		directory, err := openPinned(parent, child, Entry{Device: uint64(stat.Dev), Inode: stat.Ino}, "")
+		if err != nil {
+			return
+		}
+		defer unix.Close(directory)
+		names, err := listNames(directory)
+		if err != nil {
+			return
+		}
+		for _, name := range names {
+			var entry unix.Stat_t
+			if unix.Fstatat(directory, name, &entry, unix.AT_SYMLINK_NOFOLLOW) == nil && entry.Mode&unix.S_IFMT == unix.S_IFDIR {
+				walk(directory, name, childPath(relative, name))
+			}
+		}
+	}
+	walk(fd, name, ".")
 }
 
 // walkEntries records a sorted metadata inventory and rechecks each directory

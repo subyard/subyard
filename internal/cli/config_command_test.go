@@ -599,11 +599,19 @@ func TestConfigStatusRendersProfileRuntimeDiagnostics(t *testing.T) {
 	}
 }
 
-func TestConfigApplyRejectsUnsafeSettingsTreeBeforeMutation(t *testing.T) {
+func TestConfigApplyRepairsWritableSettingsAndRejectsWritableSecrets(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
-	unsafe := filepath.Join(configHome, "overrides", "host", "unsafe.conf")
-	writeConfigCommandFile(t, unsafe, "value\n")
-	if err := os.Chmod(unsafe, 0o666); err != nil {
+	writable := filepath.Join(configHome, "overrides", "host", "writable.conf")
+	writeConfigCommandFile(t, writable, "value\n")
+	if err := os.Chmod(writable, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(writable), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(configHome, "secrets", "token")
+	writeConfigCommandFile(t, secret, "value\n")
+	if err := os.Chmod(secret, 0o620); err != nil {
 		t.Fatal(err)
 	}
 	applier := &recordingConfigApplier{}
@@ -618,24 +626,36 @@ func TestConfigApplyRejectsUnsafeSettingsTreeBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code != 1 ||
-		!strings.Contains(stderr.String(), "group/world writable") {
-		t.Fatalf("unsafe tree was not rejected: code=%d stderr=%s", code, stderr.String())
+		!strings.Contains(stderr.String(), "group/world writable: "+secret) || strings.Contains(stderr.String(), "writable.conf") {
+		t.Fatalf("writable secret was not the only refusal: code=%d stderr=%s", code, stderr.String())
 	}
 	if len(applier.yards) != 0 {
-		t.Fatalf("unsafe tree was applied to %#v", applier.yards)
+		t.Fatalf("writable secret was applied to %#v", applier.yards)
+	}
+	for path, want := range map[string]os.FileMode{writable: 0o644, filepath.Dir(writable): 0o755, secret: 0o620} {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s mode = %v, want %v (%v)", path, info.Mode(), want, err)
+		}
 	}
 }
 
 func TestManagedConfigTreeReportsEveryUnsafePath(t *testing.T) {
 	root := testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(root, "config.env"), []byte("fixture\n"), 0o666)
-	if err := os.Mkdir(filepath.Join(root, "generated"), 0o700); err != nil {
-		t.Fatal(err)
+	for _, directory := range []string{"generated", "secrets"} {
+		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	testkit.WriteFile(t, filepath.Join(root, "generated", "unsafe"), []byte("fixture\n"), 0o666)
+	testkit.WriteFile(t, filepath.Join(root, "secrets", "one"), []byte("fixture\n"), 0o666)
+	testkit.WriteFile(t, filepath.Join(root, "secrets", "two"), []byte("fixture\n"), 0o620)
+	if findings := inspectManagedConfigTree(root); len(findings) != 4 {
+		t.Fatalf("findings=%v", findings)
+	}
 	err := validateManagedConfigTree(root)
 	if findings := inspectManagedConfigTree(root); len(findings) != 2 || err == nil ||
-		!strings.Contains(err.Error(), "config.env") || !strings.Contains(err.Error(), "generated/unsafe") {
+		!strings.Contains(err.Error(), "secrets/one") || !strings.Contains(err.Error(), "secrets/two") {
 		t.Fatalf("findings=%v err=%v", findings, err)
 	}
 }
@@ -654,8 +674,9 @@ func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t
 		{name: "generated group readable", relative: "generated/codex/config", mode: 0o640},
 		{name: "generated world readable", relative: "generated/codex/config", mode: 0o644},
 		{name: "group writable", relative: "secrets/token", mode: 0o620, wantErr: "group/world writable"},
-		{name: "world writable", relative: "generated/codex/config", mode: 0o602, wantErr: "group/world writable"},
-		{name: "group and world writable", relative: "config.env", mode: 0o666, wantErr: "group/world writable"},
+		{name: "world writable secret", relative: "secrets/token", mode: 0o602, wantErr: "group/world writable"},
+		{name: "world writable generated", relative: "generated/codex/config", mode: 0o602},
+		{name: "group and world writable", relative: "config.env", mode: 0o666},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configHome := filepath.Join(t.TempDir(), "config")
@@ -671,6 +692,9 @@ func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t
 			}
 			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
 				t.Fatalf("mode %04o error = %v, want %q", test.mode, err, test.wantErr)
+			}
+			if info, err := os.Stat(path); test.wantErr == "" && (err != nil || info.Mode().Perm() != test.mode&^0o022) {
+				t.Fatalf("mode %04o was not repaired: %v %v", test.mode, info.Mode(), err)
 			}
 		})
 	}

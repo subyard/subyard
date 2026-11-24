@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -47,8 +48,10 @@ func ReadSSHHostTrust(path string) (SSHHostTrust, error) {
 	if err != nil {
 		return SSHHostTrust{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return SSHHostTrust{}, errors.New("captured SSH host trust must be a private regular file")
+	// Host trust needs integrity, not secrecy: only the owner may change it.
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+		return SSHHostTrust{}, errors.New("captured SSH host trust must be a regular file that only its owner can write")
 	}
 	if info.Size() <= 0 || info.Size() > 64*1024 {
 		return SSHHostTrust{}, errors.New("captured SSH host trust has an invalid size")

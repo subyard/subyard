@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/credential"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const maximumRecordSize = 1024 * 1024
@@ -189,6 +190,7 @@ func (reader Reader) readPeerStatus(ctx context.Context) ([]domain.CredentialPee
 }
 
 func readProtectedJSON(path string, target any) error {
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

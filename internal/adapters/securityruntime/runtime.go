@@ -156,9 +156,9 @@ func (runtime Runtime) keyFindings() []finding {
 	if err != nil {
 		return append(result, finding{"fail", "inspect credential ledger root: " + err.Error()})
 	}
-	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		result = append(result, finding{"fail",
-			fmt.Sprintf("credential ledger root must have mode 0700: %s (mode %04o)",
+			fmt.Sprintf("credential ledger root must not be accessible by group or others: %s (mode %04o)",
 				root, info.Mode().Perm())})
 	}
 	for _, name := range []string{"age.txt", "signing_ed25519"} {
@@ -175,8 +175,8 @@ func (runtime Runtime) keyFindings() []finding {
 			result = append(result, finding{"fail", "key identity must not be a symlink: " + path})
 			continue
 		}
-		if identity.Mode().Perm() != 0o600 {
-			result = append(result, finding{"fail", "key identity must have mode 0600: " + path})
+		if identity.Mode().Perm()&0o077 != 0 {
+			result = append(result, finding{"fail", "key identity must not be accessible by group or others: " + path})
 		}
 	}
 	return result

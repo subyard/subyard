@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const agentLogRetention = 30 * 24 * time.Hour
@@ -40,11 +42,12 @@ func (recorder EventRecorder) archiveAgentRecord(clientID, kind, id string, payl
 }
 
 func readAgentLogRecord(path string, maximum int64) ([]byte, error) {
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() > maximum {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maximum {
 		return nil, errors.New("unsafe agent log record")
 	}
 	return os.ReadFile(path)

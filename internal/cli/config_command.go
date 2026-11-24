@@ -25,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -1533,7 +1534,29 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 }
 
 func validateManagedConfigTree(root string) error {
+	repairManagedConfigTree(root)
 	return domain.CollectRefusals(inspectManagedConfigTree(root)...)
+}
+
+// repairManagedConfigTree clears group and other write on the operator's own
+// config entries before the permission predicate runs. Secrets keep their
+// refusal: a writable secret may already have been replaced. Every state the
+// repair leaves is reported by inspectManagedConfigTree.
+func repairManagedConfigTree(root string) {
+	if safefs.RepairPath(root, 0o022) != nil {
+		return
+	}
+	for _, relative := range []string{"config.env", "overrides", "yards", "generated"} {
+		_ = filepath.WalkDir(filepath.Join(root, relative), func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if err := safefs.RepairPath(path, 0o022); err != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
 }
 
 // configPermissionError is a refused managed config path. Only a group- or

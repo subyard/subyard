@@ -235,12 +235,13 @@ func readHardCleanup(path string) (*hardCleanupJournal, error) {
 		return nil, err
 	}
 	defer file.Close()
+	_ = safefs.RepairMode(file, 0o077)
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 || info.Size() > 32<<20 {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 || info.Size() > 32<<20 {
 		return nil, errors.New("unsafe hard cleanup recovery journal")
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, 32<<20))

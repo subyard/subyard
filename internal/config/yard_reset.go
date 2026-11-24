@@ -36,7 +36,7 @@ func YardFallbackReset(configHome, name string) (bool, error) {
 	if !marker.Exists {
 		return false, nil
 	}
-	if marker.Identity.Mode&0o777 != 0o600 || !bytes.Equal(marker.Content, []byte(yardResetMarkerContent)) {
+	if marker.Identity.Mode&0o022 != 0 || !bytes.Equal(marker.Content, []byte(yardResetMarkerContent)) {
 		return false, errors.New("yard reset ownership marker is malformed or has unsafe permissions")
 	}
 	return true, nil

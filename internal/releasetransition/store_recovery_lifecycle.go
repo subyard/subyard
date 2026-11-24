@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -59,11 +60,15 @@ func (store *POSIXV2Store) recoveryEntries(parts []string) ([]os.DirEntry, int64
 			return nil, 0, err
 		}
 		logical[transaction] = struct{}{}
+		if fd, err := unix.Openat(parent, entry.Name(), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0); err == nil {
+			_ = safefs.RepairFD(fd, entry.Name(), 0o077)
+			_ = unix.Close(fd)
+		}
 		var info unix.Stat_t
 		if err := unix.Fstatat(parent, entry.Name(), &info, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, 0, err
 		}
-		if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&0o777 != 0o600 || info.Size > MaxProtectedRecordBytes {
+		if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&0o077 != 0 || info.Size > MaxProtectedRecordBytes {
 			return nil, 0, invalid("unsafe recovery record prevents bounded inspection")
 		}
 		total += info.Size

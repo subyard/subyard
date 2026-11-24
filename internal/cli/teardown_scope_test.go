@@ -366,7 +366,7 @@ func TestTeardownFullRejectsRemoteAndKeepDataBeforeConsent(t *testing.T) {
 }
 
 func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T) {
-	for _, kind := range []string{"complete", "truncated", "empty", "unsafe-empty", "locked-empty"} {
+	for _, kind := range []string{"complete", "truncated", "empty", "broad-empty", "locked-empty"} {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newFixture(t)
 			root := fixture.Root
@@ -388,7 +388,8 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 					t.Fatal(err)
 				}
 				defer unlock()
-			case "unsafe-empty":
+			case "broad-empty":
+				// The operator's own broader recovery directory is repaired.
 				if err := os.Chmod(directory, 0755); err != nil {
 					t.Fatal(err)
 				}
@@ -405,7 +406,7 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 				if len(prompt.Requests) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
 					t.Fatal("original first plan did not reach its single default-no confirmation", code, stderr.String())
 				}
-			} else if kind == "empty" {
+			} else if kind == "empty" || kind == "broad-empty" {
 				if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("empty recovery directory remains: %v", err)
 				}
@@ -419,7 +420,7 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 			} else if code == 0 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "ORIGINAL approved inventory") {
 				t.Fatal("incomplete protected store bypassed admission", code, stderr.String())
 			}
-			if _, err := os.Lstat(directory); kind != "empty" && err != nil {
+			if _, err := os.Lstat(directory); kind != "empty" && kind != "broad-empty" && err != nil {
 				t.Fatalf("protected store was lost: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(directory, "plan.json")); !errors.Is(err, os.ErrNotExist) {

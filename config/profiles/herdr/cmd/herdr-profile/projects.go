@@ -106,6 +106,7 @@ func stateDir() (string, error) {
 func loadRegistrations(dir string) (map[string]registration, error) {
 	state := make(map[string]registration)
 	uid := uint32(os.Getuid())
+	_ = safefs.RepairPath(filepath.Join(dir, "projects.json"), 0o077)
 	data, err := safefs.ReadRegular(filepath.Join(dir, "projects.json"), safefs.ReadOptions{MaxBytes: documentLimit, OwnerUID: &uid, DenyPerm: 0o077, SingleLink: true})
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil

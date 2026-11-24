@@ -172,11 +172,7 @@ func readRecordReadOnly(path, expectedID string) (domain.ProjectRecord, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return domain.ProjectRecord{}, fmt.Errorf("project state is not a regular file: %s", path)
 	}
-	permissions := info.Mode().Perm()
-	if permissions&0o600 != 0o600 || permissions&^0o666 != 0 ||
-		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
-		return domain.ProjectRecord{}, fmt.Errorf("project state permissions are unsafe: %o", permissions)
-	}
+	// A read-only reader trusts only the owner; mode is repaired by writers.
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return domain.ProjectRecord{}, err
@@ -386,9 +382,6 @@ func validateReadOnlyStateDirectory(path string) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return false, errors.New("state path is not a real directory")
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return false, fmt.Errorf("state directory permissions are too broad: %o", info.Mode().Perm())
-	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(stat.Uid) != os.Geteuid() {
 		return false, errors.New("state directory is not owned by the operator")
@@ -397,6 +390,7 @@ func validateReadOnlyStateDirectory(path string) (bool, error) {
 }
 
 func readRecord(path, expectedID string) (domain.ProjectRecord, error) {
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return domain.ProjectRecord{}, err
@@ -430,12 +424,8 @@ func repairLegacyRecord(path, expectedID string) (bool, error) {
 	if permissions&0o077 == 0 {
 		return false, nil
 	}
-	// The legacy shell redirection started from 0666. Require owner read/write,
-	// reject executable/special modes, and only remove group/other read/write.
-	if permissions&0o600 != 0o600 || permissions&^0o666 != 0 ||
-		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
-		return false, fmt.Errorf("project state permissions are too broad: %o", permissions)
-	}
+	// The legacy shell redirection started from 0666. Any broader mode of the
+	// operator's own valid record becomes 0600.
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return false, err

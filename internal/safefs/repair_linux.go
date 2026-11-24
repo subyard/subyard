@@ -18,6 +18,11 @@ func RepairMode(file *os.File, deny fs.FileMode) error {
 	return repairMode(int(file.Fd()), file.Name(), deny)
 }
 
+// RepairFD applies RepairMode to a raw descriptor the caller keeps open.
+func RepairFD(fd int, path string, deny fs.FileMode) error {
+	return repairMode(fd, path, deny)
+}
+
 // RepairPath applies RepairMode to path without following a final symlink.
 func RepairPath(path string, deny fs.FileMode) error {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)

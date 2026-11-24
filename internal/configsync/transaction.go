@@ -306,6 +306,7 @@ func transactionEntryApplied(
 
 func rollbackInitializedHostID(configHome, expected string) error {
 	path := HostIDPath(configHome)
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -314,7 +315,7 @@ func rollbackInitializedHostID(configHome, expected string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm() != 0o600 {
+		info.Mode().Perm()&0o077 != 0 {
 		return errors.New("initialized owner host ID changed during recovery")
 	}
 	content, err := os.ReadFile(path)
@@ -360,6 +361,7 @@ func readTransaction(configHome string) (transaction, bool, error) {
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return transaction{}, false, err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return transaction{}, false, nil
@@ -368,8 +370,8 @@ func readTransaction(configHome string) (transaction, bool, error) {
 		return transaction{}, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm() != 0o600 {
-		return transaction{}, false, metadataSafetyError(path, "config sync transaction must be a regular 0600 file", "type=regular, mode=0600", info)
+		info.Mode().Perm()&0o077 != 0 {
+		return transaction{}, false, metadataSafetyError(path, "config sync transaction must be a private regular file", "type=regular, no group or other access", info)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -457,6 +459,7 @@ func removeTransactionRoot(configHome, transactionRoot string) error {
 }
 
 func ensureConfigurationRoot(root string) error {
+	_ = safefs.RepairPath(root, 0o022)
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(root, 0o700); err != nil {
@@ -471,6 +474,7 @@ func ensureConfigurationRoot(root string) error {
 }
 
 func validateExistingConfigurationRoot(root string) error {
+	_ = safefs.RepairPath(root, 0o022)
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -508,6 +512,7 @@ func validateConfigurationAncestors(configHome, path string) error {
 	parts := strings.Split(relative, string(filepath.Separator))
 	for _, part := range parts[:len(parts)-1] {
 		current = filepath.Join(current, part)
+		_ = safefs.RepairPath(current, 0o022)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -536,6 +541,9 @@ func ensureDirectory(configHome, path string, mode os.FileMode) error {
 	}
 	current := path
 	for {
+		// Clear group and other write on the operator's own directory; the
+		// checks below report every state this repair leaves.
+		_ = safefs.RepairPath(current, 0o022)
 		info, err := os.Lstat(current)
 		if err != nil {
 			return err

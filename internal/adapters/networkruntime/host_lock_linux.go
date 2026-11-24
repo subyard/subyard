@@ -110,6 +110,9 @@ func ensureHostLockAt(directory string, ownerUID, groupGID int) error {
 	}
 	defer unix.Close(lockFD) //nolint:errcheck
 
+	if !created {
+		repairHostLockMode(lockFD, unix.S_IFREG, ownerUID, groupGID, 0o660)
+	}
 	if created {
 		if err := unix.Fchown(lockFD, ownerUID, groupGID); err != nil {
 			_ = unix.Unlinkat(directoryFD, hostLockName, 0)
@@ -277,6 +280,8 @@ func openHostLockDirectory(directory string, ownerUID int, create bool) (int, bo
 			_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 			return -1, true, fmt.Errorf("set host network policy lock directory mode: %w", err)
 		}
+	} else if create {
+		repairHostLockMode(directoryFD, unix.S_IFDIR, ownerUID, -1, 0o755)
 	}
 	if err := validateHostLockDirectoryFD(directoryFD, ownerUID); err != nil {
 		_ = unix.Close(directoryFD)
@@ -286,6 +291,19 @@ func openHostLockDirectory(directory string, ownerUID int, create bool) (int, bo
 		return -1, created, err
 	}
 	return directoryFD, created, nil
+}
+
+// repairHostLockMode restores the policy mode of an existing lock entry whose
+// type, owner, group and link count already match. Validation still reports
+// every state it leaves.
+func repairHostLockMode(fd int, kind uint32, ownerUID, groupGID int, mode uint32) {
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != kind || int(stat.Uid) != ownerUID ||
+		(groupGID >= 0 && int(stat.Gid) != groupGID) || (kind == unix.S_IFREG && stat.Nlink != 1) ||
+		stat.Mode&0o7777 == mode {
+		return
+	}
+	_ = unix.Fchmod(fd, mode)
 }
 
 func validateHostLockDirectoryFD(fd int, ownerUID int) error {

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -79,11 +80,12 @@ func publishPlan(path string, uid uint32, body []byte, expected *Tree) error {
 		return err
 	}
 	defer unix.Close(parent)
+	_ = safefs.RepairFD(parent, filepath.Dir(path), 0o077)
 	var directory unix.Stat_t
 	if err := unix.Fstat(parent, &directory); err != nil {
 		return err
 	}
-	if directory.Mode&unix.S_IFMT != unix.S_IFDIR || directory.Mode&07777 != 0700 || directory.Uid != uid || uint32(os.Getuid()) != uid {
+	if directory.Mode&unix.S_IFMT != unix.S_IFDIR || directory.Mode&07077 != 0 || directory.Uid != uid || uint32(os.Getuid()) != uid {
 		return guardRefusal("unsafe recovery publication parent")
 	}
 	unchanged := func() error {
@@ -122,11 +124,12 @@ func advanceEpoch(path string, before, after uint64, uid uint32) error {
 		return err
 	}
 	defer unix.Close(parent)
+	_ = safefs.RepairFD(parent, "owner epoch directory", 0o077)
 	var directory unix.Stat_t
 	if err := unix.Fstat(parent, &directory); err != nil {
 		return err
 	}
-	if directory.Uid != uid || directory.Mode&07777 != 0700 {
+	if directory.Uid != uid || directory.Mode&07077 != 0 {
 		return guardRefusal("unsafe owner epoch directory")
 	}
 	current := uint64(0)
@@ -134,6 +137,7 @@ func advanceEpoch(path string, before, after uint64, uid uint32) error {
 		file := os.NewFile(uintptr(fd), name)
 		var info unix.Stat_t
 		body := make([]byte, 33)
+		_ = safefs.RepairFD(fd, name, 0o077)
 		err = unix.Fstat(fd, &info)
 		size, readErr := file.Read(body)
 		if errors.Is(readErr, io.EOF) {
@@ -143,7 +147,7 @@ func advanceEpoch(path string, before, after uint64, uid uint32) error {
 		if err = errors.Join(err, readErr); err != nil {
 			return err
 		}
-		if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07777 != 0600 || info.Uid != uid {
+		if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&07077 != 0 || info.Uid != uid {
 			return guardRefusal("unsafe owner epoch")
 		}
 		current, err = strconv.ParseUint(strings.TrimSuffix(string(body[:size]), "\n"), 10, 64)
@@ -434,8 +438,9 @@ func retainRuntime(plan RecoveryPlan, destination string) error {
 			} else if !errors.Is(err, unix.EEXIST) {
 				return err
 			}
+			repairAt(parent, name, 0o077)
 			info, err := statAt(parent, name, ".")
-			if err == nil && (info.Mode&unix.S_IFMT != unix.S_IFDIR || info.Mode&07777 != 0700 || info.UID != uid) {
+			if err == nil && (info.Mode&unix.S_IFMT != unix.S_IFDIR || info.Mode&07077 != 0 || info.UID != uid) {
 				err = guardRefusal("unsafe retained runtime directory")
 			}
 			return err
@@ -503,6 +508,7 @@ func retainRuntime(plan RecoveryPlan, destination string) error {
 			if err == nil {
 				file := os.NewFile(uintptr(fd), name)
 				defer file.Close()
+				_ = safefs.RepairFD(fd, name, 0o077)
 				var stat unix.Stat_t
 				if err := unix.Fstat(fd, &stat); err != nil {
 					return err
@@ -547,12 +553,13 @@ func privateDirectory(path string) error {
 	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Getuid()) {
+	if !ok || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || stat.Uid != uint32(os.Getuid()) {
 		return guardRefusal("unsafe recovery runtime directory")
 	}
 	return nil

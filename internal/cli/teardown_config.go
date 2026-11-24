@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -47,6 +48,7 @@ func captureTeardownConfig(yard domain.Context) (*teardownConfigSnapshot, error)
 		return nil, err
 	}
 	for _, directory := range []string{root, filepath.Join(root, "yards"), filepath.Join(root, "yards", name)} {
+		_ = safefs.RepairPath(directory, 0o022)
 		info, err := os.Lstat(directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

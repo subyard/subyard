@@ -122,7 +122,7 @@ func TestRegistryPublishFinishesNarrowDirectories(t *testing.T) {
 	}
 }
 
-func TestRegistryRejectsUnsafeModeLinkAndPublicReplacement(t *testing.T) {
+func TestRegistryRepairsModeAndRejectsLinkAndPublicReplacement(t *testing.T) {
 	for _, kind := range []string{"mode", "symlink", "hardlink", "public"} {
 		t.Run(kind, func(t *testing.T) {
 			registry, record, public := fixture(t)
@@ -155,6 +155,14 @@ func TestRegistryRejectsUnsafeModeLinkAndPublicReplacement(t *testing.T) {
 			if kind == "public" {
 				if err := registry.Published(record, public); err == nil {
 					t.Fatal("public replacement accepted")
+				}
+			} else if kind == "mode" {
+				// The operator's own broader private record is repaired.
+				if _, err := registry.List(record.Service); err != nil {
+					t.Fatal(err)
+				}
+				if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("private record mode = %v (%v)", info.Mode(), err)
 				}
 			} else {
 				if _, err := registry.List(record.Service); err == nil {
