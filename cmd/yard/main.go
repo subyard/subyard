@@ -137,7 +137,7 @@ func main() {
 			os.Exit(2)
 		}
 		if err := profile.RunServices(ctx, os.Args[2], os.Args[3:], processEnvironment(), os.Stdout, os.Stderr); err != nil {
-			if os.Args[3] == "--check" || os.Args[3] == "--verify" {
+			if os.Args[3] == "--check" {
 				var check *profile.ServiceCheckError
 				if errors.As(err, &check) {
 					fmt.Fprintln(os.Stderr, check)

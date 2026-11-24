@@ -47,10 +47,9 @@ and closes their active connections.
 install or reconcile Incus, the yard and its core configuration.
 
 ```text
-Usage: yard init [--configs | --reset | --profile <name> | --environment-profiles 'LIST' | --continue-legacy | --adopt] [--yes]
+Usage: yard init [--configs | --reset | --profile <name> | --continue-legacy | --adopt] [--yes]
 
 With -Y <new-name>, plain init creates a local yard with no environment profiles or coding tools and chooses an available owner-local SSH port.
---environment-profiles 'LIST' creates that yard with the space-separated environment profiles instead; rerunning it on the yard with the same saved selection continues as plain init.
 Existing yards retain their saved settings and selections; --profile creates a new yard from a named-yard preset.
 
 --adopt registers an assessed existing local yard, then completes ordinary initialization under the same reviewed plan and confirmation. Compatibility migrations retain persistent data and desired power; any required temporary restart asks for separate later confirmation. Unproven shared infrastructure and host namespaces remain preserved.

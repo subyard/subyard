@@ -1812,7 +1812,7 @@ impl Setting {
             "multiline" => value_text(value, 8192, true),
             // Native list types accept whitespace between entries. The owner
             // validates their structure before applying any edited value.
-            "link-list" | "mount-list" | "name-list" | "url-list" => list_text(value),
+            "link-list" | "mount-list" | "name-list" => list_text(value),
             _ => text(value, 8192),
         }
     }

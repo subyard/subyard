@@ -63,12 +63,18 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := filepath.Join(root, "events")
-	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\n[ \"$SUBYARD_PROFILE_DIAGNOSTICS\" = 1 ] || exit 2\necho 'profile service check owner=sample native-exit=1 reason=boot-dependency-unloaded' >&2\nexit 1\n"), 0o700)
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" \"$SUBYARD_PROFILE_POST_APPLY\" >> \"$EVENTS\"\n[ \"$SUBYARD_PROFILE_DIAGNOSTICS\" = 1 ] || exit 2\necho 'profile service check owner=sample native-exit=1 reason=boot-dependency-unloaded' >&2\nexit 1\n"), 0o700)
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped"}}}}}
 	observed, failure := runtime.ObserveStage(context.Background(), ports.ReconcileStageProfileServices)
 	data, readErr := os.ReadFile(events)
 	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || observed.Reason != "boot-dependency-unloaded" || readErr != nil || string(data) != "--check:1" {
 		t.Fatalf("original single stopped check changed: %#v %v %q %v", observed, failure, data, readErr)
+	}
+	if converged, err := runtime.VerifyStage(context.Background(), ports.ReconcileStageProfileServices); err != nil || converged {
+		t.Fatalf("post-apply check lost drift: %t %v", converged, err)
+	}
+	if data, _ = os.ReadFile(events); string(data) != "--check:1--check:11" {
+		t.Fatalf("post-apply check environment: %q", data)
 	}
 	for _, code := range []int{1, 17} {
 		err := exec.Command("bash", "-c", "exit "+strconv.Itoa(code)).Run()
@@ -131,11 +137,6 @@ func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
 	converged, err := runtime.ProfileServiceConverged(context.Background(), "sample")
 	if err != nil || converged {
 		t.Fatalf("scoped convergence lost drift: %t %v", converged, err)
-	}
-	converged, err = runtime.VerifyProfileService(context.Background(), "sample")
-	data, readErr = os.ReadFile(events)
-	if err != nil || converged || readErr != nil || !strings.HasSuffix(string(data), "--verify:sample:1\n") {
-		t.Fatalf("verification lost drift or phase: %t %v %q %v", converged, err, data, readErr)
 	}
 }
 

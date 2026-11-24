@@ -11,8 +11,6 @@ definition with explicitly empty `YARD_TEMPLATE`, `ENVIRONMENT_PROFILES` and
 `CODING_TOOL_INTEGRATIONS`. No profile or manual configuration file is required. Later plain
 init reconciles the saved settings and preserves existing selections, including after an
 interrupted initialization. Other commands require an existing definition.
-`yard -Y example init --environment-profiles 'LIST'` creates the definition with that environment
-profile selection instead; see [Configuration](../../docs/configuration.md).
 
 The installed definition lives at:
 

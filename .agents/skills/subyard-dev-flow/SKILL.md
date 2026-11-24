@@ -5,9 +5,7 @@ description: "Always use with dev-flow when developing Subyard itself: its param
 
 # Subyard dev-flow
 
-The [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) skill owns the process; this skill names
-what stands behind its terms in Subyard. The linked guides own commands and evidence; they add no
-automatic gates. Explicit operator instructions win.
+Subyard parameters for the terms of the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) skill.
 
 ## Read the relevant sources
 
@@ -19,7 +17,7 @@ Read by task; links are relative to this skill.
 | Product context or component docs | [README.md](../../../README.md): product overview and documentation index. |
 | Code, build, or packaging work | [Development](../../../docs/development.md): toolchain and build/release workflow; use `go.mod` for versions. |
 | Commands, RPC, reconciliation, or adapters | [Control plane](../../../docs/control-plane.md): implementation map, ownership boundaries, and extension contracts. |
-| Design rationale or difficult recovery bugs | [Decisions and glossary](../../../docs/reference/decisions-and-glossary.md), [Architecture](../../../docs/reference/control-plane-architecture.md), and [Release transitions](../../../docs/reference/resumable-release-transition-design.md): current decisions, architectural rationale, and recovery invariants; use the control-plane guide for the component implementation map. |
+| Design rationale or difficult recovery bugs | [Decisions and glossary](../../../docs/reference/decisions-and-glossary.md), [Architecture](../../../docs/reference/control-plane-architecture.md), and [Release transitions](../../../docs/reference/resumable-release-transition-design.md): current decisions, architectural rationale, and recovery invariants. |
 | Testing guidance by task type | [Testing reading map](../../../docs/testing.md#reading-map-by-task-type): choose the relevant sections for the task. |
 | Live host or release behavior | [Real-host acceptance](../../../docs/real-host-acceptance.md): physical-boundary and release checks. |
 | Configuration or credentials | [Configuration](../../../docs/configuration.md) and [Keys](../../../docs/keys.md), respectively. |
@@ -29,12 +27,10 @@ Read by task; links are relative to this skill.
 - **Tasks and instructions:** the optional private overlay `private/`, a separate gitignored
   repository; rules in `private/AGENTS.md`. Keep the main checkout's `private/` current and never
   commit it; the operator syncs it with [subyard-private-sync](../subyard-private-sync/SKILL.md).
-  Without an overlay or other instructions, ask the operator. Operator questions live where the
-  overlay says.
+  Without an overlay or other instructions, ask the operator.
 - **Commits:** the coordinator commits and pushes the accepted candidate without asking.
 - **Checks:** [Choose checks by risk](#choose-checks-by-risk). **PR format:** [Pull requests](#pull-requests).
 - **Code areas:** `product`, `tests`, `fixtures and tools`, `documentation`.
-- **Agents:** [Agents](#agents); models are chosen outside this repository.
 
 ## Engineering
 
@@ -71,14 +67,14 @@ Read by task; links are relative to this skill.
 - Before an expensive VM check, run changed-component unit/contract checks, then the smallest
   [fixture preflight](../../../docs/test-vms.md#fixture-preflight), then the affected lane. Reuse a
   current applicable PASS. If no local check can prove the physical contract, record that limit
-  in one line and run the smallest owning VM diagnostic. The full host-free suite is not required.
+  in one line and run the smallest owning VM diagnostic.
 - Run `./tests/run.sh` for shared behavior or actual coupling, an explicit request, or a
   merge/release gate, not merely because a CLI or shell file changed.
 - Run full P0 only on explicit request or for cross-domain lifecycle/recovery coupling that
   targeted lanes cannot cover; state the reason first. Free VMs alone do not justify it.
 - Select owning lanes, including profile-owned lanes and transitive validators, from
-  [coverage ownership](../../../docs/testing.md#coverage-ownership); there is no automatic
-  changed-file selector. Mocks cannot close a contract the map assigns to a physical lane.
+  [coverage ownership](../../../docs/testing.md#coverage-ownership). Mocks cannot close a
+  contract the map assigns to a physical lane.
 - Planned checks on available allocated VMs are agent work: complete them before readiness.
 - Release preparation, acceptance and publication follow the
   [agent release workflow](../../../docs/reference/release-publication.md#agent-release-workflow).
@@ -106,7 +102,7 @@ Read by task; links are relative to this skill.
 
 - By default a change ships as one PR: the first commit adds the mechanism without changing
   behavior, the second changes behavior, and the first review round goes commit by commit.
-  Moving existing code onto shared primitives goes in separate PRs. There is no line-count threshold.
+  Moving existing code onto shared primitives goes in separate PRs.
 - Run GitHub commands as `subyard-github run -- gh …`. The body is the describer's output plus
   `python3 dev/pr-stats.py --base origin/BASE --review-cycles N --purpose AREA=TEXT ... [--check NAME=URL ...]`;
   `--review-cycles` counts dev-flow rounds.
@@ -137,7 +133,7 @@ Read by task; links are relative to this skill.
 | Observer, describer, design consult | `general-purpose` agent with the role brief | `spawn_agent` with the role brief | `--role observer`, or the role brief as the task |
 
 - A brief is the loaded dev-flow skill's `roles/<role>.md` plus the role additions below.
-- Use the installed bridge skill, not the temporary `agent-bridge-local` command.
+- Use the installed bridge skill.
   `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 
 ### Role additions
@@ -146,15 +142,13 @@ Read by task; links are relative to this skill.
   [execution principles](../../../docs/testing.md#execution-and-reporting-principles),
   [long checks](../../../docs/testing.md#launch-and-observe-long-checks),
   [repair after a failure](../../../docs/testing.md#repair-after-a-failure) and
-  [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup). Agent
-  termination does not drain a lease. Keep global settings and existing runner infrastructure unchanged.
+  [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup). Keep global
+  settings and existing runner infrastructure unchanged.
 - **Reviewer:** assess execution evidence by the same execution principles.
 - **Describer:** English Markdown; omit statistics.
 
 ## Environment
 
-- Use allocated test targets within the VM guide's ownership boundary. The outer yard's lifecycle
-  belongs to the operator. Ask the operator to run exact commands that need operator access or `sudo`.
-- Production updates and post-deployment checks belong to the operator after handoff; exclude
-  them from development plans and automatic follow-up tasks. Release publication keeps its
-  separate gates.
+- Use allocated test targets within the VM guide's ownership boundary. Ask the operator to run
+  exact commands that need operator access or `sudo`.
+- Exclude production updates and post-deployment checks from development plans and follow-up tasks.

@@ -14,9 +14,7 @@ Each provider has a protected mode-0600 ownership receipt in
 `/var/lib/subyard/agent-skills/`. Receipts list only managed content paths and hashes.
 Writes to managed content repair drift; unexpected files, foreign links and symlinked
 parents cause a diagnostic before the provider's artifacts change. User skills remain
-outside these receipts. The `user-skills` profile links skills from its own clones under
-`~/.local/share/subyard-user-skills/` with links it owns by exact target, never through a receipt;
-shipped skill names start with `subyard-`, which user skill sources cannot use.
+outside these receipts; the [user-skills](../../docs/user-skills.md) profile skips `subyard-` names.
 
 Profile provisioning invokes `/usr/local/libexec/subyard/agent-skills apply` only
 **after** successfully provisioning the capability. Use provider `profile-<profile>`

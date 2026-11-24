@@ -40,20 +40,16 @@ type initArguments struct {
 	continueLegacy bool
 	mode           initMode
 	profile        string
-	// environmentProfiles is the selection for a named yard that init creates.
-	environmentProfiles *string
 	// consentFD carries a config apply parent's consent to init --configs.
 	consentFD int
 }
 
 type initBootstrap struct {
-	source  *profile.Source
-	profile string
-	// environmentProfiles is the creation selection; empty means none.
-	environmentProfiles string
-	sourcePath          string
-	targetPath          string
-	content             []byte
+	source     *profile.Source
+	profile    string
+	sourcePath string
+	targetPath string
+	content    []byte
 }
 
 type initExecution struct {
@@ -216,52 +212,20 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 			if !domain.SafeName(request.profile) {
 				return initArguments{}, fmt.Errorf("invalid profile %q", request.profile)
 			}
-		case "--environment-profiles":
-			if index+1 >= len(arguments) {
-				return initArguments{}, errors.New("--environment-profiles needs a value")
-			}
-			index++
-			if request.environmentProfiles != nil {
-				return initArguments{}, errors.New("--environment-profiles may be specified only once")
-			}
-			value := arguments[index]
-			request.environmentProfiles = &value
 		default:
 			return initArguments{}, fmt.Errorf("unknown option %q", argument)
 		}
 	}
-	// The parsed request accompanies a refusal so the target-yard check can
-	// report together with these.
-	return request, domain.CollectRefusals(initArgumentRefusals(request)...)
-}
-
-// initArgumentRefusals reports every combination and name refusal that the
-// parsed arguments alone determine.
-func initArgumentRefusals(request initArguments) []error {
-	refusals := creationOptionRefusals(request)
 	if request.consentFD >= 0 && request.mode != initConfigs {
-		refusals = append(refusals, errors.New("--config-consent-fd is only for init --configs"))
+		return initArguments{}, errors.New("--config-consent-fd is only for init --configs")
 	}
 	if request.continueLegacy && (request.mode != initReconcile || request.profile != "") {
-		refusals = append(refusals, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile"))
+		return initArguments{}, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile")
 	}
 	if request.adopt && (request.continueLegacy || request.mode != initReconcile || request.profile != "") {
-		refusals = append(refusals, errors.New("--adopt cannot be combined with --continue-legacy, --configs, --reset or --profile"))
+		return initArguments{}, errors.New("--adopt cannot be combined with --continue-legacy, --configs, --reset or --profile")
 	}
-	return refusals
-}
-
-// creationOptionRefusals reports the combination and name refusals of
-// --environment-profiles.
-func creationOptionRefusals(request initArguments) []error {
-	if request.environmentProfiles == nil {
-		return nil
-	}
-	var refusals []error
-	if request.mode != initReconcile || request.profile != "" || request.adopt || request.continueLegacy {
-		refusals = append(refusals, errors.New("--environment-profiles cannot be combined with --configs, --reset, --profile, --adopt or --continue-legacy"))
-	}
-	return append(refusals, creationProfileNameRefusals(*request.environmentProfiles)...)
+	return request, nil
 }
 
 func (cli *CLI) loadInitContext(
@@ -270,27 +234,13 @@ func (cli *CLI) loadInitContext(
 	arguments []string,
 ) (config.Loaded, *initBootstrap, error) {
 	request, err := parseInitArguments(arguments)
-	if request.environmentProfiles != nil && (!explicit || yard == "" || yard == "default") {
-		// Combination, name and target refusals are independent; report them together.
-		return config.Loaded{}, nil, domain.CollectRefusals(append(initArgumentRefusals(request),
-			errors.New("--environment-profiles requires selecting a new non-default yard with -Y"))...)
-	}
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
 	if request.profile == "" {
 		loaded, err := cli.loadContext(yard)
 		if errors.Is(err, config.ErrUnknownYard) && explicit && yard != "" && yard != "default" && request.mode == initReconcile && !request.continueLegacy && !request.adopt {
-			creation := ""
-			if request.environmentProfiles != nil {
-				creation = strings.Join(strings.Fields(*request.environmentProfiles), " ")
-			}
-			return cli.loadEmptyNamedYard(yard, creation)
-		}
-		if err == nil && request.environmentProfiles != nil {
-			if err := resumedCreationSelection(loaded, *request.environmentProfiles); err != nil {
-				return config.Loaded{}, nil, err
-			}
+			return cli.loadEmptyNamedYard(yard)
 		}
 		if err == nil && (request.continueLegacy || request.adopt) && loaded.Context.AccessKind != domain.AccessLocal {
 			flag := "--continue-legacy"

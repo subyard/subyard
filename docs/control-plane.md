@@ -2774,10 +2774,9 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
-  Post-apply verification dispatches `--verify`, which runs the same `--check` hook
-  with `SUBYARD_PROFILE_POST_APPLY=1`. A hook may accept an external clone that could
-  not be fetched after reporting a warning during apply; its ordinary check still
-  schedules the next init's retry. Existing service checks keep their strict behavior.
+  Init's post-apply check passes `SUBYARD_PROFILE_POST_APPLY=1`; a hook may then accept
+  an external source that apply could not fetch and warned about, while its ordinary check
+  schedules the next init's retry.
   Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
   write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
   `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,

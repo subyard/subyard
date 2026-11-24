@@ -7,77 +7,23 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/profile"
 )
 
 func (bootstrap *initBootstrap) description() string {
 	if bootstrap.profile != "" {
 		return "create named yard definition from profile " + bootstrap.profile
 	}
-	if bootstrap.environmentProfiles != "" {
-		return "create named yard definition with environment profiles [" + bootstrap.environmentProfiles + "] and no coding tools"
-	}
 	return "create named yard definition with empty environment profiles and coding tools"
-}
-
-// creationProfileNameRefusals reports every unsafe or repeated name in an
-// init --environment-profiles value before any configuration is read.
-func creationProfileNameRefusals(value string) []error {
-	var refusals []error
-	seen := map[string]bool{}
-	for _, name := range strings.Fields(value) {
-		switch {
-		case !domain.SafeName(name):
-			refusals = append(refusals, fmt.Errorf("--environment-profiles: invalid profile name %q", name))
-		case seen[name]:
-			refusals = append(refusals, fmt.Errorf("--environment-profiles: profile %q is repeated", name))
-		}
-		seen[name] = true
-	}
-	return refusals
-}
-
-// creationProfileEligibility reports every requested profile that is unknown or
-// not eligible for the new yard.
-func (cli *CLI) creationProfileEligibility(loaded config.Loaded, names []string) error {
-	var refusals []error
-	for _, name := range names {
-		if _, err := profile.ResolvePackage(cli.options.RepositoryRoot, name); err != nil {
-			refusals = append(refusals, fmt.Errorf("--environment-profiles: unknown environment profile %q", name))
-			continue
-		}
-		eligible, reason, err := config.EnvironmentProfileEligibility(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment, loaded.Catalog, name)
-		if err != nil {
-			refusals = append(refusals, err)
-		} else if !eligible {
-			refusals = append(refusals, fmt.Errorf("--environment-profiles: profile %q is not eligible for this yard (%s)", name, reason))
-		}
-	}
-	return domain.CollectRefusals(refusals...)
-}
-
-// resumedCreationSelection lets a rerun after an interrupted creation continue
-// as plain init when the saved selection is the requested one.
-func resumedCreationSelection(loaded config.Loaded, value string) error {
-	saved := slices.Sorted(slices.Values(loaded.EnvironmentProfiles.Requested))
-	requested := slices.Sorted(slices.Values(strings.Fields(value)))
-	if loaded.EnvironmentProfiles.Present && slices.Equal(slices.Compact(saved), requested) {
-		return nil
-	}
-	yard := loaded.Context.YardName
-	return fmt.Errorf("yard %s already exists with a different environment profile selection; resume with plain yard -Y %s init, or change the selection with yard -Y %s profile enable|disable ID or yard -Y %s config set ENVIRONMENT_PROFILES 'LIST' --scope yard", yard, yard, yard, yard)
 }
 
 // Only init supplies this draft. Ordinary context loading still requires a
 // registered name, and all freshness checks continue to inspect native inputs.
-func (cli *CLI) loadEmptyNamedYard(yard, environmentProfiles string) (config.Loaded, *initBootstrap, error) {
+func (cli *CLI) loadEmptyNamedYard(yard string) (config.Loaded, *initBootstrap, error) {
 	home := cli.env["SUBYARD_OPERATOR_HOME"]
 	if home == "" {
 		home = cli.env["HOME"]
@@ -86,12 +32,9 @@ func (cli *CLI) loadEmptyNamedYard(yard, environmentProfiles string) (config.Loa
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
-	bootstrap := &initBootstrap{targetPath: filepath.Join(configHome, "yards", yard, "config.env"), environmentProfiles: environmentProfiles}
+	bootstrap := &initBootstrap{targetPath: filepath.Join(configHome, "yards", yard, "config.env")}
 	// Clear the independent selections, including an inherited yard preset.
-	content := func(port int) []byte {
-		return []byte("YARD_TEMPLATE=''\nENVIRONMENT_PROFILES='" + environmentProfiles + "'\nCODING_TOOL_INTEGRATIONS=''\nSSH_PORT=" + strconv.Itoa(port) + "\n")
-	}
-	bootstrap.content = content(2222)
+	bootstrap.content = []byte("YARD_TEMPLATE=''\nENVIRONMENT_PROFILES=''\nCODING_TOOL_INTEGRATIONS=''\nSSH_PORT=2222\n")
 	files := &config.ProspectiveFiles{Root: configHome, ReadSnapshot: func(path string) (config.PersistentFileSnapshot, error) {
 		return config.ReadPersistentFileSnapshot(configHome, path)
 	}}
@@ -127,22 +70,15 @@ func (cli *CLI) loadEmptyNamedYard(yard, environmentProfiles string) (config.Loa
 	if port > 65535 {
 		return config.Loaded{}, nil, errors.New("no available owner-local SSH port for named yard")
 	}
-	bootstrap.content = content(port)
+	bootstrap.content = []byte("YARD_TEMPLATE=''\nENVIRONMENT_PROFILES=''\nCODING_TOOL_INTEGRATIONS=''\nSSH_PORT=" + strconv.Itoa(port) + "\n")
 	loaded, err = load()
 	if err != nil {
 		return config.Loaded{}, nil, err
 	}
-	// The effective selection drops ineligible profiles; compare the authored one.
-	if strings.Join(loaded.EnvironmentProfiles.Requested, " ") != environmentProfiles {
-		return config.Loaded{}, nil, errors.New("command environment overrides new named yard at setting ENVIRONMENT_PROFILES")
-	}
-	for name, desired := range map[string]string{"YARD_TEMPLATE": "", "CODING_TOOL_INTEGRATIONS": "", "SSH_PORT": strconv.Itoa(port)} {
+	for name, desired := range map[string]string{"YARD_TEMPLATE": "", "ENVIRONMENT_PROFILES": "", "CODING_TOOL_INTEGRATIONS": "", "SSH_PORT": strconv.Itoa(port)} {
 		if loaded.Environment[name] != desired {
 			return config.Loaded{}, nil, fmt.Errorf("command environment overrides new named yard at setting %s", name)
 		}
-	}
-	if err := cli.creationProfileEligibility(loaded, loaded.EnvironmentProfiles.Requested); err != nil {
-		return config.Loaded{}, nil, err
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return config.Loaded{}, nil, errors.New("new named yard init requires local access")

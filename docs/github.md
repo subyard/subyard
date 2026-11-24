@@ -164,9 +164,8 @@ Concurrent ledger conflicts retain the last verified consumer until resolved, as
 SSH transport, starts again after stop/start or reboot, and does not require an interactive owner
 SSH session. The profile also installs the short local skill for supported agents.
 Readiness checks both the persistent boot link and the user manager's loaded
-`default.target` dependency. Human-readable profile status reports a fixed diagnostic code
-when boot registration, service activity or transport readiness is missing. Status JSON
-does not include this diagnostic.
+`default.target` dependency. Human profile status reports a fixed diagnostic code
+when boot registration, service activity or transport readiness is missing.
 Setup and activation repair restore registration and reconnect an inactive broker.
 When an installed release reports `migration-required`, `yard migrate` assesses
 and authorizes that repair. When the installed payloads and running broker

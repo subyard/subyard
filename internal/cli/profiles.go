@@ -545,15 +545,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if runtime != nil {
-			var ready bool
-			var err error
-			if verifier, ok := runtime.(interface {
-				VerifyProfileService(context.Context, string) (bool, error)
-			}); ok {
-				ready, err = verifier.VerifyProfileService(ctx, request.id)
-			} else {
-				ready, err = runtime.ProfileServiceConverged(ctx, request.id)
-			}
+			ready, err := runtime.ProfileServiceConverged(ctx, request.id)
 			if err != nil {
 				return result, err
 			}

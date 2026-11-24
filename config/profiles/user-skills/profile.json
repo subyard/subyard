@@ -3,7 +3,7 @@
   "settings": [
     {
       "name": "USER_SKILL_SOURCES",
-      "type": "url-list",
+      "type": "string",
       "scopes": ["shipped", "shared", "host", "yard", "command"],
       "application": "yard-init",
       "syncable": true,

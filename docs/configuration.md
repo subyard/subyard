@@ -443,12 +443,6 @@ chooses an available owner-local `SSH_PORT` in its confirmed plan. It explicitly
 selects neither a preset, environment profiles nor coding tools. These are independent settings.
 An existing yard's plain init preserves its saved selections and endpoint; an interrupted init
 resumes through the same command. `--profile <name>` retains its named-yard preset behavior.
-`yard -Y example init --environment-profiles 'github user-skills'` instead saves that
-space-separated selection in the new definition; each name must be an eligible environment
-profile and every refusal is reported. The option creates only an absent non-default yard and
-cannot be combined with `--profile`, `--configs`, `--reset`, `--adopt` or `--continue-legacy`.
-Rerunning it after an interrupted creation continues as plain init when the saved selection is
-the same set; otherwise use `yard -Y example profile enable|disable ID` or `config set`.
 
 For registered yards, `yard init` uses the selection resolved from profiles and persistent configuration;
 no tool-selection argument or explicit per-yard assignment is required. Default and

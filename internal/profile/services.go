@@ -100,10 +100,6 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		return errors.New("invalid profile service arguments")
 	}
 	action := arguments[0]
-	verify := action == "--verify"
-	if verify {
-		action = "--check"
-	}
 	if !slices.Contains([]string{"--check", "--yes", "--pause", "--resume", "--remove", "--wait-ready"}, action) || len(arguments) == 2 && !slices.Contains([]string{"--check", "--yes", "--remove", "--resume"}, action) {
 		return errors.New("invalid profile service action")
 	}
@@ -135,7 +131,7 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 	run := func(definition Definition, action string, output io.Writer) error {
 		env := make([]string, 0, len(environment)+1)
 		for key, value := range environment {
-			if key != "SUBYARD_PROFILE_SELECTED" && key != "SUBYARD_PROFILE_POST_APPLY" {
+			if key != "SUBYARD_PROFILE_SELECTED" {
 				env = append(env, key+"="+value)
 			}
 		}
@@ -144,9 +140,6 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 			selected = "1"
 		}
 		env = append(env, "SUBYARD_PROFILE_SELECTED="+selected)
-		if verify {
-			env = append(env, "SUBYARD_PROFILE_POST_APPLY=1")
-		}
 		command := exec.CommandContext(ctx, "bash", filepath.Join(definition.Root, definition.OwnerService), action)
 		command.Dir = root
 		command.Env = env

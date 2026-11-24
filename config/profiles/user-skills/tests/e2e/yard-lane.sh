@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Installed-candidate clone/link lifecycle: nonfatal source failure, stateless
-# retry, ordinary Git updates, disable/enable and init-time deselection.
+# Installed-candidate clone/link: nonfatal source failure and retry on the next init.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
@@ -127,39 +126,29 @@ unset YARD_ENGINE_PATH
 CANDIDATE_ENGINE="$(release_candidate_install "$ROOT" "$STATE")"
 
 first="us-e2e-$token"
-second="us-plain-$token"
 source_url="ssh://dev@localhost/home/dev/lane-skills.git"
 
 printf 'user-skills_e2e_stage=create\n'
 YARDS+=("$first")
-yard "$first" init --environment-profiles 'user-skills' --yes
-grep -Fqx "ENVIRONMENT_PROFILES='user-skills'" "$SUBYARD_CONFIG_HOME/yards/$first/config.env" \
-  || die 'creation did not save the requested selection'
+yard "$first" init --yes
 # Init preserves desired power; guest-side checks require a running yard.
 yard "$first" start --yes
-# A rerun with the saved set continues as plain init.
-yard "$first" init --environment-profiles 'user-skills' --yes
+# shellcheck disable=SC2016
+as_dev "$first" sh -euc '
+work="$(mktemp -d)"
+mkdir -p "$work/skills/lane-skill"
+printf -- "---\nname: lane-skill\ndescription: Lane skill.\n---\n" > "$work/skills/lane-skill/SKILL.md"
+git -C "$work" init -q -b main
+git -C "$work" add -A
+git -C "$work" -c user.name=lane -c user.email=lane@example.org commit -q -m skills
+git clone -q --bare "$work" "$HOME/lane-skills.git"
+'
 
 printf 'user-skills_e2e_stage=unavailable\n'
-# shellcheck disable=SC2016
-as_dev "$first" python3 -c '
-from pathlib import Path
-import os, subprocess, tempfile
-with tempfile.TemporaryDirectory() as directory:
-    work = Path(directory)
-    skill = work / "skills/lane-skill"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: lane-skill\ndescription: Lane skill.\n---\n")
-    def git(*args):
-        subprocess.run(["git", "-C", str(work), *args], check=True)
-    git("init", "-q", "-b", "main")
-    git("add", "-A")
-    git("-c", "user.name=lane", "-c", "user.email=lane@example.org", "commit", "-q", "-m", "skills")
-    git("clone", "-q", "--bare", str(work), os.environ["HOME"] + "/lane-skills.git")
-'
 yard "$first" config set USER_SKILL_SOURCES "$source_url" --scope yard --yes
+yard "$first" config set ENVIRONMENT_PROFILES 'user-skills' --scope yard --yes
 yard "$first" init --yes 2>"$STATE/unavailable.log"
-grep -F >/dev/null 'could not be cloned; authorize Git access or correct USER_SKILL_SOURCES, then run yard init' "$STATE/unavailable.log" \
+grep -F >/dev/null 'user-skills: warning: could not clone lane-skills;' "$STATE/unavailable.log" \
   || die 'missing source retry warning'
 [ "$(ready "$first")" = false ] || die 'an unreachable source reported ready'
 
@@ -176,31 +165,11 @@ ssh-keyscan localhost 2>/dev/null >> "$HOME/.ssh/known_hosts"
 printf "Host localhost\n  IdentityFile ~/.ssh/lane_key\n" >> "$HOME/.ssh/config"
 '
 yard "$first" init --yes
-clone="$(as_dev "$first" readlink /home/dev/.claude/skills/lane-skill)"
-clone="${clone%/skills/lane-skill}"
+clone=/home/dev/.local/share/subyard-user-skills/lane-skills
 for harness in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do
   [ "$(as_dev "$first" readlink "/home/dev/$harness/lane-skill")" = "$clone/skills/lane-skill" ] \
     || die "link $harness is missing after retry"
 done
 yard "$first" init --yes
 [ "$(ready "$first")" = true ] || die 'the profile is not ready after retry'
-
-printf 'user-skills_e2e_stage=scoped-disable\n'
-yard "$first" profile disable user-skills --yes
-as_dev "$first" test ! -e /home/dev/.claude/skills/lane-skill || die 'disable left a link'
-as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'disable removed the clone'
-yard "$first" profile enable user-skills --yes
-[ "$(ready "$first")" = true ] || die 'scoped enable did not converge'
-
-printf 'user-skills_e2e_stage=deselect\n'
-yard "$first" config set ENVIRONMENT_PROFILES '' --scope yard --yes
-yard "$first" init --yes
-as_dev "$first" test ! -L /home/dev/.claude/skills/lane-skill || die 'init-time deselection kept a link'
-as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'init-time deselection removed the clone'
-
-printf 'user-skills_e2e_stage=plain-named-yard\n'
-YARDS+=("$second")
-yard "$second" init --yes
-yard "$second" start --yes
-yard "$second" profile enable user-skills --yes
-printf 'ok: user-skills creation, source access retry, disable/enable, deselection and named-yard enable\n'
+printf 'ok: user-skills selection, unavailable source warning, retry and links\n'

@@ -33,7 +33,6 @@ const (
 	SettingSize            SettingValueType = "size"
 	SettingName            SettingValueType = "name"
 	SettingNameList        SettingValueType = "name-list"
-	SettingURLList         SettingValueType = "url-list"
 	SettingAbsolutePath    SettingValueType = "absolute-path"
 	SettingRelativePath    SettingValueType = "relative-path"
 	SettingImageReference  SettingValueType = "image-reference"
@@ -572,10 +571,6 @@ func validateSettingValue(definition SettingDefinition, value string) error {
 			if !domain.SafeName(name) {
 				return fmt.Errorf("contains unsafe name %q", name)
 			}
-		}
-	case SettingURLList:
-		if err := domain.ValidateURLList(value); err != nil {
-			return err
 		}
 	case SettingAbsolutePath:
 		if !filepath.IsAbs(value) {

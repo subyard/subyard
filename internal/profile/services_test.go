@@ -110,18 +110,3 @@ func TestAdvisoryDeclarationsAreClosed(t *testing.T) {
 		t.Fatalf("valid advisory declaration: %v", err)
 	}
 }
-
-// Post-apply verification accepts only the effects the hook explicitly permits;
-// a later ordinary check still reports missing external inputs without state.
-func TestServicePostApplyCheckDoesNotChangeOrdinaryChecks(t *testing.T) {
-	root := testkit.TempDir(t)
-	fixture(t, root, "sample", "#!/bin/bash\n[ \"$1\" = --check ] || exit 2\n[ \"${SUBYARD_PROFILE_POST_APPLY:-0}\" = 1 ]\n", Definition{})
-	env := map[string]string{"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1", "SUBYARD_PROFILE_POST_APPLY": "1"}
-	for _, action := range []string{"--check", "--verify", "--check"} {
-		var output bytes.Buffer
-		err := RunServices(context.Background(), root, []string{action, "sample"}, env, &output, &output)
-		if (err == nil) != (action == "--verify") || output.Len() != 0 {
-			t.Fatalf("%s: err=%v output=%q", action, err, output.String())
-		}
-	}
-}

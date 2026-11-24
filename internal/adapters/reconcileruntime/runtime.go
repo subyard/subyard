@@ -229,7 +229,7 @@ func (runtime Runtime) profileRuntimesConverged(observations map[string]ports.Ru
 
 func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
 	if stage == ports.ReconcileStageProfileServices {
-		return runtime.observeProfileServices(ctx)
+		return runtime.observeProfileServices(ctx, false)
 	}
 	if stage == ports.ReconcileStageInstance {
 		var diagnostics []string
@@ -371,7 +371,8 @@ func (runtime Runtime) ProvisionBase(ctx context.Context) error {
 func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
 	switch stage {
 	case ports.ReconcileStageProfileServices:
-		return runtime.VerifyProfileService(ctx, "")
+		observation, err := runtime.observeProfileServices(ctx, true)
+		return observation.Converged, err
 	case ports.ReconcileStageNetwork:
 		return runtime.observedPowerScriptConverged(ctx, true, "06-network.sh", "--verify")
 	case ports.ReconcileStageTestVMs:
@@ -2601,13 +2602,18 @@ func (runtime Runtime) runPathEnvironment(
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
-	observation, err := runtime.observeProfileServices(ctx)
+	observation, err := runtime.observeProfileServices(ctx, false)
 	return observation.Converged, err
 }
 
-func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.ReconcileStageObservation, error) {
+// Post-apply checks get SUBYARD_PROFILE_POST_APPLY=1: a hook may accept an external
+// source that apply could not fetch, while its ordinary check retries it on the next init.
+func (runtime Runtime) observeProfileServices(ctx context.Context, postApply bool) (ports.ReconcileStageObservation, error) {
 	ctx = readOnlyProbeContext(ctx)
 	environment := map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}
+	if postApply {
+		environment["SUBYARD_PROFILE_POST_APPLY"] = "1"
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return ports.ReconcileStageObservation{}, err
@@ -2653,20 +2659,6 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 		}
 	}
 	return observation, errors.New("profile service check unavailable")
-}
-
-// VerifyProfileService checks applied effects. Hooks may leave an unavailable
-// external source pending; the next ordinary check still schedules its retry.
-func (runtime Runtime) VerifyProfileService(ctx context.Context, name string) (bool, error) {
-	ctx = readOnlyProbeContext(ctx)
-	arguments := []string{"--verify"}
-	if name != "" {
-		arguments = append(arguments, name)
-	}
-	output := &profileRuntimeBoundedBuffer{limit: 256}
-	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", arguments...)
-	observation, err := profileServiceObservation(output.String(), output.exceeded, err)
-	return observation.Converged, err
 }
 
 // Scoped profile operations never enter the general init reconciler.

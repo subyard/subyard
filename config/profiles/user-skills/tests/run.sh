@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# Owning host-free checks: the clone/link hook and owner transport.
+# Owning host-free checks for the clone/link hook.
 set -euo pipefail
 [ "$#" -eq 0 ] || { printf 'Usage: tests/run.sh\n' >&2; exit 2; }
 profile="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-root="$(cd "$profile/../../.." && pwd)"
-python3 -B "$profile/tests/clone-test.py"
-bash "$profile/tests/owner-lifecycle.sh"
-go -C "$root" test ./config/profiles/user-skills/...
-bash -n "$profile/owner.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
-shellcheck -S warning "$profile/owner.sh" "$profile/tests/"*.sh
-bash "$profile/tests/e2e/acceptance.sh" --help >/dev/null
+bash "$profile/tests/guest-test.sh"
+shellcheck -S warning "$profile/"*.sh "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
 bash "$profile/tests/e2e/acceptance.sh" --preflight
