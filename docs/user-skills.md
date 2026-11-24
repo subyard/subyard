@@ -19,6 +19,8 @@ Init clones each source once, as the yard developer, into
 `~/.config/opencode/skills`, `~/.pi/agent/skills` and `~/.hermes/skills` where that path is free.
 Skills named `subyard-*` are skipped.
 
-If a source cannot be cloned within 60 seconds, init prints a warning and completes;
-the next init retries. `yard profile status user-skills` shows `ready: false` until every
-configured clone and its links exist.
+A clone tries plain Git, then `subyard-github run`; each attempt is stopped after 60 seconds
+(killed 10 seconds later), so a source takes at most about 140 seconds. If both fail, init
+prints a warning naming the repository and completes; the next init retries.
+`yard profile status user-skills` shows `ready: false` while a configured clone directory is
+missing or empty, or a free link path has no link.

@@ -8,18 +8,25 @@ cd "$HOME"
 store="$HOME/.local/share/subyard-user-skills"
 work=0
 for url in "$@"; do
-  name="${url%.git}"
+  # Label from the repository path only: never userinfo, host, query or fragment.
+  case "$url" in
+    *://*) name="${url#*://}"; name="${name#*/}" ;;
+    *) name="${url#*:}" ;;
+  esac
+  name="${name%%[?#]*}"
   name="${name%/}"
-  name="${name##*[/:]}"
-  case "$name" in ''|.|..) name=source ;; esac
+  name="${name%.git}"
+  name="${name%/}"
+  name="${name##*/}"
+  case "$name" in ''|.|..|*[!A-Za-z0-9._-]*) name=source ;; esac
   clone="$store/$name"
   if [ -z "$(ls -A "$clone" 2>/dev/null)" ]; then
     # Verify accepts a source that apply could not clone; check reports it for retry.
     case "$mode" in check) work=1; continue ;; verify) continue ;; esac
     mkdir -p "$store"
     temporary="$(mktemp -d "$store/.tmp-$name.XXXXXX")"
-    if GIT_TERMINAL_PROMPT=0 timeout 60 git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1 \
-      || { command -v subyard-github >/dev/null && GIT_TERMINAL_PROMPT=0 timeout 60 \
+    if GIT_TERMINAL_PROMPT=0 timeout -k 10 60 git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1 \
+      || { command -v subyard-github >/dev/null && GIT_TERMINAL_PROMPT=0 timeout -k 10 60 \
         subyard-github run -- git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1; }; then
       mv -T "$temporary" "$clone" # replaces only an empty directory
     else

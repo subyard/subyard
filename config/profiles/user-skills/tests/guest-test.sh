@@ -26,6 +26,11 @@ done
 [ -z "$(run verify "$good" "$bad")" ] || fail 'verify rejected an unreachable source'
 [ "$(run check "$good" "$bad")" = work ] || fail 'check stopped retrying'
 [ "$(ls -A "$work/home/.local/share/subyard-user-skills")" = src ] || fail 'left a temporary clone'
+# Credentials in a source never reach a warning, error or path.
+run apply "https://user:canary-pw@example.invalid/" "file://$work/missing/repo.git?access_token=canary-token" 2>"$work/stderr"
+grep -q 'could not clone source;' "$work/stderr" && grep -q 'could not clone repo;' "$work/stderr" || fail 'missing source warnings'
+! grep -q canary "$work/stderr" || fail 'a warning shows a credential'
+[ -z "$(find "$work/home" -name '*canary*')" ] || fail 'a path contains a credential'
 printf 'local\n' >"$clone/skills/demo/SKILL.md"
 run apply "$good" 2>/dev/null
 [ "$(cat "$clone/skills/demo/SKILL.md")" = local ] || fail 'touched an existing clone'
