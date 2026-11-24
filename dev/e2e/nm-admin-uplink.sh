@@ -125,8 +125,8 @@ yard() {
 seed_legacy_comma_record() {
   local boot file hash state kind canonical comma installed_identity
   read -r boot file hash state kind < "$state_record"
-  canonical="$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")"
-  comma="$(sudo -n env LC_ALL=de_DE.UTF-8 stat -c '%i:%.9Z' "$guard")"
+  canonical="$(guard_file_id "$guard")"
+  comma="${canonical/./,}"
   installed_identity="$(sudo -n env LC_ALL=de_DE.UTF-8 bash -c '. "$1"; power_nm_file_id "$2"' \
     _ "$YARD_RUNTIME_ROOT/current/scripts/lib-power.sh" "$guard")"
   [ "$file" = "$canonical" ] && [ "$comma" = "${canonical/./,}" ] \
@@ -138,13 +138,22 @@ seed_legacy_comma_record() {
 }
 assert_canonical_record() { # [bridge-refresh]: otherwise the guard identity must stay unchanged
   local canonical
-  canonical="$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")"
+  canonical="$(guard_file_id "$guard")"
   [ "$(cut -d ' ' -f2 "$state_record")" = "$canonical" ] \
     && [ "$(cut -d ' ' -f1,3- "$state_record")" = "$(cat "$STATE/legacy-fields")" ] \
     || die 'legacy canonicalization changed boot/hash/state/kind or did not write the canonical identity'
   [ "${1:-}" = bridge-refresh ] || [ "$canonical" = "$(cat "$STATE/legacy-identity")" ] \
     || die 'legacy canonicalization rewrote the guard'
   pass 'legacy comma record canonicalized with boot/hash/state/kind preserved'
+}
+# Independent native metadata oracle; Rust stat truncates ctime nanoseconds.
+guard_file_id() {
+  python3 - "$1" <<'PYID'
+import os, stat, sys
+metadata = os.lstat(sys.argv[1])
+assert stat.S_ISREG(metadata.st_mode), 'guard is not a regular file'
+print(f'{metadata.st_ino}:{metadata.st_ctime_ns // 1_000_000_000}.{metadata.st_ctime_ns % 1_000_000_000:09d}')
+PYID
 }
 effective_unmanaged() {
   sudo -n NetworkManager --print-config | awk '
@@ -543,7 +552,7 @@ fresh-prepare)
   [ "$(address_of "$UP")" = "$UP_ADDRESS" ] && [ "$(device_state br0)" = connected ] || die 'the first init touched the uplink or br0'
   [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
     && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] \
-    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(sudo -n stat -L -c '%i:%.9Z' "$guard")" ] \
+    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(guard_file_id "$guard")" ] \
     || die "the first init record: $(cat "$state_record" 2>/dev/null)"
   [ "$(stat -c '%U %a' "$state_record")" = 'root 644' ] || die "record ownership: $(stat -c '%U %a' "$state_record")"
   grep -q '^\[device-subyard\]' "$guard" || die 'the first init wrote no guard'
@@ -605,7 +614,7 @@ fresh-resume)
   grep -Fq 'interface-name:e2ebr1' "$guard" || die 'the guard does not list the second bridge'
   # Boot, content and state stay; the identity follows Subyard's rewrite of the guard.
   [ "$(cut -d ' ' -f1,3- "$state_record")" = "$record_before" ] \
-    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(sudo -n stat -L -c '%i:%.9Z' "$guard")" ] \
+    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(guard_file_id "$guard")" ] \
     || die "a bridge name changed the record: $(cat "$state_record")"
   [ "$(device_state e2ebr1)" = unmanaged ] && [ "$(address_of e2ebr1)" = 198.18.9.1/24 ] \
     || die "the second bridge is $(device_state e2ebr1) with $(address_of e2ebr1)"
@@ -659,7 +668,7 @@ fresh-final)
   [ "$(cut -d ' ' -f2 "$state_record")" = "$(tr '.' ',' < "$STATE/legacy-identity")" ] \
     && [ "$(cut -d ' ' -f1,3- "$state_record")" = "$(cat "$STATE/legacy-fields")" ] \
     || die 'boot reconciliation rewrote the legacy comma record'
-  [ "$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")" = "$(cat "$STATE/legacy-identity")" ] \
+  [ "$(guard_file_id "$guard")" = "$(cat "$STATE/legacy-identity")" ] \
     || die 'boot reconciliation changed the legacy guard identity'
   [ "$(sudo -n env LC_ALL=C bash -c '. "$1"; power_nm_guard_state' \
     _ "$YARD_RUNTIME_ROOT/current/scripts/lib-power.sh")" = loaded ] \
