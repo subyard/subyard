@@ -9,7 +9,8 @@
 #   fresh:   an except-only administrator list, an NM-managed br0 and a Docker-style bridge
 #            through a fresh candidate install whose first init stops for a reboot (a
 #            NetworkManager restart does not count), then init, start, a repair that waits for
-#            another reboot, the boot restore and teardown.
+#            another reboot, the boot restore and teardown. Init runs with a decimal-comma
+#            numeric locale; legacy comma records bind across reboots and canonicalize on init.
 # A watchdog restores the uplink address if it changes and fails the lane.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -115,7 +116,36 @@ owner() {
   command=$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' "$@")
   sg incus-admin -c "exec $command"
 }
-yard() { owner "$launcher" -Y "$name" "$@"; }
+yard() {
+  case "$MODE" in
+    fresh-*) owner env -u LC_ALL LC_MESSAGES=C LC_NUMERIC=de_DE.UTF-8 "$launcher" -Y "$name" "$@" ;;
+    *) owner "$launcher" -Y "$name" "$@" ;;
+  esac
+}
+seed_legacy_comma_record() {
+  local boot file hash state kind canonical comma installed_identity
+  read -r boot file hash state kind < "$state_record"
+  canonical="$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")"
+  comma="$(sudo -n env LC_ALL=de_DE.UTF-8 stat -c '%i:%.9Z' "$guard")"
+  installed_identity="$(sudo -n env LC_ALL=de_DE.UTF-8 bash -c '. "$1"; power_nm_file_id "$2"' \
+    _ "$YARD_RUNTIME_ROOT/current/scripts/lib-power.sh" "$guard")"
+  [ "$file" = "$canonical" ] && [ "$comma" = "${canonical/./,}" ] \
+    && [ "$installed_identity" = "$canonical" ] \
+    || die 'cannot seed an exact legacy decimal-comma identity'
+  printf '%s %s %s %s %s\n' "$boot" "$comma" "$hash" "$state" "$kind" | sudo -n tee "$state_record" >/dev/null
+  cut -d ' ' -f1,3- "$state_record" > "$STATE/legacy-fields"
+  printf '%s\n' "$canonical" > "$STATE/legacy-identity"
+}
+assert_canonical_record() { # [bridge-refresh]: otherwise the guard identity must stay unchanged
+  local canonical
+  canonical="$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")"
+  [ "$(cut -d ' ' -f2 "$state_record")" = "$canonical" ] \
+    && [ "$(cut -d ' ' -f1,3- "$state_record")" = "$(cat "$STATE/legacy-fields")" ] \
+    || die 'legacy canonicalization changed boot/hash/state/kind or did not write the canonical identity'
+  [ "${1:-}" = bridge-refresh ] || [ "$canonical" = "$(cat "$STATE/legacy-identity")" ] \
+    || die 'legacy canonicalization rewrote the guard'
+  pass 'legacy comma record canonicalized with boot/hash/state/kind preserved'
+}
 effective_unmanaged() {
   sudo -n NetworkManager --print-config | awk '
     /^\[/ { section = $0; next }
@@ -481,6 +511,13 @@ fresh-prepare)
   watchdog_start
   install_network_manager
   uplink_admins 'NetworkManager install'
+  # Keep messages in C while passing a real comma numeric locale to installed init calls.
+  # shellcheck disable=SC2024 # the operator owns the log
+  sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends locales \
+    >"$STATE/locale.log" 2>&1 || die 'locale package install failed'
+  # shellcheck disable=SC2024 # the operator owns the log
+  sudo -n localedef -i de_DE -f UTF-8 de_DE.UTF-8 >>"$STATE/locale.log" 2>&1 || die 'comma locale generation failed'
+  [ "$(LC_ALL=de_DE.UTF-8 locale decimal_point)" = ',' ] || die 'the fixture numeric locale has no decimal comma'
   sudo -n nmcli connection add type bridge ifname br0 con-name e2e-br0 autoconnect yes bridge.stp no \
     ipv4.method manual ipv4.addresses 198.19.0.1/24 ipv6.method ignore >/dev/null
   sudo -n ip link add br-0123456789ab type bridge
@@ -523,6 +560,8 @@ fresh-prepare)
   if yard init --yes >"$STATE/init-after-restart.log" 2>&1; then die 'a NetworkManager restart released the first init'; fi
   grep -Fq 'Reboot the host once' "$STATE/init-after-restart.log" || die "init after the restart: $(tail -5 "$STATE/init-after-restart.log")"
   pass 'a NetworkManager restart does not count as reading the guard'
+  seed_legacy_comma_record
+  pass 'an exact 0.31.0 decimal-comma record is ready for the first reboot'
   ;;
 
 fresh-resume)
@@ -532,6 +571,10 @@ fresh-resume)
   [ -e "$state_record" ] && [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] \
     || die "the persistent record did not survive the reboot or names this boot: $(cat "$state_record" 2>/dev/null)"
   yard init --yes >"$STATE/init.log" 2>&1 || die 'init failed after the reboot'
+  assert_canonical_record bridge-refresh
+  seed_legacy_comma_record
+  yard init --yes >"$STATE/init-comma.log" 2>&1 || die 'init failed with a bound legacy comma record'
+  assert_canonical_record
   yard start --yes >"$STATE/start.log" 2>&1 || die 'start failed after the reboot'
   settle
   uplink_admins 'except-only list through init and start'
@@ -596,6 +639,8 @@ fresh-resume)
     && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] || die "repair record: $(cat "$state_record")"
   uplink_admins 'after the repair'
   pass 'an edited-out guard is repaired and init waits for a reboot'
+  seed_legacy_comma_record
+  pass 'the boot reconciler will read an exact legacy comma record after reboot'
   watchdog_clean
   ;;
 
@@ -611,8 +656,18 @@ fresh-final)
   yard_devices_unmanaged 'yard restored at boot'
   uplink_admins 'after the final reboot'
   [ "$(device_state br0)" = connected ] && [ "$(device_state e2ebr1)" = unmanaged ] || die 'the reboot changed br0 or e2ebr1'
+  [ "$(cut -d ' ' -f2 "$state_record")" = "$(tr '.' ',' < "$STATE/legacy-identity")" ] \
+    && [ "$(cut -d ' ' -f1,3- "$state_record")" = "$(cat "$STATE/legacy-fields")" ] \
+    || die 'boot reconciliation rewrote the legacy comma record'
+  [ "$(sudo -n env LC_ALL=C stat -c '%i:%.9Z' "$guard")" = "$(cat "$STATE/legacy-identity")" ] \
+    || die 'boot reconciliation changed the legacy guard identity'
+  [ "$(sudo -n env LC_ALL=C bash -c '. "$1"; power_nm_guard_state' \
+    _ "$YARD_RUNTIME_ROOT/current/scripts/lib-power.sh")" = loaded ] \
+    || die 'the legacy comma record is not bound after reboot'
   pass 'the boot reconciler restored the running yard; its veth and both bridges keep their state'
+  pass 'boot accepts the unchanged legacy comma record without canonicalizing it'
   yard init --yes >"$STATE/init-repaired.log" 2>&1 || die "init failed after the reboot read the repaired guard: $(tail -5 "$STATE/init-repaired.log")"
+  assert_canonical_record
   pass 'after the reboot init accepts the repaired guard'
   sudo -n /usr/bin/incus network delete e2ebr1 >/dev/null 2>&1 || true
   yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'

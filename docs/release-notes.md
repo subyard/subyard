@@ -22,6 +22,15 @@
   Preserve operator-owned policies and account for custom installation paths. See
   [agent permission modes](configuration.md#other-agent-permission-modes).
 
+### NetworkManager guard
+
+- Fix yard startup after host reboot on NetworkManager hosts using a decimal-comma locale
+  (such as German or Russian). In 0.31.0, the guard record could fail to match the unchanged
+  guard file, leaving yards stopped. Updates recognize these existing records without manual
+  repair or an extra reboot. Update and boot reconciliation keep valid legacy records bound
+  without rewriting them. Init and guard publication canonicalize their identity while
+  preserving their boot and read state; a failed canonicalization keeps the existing binding.
+
 ### Rollback to v0.30.0
 
 - Complete the 0.31.0 cleanup above as well as the following steps.

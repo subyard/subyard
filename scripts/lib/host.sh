@@ -361,9 +361,9 @@ nm_guard_static_listed() { # <conf>: a current-format guard lists every static e
 
 # Planning: no released guard, a known inventory whose bridges the guard all lists, every static
 # entry, and an active NetworkManager that has read it (a migration waiting for its reboot is no
-# drift init could repair).
+# drift init could repair). A legacy decimal-comma record still needs canonicalization.
 nm_guard_file_current() { # <conf> [bridge]
-  local conf="$1" bridge="${2:-}" listed rc
+  local conf="$1" bridge="${2:-}" listed rc record='' recorded_file
   nm_guard_released "$conf" && return 1
   nm_guard_inventory || return 1
   if ! nm_path_exists "$conf"; then
@@ -376,6 +376,9 @@ nm_guard_file_current() { # <conf> [bridge]
   while IFS= read -r bridge; do
     [ -z "$bridge" ] || grep -Fxq -- "$bridge" <<< "$listed" || return 1
   done <<< "$NM_INVENTORY"
+  { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || true
+  read -r _ recorded_file _ <<< "$record"
+  case "$recorded_file" in *,*) return 1 ;; esac
   if power_nm_active; then :; else rc=$?; [ "$rc" -eq 1 ] && return 0; return 1; fi
   case "$(power_nm_guard_state "$conf")" in loaded|loaded-reboot|unread-migration) return 0 ;; *) return 1 ;; esac
 }
@@ -554,7 +557,7 @@ nm_guard_inactive_state() { # <active at the first sample> <binary>
 #   samples, or a migration with evidence that NetworkManager holds the released guard.
 nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <active> <binary> [evidence: 1|0]
   local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk guard_identity
-  local old_boot old_hash old_state old_kind state=unread
+  local old_boot old_file old_hash old_state old_kind state=unread
   NM_GUARD_RECORD_ERROR=''
   legacy="$(nm_legacy_guard "$conf")"
   if [ -z "$desired" ]; then
@@ -568,7 +571,7 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   [ "$before" != unread-migration ] || kind=migration
   record=''
   { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || true
-  read -r old_boot _ old_hash old_state old_kind _ <<< "$record"
+  read -r old_boot old_file old_hash old_state old_kind _ <<< "$record"
   # Bound: the record names this very file and its static content (any boot).
   # Anything but a regular file in place of the guard is never bound, never read, and is replaced
   # by a regular file below.
@@ -578,7 +581,15 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
     || nm_path_exists "$legacy" || bound=1
   if [ -n "$guard_identity" ] && ! nm_path_exists "$legacy" && [ "$(cat -- "$conf")" = "$desired" ]; then
     ok "NetworkManager guard already current ($conf)"
-    [ "$bound" = 0 ] || return 0
+    if [ "$bound" = 1 ]; then
+      # Keep the valid legacy record on write failure. Persist the identity already matched;
+      # unlike a guard rewrite, canonicalization must never invalidate the existing binding.
+      if [ "$old_file" != "$guard_identity" ]; then
+        nm_guard_write_file "$POWER_NM_GUARD_STATE" "$old_boot $guard_identity $hash $old_state $old_kind" \
+          || { power_fail "could not canonicalize the NetworkManager guard record $POWER_NM_GUARD_STATE; rerun $POWER_NM_GUARD_COMMAND"; return 1; }
+      fi
+      return 0
+    fi
     nm_guard_record "$conf" "$hash" "$(nm_guard_inactive_state "$active" "$binary")" "$kind" "$(power_nm_boot_id)"
     return 0
   fi

@@ -203,7 +203,7 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
 # which must be a regular file (never a link, FIFO or anything a read could block on).
 power_nm_file_id() { # <path>
   local guard_identity
-  guard_identity="$(stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
+  guard_identity="$(LC_ALL=C stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
   case "${guard_identity%%|*}" in
     'regular file'|'regular empty file') printf '%s\n' "${guard_identity#*|}" ;;
     *) return 1 ;;
@@ -219,6 +219,8 @@ power_nm_file_id() { # <path>
 power_nm_guard_state_rule() { # <record> <current boot> <file identity> <static hash>
   local boot file hash state kind extra
   read -r boot file hash state kind extra <<< "$1"
+  # 0.31.0 used the caller's decimal separator for ctime. Only that spelling may differ.
+  file="${file/,/.}"
   [ -n "$2" ] || { printf 'unread-init\n'; return; }
   if [ -n "$kind" ] && [ -z "$extra" ] && [ -n "$boot" ] && [ -n "$3" ] && [ "$file" = "$3" ] \
     && [ -n "$4" ] && [ "$hash" = "$4" ] \
