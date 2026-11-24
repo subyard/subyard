@@ -204,15 +204,10 @@ elif [ ! -e "$socket_dir" ]; then
   user_directory "$(dirname "$socket_dir")"
   install -d -o "$DEV_USER" -g "$DEV_GROUP" -m 0700 "$socket_dir"
 elif ! socket_dir_ready; then
-  # Repair the developer's or root's own directory; another owner stays refused.
-  case "$(stat -c '%u' "$socket_dir")" in
-    0) chown "$DEV_USER:$DEV_GROUP" "$socket_dir" && chmod 0700 "$socket_dir" ;;
-    "$(id -u "$DEV_USER")") chmod 0700 "$socket_dir" ;;
-  esac
-  if ! socket_dir_ready; then
-    printf 'github provision: unmanaged socket directory has wrong owner or mode: %s\n' "$socket_dir" >&2
-    exit 1
-  fi
+  # Root does not repair a path under the developer's home: the developer
+  # could swap it for a symlink between the check and the change.
+  printf 'github provision: unmanaged socket directory has wrong owner or mode: %s\n' "$socket_dir" >&2
+  exit 1
 fi
 
 # Ordinary guest provisioning alone cannot prove owner-service activation.
