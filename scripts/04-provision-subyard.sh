@@ -186,49 +186,18 @@ mkdir -p "${srv_skel[@]}"
 chown root:yard "${srv_skel[@]}"
 chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit the yard group
 
-# A cloud image's cloud-init may write host keys at first boot, before openssh-server is installed;
-# they were seen world-readable. sshd ignores a private key other users can read, and such a key is
-# no longer secret, so replace the whole set; access setup pins the new host key afterwards.
-yard_ssh_host_keys_converge() { # <root prefix>
-  local root="$1" key owner mode unsafe=0
-  for key in "$root/etc/ssh"/ssh_host_*_key; do
-    [ -e "$key" ] || [ -L "$key" ] || continue
-    if [ -L "$key" ] || [ ! -f "$key" ]; then
-      unsafe=1
-    else
-      read -r owner mode < <(stat -c '%u %a' "$key")
-      [ "$owner" = "$(id -u)" ] && (( (8#$mode & 8#077) == 0 )) || unsafe=1
-    fi
-  done
-  [ "$unsafe" = 1 ] || return 0
-  echo 'replacing yard SSH host keys: an existing private host key was readable beyond root' >&2
-  find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' \( -type f -o -type l \) -delete
-  ssh-keygen -q -A -f "$root"
-  # The package's start attempts with the ignored keys may have used up the unit's start limit.
-  systemctl reset-failed ssh.service 2>/dev/null || true
-  systemctl try-restart ssh.service
-}
-yard_ssh_host_keys_converge /
-
 # Services live in the container's own systemd (does not touch host systemd).
-# A failed start reports each failed unit's result. For sshd it also reports this attempt's journal
-# and the config/key checks behind Debian's host key setup, bounded and without their stdout.
+# A failed start reports each inactive unit's result and this attempt's bounded journal tail.
 yard_service_failure_diagnostics() { # <start epoch>
-  local unit result hostkeys
+  local unit result
   for unit in ssh.service docker.service; do
     ! timeout --kill-after=1 3 systemctl is-active --quiet "$unit" || continue
     result="$(timeout --kill-after=1 3 systemctl show "$unit" --property=Result --value 2>/dev/null)" || result=
     [[ "$result" =~ ^[a-z-]{1,32}$ ]] || result=unknown
     printf 'yard service %s failed to start: result=%s\n' "$unit" "$result"
-    [ "$unit" = ssh.service ] || continue
-    printf 'ssh.service journal for this start:\n'
-    timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u ssh.service --since "@$1" -n 20 2>/dev/null \
+    printf '%s journal for this start:\n' "$unit"
+    timeout --kill-after=1 5 journalctl --no-pager --quiet -o cat -u "$unit" --since "@$1" -n 20 2>/dev/null \
       | sed -n '1,20p' | cut -c1-240
-    printf 'sshd -G errors:\n'
-    timeout --kill-after=1 5 sshd -G 2>&1 >/dev/null | sed -n '1,20p' | cut -c1-240
-    hostkeys="$(timeout --kill-after=1 5 sshd -G 2>/dev/null | grep -ci '^hostkey ')"
-    printf 'sshd -G hostkey entries: %s, host key files: %s\n' "${hostkeys:-0}" \
-      "$(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' -type f 2>/dev/null | wc -l)"
   done
 }
 services_started="$(date +%s)"
