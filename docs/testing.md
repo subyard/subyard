@@ -208,7 +208,11 @@ The published-baseline matrix defaults to no coding integrations. Its optional a
 init before update, including structured configuration evidence and raw Codex rules when selected.
 The v0.28.0 anchor selects Claude, OpenCode and pi because its Codex provisioner can hit HTTP 403
 on GitHub's anonymous release metadata endpoint. The v0.30.0 and v0.31.0 lanes include Codex
-and its provisioning fix ([#62](https://github.com/Subyard/Subyard/pull/62)). Run selected agent
+and its provisioning fix ([#62](https://github.com/Subyard/Subyard/pull/62)). The v0.31.0 lane
+also keeps an authored host Codex rules override through update, rollback and the update after
+it (`config status`/`apply --all-local`), repairs a removed materialized artifact with every
+release source unusable, and refuses a symlinked guest instruction file by name across rollback
+and init, keeping the link until the operator removes it. Run selected agent
 jobs at the ownership, manifest and provisioning boundaries described in the VM guide.
 
 Bootstrap checks runtime ownership before interpreting checkout markers. Another runtime gets

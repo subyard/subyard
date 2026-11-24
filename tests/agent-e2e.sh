@@ -5445,6 +5445,8 @@ for dispatcher_mode in prepare login resume finish; do
       verify_historical_init_boundary() { log verify_historical_init_boundary; }
       operator_yard() { log "operator_yard $*"; }
       assert_candidate_state() { log assert_candidate_state; }
+      assert_desired_stopped() { log assert_desired_stopped; }
+      ok() { :; }
       trap '\''log "exit preserve=$PRESERVE_FIXTURE cleanup=$CLEANUP_ARMED"'\'' EXIT
       eval "$UPGRADE_DISPATCHER"
     ' >/dev/null 2>&1
@@ -5460,10 +5462,10 @@ for dispatcher_mode in prepare login resume finish; do
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nrestore_late_storage_after_login\nexit preserve=1 cleanup=1'
       ;;
     resume)
-      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\noperator_yard stop --yes\nassert_desired_stopped\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
       ;;
     finish)
-      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-reconciled\nassert_post_reboot_candidate\nfinish_candidate_flow\nexit preserve=0 cleanup=1'
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-reconciled\nassert_desired_stopped\noperator_yard start --yes\nassert_post_reboot_candidate\nfinish_candidate_flow\nexit preserve=0 cleanup=1'
       ;;
   esac
   [ "$(cat "$dispatcher_log")" = "$dispatcher_expected" ] \

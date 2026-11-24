@@ -557,6 +557,17 @@ record_reboot_baseline() {
   mv -f -- "$route_temporary" "$DEFAULT_ROUTE_STATE"
 }
 
+# The second boot inverts the first: a desired-stopped yard stays stopped after the
+# boot reconciler finished, with boot.autostart still false.
+assert_desired_stopped() { # <message>
+  [ "$(sudo -n systemctl show subyard-power-reconcile.service --property=ActiveState --value)" = inactive ] \
+    && [ "$(sudo -n systemctl show subyard-power-reconcile.service --property=Result --value)" = success ] \
+    && [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = STOPPED ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = stopped ] \
+    && [ "$(incus config get "$INSTANCE" boot.autostart --project "$PROJECT")" = false ] \
+    || die "$1"
+}
+
 # These lanes start at the anchor, whose init creates owned projects (1). Any
 # rewrite, including to a migrated registration's adopted-v1, changes which
 # releases treat the project as owned. No separate continuation grant remains.
@@ -740,15 +751,20 @@ case "$MODE" in
     info 'checking repeatable init with limited legacy authority and boot reconciliation'
     verify_historical_init_boundary
     assert_candidate_state
+    operator_yard stop --yes
+    assert_desired_stopped 'stop did not persist desired=stopped before the second reboot'
     record_reboot_baseline
     write_fixture_value "$PHASE_STATE" candidate-reconciled
     PRESERVE_FIXTURE=1
-    printf 'ok: candidate survived reboot, retained registered ownership and repeated boot reconciliation; ready for second reboot\n'
+    printf 'ok: candidate survived reboot, retained registered ownership and repeated boot reconciliation; stopped for second reboot\n'
     ;;
   finish)
     assert_state_root
     CLEANUP_ARMED=1
     assert_fixture_phase candidate-reconciled
+    assert_desired_stopped 'second boot did not keep the desired-stopped yard stopped'
+    ok 'second boot kept the desired-stopped yard stopped'
+    operator_yard start --yes
     assert_post_reboot_candidate
     finish_candidate_flow
     printf 'ok: exact published anchor upgrade survived two reboots, refused anchor rollback and compatible rollback/roll-forward\n'

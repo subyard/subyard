@@ -144,6 +144,12 @@ else
 fi
 INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
 GUEST_MARKER=/var/tmp/subyard-published-upgrade-data
+HOST_RULES_OVERRIDE="$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules/repo.rules"
+HOST_RULES_DIGEST=''
+# The 0.31.0 Codex lane also owns retained local configuration, offline activation
+# repair and a symlinked instruction file across rollback; older releases lack its refusal.
+LOCAL_CONFIG_CHECKS=0
+if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then LOCAL_CONFIG_CHECKS=1; fi
 CACHED_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}"
 
 die() {
@@ -360,6 +366,121 @@ REQUIREMENTS
   printf 'ok: ordinary yard reprovisioned the combined Codex policy\n'
 }
 
+guest_dev() { guest runuser -u dev -- "$@"; }
+
+# An authored host file override of a shipped Codex rule is local configuration. Every
+# update and rollback keeps its bytes, and all-local status/apply converge the yard to it.
+seed_host_config_override() {
+  operator_env install -d -m 0700 "$(dirname "$HOST_RULES_OVERRIDE")"
+  operator_env bash -c 'printf "# published-upgrade host override\n" > "$1"; chmod 0600 "$1"' _ \
+    "$HOST_RULES_OVERRIDE"
+  HOST_RULES_DIGEST="$(operator_env sha256sum "$HOST_RULES_OVERRIDE" | awk '{print $1}')"
+}
+
+verify_config_workflow() { # <label>
+  local status_rc=0
+  operator_yard config status --all-local >"$STATE_ROOT/config-status.log" 2>&1 || status_rc=$?
+  # Only materialized agent drift is expected; apply converges it.
+  [ "$status_rc" = 0 ] || { [ "$status_rc" = 1 ] \
+    && grep -Fq 'materialized agent config drift in yards:' "$STATE_ROOT/config-status.log"; } \
+    || die "$1: config status failed for a reason other than agent drift"
+  operator_yard config apply --all-local --yes >"$STATE_ROOT/config-apply.log" 2>&1 \
+    || die "$1: config apply --all-local failed"
+  operator_yard config status --all-local >"$STATE_ROOT/config-status.log" 2>&1 \
+    || die "$1: config status reports drift after apply"
+  [ "$(operator_env sha256sum "$HOST_RULES_OVERRIDE" | awk '{print $1}')" = "$HOST_RULES_DIGEST" ] \
+    || die "$1: changed the host Codex rules override"
+  [ "$(guest_dev sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')" = "$HOST_RULES_DIGEST" ] \
+    || die "$1: the host Codex rules override is not applied to the yard"
+  ok "$1: all-local config kept and applied the host override"
+}
+
+# Activation repair needs no release source: with every release input unusable, the
+# current release reports and repairs a removed owned artifact without replaying
+# migrations, selecting a release or changing the runtime pair.
+verify_offline_activation_repair() {
+  local report transaction target previous releases
+  local -a offline=(env YARD_RELEASE_BASE_URL="file://$STATE_ROOT/forbidden-release"
+    YARD_RELEASE_CACHE="$STATE_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version
+    "$OPERATOR_HOME/.local/bin/yard")
+  guest_dev rm /home/dev/.codex/rules/repo.rules
+  operator_env cat "$V2_LEDGER" > "$STATE_ROOT/offline-ledger.before"
+  operator_env cat "$V2_JOURNAL" > "$STATE_ROOT/offline-journal.before"
+  transaction="$(operator_env jq -er '.transaction' "$V2_JOURNAL")"
+  target="$(operator_env jq -er '.goal.target' "$V2_JOURNAL")"
+  previous="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")"
+  releases="$(operator_env ls -1 "$OPERATOR_HOME/.subyard/runtime/releases")"
+  report="$(operator_env "${offline[@]}" migrate --check --json)" || die 'offline migrate --check failed'
+  # shellcheck disable=SC2016 # jq binds $current itself.
+  jq -e --arg current "$target" '
+    .schemaVersion == 1 and .current == $current and .owner == $current and
+    .outcome.status == "migration-required" and .next == "yard migrate" and
+    all(.domains[]; .pending == []) and
+    any(.decisions[]; .scope == "activation" and .resource == "activation.materialized-config")
+  ' <<<"$report" >/dev/null || { printf '%s\n' "$report" >&2; die 'offline migrate --check did not identify the removed artifact'; }
+  operator_env cat "$V2_JOURNAL" | cmp -s "$STATE_ROOT/offline-journal.before" - \
+    || die 'offline migrate --check changed the journal'
+  guest_dev test ! -e /home/dev/.codex/rules/repo.rules || die 'offline migrate --check repaired the artifact'
+  operator_env "${offline[@]}" migrate --yes >"$STATE_ROOT/offline-migrate.log" 2>&1 \
+    || die 'offline activation repair failed'
+  operator_env cat "$V2_LEDGER" | cmp -s "$STATE_ROOT/offline-ledger.before" - \
+    || die 'offline activation repair changed the migration ledger'
+  # shellcheck disable=SC2016 # jq binds its arguments itself.
+  operator_env jq -e --arg transaction "$transaction" --arg target "$target" '
+    .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and
+    .transaction != $transaction and .steps == [] and .releases.from == $target
+  ' "$V2_JOURNAL" >/dev/null || die 'offline activation repair replayed migrations or changed the target'
+  [ "$(guest_dev sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')" = "$HOST_RULES_DIGEST" ] \
+    || die 'offline activation repair did not restore the materialized rules'
+  operator_env cat "$V2_JOURNAL" > "$STATE_ROOT/offline-journal.ready"
+  operator_env "${offline[@]}" migrate </dev/null >"$STATE_ROOT/offline-migrate.log" 2>&1 \
+    || die 'unconfirmed offline migrate failed on a ready release'
+  operator_env cat "$V2_JOURNAL" | cmp -s "$STATE_ROOT/offline-journal.ready" - \
+    && operator_env cat "$V2_LEDGER" | cmp -s "$STATE_ROOT/offline-ledger.before" - \
+    || die 'ready offline migrate rewrote its journal or ledger'
+  [ "$(operator_env ls -1 "$OPERATOR_HOME/.subyard/runtime/releases")" = "$releases" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")" = "releases/$target" ] \
+    && [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/previous")" = "$previous" ] \
+    && [ ! -e "$STATE_ROOT/forbidden-cache" ] \
+    || die 'offline migrate selected or published a release'
+  assert_ready
+  ok 'activation repair without any release source restored the removed artifact'
+}
+
+# A guest instruction file that only the runtime refreshes, replaced by a symlink in the
+# yard: the rollback, or init after it, refuses it by name with the operator's step, keeps
+# the link and its target, and converges once the operator removes it.
+verify_symlinked_instruction_file() { # <rollback command...>
+  local link=/home/dev/.codex/AGENTS.md output rc=0
+  local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
+  local preserve="'mv' '-T' '--backup=numbered' '--' '$link'"
+  operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
+  printf 'published-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
+  operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init did not refresh the instruction file'
+  guest_dev test -f "$link" -a ! -L "$link" || die 'the instruction file was not refreshed as a regular file'
+  guest_dev sh -c 'mv "$1" "$1.real" && ln -s AGENTS.md.real "$1"' _ "$link"
+  output="$("$@" 2>&1)" || rc=$?
+  printf '%s\n' "$output" > "$STATE_ROOT/published-rollback.log"
+  if [ "$rc" -eq 0 ]; then
+    output="$(operator_yard init --yes 2>&1)" && die 'init replaced the symlinked instruction file'
+    printf '%s\n' "$output" >> "$STATE_ROOT/published-rollback.log"
+  fi
+  { grep -Fq "$link is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output"; } \
+    || grep -Fq "$preserve" <<<"$output" \
+    || die 'the symlinked instruction file was refused without its path and step'
+  guest_dev test -L "$link" && [ "$(guest_dev cat "$link.real")" = 'published-upgrade instructions' ] \
+    || die 'the refusal changed the symlinked instruction file or its target'
+  guest_dev rm "$link" "$link.real"
+  # A refused rollback first repairs the current release, then runs again.
+  [ "$rc" -eq 0 ] || operator_yard migrate --yes >"$STATE_ROOT/instructions-migrate.log" 2>&1 \
+    || die 'migrate after the refused rollback failed'
+  operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init after removing the link failed'
+  guest_dev test -f "$link" -a ! -L "$link" && guest_dev grep -Fqx 'published-upgrade instructions' "$link" \
+    || die 'the replaced instruction file did not converge'
+  [ "$rc" -eq 0 ] || "$@" >"$STATE_ROOT/published-rollback.log" 2>&1 || die 'rollback after removing the link failed'
+  ok "symlinked instruction file refused by name and kept (rollback exit $rc), then converged"
+}
+
 # Cleanup removes the journal, so a failed update reports its stopping point first.
 report_failed_transition() {
   operator_env jq -c '{checkpoint, goal, steps: [.steps[] | {id, checkpoint}]}' "$V2_JOURNAL" >&2 || true
@@ -410,6 +531,10 @@ OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/cur
 write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
 assert_published_agent_configs
 ok 'published runtime created a running yard'
+if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
+  seed_host_config_override
+  verify_config_workflow 'published release'
+fi
 if [ "$OLD_VERSION" = 0.30.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
   prepare_retained_codex_sudo_default
 fi
@@ -451,9 +576,11 @@ case " $PUBLISHED_AGENTS " in *" claude "*)
   grep -Fxq 'CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1' "$STATE_ROOT/shell-environment"
   ;;
 esac
-if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
   verify_combined_codex_policy_migration
   assert_ready
+  verify_config_workflow 'candidate update'
+  verify_offline_activation_repair
 fi
 ok 'update reached Ready with the same instance and guest data'
 
@@ -473,8 +600,12 @@ if [ "$registry_relation" = 0 ]; then
   fi
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
-  operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \
-    || { cat "$STATE_ROOT/published-rollback.log" >&2; die 'rollback to the published release failed'; }
+  if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
+    verify_symlinked_instruction_file operator_yard update --rollback --yes
+  else
+    operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 \
+      || { cat "$STATE_ROOT/published-rollback.log" >&2; die 'rollback to the published release failed'; }
+  fi
   [ "$(operator_env readlink "$runtime/current")" = "$OLD_RELEASE_TARGET" ] \
     && [ "$(operator_env readlink "$runtime/previous")" = "$CANDIDATE_RELEASE_TARGET" ] \
     && [ "$(operator_yard --version)" = "yard $OLD_VERSION" ] \
@@ -485,11 +616,13 @@ if [ "$registry_relation" = 0 ]; then
     && jq -e '(.outcome // .inspection.outcome).status == "ready"' "$STATE_ROOT/rollback-migrate-check.log" >/dev/null \
     || die 'published release does not report Ready after rollback'
   ok 'rollback to the published release kept migration history'
+  [ "$LOCAL_CONFIG_CHECKS" = 0 ] || verify_config_workflow 'rollback'
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" YARD_RELEASE_VERSION="$CANDIDATE_VERSION" \
     "$OPERATOR_HOME/.local/bin/yard" update --yes \
     || { report_failed_transition; die 'update after rollback failed'; }
   [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
     || die 'update after rollback did not reactivate the candidate'
   assert_ready
+  [ "$LOCAL_CONFIG_CHECKS" = 0 ] || verify_config_workflow 'update after rollback'
   ok 'update after rollback reached Ready again'
 fi
