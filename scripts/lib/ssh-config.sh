@@ -55,35 +55,38 @@ ssh_transport_identity_prepare() {
     || { ssh_transport_identity_error "$keydir must have mode 0700"; return 1; }
 
   lockfile="$keydir/.identity.lock"
-  if [ ! -e "$lockfile" ] && [ ! -L "$lockfile" ]; then
-    # An inherited default ACL can override umask. Secure only a newly created
-    # descriptor; existing lock ownership, mode and symlinks remain validated below.
-    python3 - "$lockfile" 2>/dev/null <<'PY_LOCK' || true
+  # Default ACLs can override umask. Create new locks privately and repair
+  # existing locks only after validating the opened descriptor's type and owner.
+  if ! python3 - "$lockfile" "$uid" 2>/dev/null <<'PY_LOCK'
 import os
+import stat
 import sys
 
 try:
     fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
 except FileExistsError:
-    pass
-else:
-    try:
-        os.fchmod(fd, 0o600)
-    finally:
-        os.close(fd)
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != int(sys.argv[2]):
+        sys.exit(1)
+    os.fchmod(fd, 0o600)
+finally:
+    os.close(fd)
 PY_LOCK
+  then
+    ssh_transport_identity_error "$lockfile: cannot create or secure an operator-owned regular non-symlink lock"
+    return 1
   fi
   [ -f "$lockfile" ] && [ ! -L "$lockfile" ] \
-    || { ssh_transport_identity_error "key creation lock must be a regular non-symlink file"; return 1; }
+    || { ssh_transport_identity_error "$lockfile must be a regular non-symlink file"; return 1; }
   [ "$(stat -c %u "$lockfile" 2>/dev/null)" = "$uid" ] \
-    || { ssh_transport_identity_error "key creation lock $lockfile must be operator-owned"; return 1; }
-  [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] || chmod 0600 -- "$lockfile" 2>/dev/null || true
-  [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] \
-    || { ssh_transport_identity_error "key creation lock $lockfile must have mode 0600"; return 1; }
+    && [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] \
+    || { ssh_transport_identity_error "$lockfile must be operator-owned mode 0600"; return 1; }
   exec {lock_fd}>>"$lockfile" \
-    || { ssh_transport_identity_error "cannot open the key creation lock"; return 1; }
+    || { ssh_transport_identity_error "cannot open key creation lock $lockfile"; return 1; }
   flock "$lock_fd" \
-    || { exec {lock_fd}>&-; ssh_transport_identity_error "cannot acquire the key creation lock"; return 1; }
+    || { exec {lock_fd}>&-; ssh_transport_identity_error "cannot acquire key creation lock $lockfile"; return 1; }
 
   if { [ -e "$identity" ] || [ -L "$identity" ]; } \
     || { [ -e "$public" ] || [ -L "$public" ]; }; then

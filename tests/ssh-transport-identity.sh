@@ -41,7 +41,8 @@ fi
 if command -v setfacl >/dev/null 2>&1; then
   acl_home="$TMP/acl-data"
   mkdir -m 0700 "$acl_home"
-  setfacl -d -m u::rwx,g::rwx,o::r-x "$acl_home"
+  acl_uid="$(id -u)"
+  setfacl -d -m "u::rwx,u:$((acl_uid + 1)):rwx,g::rwx,o::r-x" "$acl_home"
   (umask 077; : > "$acl_home/umask-only")
   [ "$(stat -c %a "$acl_home/umask-only")" = 664 ] \
     || fail 'default ACL fixture did not override umask'
@@ -52,10 +53,15 @@ if command -v setfacl >/dev/null 2>&1; then
     && [ "$(stat -c %a "$acl_identity.pub")" = 644 ] \
     || fail 'default ACL changed identity permissions'
   acl_fingerprint="$(ssh-keygen -lf "$acl_identity" | awk '{print $2}')"
+  # Simulate a lock left by the old umask-only creator under this default ACL.
+  chmod 0664 "$acl_home/ssh/.identity.lock"
+  acl_lock_inode="$(stat -c '%d:%i' "$acl_home/ssh/.identity.lock")"
   ssh_transport_identity_prepare "$acl_home" >/dev/null \
     || fail 'default ACL prevented repeated identity preparation'
   [ "$(ssh-keygen -lf "$acl_identity" | awk '{print $2}')" = "$acl_fingerprint" ] \
     || fail 'default ACL rotated the transport identity'
+  [ "$(stat -c '%d:%i:%a' "$acl_home/ssh/.identity.lock")" = "$acl_lock_inode:600" ] \
+    || fail 'default-ACL lock was not repaired in place'
   ssh_config_prepend_once "$acl_home/ssh/config" 'Include subyard.config' \
     || fail 'default ACL prevented SSH config publication'
   ssh_known_host_replace "$acl_home/ssh/known_hosts" '[127.0.0.1]:2223' "$(cat "$acl_identity.pub")" \
@@ -97,20 +103,47 @@ assert_rejected() {
   shift
   mkdir -p "$home"
   "$@" "$home"
-  if ssh_transport_identity_prepare "$home" >"$TMP/$name.out" 2>"$TMP/$name.err"; then
+  if timeout 3 bash -c 'source "$1"; ssh_transport_identity_prepare "$2"' \
+    identity-refusal "$ROOT/scripts/lib/ssh-config.sh" "$home" >"$TMP/$name.out" 2>"$TMP/$name.err"; then
     fail "$name identity state was accepted"
   fi
   [ ! -s "$TMP/$name.out" ] || fail "$name failure printed an identity path"
 }
 
-make_bad_lock_mode() {
-  mkdir -m 700 "$1/ssh"
-  : > "$1/ssh/.identity.lock"
-  chmod 644 "$1/ssh/.identity.lock"
-}
-assert_rejected bad-lock-mode make_bad_lock_mode
-[ "$(stat -c %a "$TMP/reject-bad-lock-mode/ssh/.identity.lock")" = 644 ] \
-  || fail 'prepare repaired an existing unsafe lock'
+# Existing locks carry no identity material: normalize their mode in place.
+legacy_lock="$data_home/ssh/.identity.lock"
+printf 'retained lock contents\n' > "$legacy_lock"
+legacy_inode="$(stat -c '%d:%i' "$legacy_lock")"
+for legacy_mode in 644 664; do
+  chmod "$legacy_mode" "$legacy_lock"
+  ssh_transport_identity_prepare "$data_home" >/dev/null \
+    || fail "existing mode-$legacy_mode lock was not repaired"
+  [ "$(stat -c '%d:%i:%a' "$legacy_lock")" = "$legacy_inode:600" ] \
+    && [ "$(cat "$legacy_lock")" = 'retained lock contents' ] \
+    || fail 'lock repair replaced its inode or contents'
+  [ "$(ssh-keygen -lf "$identity" | awk '{print $2}')" = "$fingerprint" ] \
+    || fail 'lock repair rotated the transport identity'
+done
+
+# The descriptor owner check must precede fchmod, even if a pathname was checked.
+python3 - "$ROOT/scripts/lib/ssh-config.sh" "$TMP/foreign-lock" <<'PY_OWNER'
+import os
+import pathlib
+import subprocess
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text().split("<<'PY_LOCK'", 1)[1]
+code = source.split("\n", 1)[1].split("\nPY_LOCK", 1)[0]
+lock = pathlib.Path(sys.argv[2])
+lock.write_text("foreign lock contents")
+lock.chmod(0o664)
+before = lock.stat()
+result = subprocess.run([sys.executable, "-", str(lock), str(os.getuid() + 1)],
+                        input=code, text=True, capture_output=True)
+assert result.returncode != 0, result
+assert lock.stat().st_mode == before.st_mode and lock.stat().st_ino == before.st_ino
+assert lock.read_text() == "foreign lock contents"
+PY_OWNER
 
 make_symlink_lock() {
   mkdir -m 700 "$1/ssh"
@@ -119,6 +152,25 @@ make_symlink_lock() {
   ln -s "$1/target" "$1/ssh/.identity.lock"
 }
 assert_rejected symlink-lock make_symlink_lock
+grep -Fq "$TMP/reject-symlink-lock/ssh/.identity.lock" "$TMP/symlink-lock.err" \
+  || fail 'symlink lock refusal omitted its path'
+
+make_directory_lock() {
+  mkdir -m 700 "$1/ssh"
+  mkdir -m 700 "$1/ssh/.identity.lock"
+}
+assert_rejected directory-lock make_directory_lock
+
+make_fifo_lock() {
+  mkdir -m 700 "$1/ssh"
+  mkfifo -m 664 "$1/ssh/.identity.lock"
+}
+assert_rejected fifo-lock make_fifo_lock
+for lock_case in directory-lock fifo-lock; do
+  grep -Fq "$TMP/reject-$lock_case/ssh/.identity.lock" "$TMP/$lock_case.err" \
+    || fail "$lock_case refusal omitted its path"
+done
+
 
 make_incomplete() {
   mkdir -m 700 "$1/ssh"
