@@ -52,4 +52,4 @@ allows init to complete. The next init retries. `yard profile status user-skills
 `ready: false` while a configured clone or link is missing; this is derived from the
 filesystem, without a state file or lock. Each clone attempt is bounded to 60 seconds,
 with a 300-second total clone budget per init.
-The next init also removes abandoned temporary clone directories owned by the hook.
+Abandoned temporary clone directories are left in place; they do not block later clone attempts.

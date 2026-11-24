@@ -25,7 +25,6 @@ ATTEMPT_TIMEOUT = 60
 CLONE_BUDGET = 300
 SKILL_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
 SOURCE_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}')
-TEMP_NAME = re.compile(r'\.tmp-' + SOURCE_NAME.pattern + r'-[a-z0-9_]{8}')
 
 
 def source_name(normalized):
@@ -68,14 +67,6 @@ def harness_directories(home):
         else:
             usable.append(path)
     return usable, skipped
-
-
-def temporary_clones(root):
-    if not root.is_dir():
-        return []
-    # Init and scoped profile operations already hold the core's per-yard lock.
-    return [path for path in sorted(root.iterdir()) if TEMP_NAME.fullmatch(path.name)
-            and stat.S_ISDIR((info := path.lstat()).st_mode) and info.st_uid == os.geteuid()]
 
 
 def inspect(home, root, sources):
@@ -121,8 +112,7 @@ def inspect(home, root, sources):
                 create.append((link, target))
             elif not os.path.islink(link) or os.readlink(link) != target:
                 skipped.append(f'skipped {link}: path is occupied')
-    return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped,
-            'temporary': temporary_clones(root)}
+    return {'missing': missing, 'wanted': wanted, 'remove': remove, 'create': create, 'skipped': skipped}
 
 
 def _die_with_parent(parent):
@@ -223,11 +213,8 @@ def run(mode, urls, home, post_apply=False):
                for url in urls]
     plan = inspect(home, root, sources)
     if mode == 'check':
-        return int(bool(plan['remove'] or plan['create']
-                        or ((plan['missing'] or plan['temporary']) and not post_apply)))
+        return int(bool(plan['remove'] or plan['create'] or (plan['missing'] and not post_apply)))
     report = []
-    for temporary in plan['temporary']:
-        remove_tree(temporary, report)
     if sources:
         root.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + CLONE_BUDGET
