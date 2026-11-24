@@ -204,7 +204,7 @@ prepare_native_server() {
     cat /srv/amnezia/admin.key </dev/null \
     | guest 2 bash -ceu '
         destination=/var/tmp/subyard-amnezia-client/admin.key
-        install -o 0 -g 0 -m 0600 /dev/stdin "$destination"
+        install -D -o 0 -g 0 -m 0600 /dev/stdin "$destination"
         test -s "$destination"
       '
   native_app install
@@ -248,7 +248,7 @@ prepare_native_clients() {
   ' </dev/null | guest 2 docker image load >/dev/null
   guest 2 bash -ceu '
     docker image inspect --format "{{.Id}}" subyard-amnezia-e2e/native:source \
-      | install -o 0 -g 0 -m 0600 /dev/stdin /var/tmp/subyard-amnezia-client/image
+      | install -D -o 0 -g 0 -m 0600 /dev/stdin /var/tmp/subyard-amnezia-client/image
   ' </dev/null
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
     docker exec amnezia-awg2 ip -4 -j address show dev awg0 </dev/null \

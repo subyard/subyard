@@ -246,7 +246,7 @@ materialize_unit() {
     # Inspect the production delay first; accelerate the subsequent retry cases.
     if [ "$mode" != success ]; then printf 'RestartSec=100ms\n'; fi
     printf 'RuntimeDirectory=%s\nRuntimeDirectoryPreserve=yes\n' "$RUNTIME_DIR"
-  } | sudo -n install -o root -g root -m 0644 /dev/stdin "$DROPIN_PATH"
+  } | sudo -n install -D -o root -g root -m 0644 /dev/stdin "$DROPIN_PATH"
   sudo -n "$SYSTEMCTL_BIN" daemon-reload
 }
 
@@ -256,7 +256,7 @@ set_runtime_max_test_override() {
     printf '[Service]\n'
     printf 'RestartSec=100ms\nRuntimeMaxSec=500ms\n'
     printf 'RuntimeDirectory=%s\nRuntimeDirectoryPreserve=yes\n' "$RUNTIME_DIR"
-  } | sudo -n install -o root -g root -m 0644 /dev/stdin "$DROPIN_PATH"
+  } | sudo -n install -D -o root -g root -m 0644 /dev/stdin "$DROPIN_PATH"
   sudo -n "$SYSTEMCTL_BIN" daemon-reload
 }
 
@@ -265,9 +265,9 @@ start_case() {
   sudo -n "$SYSTEMCTL_BIN" reset-failed "$UNIT" >/dev/null 2>&1 || true
   sudo -n install -d -o root -g root -m 0755 "$RUNTIME_PATH"
   printf '# %s\n' "$MARKER" \
-    | sudo -n install -o root -g root -m 0600 /dev/stdin "$ATTEMPT_PATH"
+    | sudo -n install -D -o root -g root -m 0600 /dev/stdin "$ATTEMPT_PATH"
   printf '# %s\n%s\n' "$MARKER" "$CURRENT_MODE" \
-    | sudo -n install -o root -g root -m 0600 /dev/stdin "$MODE_PATH"
+    | sudo -n install -D -o root -g root -m 0600 /dev/stdin "$MODE_PATH"
   sudo -n "$SYSTEMCTL_BIN" start --no-block "$UNIT"
   # An inactive unit already reports success before the queued start executes.
   wait_for 'the first helper execution' has_attempt

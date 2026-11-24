@@ -181,13 +181,13 @@ for name in a-waiting z-ready; do
 done
 {
   printf '# %s\n[Slice]\nCPUAccounting=yes\nMemoryAccounting=yes\nIPAccounting=yes\n' "$MARKER"
-} | sudo -n install -m 0644 /dev/stdin "$SLICE_PATH"
+} | sudo -n install -D -m 0644 /dev/stdin "$SLICE_PATH"
 SLICE_ARMED=1
 {
   printf '# %s\n' "$MARKER"
   sed "s|@SUBYARD_POWER_RECONCILER@|$BINARY_PATH|g" "$ROOT/config/systemd/subyard-power-reconcile.service.in"
   printf '\n[Service]\nSlice=%s\nCPUAccounting=yes\nMemoryAccounting=yes\nIPAccounting=yes\n' "$SLICE"
-} | sudo -n install -m 0644 /dev/stdin "$UNIT_PATH"
+} | sudo -n install -D -m 0644 /dev/stdin "$UNIT_PATH"
 UNIT_ARMED=1
 sudo -n systemctl daemon-reload
 sudo -n systemctl start --no-block "$UNIT"

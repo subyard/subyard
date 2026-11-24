@@ -96,7 +96,8 @@ done
 chmod 0755 "$INSTALL_ROOT/runtime.sh"
 install -m 0644 "$stage/config.json" /etc/subyard-android.json
 install -m 0644 "$stage/unit" "$UNIT"
-install -m 0755 /dev/stdin "$PUBLIC_ROOT/bin/android-broker" <<'EOF'
+# -D supports repeated streamed installation with Rust coreutils as well as GNU.
+install -D -m 0755 /dev/stdin "$PUBLIC_ROOT/bin/android-broker" <<'EOF'
 #!/usr/bin/env bash
 exec /usr/bin/python3 /usr/local/lib/subyard-android/client.py "$@"
 EOF

@@ -16,7 +16,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 mkdir -p "$tmp/public/bin" "$tmp/owner"
 touch "$tmp/public/bin/yard"
 ln -s missing-client "$tmp/public/bin/yard-emu"
-sed -n '/^install -m 0755 .*bin\/android-broker/,/^# Retire the old staged/p' \
+sed -n '/^install -D -m 0755 .*bin\/android-broker/,/^# Retire the old staged/p' \
   "$ROOT/config/profiles/android/pool-install.sh" | sed '$d' > "$tmp/install-client.sh"
 for _attempt in 1 2; do
   PUBLIC_ROOT="$tmp/public" bash "$tmp/install-client.sh"
