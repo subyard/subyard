@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import tempfile
 
@@ -341,7 +342,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                 except FileNotFoundError:
                     continue
                 if info.st_uid != uid or info.st_gid not in (uid, gid):
-                    raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid)
+                    raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid, str(home))
                 raw = snapshot(target, legacy=True)
                 if raw is None or not raw.strip():
                     continue
@@ -377,7 +378,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                 elif payload != raw:
                     info = target.lstat()
                     if info.st_uid != uid or info.st_gid not in (uid, gid):
-                        raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid)
+                        raise LegacyConfigError('owner', info.st_uid, info.st_gid, uid, gid, str(home))
                     # Any rewritten home document can contain user credentials.
                     edits.append((path, target, payload, raw, info.st_mode & 0o600, info.st_gid))
             except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as error:
@@ -431,8 +432,14 @@ LEGACY_CONFIG_REASONS = {
 }
 
 
+def valid_developer_home(home):
+    return (isinstance(home, str) and len(home) <= 4096 and home.startswith('/') and home != '/'
+            and str(Path(home)) == home and '..' not in Path(home).parts
+            and all(ord(character) >= 32 and ord(character) != 127 for character in home))
+
+
 def refusal_messages(reasons):
-    """Render known identifiers against local policy, without using guest text."""
+    """Render closed reasons and validated home paths, never document or exception text."""
     if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= 11:
         raise ValueError('invalid telemetry refusal')
     messages = []
@@ -451,12 +458,12 @@ def refusal_messages(reasons):
                                 '/var/lib/subyard/telemetry-control/native.json and retry')
             case ('legacy-token-remains', agent) if agent in AGENTS:
                 messages.append('collector token remains in legacy '+agent+' configuration')
-            case ('legacy-config', agent, 'owner', actual_uid, actual_gid, uid, gid) if agent in AGENTS and all(
+            case ('legacy-config', agent, 'owner', actual_uid, actual_gid, uid, gid, home) if agent in AGENTS and valid_developer_home(home) and all(
                     type(value) is int and 0 <= value < 2**32 for value in (actual_uid, actual_gid, uid, gid)):
-                path = '~/'+AGENTS[agent][1]
+                path = str(Path(home)/AGENTS[agent][1])
                 messages.append(f'cannot clean legacy {agent} configuration {path}: actual owner '
                                 f'{actual_uid}:{actual_gid}, expected {uid}:{uid} (materializer) or {uid}:{gid} '
-                                f'(developer primary group); as root inside the yard, run chown {uid}:{uid} -- {path} and retry')
+                                f'(developer primary group); as root inside the yard, run chown {uid}:{uid} -- {shlex.quote(path)} and retry')
             case ('legacy-config', agent, code) if agent in AGENTS and code in LEGACY_CONFIG_REASONS:
                 messages.append('cannot clean legacy '+agent+' configuration ~/'+AGENTS[agent][1]+': '+LEGACY_CONFIG_REASONS[code])
             case ('unsafe-policy', agent) if agent in AGENTS:

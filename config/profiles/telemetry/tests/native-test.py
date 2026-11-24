@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -182,19 +183,21 @@ class NativeTest(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_legacy_cleanup_names_foreign_owner_without_echoing_contents(self):
+        self.home = self.root/"developer's home"
         self.legacy()(self.home, self.receipt, ['claude'], self.endpoint, self.token,
                       tomli_w, self.uid, self.gid)
-        path = self.documents['claude']
+        path = self.home/native.AGENTS['claude'][1]
         before = path.read_bytes()
         failures = []
         with patch.object(native, 'developer_files', return_value=nullcontext()):
             native.legacy_edits(self.receipt, self.home, self.token, tomli_w,
                                 self.uid + 1, self.gid + 1, failures)
         message = str(native.Refusal(failures))
-        self.assertIn('~/.claude/settings.json', message)
+        self.assertIn(str(path), message)
+        self.assertNotIn('~/.claude/settings.json', message)
         self.assertIn(f'actual owner {self.uid}:{self.gid}', message)
         self.assertIn(f'expected {self.uid+1}:{self.uid+1}', message)
-        self.assertIn(f'chown {self.uid+1}:{self.uid+1} -- ~/.claude/settings.json', message)
+        self.assertIn(f'chown {self.uid+1}:{self.uid+1} -- {shlex.quote(str(path))}', message)
         self.assertNotIn(self.token, message)
         self.assertEqual(path.read_bytes(), before)
 
