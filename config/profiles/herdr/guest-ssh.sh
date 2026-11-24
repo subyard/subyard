@@ -17,7 +17,7 @@ regular_policy() {
 matches() { regular_policy && printf '%s\n' "$body" | cmp -s - "$policy"; }
 # Ensure rewrites an owned file, so a drifted mode alone does not disown it.
 root_policy() {
-    [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u' "$policy")" = 0 ] &&
+    [ ! -L "$policy" ] && [ -f "$policy" ] && [ "$(stat -c '%u:' "$policy")" = 0: ] &&
         [ $(( 0$(stat -c '%a' "$policy") & 07022 )) = 0 ]
 }
 owned() {

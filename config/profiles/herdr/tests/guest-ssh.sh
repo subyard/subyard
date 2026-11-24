@@ -27,7 +27,7 @@ SYSTEMCTL
 chmod 0755 "$test_root/bin/"*
 policy="$test_root/00-subyard-herdr.conf"
 sed -e "s|^policy=.*|policy=$policy|" -e "s|/usr/sbin/sshd|$test_root/bin/sshd|" \
-    -e "s/ = 0:644 / = $(id -u):644 /" scripts/lib/sshd.sh config/profiles/herdr/guest-ssh.sh > "$test_root/guest-ssh.sh"
+    -e "s/ = 0:644 / = $(id -u):644 /" -e "s/ = 0: ] / = $(id -u): ] /" scripts/lib/sshd.sh config/profiles/herdr/guest-ssh.sh > "$test_root/guest-ssh.sh"
 printf 'check syntax\ncheck effective configuration\nreload\n' > "$test_root/install-calls"
 printf '# Managed by the Subyard Herdr profile\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n' > "$test_root/expected-policy"
 sh "$test_root/guest-ssh.sh" ensure dev
@@ -61,6 +61,14 @@ cmp "$test_root/original-policy" "$policy"
 sh "$test_root/guest-ssh.sh" ensure dev
 cmp "$test_root/expected-policy" "$policy"
 sh "$test_root/guest-ssh.sh" check
+# An owned drop-in with only a drifted mode is rewritten; a group-writable one is refused.
+chmod 0600 "$policy"
+if sh "$test_root/guest-ssh.sh" check; then exit 1; fi
+sh "$test_root/guest-ssh.sh" ensure dev
+[ "$(stat -c %a "$policy")" = 644 ]
+chmod 0664 "$policy"
+if sh "$test_root/guest-ssh.sh" ensure dev 2>/dev/null; then exit 1; fi
+chmod 0644 "$policy"
 
 printf 'PasswordAuthentication yes\n' > "$policy"
 if sh "$test_root/guest-ssh.sh" remove 2>/dev/null; then exit 1; fi
