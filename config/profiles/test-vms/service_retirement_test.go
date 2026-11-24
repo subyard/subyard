@@ -36,7 +36,8 @@ func TestServiceRemovedRuntimeIsAbsentForReleaseAdmission(t *testing.T) {
 			case "reset-unrecognized-file":
 				testkit.WriteFile(t, filepath.Join(directory, "foreign"), []byte("preserve"), 0o600)
 			case "unsafe-marker":
-				if err := os.Chmod(config.YardResetMarkerPath(home, "test-yard"), 0o644); err != nil {
+				marker := config.YardResetMarkerPath(home, "test-yard")
+				if err := os.Link(marker, filepath.Join(home, "marker-alias")); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink-with-settings":

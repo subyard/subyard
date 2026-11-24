@@ -161,6 +161,12 @@ func TestRegisteredOwnersBindOptionalHostID(t *testing.T) {
 						content = []byte("unsafe/owner\n")
 					}
 					testkit.WriteFile(t, path, content, mode)
+					if change == "unsafe-mode" {
+						// Another hard link keeps the broader HostID from being repaired.
+						if err := os.Link(path, path+".alias"); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
 				err := owner.Reconcile(context.Background(), releasetransition.ReleaseLinks{})
 				if err == nil || native.grants != 0 {

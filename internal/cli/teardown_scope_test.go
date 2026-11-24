@@ -724,6 +724,12 @@ func TestFullTeardownRetiresOnlyOwnedIdentityAuthority(t *testing.T) {
 				mode = 0644
 			}
 			testkit.WriteFile(t, path, body, mode)
+			if scenario == "unsafe-mode" {
+				// Another hard link keeps the broader marker from being repaired.
+				if err := os.Link(path, filepath.Join(root, "marker-alias")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			hint := config.AppliedIdentityHint{Schema: 1, Yard: "owned", UUID: uuid, Source: strings.Repeat("a", 64), Release: strings.Repeat("b", 64), User: "developer", UID: 1001}
 			if err := config.PublishAppliedIdentityHint(root, hint, config.PersistentFileSnapshot{}); err != nil {
 				t.Fatal(err)

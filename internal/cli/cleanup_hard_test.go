@@ -243,8 +243,20 @@ func TestCleanupCheckpointIsPrivateAndYardScoped(t *testing.T) {
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := readHardCleanup(path); err != nil {
+		t.Fatalf("broader own checkpoint was not repaired: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("checkpoint mode = %v (%v)", info.Mode(), err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, path+".alias"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := readHardCleanup(path); err == nil {
-		t.Fatal("unsafe checkpoint accepted")
+		t.Fatal("shared unsafe checkpoint accepted")
 	}
 }
 

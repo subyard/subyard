@@ -594,7 +594,7 @@ func TestSecurityRuntimeRequiresPrivateIdentityMode(t *testing.T) {
 	var diagnostics bytes.Buffer
 	runtime.Stderr = &diagnostics
 	_, err := runtime.CheckSecurity(context.Background(), false, true)
-	if !errors.Is(err, ErrContract) || !strings.Contains(diagnostics.String(), "mode 0600") {
+	if !errors.Is(err, ErrContract) || !strings.Contains(diagnostics.String(), "must not be accessible by group or others") {
 		t.Fatalf("expected identity-mode failure, err=%v output=%q", err, diagnostics.String())
 	}
 }
