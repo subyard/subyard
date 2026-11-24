@@ -64,6 +64,7 @@ Read by task; links are relative to this skill.
 - Checks and acceptance test the current public worktree, including uncommitted and untracked
   inputs. Installed-runtime and reboot checks package that worktree and install it through the
   supported installer. A published release is only a problem-reproduction baseline.
+- Source-text assertions belong only to explicit source-level contracts.
 - Before an expensive VM check, run changed-component unit/contract checks, then the smallest
   [fixture preflight](../../../docs/test-vms.md#fixture-preflight), then the affected lane. Reuse a
   current applicable PASS. If no local check can prove the physical contract, record that limit

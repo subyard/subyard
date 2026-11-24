@@ -12,7 +12,9 @@ yard [-Y NAME] config set USER_SKILL_SOURCES 'https://github.com/OWNER/skills gi
 yard [-Y NAME] init
 ```
 
-Update clones with plain Git; Subyard never updates, restores or deletes a clone.
+Update clones with plain Git. Subyard never updates or deletes a clone; it clones a configured
+source only when its directory is missing or empty, so a deleted clone or store comes back on
+the next apply while that source is configured and reachable.
 
 ## Rules
 
@@ -24,7 +26,8 @@ accepts skipped sources.
   any userinfo, or the SCP host. The name is the last two path segments, without a trailing
   `.git`, and must match `SEG/SEG` with `SEG` = `[A-Za-z0-9][A-Za-z0-9._-]*`. For example,
   `https://github.com/OWNER/skills` and `git@example.org:group/sub/skills` give `OWNER/skills`
-  and `sub/skills`. Credentials in URLs are unsupported: use public or SSH-key repositories.
+  and `sub/skills`; a bracketed SCP host such as `git@[::1]:OWNER/skills` is stripped whole.
+  Credentials in URLs are unsupported: use public or SSH-key repositories.
 - **Skipped sources.** A source is skipped when its name is invalid, equals an earlier name, or
   its clone fails. Apply prints a warning that names only the source position or the validated
   name, never URL text; check reports drift, so status shows `ready: false`; verify accepts it,
@@ -42,11 +45,13 @@ accepts skipped sources.
 - **Ours.** A link is ours only when its text is exactly `<store>/<name>/skills/<link name>`
   with a valid name. Paths are compared as strings and never resolved, so hand-made, relative or
   differently spelled links are never touched.
+- **Order.** Apply first clones every source, then unlinks, then links, so one run converges
+  when a freed link path is taken over by another source.
 - **Unlink.** Apply unlinks each of our links unless its name is a configured, non-skipped
   source and its target still has `SKILL.md`. So `yard profile disable user-skills`,
-  deselecting the profile and running `yard init`, removing a source, deleting a skill folder or
-  deleting the store all remove those links and keep the clones. To disable one skill, delete its
-  folder in the clone; removing only its link gets it re-added.
+  deselecting the profile and running `yard init`, removing a source or deleting a skill folder
+  removes those links and keeps the clones. To disable one skill, delete its folder in the
+  clone; removing only its link gets it re-added.
 - Concurrent edits by the same user during a run are not guarded.
 
 Out of scope:

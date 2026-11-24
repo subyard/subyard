@@ -14,6 +14,7 @@ names=() # configured, not skipped
 skipped() {
   case "$mode" in check) work=1 ;; apply) printf 'user-skills: warning: %s\n' "$1" >&2 ;; esac
 }
+# Pass 1: parse and clone every source, giving the configured, non-skipped names.
 position=0
 for url in "$@"; do
   position=$((position + 1))
@@ -21,6 +22,7 @@ for url in "$@"; do
   path="${url%%[?#]*}"
   case "$path" in
     *://*) path="${path#*://}"; case "$path" in */*) path="${path#*/}" ;; *) path="" ;; esac ;;
+    \[*\]:*|*@\[*\]:*) path="${path#*\]:}" ;; # bracketed SCP host, such as git@[::1]:owner/repo
     *) path="${path#*:}" ;;
   esac
   path="${path%/}"
@@ -55,7 +57,29 @@ for url in "$@"; do
     fi
   fi
   names+=("$name")
-  for manifest in "$clone"/skills/*/SKILL.md; do
+done
+# Pass 2, before linking so that a freed path can be relinked in the same run.
+# Ours: the link text is exactly $store/OWNER/REPO/skills/<link name>. Keep it only while its
+# source is configured, not skipped, and the skill folder still has SKILL.md.
+for harness in "${harnesses[@]}"; do
+  for link in "$HOME/$harness"/*; do
+    [ -L "$link" ] || continue
+    # Keep the exact link text: command substitution would strip trailing newlines.
+    target="$(readlink -- "$link"; printf x)"
+    target="${target%x}"
+    target="${target%$'\n'}"
+    name="${target#"$store/"}"
+    name="${name%"/skills/${link##*/}"}"
+    [ "$target" = "$store/$name/skills/${link##*/}" ] && [[ "$name" =~ ^$segment/$segment$ ]] || continue
+    keep=0
+    for other in "${names[@]}"; do [ "$other" != "$name" ] || keep=1; done
+    if [ "$keep" = 1 ] && [ -e "$target/SKILL.md" ]; then continue; fi
+    if [ "$mode" = apply ]; then unlink -- "$link"; else work=1; fi
+  done
+done
+# Pass 3: link each configured skill where the path is free.
+for name in "${names[@]}"; do
+  for manifest in "$store/$name"/skills/*/SKILL.md; do
     [ -f "$manifest" ] || continue
     skill="${manifest%/SKILL.md}"
     case "${skill##*/}" in subyard-*) continue ;; esac # shipped skill names
@@ -69,21 +93,6 @@ for url in "$@"; do
         work=1
       fi
     done
-  done
-done
-# Ours: the link text is exactly $store/OWNER/REPO/skills/<link name>. Keep it only while its
-# source is configured, not skipped, and the skill folder still has SKILL.md.
-for harness in "${harnesses[@]}"; do
-  for link in "$HOME/$harness"/*; do
-    [ -L "$link" ] || continue
-    target="$(readlink -- "$link")"
-    name="${target#"$store/"}"
-    name="${name%"/skills/${link##*/}"}"
-    [ "$target" = "$store/$name/skills/${link##*/}" ] && [[ "$name" =~ ^$segment/$segment$ ]] || continue
-    keep=0
-    for other in "${names[@]}"; do [ "$other" != "$name" ] || keep=1; done
-    if [ "$keep" = 1 ] && [ -e "$target/SKILL.md" ]; then continue; fi
-    if [ "$mode" = apply ]; then unlink -- "$link"; else work=1; fi
   done
 done
 if [ "$work" = 1 ]; then printf 'work\n'; fi

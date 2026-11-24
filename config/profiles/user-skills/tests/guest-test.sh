@@ -16,6 +16,8 @@ repo() { # <owner/repo> <skill...>
 }
 repo owner/skills demo taken subyard-x
 repo owner/more extra
+repo owner/old same
+repo owner/new same
 mkdir -p "$work/home/.claude/skills" "$work/home/.config/opencode" "$work/outside" "$work/elsewhere"
 ln -s "$work/outside" "$work/home/.config/opencode/skills" # a symlinked harness is used as given
 printf 'mine\n' >"$work/home/.claude/skills/taken"
@@ -68,6 +70,17 @@ mv -T "$clone/skills/gone" "$work/gone"
 [ "$(run check "$good")" = work ] || fail 'check missed a dangling link'
 run apply "$good"
 [ ! -L "$work/home/.agents/skills/gone" ] || fail 'kept a deleted skill link'
+# One apply converges when a source is replaced by one with the same skill name, and when the
+# winning skill folder is deleted while another source has that name.
+old="file://$work/owner/old" new="file://$work/owner/new" same="$work/home/.agents/skills/same"
+run apply "$good" "$old"
+run apply "$good" "$new"
+[ "$(readlink "$same")" = "$store/owner/new/skills/same" ] && [ -z "$(run verify "$good" "$new")" ] || fail 'source replacement needs a second apply'
+run apply "$good" "$new" "$old"
+mv -T "$store/owner/new/skills/same" "$work/same"
+run apply "$good" "$new" "$old"
+[ "$(readlink "$same")" = "$store/owner/old/skills/same" ] && [ -z "$(run verify "$good" "$new" "$old")" ] || fail 'deleted winner needs a second apply'
+run apply "$good"
 # Disable unlinks only links spelled exactly as ours and keeps the clones.
 skills="$work/home/.agents/skills"
 ln -s "$work/elsewhere" "$skills/foreign"
@@ -77,11 +90,12 @@ ln -s "$store/redirect/x/y/skills/foreign-redirect" "$skills/foreign-redirect"
 ln -s "$clone/skills/demo" "$skills/mismatch"
 ln -s "$store/x/skills/onesegment" "$skills/onesegment"
 ln -s ../../.local/share/subyard-user-skills/owner/skills/skills/demo "$skills/relative"
+python3 -c 'import os, sys; os.symlink(sys.argv[1] + "\n", sys.argv[2])' "$clone/skills/newline" "$skills/newline"
 [ "$(run check)" = work ] || fail 'disable check missed our links'
 run apply
 [ -z "$(run check)" ] || fail 'links remain after disable'
 links_are ''
-for kept in foreign foreign-dangling foreign-dotdot foreign-redirect mismatch onesegment relative; do
+for kept in foreign foreign-dangling foreign-dotdot foreign-redirect mismatch onesegment relative newline; do
   [ -L "$skills/$kept" ] || fail "removed foreign link $kept"
 done
 [ "$(cat "$work/home/.claude/skills/taken")" = mine ] && [ -f "$clone/skills/demo/SKILL.md" ] || fail 'removed a file or clone'
@@ -90,4 +104,8 @@ run apply "$good"
 mv -T "$store" "$work/store-moved"
 run apply
 links_are ''
+# A bracketed IPv6 SCP host is stripped whole; the existing clone is used as is.
+mkdir -p "$store/owner/ipv6/skills/v6" && printf 'v6\n' >"$store/owner/ipv6/skills/v6/SKILL.md"
+run apply 'git@[::1]:owner/ipv6.git'
+[ "$(readlink "$skills/v6")" = "$store/owner/ipv6/skills/v6" ] || fail 'bracketed SCP host misparsed'
 printf 'ok: user-skills guest hook\n'
