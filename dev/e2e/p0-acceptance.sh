@@ -827,7 +827,7 @@ wait_reboot_host_ready() {
 }
 
 reboot_vm() {
-  local vm="$1"
+  local vm="$1"; shift
   local before_boot after_boot='' down=0 up=0 unit_complete=0 route
   local start_wait_deadline policy_deadline=0 local_policy_deadline=0
   local started_seconds remaining now
@@ -865,6 +865,9 @@ reboot_vm() {
   done
   [ "$up" = 1 ] || die "VM$vm did not return with a new boot ID"
   wait_reboot_host_ready "$vm"
+  # A fixture can model login-time storage before requiring terminal power.
+  # Failure preserves its native status and the enclosing cleanup ownership.
+  if [ "$#" -gt 0 ]; then "$@" || return "$?"; fi
   # Anchor the observation deadline to the unit's current-boot monotonic start. This covers the
   # complete production policy window even when activation begins after the host becomes ready.
   # The local deadline is a fail-safe for subsequent SSH or systemd transport failures.
@@ -1295,7 +1298,7 @@ reboot_verify_lane() {
   POWER_SYSTEMD_LANE_VM="$vm"
   POWER_SYSTEMD_STARTED=1
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh prepare "$TOKEN"
-  reboot_vm "$vm"
+  reboot_vm "$vm" run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh login "$TOKEN"
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh resume "$TOKEN"
   reboot_vm "$vm"
   run_power_systemd_vm "$vm" dev/e2e/power-reconciler-upgrade.sh finish "$TOKEN"

@@ -28,10 +28,27 @@ for arg in "$@"; do
     --remove-if-unused) action=remove-if-unused ;;
     --native-fence) action=native-fence ;;
     --guard-only) action="guard-only" ;;
+    --prepare-recreation) action="prepare-recreation" ;;
+    --print-network-manager-config) action="print-network-manager-config" ;;
     -y|--yes) ;;
     -*) die "unknown option '$arg'" ;;
   esac
 done
+
+if [ "$action" = print-network-manager-config ]; then
+  # Use only the enclosing operation's approved, noninteractive reader.
+  power_nm_print_config
+  exit
+fi
+
+if [ "$action" = prepare-recreation ]; then
+  # Consent is the enclosing release plan. Keep the current runtime intact,
+  # but bind the guard before asking for its one safe reboot.
+  POWER_NM_GUARD_COMMAND="yard update"
+  require_root "preparing the host NetworkManager guard needs root"
+  nm_unmanaged_guard_prepare_recreation || die "$POWER_ERROR"
+  exit 0
+fi
 
 if [ "$action" = guard-only ]; then
   # Update activation: rewrite a released NetworkManager guard, with or without this unit.

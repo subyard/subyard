@@ -4715,7 +4715,7 @@ done
 reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 legacy_continuation_lane_function="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" legacy_continuation_lane split_lane)"
-for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish legacy-continuation:prepare legacy-continuation:reboot legacy-continuation:resume legacy-continuation:finish; do
+for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation:none reboot-verify:prepare reboot-verify:reboot reboot-verify:login reboot-verify:resume reboot-verify:finish legacy-continuation:prepare legacy-continuation:reboot legacy-continuation:resume legacy-continuation:finish; do
   reboot_failure="${reboot_scenario#*:}"
   reboot_fixture_log="$TMP/reboot-fixture-$reboot_scenario.log"
   set +e
@@ -4752,6 +4752,7 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
         [ "$REBOOT_FAILURE" != "$3" ] || exit 45
         case "$3:$fixture:$reboots" in
           prepare:absent:0) fixture=prepared ;;
+          login:prepared:1) ;;
           resume:prepared:1) fixture=resumed ;;
           finish:resumed:2) fixture=restored ;;
           *) exit 44 ;;
@@ -4763,6 +4764,8 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
         printf "reboot\n"
         [ "$REBOOT_FAILURE" != reboot ] || exit 45
         reboots=$((reboots + 1))
+        shift
+        if [ "$#" -gt 0 ]; then "$@"; fi
       }
       cleanup_lane() {
         [ "$fixture" = restored ] && [ "$POWER_SYSTEMD_STARTED" = 0 ] || exit 48
@@ -4786,7 +4789,9 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
       || fail 'standalone reboot lane did not prepare its own power fixture before rebooting'
     reboot_expected=$'capacity\nplatform\n'
     [ "${reboot_scenario%%:*}" != power-systemd ] || reboot_expected+=$'systemd255\nsystemd\n'
-    reboot_expected+=$'prepare\nreboot\nresume\nreboot\nfinish\ncleanup\n'
+    reboot_expected+=$'prepare\nreboot\n'
+    [ "${reboot_scenario%%:*}" = legacy-continuation ] || reboot_expected+=$'login\n'
+    reboot_expected+=$'resume\nreboot\nfinish\ncleanup\n'
     [ "${reboot_scenario%%:*}" = reboot-verify ] || reboot_expected+=$'final-verify\n'
     reboot_expected+='exit=0 armed=0'
     [ "$(cat "$reboot_fixture_log")" = "$reboot_expected" ] \
@@ -5464,7 +5469,7 @@ upgrade_dispatcher="$(awk '
   capture { block = block $0 ORS }
   END { printf "%s", block }
 ' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
-for dispatcher_mode in prepare resume finish; do
+for dispatcher_mode in prepare login resume finish; do
   dispatcher_log="$TMP/power-dispatcher-$dispatcher_mode.log"
   set +e
   UPGRADE_DISPATCHER="$upgrade_dispatcher" DISPATCHER_MODE="$dispatcher_mode" \
@@ -5484,6 +5489,8 @@ for dispatcher_mode in prepare resume finish; do
       prepare_candidate() { log prepare_candidate; }
       exercise_activation_only_repair() { log exercise_activation_only_repair; }
       establish_registered_ownership() { log establish_registered_ownership; }
+      prepare_late_storage() { log prepare_late_storage; }
+      restore_late_storage_after_login() { log restore_late_storage_after_login; }
       record_reboot_baseline() { log record_reboot_baseline; }
       write_fixture_value() { log "write_fixture_value $*"; }
       finish_candidate_flow() { log finish_candidate_flow; }
@@ -5502,7 +5509,10 @@ for dispatcher_mode in prepare resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_registered_ownership\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_registered_ownership\nprepare_late_storage\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      ;;
+    login)
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nrestore_late_storage_after_login\nexit preserve=1 cleanup=1'
       ;;
     resume)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
@@ -6010,11 +6020,13 @@ for reboot_scenario in transient empty degraded exhausted maintenance false-runn
           *) exit 94 ;;
         esac
       }
+      after_login() { : > "$REBOOT_PROBE_DIR/after-login"; }
       boot_power_reconciler_succeeded() {
+        [ -e "$REBOOT_PROBE_DIR/after-login" ] || return 1
         touch "$REBOOT_PROBE_DIR/power-verified"
         return 0
       }
-      reboot_vm 2
+      reboot_vm 2 after_login
     ' > "$reboot_probe_dir/output" 2>&1
   reboot_probe_rc=$?
   set -e

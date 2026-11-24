@@ -24,6 +24,11 @@ type NetworkGuard struct {
 	Run    func(context.Context, string, ...string) ([]byte, error)
 	// State reports the guard's read state (see NetworkManagerGuardState); nil means loaded.
 	State func() string
+	// NextStep is the enclosing operation to retry after restoring host safety.
+	// Empty keeps the ordinary start/init guidance.
+	NextStep string
+	// AutomaticRetry omits a manual start from boot-service recovery guidance.
+	AutomaticRetry bool
 }
 
 // Check reports every independent refusal: NetworkManager's effective guard, the runtime state
@@ -113,8 +118,23 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if len(violations) == 0 {
 		return nil
 	}
+	if guard.NextStep != "" {
+		nextStep = guard.NextStep
+	}
+	if guard.AutomaticRetry {
+		if len(remedies) == 0 {
+			if nextStep == "yard init" {
+				remedies = append(remedies, "run yard init")
+			} else {
+				remedies = append(remedies, "restore NetworkManager device inspection")
+			}
+		}
+		remedies = append(remedies, "desired-running yards start automatically after recovery")
+	} else {
+		remedies = append(remedies, "rerun "+nextStep)
+	}
 	return fmt.Errorf("NetworkManager guard is not effective: %s — %s", strings.Join(violations, "; "),
-		strings.Join(append(remedies, "rerun "+nextStep), ", then "))
+		strings.Join(remedies, ", then "))
 }
 
 func (guard NetworkGuard) networkManagerActive(ctx context.Context) (bool, error) {
@@ -331,10 +351,10 @@ const bootIDPath = "/proc/sys/kernel/random/boot_id"
 const NetworkManagerRebootReminder = "reboot the host once so NetworkManager applies the migrated Subyard guard safely; NetworkManager keeps its previous configuration until then"
 
 // NetworkManagerUnreadReminder names the reboot NetworkManager needs before any yard starts.
-const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host once before starting a yard"
+const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host once; desired-running yards start automatically afterwards"
 
 // NetworkManagerUnboundReminder: no record binds the guard on disk, so init must record it first.
-const NetworkManagerUnboundReminder = "no Subyard record binds the NetworkManager guard on disk: run yard init, then reboot the host once before starting a yard"
+const NetworkManagerUnboundReminder = "no Subyard record binds the NetworkManager guard on disk: run yard init, then reboot the host once; desired-running yards start automatically afterwards"
 
 var exactInterfaceEntry = regexp.MustCompile(`^interface-name:[A-Za-z0-9_.:-]+$`)
 

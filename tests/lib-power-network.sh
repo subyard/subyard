@@ -596,7 +596,22 @@ grep -Fq 'NetworkManager is active but its binary is unavailable at a known path
   || fail "unknown binary refusal: $(cat "$tmp/guard.out")"
 [ ! -e "$guard_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] || fail "unknown binary changed the guard"
 
+# A recreation preflight binds a missing record before refusing to start.
+# It leaves the running yard and NetworkManager untouched; one reboot loads it.
+guard_case
+nm_guard_write_file "$guard_conf" "$(render $'incusbr0\nnestedbr0')"
+before_hash="$(hash_of "$guard_conf")"
+nm_unmanaged_guard_prepare_recreation >"$tmp/recreation.out" 2>&1 \
+  || fail "recreation guard preparation failed: $(cat "$tmp/recreation.out")"
+[ "$(state_of)" = unread-init ] && [ "$(hash_of "$guard_conf")" = "$before_hash" ] \
+  || fail 'recreation did not bind the unchanged guard as unread'
+[ ! -s "$MOCK_INCUS_LOG" ] || fail 'recreation preparation touched yard power'
+no_reload recreation
+reboot_host
+[ "$(state_of)" = loaded ] || fail 'one reboot did not load the recreation guard'
+
 # A failed conf.d copy must never validate or publish a partial proposal. Independent reads remain.
+guard_case
 (nm_guard_nm_state
  nm_guard_write_file "$guard_conf" "$expected_guard"
  before_hash="$(hash_of "$guard_conf")"

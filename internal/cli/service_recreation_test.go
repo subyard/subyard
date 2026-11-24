@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -34,7 +35,9 @@ type serviceRecreationCalls struct {
 	sameEngine bool
 	engineErr  error
 	// halfInstall leaves the failed install's instance uninitialized.
-	halfInstall bool
+	halfInstall       bool
+	prepareRecreation func() error
+	checkRecreation   func() error
 }
 
 func (fixture *serviceRecreationCalls) run(_ context.Context, yard string, _ io.Writer, arguments ...string) error {
@@ -87,6 +90,19 @@ func (incus *recreationIncus) ReconcileState(ctx context.Context, project, insta
 type recreationPlatform struct {
 	*initPlatformFixture
 	calls *serviceRecreationCalls
+}
+
+func (platform recreationPlatform) PrepareServiceRecreation(context.Context) error {
+	if platform.calls.prepareRecreation != nil {
+		return platform.calls.prepareRecreation()
+	}
+	return nil
+}
+func (platform recreationPlatform) CheckServiceRecreation(context.Context) error {
+	if platform.calls.checkRecreation != nil {
+		return platform.calls.checkRecreation()
+	}
+	return nil
 }
 
 func (platform recreationPlatform) StageEngineChanged(_ context.Context, stage ports.ReconcileStageID) (bool, error) {
@@ -597,5 +613,36 @@ func TestRefusedRecreationNamesTheRegisteredPool(t *testing.T) {
 	want := "recreate it with yard service remove fixture-service --pool gpu, then yard service install fixture-service --yard fixture-runtime --pool gpu"
 	if err != nil || len(observed.Warnings) != 1 || !strings.HasSuffix(observed.Warnings[0], want) || len(calls.calls) != 0 {
 		t.Fatalf("refusal for a named pool: %+v %v", observed, err)
+	}
+}
+
+func TestRecreationPreflightReportsPreparationAndIndependentSafetyRefusals(t *testing.T) {
+	_, _, _, stage, calls := serviceRecreationFixture(t)
+	calls.prepareRecreation = func() error { return errors.New("guard record write failed") }
+	calls.checkRecreation = func() error { return errors.New("unsafe host default route") }
+	err := stage.PreflightActivation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "guard record write failed") || !strings.Contains(err.Error(), "unsafe host default route") || len(calls.calls) != 0 {
+		t.Fatalf("preparation hid safety refusal or changed runtime: %v %v", err, calls.calls)
+	}
+}
+
+func TestRecreationPreflightBoundsProtocolDiagnosticWithoutDroppingStderr(t *testing.T) {
+	program, _, _, stage, calls := serviceRecreationFixture(t)
+	var stderr bytes.Buffer
+	program.options.Stderr = &stderr
+	first, second := errors.New(strings.Repeat("guard inspection failed ", 40)), errors.New("unsafe host default route")
+	calls.prepareRecreation = func() error { return first }
+	calls.checkRecreation = func() error { return second }
+	err := stage.PreflightActivation(context.Background())
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatal("missing public preflight refusal", err)
+	}
+	message, next := diagnostic.ActivationDiagnostic()
+	if len(message) > operationStepTextLimit || !strings.Contains(message, "host safety refusals") || !strings.Contains(next, "yard update") {
+		t.Fatal("invalid bounded diagnostic", message, next)
+	}
+	if !strings.Contains(stderr.String(), first.Error()) || !strings.Contains(stderr.String(), second.Error()) || len(calls.calls) != 0 {
+		t.Fatal("refusal details lost or runtime changed", stderr.String(), calls.calls)
 	}
 }

@@ -43,7 +43,7 @@ func RunBootPower(
 		}
 	}
 	if err != nil && !errors.Is(err, ports.ErrHostAddressUnavailable) {
-		fmt.Fprintf(stderr, "subyard-power: FAIL: %v\n", err)
+		fmt.Fprintf(stderr, "subyard-power: FAIL: %v; desired power remains pending; the boot service retries automatically after the cause is resolved\n", err)
 		if errors.Is(err, ports.ErrIncusUnavailable) {
 			return bootPowerTemporaryFailure
 		}

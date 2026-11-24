@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1080,6 +1081,37 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 		Environment: runtimeEnvironment(runtime.Environment),
 		Incus:       runtime.Incus, Output: runtime.Stdout,
 	}).Run(ctx, hostruntime.CheckOptions{Strict: true, BasePresent: basePresent})
+}
+
+// PrepareServiceRecreation binds an existing guard before a refused recreation
+// asks for a reboot. It never reloads NetworkManager or stops a yard.
+func (runtime Runtime) PrepareServiceRecreation(ctx context.Context) error {
+	operator, err := runtime.operatorIdentity()
+	if err != nil {
+		return err
+	}
+	return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_USER": operator.Username},
+		"install-power-reconciler.sh", "--prepare-recreation", "--yes")
+}
+
+func (runtime Runtime) CheckServiceRecreation(ctx context.Context) error {
+	return runtime.serviceRecreationNetworkGuard().Check(ctx, []string{runtime.Yard.IncusBridge})
+}
+
+func (runtime Runtime) serviceRecreationNetworkGuard() hostruntime.NetworkGuard {
+	return hostruntime.NetworkGuard{
+		State: hostruntime.LocalNetworkManagerGuardState, NextStep: "yard update",
+		Run: func(ctx context.Context, name string, arguments ...string) ([]byte, error) {
+			if filepath.Base(name) == "NetworkManager" && slices.Equal(arguments, []string{"--print-config"}) {
+				var output bytes.Buffer
+				err := runtime.runScript(ctx, &output, "install-power-reconciler.sh", "--print-network-manager-config")
+				return output.Bytes(), err
+			}
+			command := exec.CommandContext(ctx, name, arguments...)
+			command.Env = runtime.Environment
+			return command.CombinedOutput()
+		},
+	}
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {

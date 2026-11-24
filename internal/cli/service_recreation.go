@@ -214,6 +214,81 @@ type serviceRuntimeStopper interface {
 	RunApprovedMigrationStop(context.Context) error
 }
 
+type serviceRecreationPreflight interface {
+	PrepareServiceRecreation(context.Context) error
+	CheckServiceRecreation(context.Context) error
+}
+
+// PreflightActivation runs before the release journal is opened. Ownership
+// refusals keep their existing preserve-and-warn behavior; start prerequisites
+// must instead stop the entire transition before teardown can remove anything.
+func (reconciler *activationStageReconciler) PreflightActivation(ctx context.Context) error {
+	if reconciler.recreation == nil {
+		return nil
+	}
+	applicability, err := reconciler.inspectApplicability(ctx)
+	if err != nil || !applicability.applies {
+		return err
+	}
+	platform, err := reconciler.platform(ctx, applicability)
+	if err != nil {
+		return err
+	}
+	changed, err := stageEngineChanged(ctx, platform, reconciler.stage)
+	if err != nil || !changed {
+		return err
+	}
+	plan, err := reconciler.recreation.assess(ctx, applicability.target)
+	if err != nil || plan.selection == nil || plan.refusal != nil {
+		return err
+	}
+	preflight, ok := platform.(serviceRecreationPreflight)
+	if !ok {
+		return errors.New("service recreation start preflight is unavailable")
+	}
+	if reconciler.authorize != nil {
+		if err := reconciler.authorize(ctx); err != nil {
+			return err
+		}
+		platform, err = reconciler.platform(ctx, applicability)
+		if err != nil {
+			return err
+		}
+		preflight, ok = platform.(serviceRecreationPreflight)
+		if !ok {
+			return errors.New("service recreation start preflight is unavailable")
+		}
+	}
+	// A missing record is prepared before refusing, so one reboot suffices.
+	// A preparation failure must not hide the independent route/guard checks.
+	err = domain.CollectRefusals(preflight.PrepareServiceRecreation(ctx), preflight.CheckServiceRecreation(ctx))
+	if err != nil {
+		fmt.Fprintf(reconciler.recreation.cli.options.Stderr, "service recreation preflight: %v\n", err)
+		return serviceRecreationPrerequisiteError{yard: applicability.target, err: err}
+	}
+	return nil
+}
+
+type serviceRecreationPrerequisiteError struct {
+	yard string
+	err  error
+}
+
+func (failure serviceRecreationPrerequisiteError) Error() string { return failure.err.Error() }
+func (failure serviceRecreationPrerequisiteError) Unwrap() error { return failure.err }
+func (failure serviceRecreationPrerequisiteError) ActivationDiagnostic() (string, string) {
+	causes := []error{failure.err}
+	if refusals, ok := failure.err.(*domain.Refusals); ok {
+		causes = refusals.Unwrap()
+	}
+	messages := make([]string, len(causes))
+	for index, cause := range causes {
+		messages[index] = cause.Error()
+	}
+	return boundedStepList("service recreation in yard "+failure.yard+" cannot start its replacement (full details: stderr): ", messages, "; ", "host safety refusals"),
+		"resolve the reported host safety prerequisites, reboot the host once if the guard is unread, then run yard update"
+}
+
 // assess proves the exact registered owner before any effect. Each ownership
 // finding is collected independently and leaves the runtime as it is; a
 // failed read is an error that blocks the stage for a retry.
@@ -263,7 +338,7 @@ func (recreation *serviceRecreation) assess(ctx context.Context, yard string) (s
 
 func (recreation *serviceRecreation) consequence(plan serviceRecreationPlan) string {
 	record := plan.selection.record
-	return fmt.Sprintf("recreate service %s in yard %s for the new release: its open SSH sessions are interrupted; teardown deletes its instance, Incus project and /srv volume with their VMs, leases and base images, and also the shared bridge, storage pool and power reconciler when it is the last managed yard; yard settings are kept and the runtime gets a new UUID", record.Service, record.Yard)
+	return fmt.Sprintf("recreate service %s in yard %s for the new release: its open SSH sessions are interrupted; teardown deletes its instance, Incus project and /srv volume with their VMs, leases and base images; the shared bridge, storage pool, guard binding, power reconciler and yard settings are kept and the runtime gets a new UUID", record.Service, record.Yard)
 }
 
 func (recreation *serviceRecreation) warning(yard string, refusal error) string {
@@ -281,6 +356,14 @@ func (recreation *serviceRecreation) run(ctx context.Context, plan serviceRecrea
 	cli, record := recreation.cli, plan.selection.record
 	if err := cli.checkServiceSelection(ctx, plan.loaded, plan.selection); err != nil {
 		return err
+	}
+	preflight, ok := platform.(serviceRecreationPreflight)
+	if !ok {
+		return errors.New("service recreation start preflight is unavailable")
+	}
+	if err := preflight.CheckServiceRecreation(ctx); err != nil {
+		fmt.Fprintf(cli.options.Stderr, "service recreation preflight: %v\n", err)
+		return serviceRecreationPrerequisiteError{yard: record.Yard, err: err}
 	}
 	stopper, ok := platform.(serviceRuntimeStopper)
 	if !ok {

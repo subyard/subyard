@@ -1103,9 +1103,18 @@ PYBASELINE
     rollback_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
     "$baseline_owner" update --version "$rollback_release" --yes
     [ "$(runtime_yard --version)" = "yard $rollback_release" ] || die 'newest published release was not activated'
-    [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$rollback_owner" ] \
-      && verify_broker_installation \
-      || die 'published update did not update the broker in place'
+    before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+    [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$before_owner" != "$rollback_owner" ] \
+      || die 'published update did not recreate the broker'
+    route="$SUBYARD_HOME/e2e/routes/services/test-vms/default.json"
+    [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$before_owner" ] \
+      && [ "$(jq -er .runtime_uuid "$route")" = "$before_owner" ] \
+      || die 'published broker registration or route does not bind the new runtime'
+    # The verified successor belongs to this fixture; restore its cleanup marker.
+    name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
+    [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'published broker has a foreign fixture marker'
+    incus project set "$PROJECT" "user.subyard-e2e.image-cache=$MARKER"
+    verify_broker_installation || die 'published broker installation differs from its runtime'
     before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   fi
   cmp -s "$SUBYARD_HOME/runtime/current/config/release-transition.json" \

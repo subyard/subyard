@@ -767,6 +767,15 @@ nm_unmanaged_guard_migrate() { # [conf]
   nm_guard_migrate_with "$conf" "$NM_INVENTORY" 0 || die "$POWER_ERROR"
 }
 
+# Before release recreation: bind an unrecorded guard without stopping a yard,
+# pinning a device or reloading NetworkManager. The caller checks start safety.
+nm_unmanaged_guard_prepare_recreation() {
+  nm_unmanaged_guard_migrate "$NM_GUARD_CONF"
+  nm_guard_nm_state || { power_fail "$POWER_ERROR"; return 1; }
+  nm_guard_inventory || { power_fail "could not list Incus-managed bridges for recreation"; return 1; }
+  nm_guard_apply_current "$NM_GUARD_CONF" "$(nm_guard_render "$NM_INVENTORY")" "$NM_INVENTORY" 0 0
+}
+
 # Teardown: keep the guard for surviving Incus bridges, remove it after the last one. A released
 # guard goes through the migration's refusal; any refusal warns and keeps the guard.
 nm_unmanaged_guard_reconcile() { # [conf]
