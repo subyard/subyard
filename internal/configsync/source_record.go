@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const sourceRecordSchema = 1
@@ -89,6 +90,7 @@ func readSourceRecord(configHome string) (SourceRecord, bool, error) {
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return SourceRecord{}, false, err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return SourceRecord{}, false, nil
@@ -97,8 +99,8 @@ func readSourceRecord(configHome string) (SourceRecord, bool, error) {
 		return SourceRecord{}, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm() != 0o600 {
-		return SourceRecord{}, false, metadataSafetyError(path, "configuration source record must be a regular 0600 file", "type=regular, mode=0600", info)
+		info.Mode().Perm()&0o077 != 0 {
+		return SourceRecord{}, false, metadataSafetyError(path, "configuration source record must be a private regular file", "type=regular, no group or other access", info)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {

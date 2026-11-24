@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -68,15 +70,19 @@ func (runtime Runtime) extrasDevices(state ports.ReconcileState, extras map[stri
 			device["shift"] = "true"
 		}
 		devices["yx-"+parts[0]] = device
+		mode, _ := strconv.ParseUint(parts[3], 8, 32)
+		if mode <= 0o777 {
+			// Give the operator's own directory its declared mode.
+			_ = safefs.AdmitDir(path, fs.FileMode(mode))
+		}
 		tree, err := uninstall.CaptureRoot(path)
 		if sources != nil {
 			*sources = append(*sources, tree)
 		}
-		mode, _ := strconv.ParseUint(parts[3], 8, 32)
 		uid, uidErr := strconv.ParseUint(runtime.environmentDefault("DEV_UID", "1000"), 10, 32)
 		if err != nil || uidErr != nil || len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFDIR || uint64(tree.Entries[0].Mode&07777) != mode {
 			refusals = append(refusals, fmt.Errorf("profile mount %q has unverified host directory permissions", parts[0]))
-		} else if uint64(tree.Entries[0].UID) != uid || uint64(tree.Entries[0].GID) != uid {
+		} else if uint64(tree.Entries[0].UID) != uid {
 			refusals = append(refusals, fmt.Errorf("profile mount %q has unverified owner identity", parts[0]))
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -23,6 +24,7 @@ func (cli *CLI) discoverLegacyInstallation(current config.Loaded) (uninstall.Ins
 	record := filepath.Join(installation.DataHome, "recovery", "pre-go-source")
 	read := func(name string) (string, error) {
 		path := filepath.Join(record, name)
+		_ = safefs.RepairPath(path, 0o077)
 		tree, err := uninstall.Capture(path)
 		if err != nil {
 			return "", err
@@ -30,7 +32,7 @@ func (cli *CLI) discoverLegacyInstallation(current config.Loaded) (uninstall.Ins
 		if len(tree.Entries) == 0 {
 			return "", os.ErrNotExist
 		}
-		if len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].Mode&0777 != 0600 || tree.Entries[0].UID != uid {
+		if len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].Mode&0o077 != 0 || tree.Entries[0].UID != uid {
 			return "", errors.New("legacy source ownership record is unsafe")
 		}
 		body, err := os.ReadFile(path)

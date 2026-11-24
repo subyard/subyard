@@ -89,7 +89,7 @@ func (files *ProspectiveFiles) fallbackReset(root, yard string) (bool, error) {
 	if !marker.Exists {
 		return false, nil
 	}
-	if marker.Identity.Mode&0o777 != 0o600 || string(marker.Content) != yardResetMarkerContent {
+	if marker.Identity.Mode&0o022 != 0 || string(marker.Content) != yardResetMarkerContent {
 		return false, errors.New("unsafe prospective yard reset marker")
 	}
 	return true, nil

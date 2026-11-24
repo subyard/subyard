@@ -36,6 +36,13 @@ installation tokens can carry write permissions; the yard boundary alone does no
 Pi has no equivalent native permission mechanism and relies on instructions. Diagnostics must
 distinguish verified rules from unverified enforcement.
 
+File modes protect secrets, keys, other users' data and root-owned policy or executables; those
+checks stay strict. Elsewhere the owner is the boundary: Subyard's own broader single-link file
+or directory is narrowed in place (`safefs.RepairMode`, Python `safefs.repair_mode`), a narrower
+mode is kept unless it marks a sealed or retired state, and group ownership is not compared.
+Only what the repair cannot change (another owner, a symlink, extra hard links, group or other
+write on root policy) is refused.
+
 <a id="entities-and-layers"></a>
 
 ## Entities, layers, and identity

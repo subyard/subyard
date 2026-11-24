@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const hostIDRenameSchema = 1
@@ -334,6 +335,7 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return hostIDRenameJournal{}, false, err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return hostIDRenameJournal{}, false, nil
@@ -341,8 +343,8 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	if err != nil {
 		return hostIDRenameJournal{}, false, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return hostIDRenameJournal{}, false, metadataSafetyError(path, "unsafe owner rename journal", "type=regular, mode=0600", info)
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return hostIDRenameJournal{}, false, metadataSafetyError(path, "unsafe owner rename journal", "type=regular, no group or other access", info)
 	}
 	if err := validateOwnedMode(path, info, false); err != nil {
 		return hostIDRenameJournal{}, false, err

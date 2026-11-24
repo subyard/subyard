@@ -127,11 +127,11 @@ func TestSetupCredentialImportMaterializeAndResume(t *testing.T) {
 	if err := os.Chmod(destination, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.ValidateConsumerFile("fixture-key", "global", destination); err == nil {
-		t.Fatal("world-readable valid private key accepted")
+	if err := runtime.ValidateConsumerFile("fixture-key", "global", destination); err != nil {
+		t.Fatalf("operator-owned broader private key was not repaired: %v", err)
 	}
-	if err := os.Chmod(destination, 0o600); err != nil {
-		t.Fatal(err)
+	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key mode = %v (%v)", info.Mode(), err)
 	}
 
 	got, err := os.ReadFile(destination)

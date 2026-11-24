@@ -101,6 +101,11 @@ func validateDirectory(dir string, create bool) error {
 			if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 				return errors.New("cannot create SSH agent runtime directory")
 			}
+			// The key socket directory keeps refusing any group or other
+			// access; AdmitDir only finishes a narrower directory here.
+			if info, err := os.Lstat(path); err == nil && info.Mode().Perm()&0o077 != 0 {
+				return errors.New("SSH agent runtime directory and parent must be owned by the operator with mode 0700")
+			}
 			if err := safefs.AdmitDir(path, 0o700); err != nil {
 				return errors.New("SSH agent runtime directory and parent must be owned by the operator with mode 0700")
 			}
@@ -123,13 +128,14 @@ func protectedFile(path string, flags int) (*os.File, error) {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), path)
+	_ = safefs.RepairMode(f, 0o077)
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || int(st.Uid) != os.Geteuid() || st.Nlink != 1 {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || int(st.Uid) != os.Geteuid() || st.Nlink != 1 {
 		f.Close()
 		return nil, errors.New("unsafe SSH agent control file")
 	}

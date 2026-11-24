@@ -344,8 +344,20 @@ func TestPayloadImportDenylistAndConsumerMapping(t *testing.T) {
 	if err := os.Chmod(source, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := runtime.validateImportPath(source); err != nil {
+		t.Fatalf("caller-owned broad source was not repaired: %v", err)
+	}
+	if info, err := os.Stat(source); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("source mode = %v (%v)", info.Mode(), err)
+	}
+	if err := os.Chmod(source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, source+".alias"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := runtime.validateImportPath(source); err == nil {
-		t.Fatal("broad source permissions were accepted")
+		t.Fatal("shared broad source permissions were accepted")
 	}
 	oauth := filepath.Join(testkit.TempDir(t), ".codex", "auth.json")
 	writeCredentialFile(t, oauth, "{}", 0o600)
@@ -580,9 +592,13 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 		writeCredentialRecord(t, runtime, sharedLedger, head)
 		unsafe := filepath.Join(testkit.TempDir(t), "replacement")
 		writeCredentialFile(t, unsafe, "protected", 0o644)
+		// Another hard link keeps the broader source from being repaired.
+		if err := os.Link(unsafe, unsafe+".alias"); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := runtime.Prepare(context.Background(), "", []string{
 			"rotate", credentialID, "--file", unsafe,
-		}); err == nil || !strings.Contains(err.Error(), "mode 0600 or 0400") {
+		}); err == nil || !strings.Contains(err.Error(), "must not be accessible by group or others") {
 			t.Fatalf("rotate deferred protected source mode validation: %v", err)
 		}
 
@@ -590,7 +606,7 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 		writeCredentialRecord(t, runtime, sharedLedger, other)
 		if _, err := runtime.Prepare(context.Background(), "", []string{
 			"resolve", credentialID, "--rotate", "--file", unsafe,
-		}); err == nil || !strings.Contains(err.Error(), "mode 0600 or 0400") {
+		}); err == nil || !strings.Contains(err.Error(), "must not be accessible by group or others") {
 			t.Fatalf("resolve --rotate deferred protected source mode validation: %v", err)
 		}
 
@@ -602,9 +618,8 @@ func TestPreparedCredentialMutationsAssessReadOnlyStateBeforeExecution(t *testin
 		if err != nil || prepared.Action != "keys.resolve-rotate" {
 			t.Fatalf("safe replacement did not pass metadata preflight: prepared=%#v err=%v", prepared, err)
 		}
-		if err := os.Chmod(safe, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		// A broader mode alone is repaired; changed content is stale.
+		writeCredentialFile(t, safe, "protected and changed", 0o644)
 		if err := prepared.Execute(context.Background()); err == nil ||
 			!errors.Is(err, domain.ErrPlanStale) {
 			t.Fatalf("apply did not reopen and revalidate the protected source: %v", err)

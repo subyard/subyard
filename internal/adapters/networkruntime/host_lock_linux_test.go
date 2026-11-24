@@ -160,24 +160,31 @@ func TestEnsureHostLockRejectsUnsafeExistingObjects(t *testing.T) {
 		}
 	})
 
-	t.Run("unsafe mode", func(t *testing.T) {
+	t.Run("mode drift", func(t *testing.T) {
 		directory := filepath.Join(t.TempDir(), "subyard-network")
 		if err := ensureHostLockAt(directory, uid, gid); err != nil {
 			t.Fatal(err)
 		}
 		path := filepath.Join(directory, hostLockName)
-		if err := os.Chmod(path, 0o666); err != nil {
+		for name, mode := range map[string]os.FileMode{directory: 0o775, path: 0o666} {
+			if err := os.Chmod(name, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The read-only check reports drift; only Ensure repairs it.
+		if err := checkHostLockAt(directory, uid, gid); err == nil || !strings.Contains(err.Error(), "0755") {
+			t.Fatalf("check error = %v, want 0755 rejection", err)
+		}
+		if err := ensureHostLockAt(directory, uid, gid); err != nil {
+			t.Fatalf("mode-only drift was not repaired: %v", err)
+		}
+		for name, want := range map[string]os.FileMode{directory: 0o755, path: 0o660} {
+			if info, err := os.Lstat(name); err != nil || info.Mode().Perm() != want {
+				t.Fatalf("%s mode = %v, want %v (%v)", name, info.Mode(), want, err)
+			}
+		}
+		if err := checkHostLockAt(directory, uid, gid); err != nil {
 			t.Fatal(err)
-		}
-		if err := ensureHostLockAt(directory, uid, gid); err == nil || !strings.Contains(err.Error(), "0660") {
-			t.Fatalf("unsafe-mode lock error = %v, want 0660 rejection", err)
-		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatalf("stat existing unsafe lock: %v", err)
-		}
-		if info.Mode().Perm() != 0o666 {
-			t.Fatalf("existing unsafe lock was mutated: mode=%v", info.Mode())
 		}
 	})
 

@@ -40,6 +40,28 @@ func TestCapturedRemotePlanRejectsControllerIdentityReplacementBeforeAuthorizati
 	}
 }
 
+func TestCapturedRemotePlanAcceptsReadableSSHConfigLikeSSH(t *testing.T) {
+	runtime := remoteFixture(t)
+	request := domain.RemotePrepared{Action: domain.RemoteAdd, Spec: domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"}, Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")}}
+	writeRemoteFile(t, runtime.sshConfigPath(), "Host other\n", 0o644)
+	writeRemoteFile(t, runtime.knownHostsPath(), "", 0o644)
+	writeRemoteFile(t, strings.TrimSuffix(runtime.PublicKey, ".pub"), "private\n", 0o600)
+	if _, err := runtime.CapturePrepared(context.Background(), request); err != nil {
+		t.Fatalf("readable ssh configuration refused: %v", err)
+	}
+	for path, mode := range map[string]os.FileMode{runtime.sshConfigPath(): 0o664, strings.TrimSuffix(runtime.PublicKey, ".pub"): 0o640} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.CapturePrepared(context.Background(), request); err == nil {
+			t.Fatalf("%s with mode %v accepted", path, mode)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCapturedRemotePlanSurvivesCreatingSSHDirectoryThroughHomeAlias(t *testing.T) {
 	runtime := remoteFixture(t)
 	realHome := runtime.Home + "-real"

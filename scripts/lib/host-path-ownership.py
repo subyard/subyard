@@ -33,7 +33,15 @@ def main():
     path = directory + "/" + hashlib.sha256(root.encode()).hexdigest() + ".json"
     if os.path.lexists(path):
         info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != uid:
+        if stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) & 0o077:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if os.path.samestat(os.fstat(fd), info):
+                    os.fchmod(fd, stat.S_IMODE(info.st_mode) & 0o700)
+            finally:
+                os.close(fd)
+            info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077 or info.st_uid != uid:
             raise ValueError("unsafe host ownership ledger")
         with open(path, encoding="utf-8") as handle:
             plan = json.load(handle)

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -599,11 +601,12 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 		if err := validateTransactionID(transaction); err != nil {
 			return nil, errors.New("release transition recovery directory contains an invalid transaction")
 		}
-		info, err := entry.Info()
+		_ = safefs.RepairPath(filepath.Join(root, entry.Name()), 0o077)
+		info, err := os.Lstat(filepath.Join(root, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 			return nil, errors.New("release transition recovery transaction has an unsafe type or mode")
 		}
 		directories[transaction] = struct{}{}
@@ -1099,25 +1102,32 @@ func readProtectedAt(parent int, name string) (ProtectedSnapshot, error) {
 	}, nil
 }
 
+// validateProtectedDirectoryFD first clears group and other access on a
+// private directory (write on a shared one) the operator owns, then checks
+// the state the repair leaves.
 func validateProtectedDirectoryFD(fd int, exactMode bool) error {
+	deny := fs.FileMode(0o022)
+	if exactMode {
+		deny = 0o077
+	}
+	_ = safefs.RepairFD(fd, "protected release transition directory", deny)
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
 	}
-	mode := stat.Mode & 0o777
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Getuid()) ||
-		(exactMode && mode != 0o700) || (!exactMode && mode&0o022 != 0) {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Getuid()) || stat.Mode&uint32(deny) != 0 {
 		return errors.New("protected release transition directory has unsafe type, mode, or ownership")
 	}
 	return nil
 }
 
 func validateProtectedFileFD(fd int, bounded bool) error {
+	_ = safefs.RepairFD(fd, "protected release transition record", 0o077)
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 ||
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o077 != 0 ||
 		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
 		return errors.New("protected release transition record has unsafe type, mode, ownership, or links")
 	}

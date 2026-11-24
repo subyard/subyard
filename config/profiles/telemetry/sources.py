@@ -195,8 +195,9 @@ def intent_lock(root):
     except FileExistsError:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as lock:
+        records.repair_private(lock.fileno())
         info = os.fstat(lock.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or not records.private_mode(info, 0o600):
             raise ValueError('private registration lock required')
         deadline = time.monotonic()+.1
         while True:

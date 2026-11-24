@@ -49,6 +49,8 @@ ssh_transport_identity_prepare() {
     || { ssh_transport_identity_error "$keydir must be a real directory"; return 1; }
   [ "$(stat -c %u "$keydir" 2>/dev/null)" = "$uid" ] \
     || { ssh_transport_identity_error "$keydir must be owned by the operator"; return 1; }
+  # Repair the operator's own key directory, then verify the result.
+  [ "$(stat -c %a "$keydir" 2>/dev/null)" = 700 ] || chmod 0700 -- "$keydir" 2>/dev/null || true
   [ "$(stat -c %a "$keydir" 2>/dev/null)" = 700 ] \
     || { ssh_transport_identity_error "$keydir must have mode 0700"; return 1; }
 
@@ -59,8 +61,10 @@ ssh_transport_identity_prepare() {
   [ -f "$lockfile" ] && [ ! -L "$lockfile" ] \
     || { ssh_transport_identity_error "key creation lock must be a regular non-symlink file"; return 1; }
   [ "$(stat -c %u "$lockfile" 2>/dev/null)" = "$uid" ] \
-    && [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] \
-    || { ssh_transport_identity_error "key creation lock must be operator-owned mode 0600"; return 1; }
+    || { ssh_transport_identity_error "key creation lock $lockfile must be operator-owned"; return 1; }
+  [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] || chmod 0600 -- "$lockfile" 2>/dev/null || true
+  [ "$(stat -c %a "$lockfile" 2>/dev/null)" = 600 ] \
+    || { ssh_transport_identity_error "key creation lock $lockfile must have mode 0600"; return 1; }
   exec {lock_fd}>>"$lockfile" \
     || { ssh_transport_identity_error "cannot open the key creation lock"; return 1; }
   flock "$lock_fd" \
@@ -121,10 +125,14 @@ ssh_transport_identity_prepare() {
   [ "$(stat -c %u "$identity" 2>/dev/null)" = "$uid" ] \
     && [ "$(stat -c %u "$public" 2>/dev/null)" = "$uid" ] \
     || { ssh_transport_identity_error "key pair must be owned by the operator"; return 1; }
-  [ "$(stat -c %a "$identity" 2>/dev/null)" = 600 ] \
-    || { ssh_transport_identity_error "private key must have mode 0600"; return 1; }
-  [ "$(stat -c %a "$public" 2>/dev/null)" = 644 ] \
-    || { ssh_transport_identity_error "public key must have mode 0644"; return 1; }
+  # Narrow the operator's own single-link private key; any mode without group
+  # or other access is accepted. The public key is checked against it below.
+  if (( 8#$(stat -c %a "$identity" 2>/dev/null || echo 777) & 8#077 )) \
+    && [ "$(stat -c %h "$identity" 2>/dev/null)" = 1 ]; then
+    chmod go-rwx -- "$identity" 2>/dev/null || true
+  fi
+  (( (8#$(stat -c %a "$identity" 2>/dev/null || echo 777) & 8#077) == 0 )) \
+    || { ssh_transport_identity_error "private key $identity must not be accessible by group or others"; return 1; }
 
   private_line="$(ssh-keygen -y -P '' -f "$identity" 2>/dev/null)" \
     || { ssh_transport_identity_error "private key must be an unencrypted Ed25519 key"; return 1; }

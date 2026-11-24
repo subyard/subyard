@@ -71,6 +71,9 @@ func ReadPersistentFileSnapshot(
 		return PersistentFileSnapshot{}, nil
 	}
 	defer file.Close()
+	// Clear group and other write on the operator's own file; the checks
+	// below report every state this repair leaves.
+	_ = safefs.RepairMode(file, 0o022)
 	info, err := file.Stat()
 	if err != nil {
 		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
@@ -164,6 +167,7 @@ func openPersistentFileAt(
 }
 
 func validateOpenedPersistentDirectory(file *os.File, path string) error {
+	_ = safefs.RepairMode(file, 0o022)
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -358,6 +362,7 @@ func writePersistentFileIfUnchanged(configHome, path string, expected Persistent
 }
 
 func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
+	_ = safefs.RepairPath(path, 0o022)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return PersistentFileSnapshot{}, nil
@@ -549,6 +554,9 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 		return err
 	}
 	mode := os.FileMode(0o600)
+	if replace {
+		_ = safefs.RepairPath(path, 0o022)
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if !replace {
 			return errors.New("persistent setting target already exists")
@@ -609,6 +617,7 @@ func ensurePersistentDirectory(configHome, target string) error {
 }
 
 func validatePersistentDirectory(path string) error {
+	_ = safefs.RepairPath(path, 0o022)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

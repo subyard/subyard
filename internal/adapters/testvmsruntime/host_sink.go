@@ -265,10 +265,10 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 			eventDirectory := filepath.Join(root, ".test-vms-broker-events")
 			incidentDirectory := filepath.Join(root, "test-vms-broker-incidents")
 			owner := sink.operatorOwnership()
-			if err := safefs.EnsurePrivateDir(eventDirectory); err != nil {
+			if err := safefs.EnsureDir(eventDirectory, safefs.DirOptions{Existing: safefs.Repair}); err != nil {
 				return err
 			}
-			if err := safefs.EnsureDir(incidentDirectory, safefs.DirOptions{Mode: 0o750, Owner: owner}); err != nil {
+			if err := safefs.EnsureDir(incidentDirectory, safefs.DirOptions{Mode: 0o750, Owner: owner, Existing: safefs.Repair}); err != nil {
 				return err
 			}
 			for _, event := range batch.Events {

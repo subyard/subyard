@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -204,14 +205,15 @@ func openPrivateRegistrationRepairDirectoryAt(parent int, name string) (int, err
 	if err != nil {
 		return -1, err
 	}
+	_ = safefs.RepairFD(fd, name, 0o077)
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		_ = unix.Close(fd)
 		return -1, err
 	}
-	if stat.Mode&0o777 != 0o700 {
+	if stat.Mode&0o077 != 0 {
 		_ = unix.Close(fd)
-		return -1, errors.New("yard registration recovery directory must have mode 0700")
+		return -1, errors.New("yard registration recovery directory must not be accessible by group or others")
 	}
 	return fd, nil
 }

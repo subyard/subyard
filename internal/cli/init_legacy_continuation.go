@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"strings"
 )
@@ -186,6 +187,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	if err != nil {
 		return err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	registration, err := config.ReadPersistentFileSnapshot(runtime.Yard.Paths.ConfigHome, path)
 	if err != nil {
 		return fmt.Errorf("legacy continuation cannot inspect the protected local yard registration: %w", err)
@@ -195,6 +197,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 		// Published legacy default init reads host config without creating a yard
 		// registration. Bind that genuine protected source and the yard's absence;
 		// an unsafe or unreadable explicit record must never select this fallback.
+		_ = safefs.RepairPath(filepath.Join(runtime.Yard.Paths.ConfigHome, "config.env"), 0o077)
 		legacyHost, err = config.ReadPersistentFileSnapshot(runtime.Yard.Paths.ConfigHome, filepath.Join(runtime.Yard.Paths.ConfigHome, "config.env"))
 		if err != nil {
 			return fmt.Errorf("legacy continuation cannot inspect the protected implicit-default host configuration: %w", err)
@@ -202,15 +205,15 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 		if !legacyHost.Exists {
 			return config.OwnerMetadataError(filepath.Join(runtime.Yard.Paths.ConfigHome, "config.env"), "implicit-default host configuration", "source is missing (observed metadata unavailable); required existing protected mode0600 host configuration", "", nil)
 		}
-		if mode := legacyHost.Identity.Mode & 0777; mode != 0600 {
-			return config.OwnerMetadataError(filepath.Join(runtime.Yard.Paths.ConfigHome, "config.env"), "implicit-default host configuration", fmt.Sprintf("requires existing protected mode0600 host configuration; observed mode=%04o, required mode=0600", mode), "", nil)
+		if mode := legacyHost.Identity.Mode & 0777; mode&0o077 != 0 {
+			return config.OwnerMetadataError(filepath.Join(runtime.Yard.Paths.ConfigHome, "config.env"), "implicit-default host configuration", fmt.Sprintf("requires existing private host configuration; observed mode=%04o, required no group or other access", mode), "", nil)
 		}
 	} else {
 		if !registration.Exists {
 			return config.OwnerMetadataError(path, "local yard registration", "source is missing (observed metadata unavailable); required existing protected mode0600 local yard registration", "", nil)
 		}
-		if mode := registration.Identity.Mode & 0777; mode != 0600 {
-			return config.OwnerMetadataError(path, "local yard registration", fmt.Sprintf("requires existing protected mode0600 local yard registration; observed mode=%04o, required mode=0600", mode), "", nil)
+		if mode := registration.Identity.Mode & 0777; mode&0o077 != 0 {
+			return config.OwnerMetadataError(path, "local yard registration", fmt.Sprintf("requires existing private local yard registration; observed mode=%04o, required no group or other access", mode), "", nil)
 		}
 	}
 	// Reconstruct the protected persisted context without scalar command inputs.
@@ -255,8 +258,8 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	if !hostBefore.Exists {
 		return config.OwnerMetadataError(configsync.HostIDPath(runtime.Yard.Paths.ConfigHome), "protected owner HostID", "source is missing during legacy assessment", "observed HostID unavailable", nil)
 	}
-	if hostBefore.Identity.Mode&0777 != 0600 {
-		return config.OwnerMetadataError(configsync.HostIDPath(runtime.Yard.Paths.ConfigHome), "protected owner HostID", fmt.Sprintf("unsafe mode during legacy assessment; observed mode=%04o, required mode=0600", hostBefore.Identity.Mode&0777), "", nil)
+	if hostBefore.Identity.Mode&0o077 != 0 {
+		return config.OwnerMetadataError(configsync.HostIDPath(runtime.Yard.Paths.ConfigHome), "protected owner HostID", fmt.Sprintf("unsafe mode during legacy assessment; observed mode=%04o, required no group or other access", hostBefore.Identity.Mode&0777), "", nil)
 	}
 	if strings.TrimSpace(string(hostBefore.Content)) != execution.hostID {
 		return config.OwnerMetadataError(configsync.HostIDPath(runtime.Yard.Paths.ConfigHome), "protected owner HostID", "HostID changed during legacy assessment", "", nil)

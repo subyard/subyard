@@ -96,7 +96,7 @@ def private_directory(path):
             fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
         else:
             fd, _ = safefs.open_dir(path, owner=(os.getuid(), -1), parent_mode=0o700,
-                                    durability=safefs.BEST_EFFORT)
+                                    existing=safefs.REPAIR, durability=safefs.BEST_EFFORT)
     except safefs.Unsafe as error:
         if error.reason == safefs.SYMLINK:
             raise ValueError('unsafe directory') from None
@@ -104,12 +104,30 @@ def private_directory(path):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path)) from None
         raise ValueError('private directory required') from None
     try:
+        repair_private(fd)
         info = os.fstat(fd)
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        if info.st_uid != os.getuid() or not private_mode(info, 0o700):
             raise ValueError('private directory required')
     finally:
         os.close(fd)
     return path
+
+
+def repair_private(target):
+    """Narrow our own broader file or directory; the caller's check reports what remains."""
+    try:
+        safefs.repair_mode(target, 0o077)
+    except (OSError, safefs.Unsafe):
+        pass
+
+
+def private_mode(info, owner):
+    """Owner access as required and none for group or others.
+
+    Narrower owner modes stay refused: retired or sealed state uses them.
+    """
+    mode = stat.S_IMODE(info.st_mode)
+    return not mode & 0o077 and mode & owner == owner
 
 
 def atomic_json(path, value, *, family=None):
@@ -120,8 +138,9 @@ def atomic_json(path, value, *, family=None):
     if path.is_symlink():
         raise ValueError('unsafe file')
     if path.exists():
+        repair_private(path)
         info = path.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or not private_mode(info, 0o600):
             raise ValueError('private file required')
     content = compact_json(value)+b'\n'
     if len(content) > 65536:
@@ -135,9 +154,10 @@ def atomic_json(path, value, *, family=None):
 
 
 def checked_file(fd, maximum):
+    repair_private(fd)
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > maximum):
+            or not private_mode(info, 0o600) or info.st_size > maximum):
         raise ValueError('private file required')
     return info
 
@@ -188,8 +208,9 @@ def load_producer_state(directory, binary=None):
     """Read and validate the same state used by emit, readiness and repair."""
     directory = Path(directory)
     for path in (directory, directory/'spool'):
+        repair_private(path)
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
+        if not stat.S_ISDIR(info.st_mode) or not private_mode(info, 0o700) or info.st_uid != os.getuid():
             raise ValueError('invalid telemetry producer directory')
     with open_private(directory/'spool-loss') as slot:
         if os.fstat(slot.fileno()).st_size != 2*MARKER_SLOT:

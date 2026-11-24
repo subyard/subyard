@@ -22,7 +22,7 @@ func TestLegacyFullRegistrationUsesProtectedDefaultRoot(t *testing.T) {
 	}{
 		{"default root", "default", 0o600, true},
 		{"named yard cannot use root", "demo", 0o600, false},
-		{"unprotected default root", "default", 0o666, false},
+		{"broader default root is repaired", "default", 0o666, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			configHome := testkit.TempDir(t)

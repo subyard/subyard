@@ -87,6 +87,27 @@ def metadata(path, mode, uid, gid):
     return stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == mode and (st.st_uid, st.st_gid) == (uid, gid)
 
 
+def restore_metadata(path, mode, uid, gid, repair):
+    """Restore the mode and group of our own root policy entry.
+
+    Another owner, or group or other write that may have changed the entry, is left
+    for the caller to refuse.
+    """
+    if not repair:
+        return
+    # Change the pinned inode, never a name that could be swapped meanwhile.
+    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if (st.st_uid == uid and (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
+                and not stat.S_IMODE(st.st_mode) & 0o022 & ~mode
+                and (stat.S_IMODE(st.st_mode), st.st_gid) != (mode, gid)):
+            os.chown(f'/proc/self/fd/{fd}', uid, gid)
+            os.chmod(f'/proc/self/fd/{fd}', mode)
+    finally:
+        os.close(fd)
+
+
 def validate_sources(result):
     for name, files in result.items():
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name):
@@ -133,11 +154,14 @@ def delivery(args):
     owner = os.geteuid()
     old = {'schema': 1, 'skills': {}, 'extra': False}
     safe(receipt_path)
+    repair = not args.mode.startswith('check')
     if state.exists():
+        restore_metadata(state, 0o700, owner, os.getegid(), repair)
         st = state.stat()
         if (st.st_uid,st.st_gid) != (owner,os.getegid()) or stat.S_IMODE(st.st_mode) != 0o700:
             raise ValueError('unsafe skill receipt directory')
     if receipt_path.exists():
+        restore_metadata(receipt_path, 0o600, owner, os.getegid(), repair)
         if not metadata(receipt_path, 0o600, owner, os.getegid()):
             raise ValueError('unsafe skill receipt')
         old = json.loads(receipt_path.read_bytes())
@@ -158,6 +182,7 @@ def delivery(args):
         return 0
     safe(canonical)
     if canonical.exists():
+        restore_metadata(canonical, 0o755, owner, os.getegid(), repair)
         st = canonical.stat()
         if not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid) != (owner,os.getegid()) or stat.S_IMODE(st.st_mode) != 0o755:
             raise ValueError('unsafe canonical skill root')

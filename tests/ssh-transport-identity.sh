@@ -87,13 +87,33 @@ make_symlink() {
 }
 assert_rejected symlink make_symlink
 
-make_bad_mode() {
+make_shared_bad_mode() {
   mkdir -m 700 "$1/ssh"
   ssh-keygen -q -t ed25519 -N '' -f "$1/ssh/id_ed25519"
   chmod 640 "$1/ssh/id_ed25519"
-  chmod 644 "$1/ssh/id_ed25519.pub"
+  ln "$1/ssh/id_ed25519" "$1/alias"
 }
-assert_rejected bad-mode make_bad_mode
+assert_rejected shared-bad-mode make_shared_bad_mode
+
+# The operator's own broader state is repaired; a read-only key is accepted.
+repair_home="$TMP/repair"
+mkdir -p "$repair_home/ssh"
+chmod 755 "$repair_home/ssh"
+ssh-keygen -q -t ed25519 -N '' -f "$repair_home/ssh/id_ed25519"
+chmod 640 "$repair_home/ssh/id_ed25519"
+chmod 664 "$repair_home/ssh/id_ed25519.pub"
+: > "$repair_home/ssh/.identity.lock"
+chmod 644 "$repair_home/ssh/.identity.lock"
+ssh_transport_identity_prepare "$repair_home" >/dev/null \
+  || fail 'operator-owned broader identity state was not repaired'
+[ "$(stat -c %a "$repair_home/ssh")" = 700 ] \
+  && [ "$(stat -c %a "$repair_home/ssh/id_ed25519")" = 600 ] \
+  && [ "$(stat -c %a "$repair_home/ssh/.identity.lock")" = 600 ] \
+  || fail 'identity repair left a broader mode'
+chmod 400 "$repair_home/ssh/id_ed25519"
+ssh_transport_identity_prepare "$repair_home" >/dev/null \
+  || fail 'read-only private key was refused'
+[ "$(stat -c %a "$repair_home/ssh/id_ed25519")" = 400 ] || fail 'read-only private key was widened'
 
 make_mismatch() {
   mkdir -m 700 "$1/ssh"

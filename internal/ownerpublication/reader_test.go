@@ -73,8 +73,14 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Link(path, path+".alias"); err != nil {
+		t.Fatal(err)
+	}
 	if err := RequireReader(root, home); err == nil {
 		t.Fatal("unsafe boundary permissions were accepted")
+	}
+	if err := os.Remove(path + ".alias"); err != nil {
+		t.Fatal(err)
 	}
 
 	// A valid future typed ledger reaches this consumer, rather than failing

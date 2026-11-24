@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,11 +81,44 @@ func TestArtifactGuardOutcomesGiveReasons(t *testing.T) {
 	if _, err = Capture(private); err != os.ErrPermission {
 		t.Fatalf("capture-tree permission outcome changed: %v", err)
 	}
-	if opaque, err := CapturePrivate(private); err != nil || !opaque.Opaque || len(opaque.Entries) != 1 {
-		t.Fatalf("private capture lost its opaque fallback: %+v %v", opaque, err)
-	}
 	if _, err = CaptureArtifact(private); err != os.ErrPermission {
 		t.Fatalf("capture-artifact permission outcome changed: %v", err)
 	}
 	assertStale(t, "check-tree", "permission denied", approved.Check())
+	// A private capture gives the operator access to its own directories.
+	repaired, err := CapturePrivate(private)
+	if err != nil || repaired.Opaque || len(repaired.Entries) != 2 {
+		t.Fatalf("private capture did not repair owner access: %+v %v", repaired, err)
+	}
+	if info, err := os.Stat(filepath.Join(private, "sealed")); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("sealed directory mode = %v (%v)", info.Mode(), err)
+	}
+	if err := repaired.Remove(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScopedCaptureGrantsAccessOnlyInsideOwnedPaths(t *testing.T) {
+	root := testkit.TempDir(t)
+	owned, foreign := filepath.Join(root, "owned"), filepath.Join(root, "foreign")
+	for _, path := range []string{owned, foreign} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, mode := range map[string]os.FileMode{owned: 0o500, foreign: 0o500} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(foreign, 0o700) })
+	tree, err := CaptureScoped(root, []string{"owned"}, nil)
+	if err != nil || !slices.Equal(tree.Preserved, []string{"foreign"}) {
+		t.Fatalf("CaptureScoped = %v preserved=%v", err, tree.Preserved)
+	}
+	for path, want := range map[string]os.FileMode{owned: 0o700, foreign: 0o500} {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s mode = %v, want %v (%v)", path, info.Mode(), want, err)
+		}
+	}
 }

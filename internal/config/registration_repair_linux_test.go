@@ -107,7 +107,7 @@ func TestPlanYardRegistrationRepairRejectsArchiveConflict(t *testing.T) {
 	}
 }
 
-func TestPlanYardRegistrationRepairRejectsNonPrivateRecoveryDirectory(t *testing.T) {
+func TestPlanYardRegistrationRepairNarrowsBroaderRecoveryDirectory(t *testing.T) {
 	configHome, _, _ := registrationRepairFixture(t)
 	recovery := filepath.Join(configHome, "recovery")
 	if err := os.Mkdir(recovery, 0o700); err != nil {
@@ -116,8 +116,11 @@ func TestPlanYardRegistrationRepairRejectsNonPrivateRecoveryDirectory(t *testing
 	if err := os.Chmod(recovery, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PlanYardRegistrationRepair(configHome, "named"); err == nil {
-		t.Fatal("plan accepted a non-private recovery directory")
+	if _, err := PlanYardRegistrationRepair(configHome, "named"); err != nil {
+		t.Fatalf("plan refused an operator-owned broader recovery directory: %v", err)
+	}
+	if info, err := os.Stat(recovery); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("recovery directory mode = %v (%v)", info.Mode(), err)
 	}
 }
 
@@ -192,8 +195,8 @@ func TestYardRegistrationRepairRejectsArchiveRaceAndSymlinkTraversal(t *testing.
 		}
 	})
 
-	t.Run("non-private recovery appeared", func(t *testing.T) {
-		configHome, _, flatPath := registrationRepairFixture(t)
+	t.Run("broader recovery appeared", func(t *testing.T) {
+		configHome, _, _ := registrationRepairFixture(t)
 		repair, err := PlanYardRegistrationRepair(configHome, "named")
 		if err != nil {
 			t.Fatal(err)
@@ -205,11 +208,12 @@ func TestYardRegistrationRepairRejectsArchiveRaceAndSymlinkTraversal(t *testing.
 		if err := os.Chmod(recovery, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := repair.Apply(); err == nil {
-			t.Fatal("repair accepted a non-private recovery directory")
+		// The operator's own broader recovery directory is narrowed.
+		if err := repair.Apply(); err != nil {
+			t.Fatalf("repair refused an operator-owned broader recovery directory: %v", err)
 		}
-		if _, err := os.Lstat(flatPath); err != nil {
-			t.Fatalf("unsafe recovery directory removed flat registration: %v", err)
+		if info, err := os.Stat(recovery); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("recovery directory mode = %v (%v)", info.Mode(), err)
 		}
 	})
 }

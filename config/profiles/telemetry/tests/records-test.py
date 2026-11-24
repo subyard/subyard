@@ -41,6 +41,10 @@ Path('file').touch()
 with TestCase().assertRaises(NotADirectoryError):
     records.private_directory('file/../unintended')
 assert not Path('unintended').exists()
+Path('broader').mkdir()
+Path('broader').chmod(0o755)
+records.private_directory('broader')
+assert Path('broader').stat().st_mode & 0o777 == 0o700
 Path('.').chmod(0o500)
 with TestCase().assertRaisesRegex(ValueError, 'private directory required'):
     records.private_directory('.')

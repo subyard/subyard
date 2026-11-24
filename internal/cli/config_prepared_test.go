@@ -450,6 +450,10 @@ func TestConfigProspectiveCollectsExpansionAndDependencyRefusals(t *testing.T) {
 	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(home, "yards/alpha/config.env"), "GIT_USER_EMAIL=$GIT_USER_NAME\n")
 	writeConfigCommandFile(t, filepath.Join(home, "yards/beta/config.env"), "GIT_USER_NAME=Jane\n", 0o620)
+	// Another hard link keeps the writable file from being repaired.
+	if err := os.Link(filepath.Join(home, "yards/beta/config.env"), filepath.Join(home, "beta-alias")); err != nil {
+		t.Fatal(err)
+	}
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	program := fixture.New(configExactOptions(environment, nil, nil))
 	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeHost}, filepath.Join(home, "config.env"),

@@ -40,6 +40,10 @@ def observe(path, owner):
         return '0'
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) != 0o644:
+            # Our own record with a drifted mode is restored in place.
+            os.fchmod(stream.fileno(), 0o644)
+            info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o644 or info.st_size > 4096:
             raise ValueError('unsafe native install generation')
         raw = stream.read(4097)
@@ -172,8 +176,7 @@ def main():
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
                 raise ValueError('unsafe native install lock')
-            if created: os.fchmod(fd, 0o600)
-            elif stat.S_IMODE(info.st_mode) != 0o600: raise ValueError('unsafe native install lock mode')
+            if created or stat.S_IMODE(info.st_mode) != 0o600: os.fchmod(fd, 0o600)
         finally: os.close(fd)
         return
     fd = int(arguments.pop(0))

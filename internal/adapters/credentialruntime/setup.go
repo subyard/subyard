@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/credential"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // ConsumerCredentialID inspects ledger metadata only. Ambiguous heads must be resolved by
@@ -476,12 +477,13 @@ func (runtime *Runtime) readConsumerFile(consumer, zone, path string) ([]byte, e
 	}
 	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
+	_ = safefs.RepairMode(file, 0o077)
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("credential file must be regular")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || (info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400) {
+	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("credential file ownership or permissions are unsafe")
 	}
 	if info.Size() <= 0 || info.Size() > maximumPayload {

@@ -341,6 +341,47 @@ safefs.write_file(sys.argv[3], b'new')
         with self.assertRaisesRegex(safefs.Unsafe, safefs.TOO_LARGE):
             safefs.read_regular(self.path, max_bytes=4)
 
+    def test_repair_mode_narrows_owned_entries(self):
+        def made(name, mode, directory=False):
+            path = self.root/name
+            path.mkdir() if directory else path.write_bytes(b'')
+            os.chmod(path, mode)
+            return path
+        for path, deny, want in (
+                (made('broad', 0o644), 0o077, 0o600),
+                (made('readonly', 0o400), 0o077, 0o400),
+                (made('readable', 0o644), 0o022, 0o644),
+                (made('setuid', 0o4600), 0o077, 0o600),
+                (made('exec', 0o755), 0o077, 0o700),
+                (made('dir', 0o755, True), 0o077, 0o700),
+                (made('sticky', 0o1777, True), 0o077, 0o1700)):
+            safefs.repair_mode(path, deny)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), want, path.name)
+        fd = os.open(made('fd', 0o640), os.O_RDONLY)
+        try:
+            safefs.repair_mode(fd, 0o077)
+        finally:
+            os.close(fd)
+        self.assertEqual(stat.S_IMODE((self.root/'fd').stat().st_mode), 0o600)
+
+    def test_repair_mode_refuses_unsafe_entries(self):
+        target = self.root/'target-file'
+        target.write_bytes(b'')
+        os.chmod(target, 0o644)
+        (self.root/'link').symlink_to(target)
+        os.link(target, self.root/'hard')
+        os.mkfifo(self.root/'fifo', 0o644)
+        for name, reason in (('link', safefs.SYMLINK), ('hard', safefs.MULTIPLE_LINKS),
+                             ('fifo', safefs.NOT_REGULAR)):
+            with self.assertRaises(safefs.Unsafe) as raised:
+                safefs.repair_mode(self.root/name, 0o077)
+            self.assertEqual(raised.exception.reason, reason)
+            self.assertIn(name, str(raised.exception))
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+        if os.geteuid() != 0:
+            with self.assertRaises(safefs.Unsafe) as raised:
+                safefs.repair_mode('/etc/passwd', 0o077)
+            self.assertEqual(raised.exception.reason, safefs.OWNER)
 
 if __name__ == '__main__':
     unittest.main()

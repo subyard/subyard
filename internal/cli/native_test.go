@@ -1300,7 +1300,7 @@ func TestUpdateReportsActivatedRuntimeWhenConfigRefreshFails(t *testing.T) {
 	}
 }
 
-func TestUpdateRefreshAcceptsReadableConfigAndRejectsWritableConfigAfterActivation(t *testing.T) {
+func TestUpdateRefreshAcceptsReadableConfigAndRepairsWritableConfigAfterActivation(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		mode     os.FileMode
@@ -1308,7 +1308,7 @@ func TestUpdateRefreshAcceptsReadableConfigAndRejectsWritableConfigAfterActivati
 		wantErr  string
 	}{
 		{name: "group readable", mode: 0o640},
-		{name: "group writable", mode: 0o660, wantCode: 1, wantErr: "group/world writable"},
+		{name: "group writable", mode: 0o660},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, runtimeRoot := updateReleaseFixture(t)
@@ -1345,6 +1345,9 @@ func TestUpdateRefreshAcceptsReadableConfigAndRejectsWritableConfigAfterActivati
 			}
 			if test.wantCode == 0 && !slices.Equal(applier.yards, []string{"hermes"}) {
 				t.Fatalf("refreshed yards = %#v", applier.yards)
+			}
+			if info, err := os.Stat(configPath); err != nil || info.Mode().Perm() != test.mode&^0o022 {
+				t.Fatalf("config mode = %v (%v)", info.Mode(), err)
 			}
 		})
 	}

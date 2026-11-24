@@ -197,6 +197,16 @@ func TestV2TransitionRefusesUnsafeOrConflictingAppliedStaging(t *testing.T) {
 				}
 			}
 			before := snapshotStoreV2Tree(t, home)
+			if mutant == "mode" {
+				// The refusal repairs only the operator's own broader mode.
+				if err := os.Chmod(pending, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				before = snapshotStoreV2Tree(t, home)
+				if err := os.Chmod(pending, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			options := transition.options
 			options.fault = nil
 			restart, err := NewV2Transition(options)

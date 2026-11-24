@@ -642,6 +642,27 @@ runpy.run_path(bridge, run_name='__main__')
         linked.symlink_to(root, target_is_directory=True)
         self.cli('status', linked, success=False)
 
+    def test_state_directory_repair_matches_shared_safefs(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('bridge_under_test', BRIDGE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # An unreadable owned directory is pinned with O_PATH; special bits stay.
+        for mode, want in ((0o300, 0o700), (0o307, 0o700), (0o3755, 0o3700), (0o1777, 0o1700)):
+            with self.subTest(mode=oct(mode)):
+                path = self.root / f'state-{mode:o}'
+                path.mkdir()
+                path.chmod(mode)
+                module.directory(path, create=False)
+                self.assertEqual(path.stat().st_mode & 0o7777, want)
+        target = self.root / 'state-target'
+        target.mkdir()
+        target.chmod(0o755)
+        (self.root / 'state-link').symlink_to(target, target_is_directory=True)
+        with self.assertRaises(module.BridgeError):
+            module.directory(self.root / 'state-link', create=False)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+
     def test_missing_executable_fails_without_a_session(self):
         root = self.start('codex', 'unused', '--executable', str(self.root / 'missing'))
         self.done(root, 'failed')

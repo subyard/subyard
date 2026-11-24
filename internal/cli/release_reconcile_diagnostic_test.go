@@ -360,7 +360,12 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 			projected := stage != "compare-exact" && stage != "legacy-adoption"
 			switch stage {
 			case "lock":
-				writeConfigCommandFile(t, filepath.Join(configHome, "generated/integration-locks/default.lock"), "private-sentinel", 0o644)
+				lock := filepath.Join(configHome, "generated/integration-locks/default.lock")
+				// A broader lock is repaired; a read-only one still fails to lock.
+				if os.Geteuid() == 0 {
+					t.Skip("root opens a read-only lock for writing")
+				}
+				writeConfigCommandFile(t, lock, "private-sentinel", 0o400)
 			case "legacy-adoption":
 				loaded.Integrations.AllowsCodingTools = true
 				runtime.Executor = &testkit.Incus{Err: errors.New("private-sentinel")}

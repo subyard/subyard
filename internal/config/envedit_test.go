@@ -434,9 +434,28 @@ func TestReadPersistentFileSnapshotRejectsUnsafePaths(t *testing.T) {
 		if err := os.Chmod(safe, 0o660); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(safeDirectory, 0o775); err != nil {
+			t.Fatal(err)
+		}
 		defer os.Chmod(safe, 0o600)
+		if _, err := ReadPersistentFileSnapshot(configHome, safe); err != nil {
+			t.Fatalf("operator-owned writable file was not repaired: %v", err)
+		}
+		for path, want := range map[string]os.FileMode{safe: 0o640, safeDirectory: 0o755} {
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
+				t.Fatalf("%s mode = %v, want %v (%v)", path, info.Mode(), want, err)
+			}
+		}
+		alias := filepath.Join(safeDirectory, "writable-alias.env")
+		if err := os.Link(safe, alias); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(alias)
+		if err := os.Chmod(safe, 0o660); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := ReadPersistentFileSnapshot(configHome, safe); err == nil {
-			t.Fatal("accepted group-writable file")
+			t.Fatal("repaired a group-writable file with another hard link")
 		}
 	})
 	t.Run("hard linked", func(t *testing.T) {

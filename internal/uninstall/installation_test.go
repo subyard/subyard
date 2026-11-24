@@ -120,7 +120,7 @@ func TestInstallationEnrollmentExactScopeAndCAS(t *testing.T) {
 				testkit.WriteFile(t, path, append(body, []byte(strings.Repeat(" ", 65536))...), 0600)
 			}
 			before, err := InspectInstallation(identity.RuntimeRoot, identity)
-			if scenario == "conflicting" || scenario == "uid" || scenario == "hardlink" || scenario == "symlink" || scenario == "mode" || scenario == "special mode" || scenario == "malformed" || scenario == "oversized" || scenario == "full claims" {
+			if scenario == "conflicting" || scenario == "uid" || scenario == "hardlink" || scenario == "symlink" || scenario == "malformed" || scenario == "oversized" || scenario == "full claims" {
 				if err == nil {
 					before.Close()
 					t.Fatal("unsafe inventory admitted")
@@ -131,6 +131,13 @@ func TestInstallationEnrollmentExactScopeAndCAS(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer before.Close()
+			if scenario == "mode" || scenario == "special mode" {
+				// The operator's own broader inventory is repaired, not refused.
+				if info, err := os.Lstat(path); err != nil || info.Mode() != 0o600 {
+					t.Fatalf("inventory mode = %v (%v)", info.Mode(), err)
+				}
+				return
+			}
 			if _, err := os.Lstat(path); scenario != "matching" && scenario != "replacement" && !os.IsNotExist(err) {
 				t.Fatal("inspection wrote inventory")
 			}

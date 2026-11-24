@@ -62,7 +62,22 @@ def directory(path, create=False):
         raise
 
 
+def repair_private(fd):
+    """Narrow our own broader single-link file or directory in place.
+
+    This source also runs inside the guest through python3 -c, where the shared
+    safefs module is absent; it mirrors safefs.repair_mode: a regular file loses
+    set-ID and sticky bits, a directory keeps them.
+    """
+    info = os.fstat(fd)
+    keep = 0o7700 if stat.S_ISDIR(info.st_mode) else 0o700
+    if (info.st_uid == os.getuid() and info.st_mode & 0o077
+            and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink == 1)):
+        os.fchmod(fd, stat.S_IMODE(info.st_mode) & keep)
+
+
 def read_state(fd):
+    repair_private(fd)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
         raise ValueError("unsafe operation receipt")
@@ -134,6 +149,7 @@ class Storage:
         except FileExistsError:
             created = False
         self.control = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.parent)
+        repair_private(self.control)
         info = os.fstat(self.control)
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("unsafe operation directory")
@@ -151,6 +167,7 @@ class Storage:
         else:
             self.lock = os.open(".owner", os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=self.control)
             self.data = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.control)
+        repair_private(self.data)
         info = os.fstat(self.data)
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("unsafe operation directory")

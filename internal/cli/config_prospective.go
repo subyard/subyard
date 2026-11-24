@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // A retained draft uses the production resolver with its normal logical paths.
@@ -182,6 +183,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	directories := map[string]config.PersistentFileIdentity{}
 	observeDirectories := func(path string) error {
 		for directory := filepath.Dir(path); directory == paths.ConfigHome || strings.HasPrefix(directory, paths.ConfigHome+string(filepath.Separator)); directory = filepath.Dir(directory) {
+			_ = safefs.RepairPath(directory, 0o022)
 			info, err := os.Lstat(directory)
 			if errors.Is(err, os.ErrNotExist) {
 				continue

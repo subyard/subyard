@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,11 +42,12 @@ func ReadHostPaths(installation Installation) ([]HostPathRecord, error) {
 	result := []HostPathRecord{}
 	for _, entry := range entries {
 		path := filepath.Join(directory, entry.Name())
+		_ = safefs.RepairPath(path, 0o077)
 		tree, err := Capture(path)
 		if err != nil {
 			return nil, err
 		}
-		if len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].Mode&0777 != 0600 || tree.Entries[0].UID != installation.OperatorUID {
+		if len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].Mode&07077 != 0 || tree.Entries[0].UID != installation.OperatorUID {
 			return nil, protectedEntryError(path, "host ownership ledger", tree.Entries, installation.OperatorUID)
 		}
 		body, err := os.ReadFile(path)

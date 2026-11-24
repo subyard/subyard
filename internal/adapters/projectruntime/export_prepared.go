@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // PreparedPatchStore captures an exact controller destination without creating it.
@@ -31,11 +32,12 @@ func (store PatchStore) Prepare(projectID string) (*PreparedPatchStore, error) {
 	}
 	prepared := &PreparedPatchStore{projectID: projectID, directory: filepath.Clean(store.Directory)}
 	var err error
+	_ = safefs.RepairPath(prepared.directory, 0o077)
 	prepared.before, err = os.Lstat(prepared.directory)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err == nil && (!prepared.before.IsDir() || prepared.before.Mode()&os.ModeSymlink != 0 || prepared.before.Mode().Perm() != 0o700) {
+	if err == nil && (!prepared.before.IsDir() || prepared.before.Mode()&os.ModeSymlink != 0 || prepared.before.Mode().Perm()&0o077 != 0) {
 		return nil, errors.New("export directory must be a protected real directory")
 	}
 	prepared.ancestor = filepath.Dir(prepared.directory)

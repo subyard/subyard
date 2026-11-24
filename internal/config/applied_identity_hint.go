@@ -9,6 +9,7 @@ import (
 	"regexp"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // AppliedIdentityHint is an offline observation, never mutation authority. Its
@@ -27,6 +28,7 @@ func AppliedIdentityHintPath(root, yard string) string {
 	return filepath.Join(root, "reconcile", "applied-identities", yard+".json")
 }
 func ReadAppliedIdentityHint(root, yard string) (*AppliedIdentityHint, PersistentFileSnapshot, error) {
+	_ = safefs.RepairPath(AppliedIdentityHintPath(root, yard), 0o077)
 	snapshot, err := ReadPersistentFileSnapshot(root, AppliedIdentityHintPath(root, yard))
 	if err != nil || !snapshot.Exists {
 		return nil, snapshot, err
@@ -34,7 +36,7 @@ func ReadAppliedIdentityHint(root, yard string) (*AppliedIdentityHint, Persisten
 	var hint AppliedIdentityHint
 	decoder := json.NewDecoder(bytes.NewReader(snapshot.Content))
 	decoder.DisallowUnknownFields()
-	if snapshot.Identity.Mode&0777 != 0600 || len(snapshot.Content) > 4096 || decoder.Decode(&hint) != nil || decoder.Decode(new(any)) != io.EOF || hint.Schema != 1 || hint.Yard != yard || !domain.SafeName(hint.Yard) || !domain.SafeName(hint.User) || hint.UID <= 0 || !regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`).MatchString(hint.UUID) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hint.Source) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hint.Release) {
+	if snapshot.Identity.Mode&0o077 != 0 || len(snapshot.Content) > 4096 || decoder.Decode(&hint) != nil || decoder.Decode(new(any)) != io.EOF || hint.Schema != 1 || hint.Yard != yard || !domain.SafeName(hint.Yard) || !domain.SafeName(hint.User) || hint.UID <= 0 || !regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`).MatchString(hint.UUID) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hint.Source) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(hint.Release) {
 		return nil, snapshot, errors.New("unsafe applied developer identity hint")
 	}
 	return &hint, snapshot, nil

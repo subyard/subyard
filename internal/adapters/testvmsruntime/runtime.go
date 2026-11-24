@@ -1012,7 +1012,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 func (runtime *Runtime) ensureStateDir() error {
 	cfg := runtime.Config
 	if os.Geteuid() == 0 {
-		if err := safefs.EnsureDir(cfg.StateDir, safefs.DirOptions{ParentMode: 0o700}); err != nil {
+		if err := safefs.EnsureDir(cfg.StateDir, safefs.DirOptions{ParentMode: 0o700, Existing: safefs.Repair}); err != nil {
 			return err
 		}
 		return writePrivateFile(cfg.stateMarker(), []byte(managedMarker+"\n"))

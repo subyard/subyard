@@ -152,7 +152,8 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(foreign.read_text(), 'do not overwrite')
             (runs/'foreign.json').unlink()
             launcher.records.atomic_json(runs/'foreign.json', {'agent_run_id':'foreign'})
-            (runs/'foreign.json').chmod(0o644)
+            # A broader own manifest is repaired; a sealed one stays refused.
+            (runs/'foreign.json').chmod(0o400)
             self.assertFalse(launcher.admit_manifest(root, fixture_run()))
             self.assertTrue((runs/'foreign.json').exists())
 
@@ -323,7 +324,7 @@ assert not records.emit(sys.argv[2], 'gap', {})
                 launcher.records.atomic_json(directory/(str(number)+'.json'), {'agent_run_id':str(number),'boot_id':launcher.boot_id()})
             paths = list(directory.glob('*.json'))
             for path in paths[:2]:
-                path.chmod(0o644)
+                path.chmod(0o400)
             sampler = types.SimpleNamespace(poll=lambda: True)
             class Finished(Exception):
                 pass

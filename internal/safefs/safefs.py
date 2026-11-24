@@ -506,6 +506,42 @@ def read_regular(path, *, max_bytes=None, owner_uid=None, deny_perm=0, single_li
         return data
 
 
+def repair_mode(target, deny, *, dir_fd=None):
+    """Narrow a caller-owned regular file or directory, given as a path or an open descriptor.
+
+    Clear the permission bits in deny through the same descriptor; a regular file also loses
+    set-ID and sticky bits, while a directory keeps them. A narrower state is kept.
+    Another type refuses; a needed change refuses another owner and extra hard links.
+    """
+    if isinstance(target, int):
+        fd, path, owned = target, f'<fd {target}>', False
+    else:
+        path, owned = os.fspath(target), True
+        try:
+            fd = os.open(path, os.O_PATH | _NOFOLLOW, dir_fd=dir_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise Unsafe(SYMLINK, path) from None
+            raise
+    try:
+        info = os.fstat(fd)
+        actual, denied = stat.S_IMODE(info.st_mode), deny & 0o777
+        if stat.S_ISREG(info.st_mode):
+            denied |= 0o7000
+        elif not stat.S_ISDIR(info.st_mode):
+            _regular(info, path)
+        if not actual & denied:
+            return
+        if info.st_uid != os.geteuid():
+            raise Unsafe(OWNER, path)
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise Unsafe(MULTIPLE_LINKS, path)
+        os.chmod(f'/proc/self/fd/{fd}', actual & ~denied)
+    finally:
+        if owned:
+            os.close(fd)
+
+
 @contextmanager
 def lock(path, *, shared=False, deadline=None, mode=0o600):
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | _NOFOLLOW, mode)

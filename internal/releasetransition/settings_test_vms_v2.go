@@ -16,6 +16,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -339,6 +340,7 @@ func (view posixV2SettingsSnapshotView) ListYards() ([]string, error) {
 		return nil, err
 	}
 	defer directory.Close()
+	_ = safefs.RepairMode(directory, 0o022)
 	info, err := directory.Stat()
 	if err != nil {
 		return nil, err

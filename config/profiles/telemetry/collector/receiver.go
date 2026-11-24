@@ -124,8 +124,8 @@ func readToken(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm() != 0600 {
-		return "", errors.New("auth file must be regular with mode 0600")
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("auth file must be regular without group or other access")
 	}
 	if owner, ok := st.Sys().(*syscall.Stat_t); !ok || int(owner.Uid) != os.Geteuid() || owner.Nlink != 1 || st.Size() > 1024 {
 		return "", errors.New("unsafe auth file ownership, links or size")

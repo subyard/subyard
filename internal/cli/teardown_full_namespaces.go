@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"io"
 	"path/filepath"
@@ -88,6 +89,7 @@ func fullRootNamespaces(root string, installation uninstall.Installation, execut
 // uninstall tree subsequently binds bytes/inode/mode and refuses changed files.
 func ownedIdentityRemovalMarker(root string, yard uninstall.RecoveryYard) (string, error) {
 	path := config.DeveloperIdentityMarkerPath(root, yard.Context.YardName)
+	_ = safefs.RepairPath(path, 0o077)
 	snapshot, err := config.ReadPersistentFileSnapshot(root, path)
 	if err != nil {
 		return "", err
@@ -98,7 +100,7 @@ func ownedIdentityRemovalMarker(root string, yard uninstall.RecoveryYard) (strin
 	var marker config.DeveloperIdentityMarker
 	decoder := json.NewDecoder(bytes.NewReader(snapshot.Content))
 	decoder.DisallowUnknownFields()
-	if snapshot.Identity.Mode&0777 != 0600 || len(snapshot.Content) > 2<<20 || decoder.Decode(&marker) != nil || decoder.Decode(new(any)) != io.EOF || marker.Schema != 1 || marker.Yard != yard.Context.YardName || len(marker.Inputs) != 64 || len(marker.Release) != 64 {
+	if snapshot.Identity.Mode&0o077 != 0 || len(snapshot.Content) > 2<<20 || decoder.Decode(&marker) != nil || decoder.Decode(new(any)) != io.EOF || marker.Schema != 1 || marker.Yard != yard.Context.YardName || len(marker.Inputs) != 64 || len(marker.Release) != 64 {
 		return "", fmt.Errorf("unsafe pending identity removal marker for yard %s", yard.Context.YardName)
 	}
 	var proof map[string]any

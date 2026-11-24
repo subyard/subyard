@@ -27,6 +27,7 @@ func TransactionPath(configHome string) string {
 
 func ResolveHostID(configHome string, environment map[string]string) (string, bool, error) {
 	path := HostIDPath(configHome)
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if err == nil {
 		if err := validateConfigurationAncestors(configHome, path); err != nil {
@@ -35,8 +36,8 @@ func ResolveHostID(configHome string, environment map[string]string) (string, bo
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return "", false, config.OwnerMetadataError(path, "owner host ID", "must be a regular non-symlink file; "+config.FileMetadata(info), "", nil)
 		}
-		if info.Mode().Perm() != 0o600 {
-			return "", false, config.OwnerMetadataError(path, "owner host ID", fmt.Sprintf("file mode must be 0600; observed mode=%04o, required mode=0600", info.Mode().Perm()), "", nil)
+		if info.Mode().Perm()&0o077 != 0 {
+			return "", false, config.OwnerMetadataError(path, "owner host ID", fmt.Sprintf("file must be private; observed mode=%04o, required no group or other access", info.Mode().Perm()), "", nil)
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {

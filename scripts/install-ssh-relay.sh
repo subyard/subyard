@@ -88,8 +88,10 @@ for current in "$socket_path" "$service_path"; do
   if [ -e "$current" ] || [ -L "$current" ]; then
     [ -f "$current" ] && [ ! -L "$current" ] \
       || die "refusing unsafe SSH relay unit path: $current"
-    [ "$(stat -c %u "$current")" = 0 ] && [ "$(stat -c %a "$current")" = 644 ] \
+    [ "$(stat -c %u "$current")" = 0 ] && [ $(( 8#$(stat -c %a "$current") & 8#7022 )) = 0 ] \
       || die "SSH relay unit must be root-owned mode 0644: $current"
+    # A root-owned unit that only others cannot write is restored in place.
+    [ "$(stat -c %a "$current")" = 644 ] || chmod 0644 "$current"
   fi
 done
 

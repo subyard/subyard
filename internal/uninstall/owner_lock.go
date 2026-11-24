@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,15 +110,16 @@ func ownerLock(ctx context.Context, dataHome string, expected *Tree, wait bool) 
 		}
 		return Tree{}, nil, err
 	}
+	_ = safefs.RepairMode(file, 0o077)
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
 		return Tree{}, nil, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uid || stat.Nlink != 1 {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || stat.Uid != uid || stat.Nlink != 1 {
 		file.Close()
-		return Tree{}, nil, config.OwnerMetadataError(path, "owner mutation lock", "must be an operator-owned real mode 0600 file; "+ownerLockFacts(info), fmt.Sprintf("required type=regular, mode=0600, uid=%d, links=1", uid), nil)
+		return Tree{}, nil, config.OwnerMetadataError(path, "owner mutation lock", "must be an operator-owned private real file; "+ownerLockFacts(info), fmt.Sprintf("required type=regular, no group or other access, uid=%d, links=1", uid), nil)
 	}
 	for {
 		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -186,6 +188,7 @@ func ReadOwnerEpoch(dataHome string) (uint64, error) {
 	if err := safePath(path); err != nil {
 		return 0, err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -194,8 +197,8 @@ func ReadOwnerEpoch(dataHome string) (uint64, error) {
 		return 0, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Getuid()) {
-		return 0, config.OwnerMetadataError(path, "owner coordination epoch", fmt.Sprintf("unsafe owner coordination epoch; %s; required type=regular, mode=0600, uid=%d", config.FileMetadata(info), os.Getuid()), "", nil)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || stat.Uid != uint32(os.Getuid()) {
+		return 0, config.OwnerMetadataError(path, "owner coordination epoch", fmt.Sprintf("unsafe owner coordination epoch; %s; required type=regular, no group or other access, uid=%d", config.FileMetadata(info), os.Getuid()), "", nil)
 	}
 	parent, err := openParent(filepath.Dir(path))
 	if err != nil {

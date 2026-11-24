@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -47,7 +48,11 @@ func TestAppliedIdentityHintIsPrivateNonAuthorizingObservation(t *testing.T) {
 			data, _ = json.Marshal(value)
 			testkit.WriteFile(t, AppliedIdentityHintPath(root, "sample"), data, 0600)
 			if field == "mode" {
+				// Another hard link keeps the broader hint from being repaired.
 				if err := os.Chmod(AppliedIdentityHintPath(root, "sample"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(AppliedIdentityHintPath(root, "sample"), filepath.Join(root, "hint-alias")); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -312,7 +312,11 @@ func TestOwnerPrivatePublicationRejectsUnsafeLegacyStaging(t *testing.T) {
 				t.Fatal("unsafe legacy staging admitted")
 			}
 			after, err := os.Lstat(pending)
-			if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || before.Size() != after.Size() {
+			wantMode := before.Mode()
+			if mutant == "unsafe-mode" {
+				wantMode = 0o600 // Only the operator's own broader mode is repaired.
+			}
+			if err != nil || !os.SameFile(before, after) || after.Mode() != wantMode || before.Size() != after.Size() {
 				t.Fatalf("unsafe staging changed: %v", err)
 			}
 			if _, err := os.Lstat(filepath.Join(dir, "tx-private.json")); !errors.Is(err, os.ErrNotExist) {

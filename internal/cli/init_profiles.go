@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 type initProfileSetup struct {
@@ -68,6 +69,8 @@ func (cli *CLI) prepareInitProfile(ctx context.Context, execution *initExecution
 	setup := &initProfileSetup{definition: definition, configHome: loaded.Context.Paths.ConfigHome, values: map[string]any{}}
 	setup.path = filepath.Join(setup.configHome, schema.ConfigFile)
 	var err error
+	// Narrow the operator's own profile settings before binding them.
+	_ = safefs.RepairPath(setup.path, 0o077)
 	setup.before, err = readInitSelectionSnapshot(setup.configHome, setup.path)
 	if err != nil {
 		return nil, err
@@ -86,7 +89,7 @@ func (cli *CLI) prepareInitProfile(ctx context.Context, execution *initExecution
 	}
 	if setup.before.Exists {
 		setup.values, err = schema.Decode(setup.before.Content)
-		if err != nil || setup.before.Identity.Mode&0o777 != 0o600 && setup.before.Identity.Mode&0o777 != 0o400 {
+		if err != nil || setup.before.Identity.Mode&0o077 != 0 {
 			fmt.Fprintf(cli.options.Stdout, "  [ .. ] %s settings are invalid or unprotected; repair %s on the owner host. Existing settings were kept.\n", definition.Name, schema.ConfigFile)
 			return nil, nil
 		}
@@ -172,7 +175,7 @@ func protectedSetupKeyExists(path string) bool {
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid()) && (info.Mode().Perm() == 0o600 || info.Mode().Perm() == 0o400)
+	return ok && stat.Uid == uint32(os.Geteuid()) && info.Mode().Perm()&0o077 == 0
 }
 
 // Read one line without consuming the next central confirmation answer.

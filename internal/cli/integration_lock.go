@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 // Serialize desired-state publication and apply across processes, only after
@@ -40,6 +41,7 @@ func lockOwnerOperation(ctx context.Context, configHome, name string) (func(), e
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
+	_ = safefs.RepairMode(file, 0o077)
 	var stat syscall.Stat_t
 	if err = syscall.Fstat(fd, &stat); err != nil || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || stat.Mode&syscall.S_IFMT != syscall.S_IFREG || stat.Mode&0o077 != 0 {
 		file.Close()

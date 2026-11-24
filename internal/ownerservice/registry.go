@@ -294,7 +294,7 @@ func directory(path string, create bool, mode os.FileMode) error {
 	}
 	if create {
 		err := safefs.EnsureDir(path, safefs.DirOptions{
-			Mode: mode, Owner: &safefs.Ownership{UID: os.Getuid(), GID: -1},
+			Mode: mode, Owner: &safefs.Ownership{UID: os.Getuid(), GID: -1}, Existing: safefs.Repair,
 		})
 		if errors.Is(err, safefs.ErrSymlink) || errors.Is(err, safefs.ErrNotDirectory) ||
 			errors.Is(err, safefs.ErrUnsafeMode) || errors.Is(err, safefs.ErrUnsafeOwner) {
@@ -302,15 +302,33 @@ func directory(path string, create bool, mode os.FileMode) error {
 		}
 		return err
 	}
+	deny := registryDeny(mode)
+	_ = safefs.RepairPath(path, deny)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != mode || stat.Uid != uint32(os.Getuid()) {
+	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !registryMode(info.Mode(), mode) || stat.Uid != uint32(os.Getuid()) {
 		return errors.New("unsafe service registry directory")
 	}
 	return nil
+}
+
+// registryDeny forbids group and other access for private registry entries
+// and only group and other write for public ones.
+func registryDeny(mode os.FileMode) os.FileMode {
+	if mode&0o077 == 0 {
+		return 0o077
+	}
+	return 0o022
+}
+
+// registryMode accepts any private mode for a private entry. A public entry
+// keeps every bit of its mode so its consumers can read it.
+func registryMode(actual, mode os.FileMode) bool {
+	deny := registryDeny(mode)
+	return actual.Perm()&deny == 0 && (deny == 0o077 || actual.Perm()&mode == mode)
 }
 
 func read(path string, value any, mode os.FileMode) error {
@@ -319,12 +337,14 @@ func read(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	defer file.Close()
+	deny := registryDeny(mode)
+	_ = safefs.RepairMode(file, deny)
 	info, err := file.Stat()
 	if err != nil {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != mode || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || info.Size() > 16384 {
+	if !ok || !info.Mode().IsRegular() || !registryMode(info.Mode(), mode) || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || info.Size() > 16384 {
 		return errors.New("unsafe service registry file")
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, 16385))

@@ -139,7 +139,7 @@ func (sink *HostSink) saveHostEvidence(ctx context.Context, instance outerBroker
 		return err
 	}
 	owner := sink.operatorOwnership()
-	if err := safefs.EnsureDir(directory, safefs.DirOptions{Mode: 0o750, ParentMode: 0o750, Owner: owner}); err != nil {
+	if err := safefs.EnsureDir(directory, safefs.DirOptions{Mode: 0o750, ParentMode: 0o750, Owner: owner, Existing: safefs.Repair}); err != nil {
 		return err
 	}
 	for _, incident := range pending {

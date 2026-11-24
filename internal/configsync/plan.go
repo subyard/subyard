@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 func BuildPlan(options Options) (Plan, error) {
@@ -536,6 +538,12 @@ func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, er
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return liveFile{}, false, err
 	}
+	privateConfig := filepath.Base(path) == "config.env" && !(len(local) != 0 && local[0])
+	deny := fs.FileMode(0o022)
+	if privateConfig {
+		deny = 0o077
+	}
+	_ = safefs.RepairPath(path, deny)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return liveFile{}, false, nil
@@ -556,8 +564,8 @@ func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, er
 	maximum := int64(maxAssetBytes)
 	if filepath.Base(path) == "config.env" {
 		maximum = maxConfigBytes
-		if info.Mode().Perm() != 0o600 && !(len(local) != 0 && local[0]) {
-			return liveFile{}, false, metadataSafetyError(path, "live config.env mode must be 0600", "mode=0600", info)
+		if privateConfig && info.Mode().Perm()&0o077 != 0 {
+			return liveFile{}, false, metadataSafetyError(path, "live config.env must be private", "no group or other access", info)
 		}
 	}
 	if info.Size() > int64(maximum) {
@@ -583,6 +591,7 @@ func readManifest(configHome string) (Manifest, error) {
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return Manifest{}, err
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Manifest{}, nil
@@ -591,8 +600,8 @@ func readManifest(configHome string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm() != 0o600 {
-		return Manifest{}, metadataSafetyError(path, "config sync manifest must be a regular 0600 file", "type=regular, mode=0600", info)
+		info.Mode().Perm()&0o077 != 0 {
+		return Manifest{}, metadataSafetyError(path, "config sync manifest must be a private regular file", "type=regular, no group or other access", info)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

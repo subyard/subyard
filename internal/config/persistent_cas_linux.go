@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -277,6 +278,9 @@ func persistentRelativeParts(configHome, path string) ([]string, error) {
 }
 
 func validatePersistentDirectoryFD(fd int) error {
+	// Clear group and other write on the operator's own directory; the
+	// checks below report every state this repair leaves.
+	_ = safefs.RepairFD(fd, "persistent settings directory", 0o022)
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
@@ -304,6 +308,7 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
+	_ = safefs.RepairMode(file, 0o022)
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)

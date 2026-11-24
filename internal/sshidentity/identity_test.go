@@ -52,12 +52,26 @@ func TestClassifyLocalIdentity(t *testing.T) {
 		t.Fatalf("personal identity classified as %q", got)
 	}
 
+	writeSnippet("subyard-writable.config", identity)
+	writable := filepath.Join(sshDir, "subyard-writable.config")
+	if err := os.Chmod(writable, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if got := Classify(home, dataHome, "writable"); got != Dedicated {
+		t.Fatalf("operator-owned writable snippet classified as %q", got)
+	}
+	if info, err := os.Stat(writable); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("snippet mode = %v (%v)", info.Mode(), err)
+	}
 	writeSnippet("subyard-unsafe.config", identity)
 	if err := os.Chmod(filepath.Join(sshDir, "subyard-unsafe.config"), 0o666); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Link(filepath.Join(sshDir, "subyard-unsafe.config"), filepath.Join(root, "unsafe-alias")); err != nil {
+		t.Fatal(err)
+	}
 	if got := Classify(home, dataHome, "unsafe"); got != Drift {
-		t.Fatalf("unsafe snippet classified as %q", got)
+		t.Fatalf("shared writable snippet classified as %q", got)
 	}
 	if err := os.WriteFile(filepath.Join(sshDir, "subyard-multiple.config"), []byte(
 		"Host yard-multiple\n    IdentityFile \""+identity+"\"\n"+
@@ -68,11 +82,34 @@ func TestClassifyLocalIdentity(t *testing.T) {
 		t.Fatalf("multiple IdentityFile directives classified as %q", got)
 	}
 
+	for _, mode := range []os.FileMode{0o640, 0o400} {
+		if err := os.Chmod(identity, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keyDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := Classify(home, dataHome, "default"); got != Dedicated {
+			t.Fatalf("operator-owned identity with mode %v classified as %q", mode, got)
+		}
+		if info, err := os.Stat(identity); err != nil || info.Mode().Perm() != mode&^0o077 {
+			t.Fatalf("identity mode = %v (%v)", info.Mode(), err)
+		}
+		if info, err := os.Stat(keyDir); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("key directory mode = %v (%v)", info.Mode(), err)
+		}
+	}
 	if err := os.Chmod(identity, 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Link(identity, filepath.Join(root, "identity-alias")); err != nil {
+		t.Fatal(err)
+	}
 	if got := Classify(home, dataHome, "default"); got != Drift {
-		t.Fatalf("unsafe canonical identity classified as %q", got)
+		t.Fatalf("shared readable canonical identity classified as %q", got)
+	}
+	if err := os.Remove(filepath.Join(root, "identity-alias")); err != nil {
+		t.Fatal(err)
 	}
 	if got := Classify(home, dataHome, "missing"); got != Drift {
 		t.Fatalf("missing snippet classified as %q", got)

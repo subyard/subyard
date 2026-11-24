@@ -78,7 +78,13 @@ func captureService(scope string, units []string, files []producerFile, uid uint
 			if file.helper {
 				mode = 0755
 			}
-			if fact := facts[0]; fact.Mode&unix.S_IFMT != unix.S_IFREG || fact.UID != uid || fact.Mode&07777 != mode {
+			fact := facts[0]
+			unsafeMode := fact.Mode&07777 != mode
+			if !file.helper && uid != producerSystemUID {
+				// Content proves an operator unit; only write by others matters.
+				unsafeMode = fact.Mode&07022 != 0
+			}
+			if fact.Mode&unix.S_IFMT != unix.S_IFREG || fact.UID != uid || unsafeMode {
 				return guardRefusal("unsafe producer artifact")
 			}
 			if file.helper {

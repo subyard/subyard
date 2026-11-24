@@ -746,7 +746,7 @@ func TestPOSIXV2StoreRejectsUnsafeFilesAndParents(t *testing.T) {
 		}
 	})
 
-	t.Run("unsafe parent", func(t *testing.T) {
+	t.Run("broader parent", func(t *testing.T) {
 		configHome := protectedConfigHome(t)
 		root := filepath.Join(configHome, "release-transition")
 		if err := os.Mkdir(root, 0o777); err != nil {
@@ -756,8 +756,11 @@ func TestPOSIXV2StoreRejectsUnsafeFilesAndParents(t *testing.T) {
 			t.Fatal(err)
 		}
 		store, _ := NewPOSIXV2Store(configHome)
-		if _, err := store.ReadLedger(); err == nil {
-			t.Fatal("unsafe parent was accepted")
+		if _, err := store.ReadLedger(); err != nil {
+			t.Fatalf("operator-owned broader parent was not repaired: %v", err)
+		}
+		if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("parent mode = %v (%v)", info.Mode(), err)
 		}
 	})
 }

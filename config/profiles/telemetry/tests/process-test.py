@@ -123,7 +123,8 @@ class ProcessTest(unittest.TestCase):
                         journal = journals/'child.json'
                         processes.records.atomic_json(journal, dict(agent_run_id='child', cgroup=str(child/'workload')))
                         if change == 'unreadable_journal':
-                            journal.chmod(0o644)
+                            # A broader journal is repaired; a sealed one stays refused.
+                            journal.chmod(0o400)
                             with self.assertRaises(ValueError):
                                 sampler.poll()
                         else:

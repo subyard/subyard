@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -93,13 +94,14 @@ func (store RecoveryStore) validateDirectory() error {
 	if err := safePath(filepath.Join(store.Directory, "plan.json")); err != nil {
 		return err
 	}
+	_ = safefs.RepairPath(store.Directory, 0o077)
 	info, err := os.Lstat(store.Directory)
 	if err != nil {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != store.UID {
-		return config.OwnerMetadataError(store.Directory, "uninstall recovery root", fmt.Sprintf("must be an operator-owned real mode 0700 directory; %s; required type=directory, mode=0700, uid=%d", config.FileMetadata(info), store.UID), "", nil)
+	if !ok || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || stat.Uid != store.UID {
+		return config.OwnerMetadataError(store.Directory, "uninstall recovery root", fmt.Sprintf("must be an operator-owned private real directory; %s; required type=directory, no group or other access, uid=%d", config.FileMetadata(info), store.UID), "", nil)
 	}
 	return nil
 }
@@ -276,13 +278,14 @@ func (store RecoveryStore) readBinding() (Tree, error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		path = filepath.Join(store.Directory, ".plan-next")
 	}
+	_ = safefs.RepairPath(path, 0o077)
 	return Capture(path)
 }
 
 func (store RecoveryStore) readPlan(binding Tree) (RecoveryPlan, error) {
 	var plan RecoveryPlan
 	path := binding.Path
-	if len(binding.Entries) != 1 || binding.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || binding.Entries[0].Mode&0777 != 0600 || binding.Entries[0].UID != store.UID {
+	if len(binding.Entries) != 1 || binding.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || binding.Entries[0].Mode&07077 != 0 || binding.Entries[0].UID != store.UID {
 		return plan, protectedEntryError(path, "uninstall recovery plan", binding.Entries, store.UID)
 	}
 	body, err := store.ReadBody(binding)

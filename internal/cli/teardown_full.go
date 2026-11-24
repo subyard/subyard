@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -56,6 +57,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	// A normal-reconcile grant is not evidence that deleting its config/data or
 	// native workloads is authorized, even when bootstrap inventory exists.
 	legacyRoot := filepath.Join(current.Context.Paths.ConfigHome, "ownership", "legacy-continuations")
+	_ = safefs.RepairPath(legacyRoot, 0o077)
 	if info, err := os.Lstat(legacyRoot); err == nil {
 		if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 			return errors.New("unsafe legacy continuation namespace; preserve its records before full removal")

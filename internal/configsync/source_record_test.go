@@ -74,7 +74,7 @@ func TestConfigurationSourceRecordRejectsUnsafeState(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, _, err := ReadSourceRecord(configHome); err == nil ||
-			!strings.Contains(err.Error(), "regular 0600") {
+			!strings.Contains(err.Error(), "private regular file") {
 			t.Fatalf("symlink record was accepted: %v", err)
 		}
 	})

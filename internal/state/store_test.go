@@ -148,24 +148,24 @@ func TestFileStoreDoesNotRepairInvalidBroadState(t *testing.T) {
 	}
 }
 
-func TestFileStoreDoesNotRepairAnomalousLegacyMode(t *testing.T) {
+func TestFileStoreRepairsAnomalousLegacyMode(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Put(context.Background(), fixtureRecord("executable")); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(store.Directory(), "executable.json")
-	if err := os.Chmod(path, 0o755); err != nil {
+	if err := os.Chmod(path, 0o755|os.ModeSetuid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RepairLegacyPermissions(context.Background()); err == nil {
-		t.Fatal("executable state mode was repaired")
+	if _, err := store.RepairLegacyPermissions(context.Background()); err != nil {
+		t.Fatalf("operator-owned executable state mode was not repaired: %v", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o755 {
-		t.Fatalf("anomalous state mode changed to %o", info.Mode().Perm())
+	if info.Mode()&(os.ModePerm|os.ModeSetuid) != 0o600 {
+		t.Fatalf("anomalous state mode = %v", info.Mode())
 	}
 }
 
@@ -174,16 +174,6 @@ func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
 		name  string
 		setup func(*testing.T, string) string
 	}{
-		{
-			name: "broad permissions",
-			setup: func(t *testing.T, directory string) string {
-				t.Helper()
-				if err := os.Chmod(directory, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				return directory
-			},
-		},
 		{
 			name: "symlink",
 			setup: func(t *testing.T, directory string) string {
@@ -218,6 +208,29 @@ func TestFileStoreReadOnlyRejectsUnsafeStateDirectory(t *testing.T) {
 				t.Fatal("GetReadOnly accepted an unsafe state directory")
 			}
 		})
+	}
+}
+
+func TestFileStoreReadOnlyAcceptsReadableOwnedState(t *testing.T) {
+	store := newTestStore(t)
+	record := fixtureRecord("project-a")
+	if err := store.Put(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.Directory(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(store.Directory(), "project-a.json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if records, err := store.ListReadOnly(context.Background()); err != nil || len(records) != 1 {
+		t.Fatalf("ListReadOnly = %v, %v", records, err)
+	}
+	if _, err := store.GetReadOnly(context.Background(), record.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(store.Directory()); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("read-only access changed the directory: %v %v", info, err)
 	}
 }
 
@@ -640,15 +653,15 @@ func TestFileStoreFinishesNarrowDirectoryAndRefusesSymlinkedTargets(t *testing.T
 	if info, err := os.Stat(store.Directory()); err != nil || info.Mode()&(os.ModeSetgid|os.ModePerm) != os.ModeSetgid|0o700 {
 		t.Fatalf("state directory changed: %v %v", info, err)
 	}
-	if err := os.Chmod(store.Directory(), 0o750); err != nil {
+	// An owned broader directory is narrowed to 0700.
+	if err := os.Chmod(store.Directory(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := store.Put(context.Background(), fixtureRecord("project-a"))
-	if err == nil || err.Error() != "state directory permissions are too broad: 750" {
+	if err := store.Put(context.Background(), fixtureRecord("project-a")); err != nil {
 		t.Fatalf("broad state directory: %v", err)
 	}
-	if err := os.Chmod(store.Directory(), 0o700); err != nil {
-		t.Fatal(err)
+	if info, err := os.Stat(store.Directory()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("broad state directory not narrowed: %v %v", info, err)
 	}
 
 	victim := filepath.Join(testkit.TempDir(t), "victim.json")
@@ -658,7 +671,7 @@ func TestFileStoreFinishesNarrowDirectoryAndRefusesSymlinkedTargets(t *testing.T
 		t.Fatal(err)
 	}
 	// putUnlocked is the publisher Put reaches after its listing checks.
-	err = store.putUnlocked(fixtureRecord("project-b"))
+	err := store.putUnlocked(fixtureRecord("project-b"))
 	if err == nil || !strings.HasPrefix(err.Error(), "publish state: ") {
 		t.Fatalf("symlinked state target: %v", err)
 	}
@@ -699,5 +712,22 @@ func TestReservationRefusesSymlinkedReservationFile(t *testing.T) {
 	}
 	if _, err := store.readReservation(reservation.OperationID); err == nil || err.Error() != want {
 		t.Fatalf("reservation read through a symlink: %v", err)
+	}
+}
+
+func TestFileStoreNarrowsBroaderSetGIDStateDirectory(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.Put(context.Background(), fixtureRecord("setgid")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.Directory(), 0o755|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), fixtureRecord("setgid")); err != nil {
+		t.Fatalf("operator-owned set-group-ID state directory was not narrowed: %v", err)
+	}
+	info, err := os.Stat(store.Directory())
+	if err != nil || info.Mode()&(os.ModePerm|os.ModeSetgid) != 0o700|os.ModeSetgid {
+		t.Fatalf("state directory mode = %v (%v)", info.Mode(), err)
 	}
 }

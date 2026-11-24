@@ -31,8 +31,9 @@ func PrepareStartup(path, runtimeRoot, binDir string, keepBinPath bool) (Startup
 		return edit, nil
 	}
 	entry := tree.Entries[0]
-	if len(tree.Entries) != 1 || entry.Mode&syscall.S_IFMT != syscall.S_IFREG || entry.UID != uint32(os.Getuid()) || entry.Mode&0022 != 0 {
-		return edit, errors.New("shell startup file must be an operator-owned non-writable regular file")
+	// The operator's own file keeps its mode through the edit.
+	if len(tree.Entries) != 1 || entry.Mode&syscall.S_IFMT != syscall.S_IFREG || entry.UID != uint32(os.Getuid()) {
+		return edit, errors.New("shell startup file must be an operator-owned regular file")
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

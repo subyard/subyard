@@ -163,6 +163,12 @@ policy_guard() {
     mode=644
     [ "$file" != /usr/local/lib/subyard-guest-tmp ] || mode=755
     if [ -e "$file" ] || [ -L "$file" ]; then
+      # Apply restores the mode of our own root-owned file with current content
+      # unless group or other could have written it.
+      if [ "$1" != check ] && actual=$(stat -c '%a' "$file" 2>/dev/null) \
+        && [ $(( 0$actual & 07022 )) = 0 ]; then
+        mode=$actual
+      fi
       [ -f "$file" ] && [ ! -L "$file" ] \
         && [ "$(stat -c '%a:%u:%g' "$file")" = "$mode:0:0" ] \
         && policy_content "$file" | cmp -s - "$file" \
@@ -230,11 +236,14 @@ check_units() {
 apply_policy() {
   policy_guard apply
   for file in $policy_files; do
-    [ ! -e "$file" ] || continue
-    temporary=$(mktemp "${file%/*}/.subyard-tmp.XXXXXX")
-    policy_content "$file" > "$temporary"
     mode=644
     [ "$file" != /usr/local/lib/subyard-guest-tmp ] || mode=755
+    if [ -e "$file" ]; then
+      [ "$(stat -c '%a' "$file")" = "$mode" ] || chmod "$mode" "$file"
+      continue
+    fi
+    temporary=$(mktemp "${file%/*}/.subyard-tmp.XXXXXX")
+    policy_content "$file" > "$temporary"
     chmod "$mode" "$temporary"
     mv -T "$temporary" "$file"
   done

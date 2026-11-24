@@ -421,7 +421,7 @@ func (backend *Backend) publishRoute(ctx context.Context, state backendState) er
 		return err
 	}
 	// Clients in unprivileged yards need public traversal even under umask 077.
-	if err := safefs.EnsureDir(state.clientDirectory, safefs.DirOptions{Mode: 0o755, ParentMode: 0o755}); err != nil {
+	if err := safefs.EnsureDir(state.clientDirectory, safefs.DirOptions{Mode: 0o755, ParentMode: 0o755, Existing: safefs.Repair}); err != nil {
 		return err
 	}
 

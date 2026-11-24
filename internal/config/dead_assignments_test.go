@@ -78,7 +78,7 @@ func TestDeadAssignmentsLoadPreviewAndAtomicApply(t *testing.T) {
 }
 
 func TestDeadAssignmentsKeepUncertainReferencesAndLiteralRefusals(t *testing.T) {
-	for _, name := range []string{"live", "other variable", "parameter operator", "missing override", "symlink override", "hardlink override", "writable override", "symlink private", "duplicate", "single quote", "command substitution", "config dir reassignment", "wrong artifact", "multiline"} {
+	for _, name := range []string{"live", "other variable", "parameter operator", "missing override", "symlink override", "hardlink override", "writable hardlink override", "symlink private", "duplicate", "single quote", "command substitution", "config dir reassignment", "wrong artifact", "multiline"} {
 		t.Run(name, func(t *testing.T) {
 			root, home, catalog, path := deadAssignmentFixture(t)
 			assignment := `AGENT_sample_CONFIG="$SUBYARD_CONFIG_DIR/../private/agents/sample/settings.json"` + "\n"
@@ -109,8 +109,13 @@ func TestDeadAssignmentsKeepUncertainReferencesAndLiteralRefusals(t *testing.T) 
 				if err := os.Link(override, override+".link"); err != nil {
 					t.Fatal(err)
 				}
-			case "writable override":
+			case "writable hardlink override":
+				// A writable override the operator alone owns is repaired; a
+				// shared inode keeps it uncertain.
 				if err := os.Chmod(override, 0660); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(override, override+".link"); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink private":

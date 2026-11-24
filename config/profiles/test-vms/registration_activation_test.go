@@ -89,9 +89,11 @@ func TestBrokerRegistrationActivation(t *testing.T) {
 						t.Fatal("existing entry rediscovered runtimes")
 					}
 					if scenario == "save-failure" {
-						if err := os.Chmod(registry.Root, 0o755); err != nil {
+						// A broader own registry is repaired; a file in its place is not.
+						if err := os.Remove(registry.Root); err != nil {
 							t.Fatal(err)
 						}
+						testkit.WriteFile(t, registry.Root, nil, 0o600)
 					}
 					return candidates, scenario != "unselected", nil
 				}, &output)

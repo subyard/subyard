@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import shutil
 import subprocess
 import tarfile
@@ -187,9 +188,15 @@ with tempfile.TemporaryDirectory(prefix="producer-bridge-", dir="/tmp") as tempo
         with mock.patch.object(runner.os, 'fstat', side_effect=foreign_uid):
             with checks.assertRaises(ValueError):
                 runner.write_bridge_active(legacy.bridge(), 'profile', None)
+        # A broader own receipt is narrowed; a shared one stays refused.
         receipt.chmod(0o666)
+        runner.write_bridge_active(legacy.bridge(), 'profile', None)
+        assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+        receipt.chmod(0o666)
+        os.link(receipt, receipt.with_name('linked-owner'))
         with checks.assertRaises(ValueError):
             runner.write_bridge_active(legacy.bridge(), 'profile', None)
+        receipt.with_name('linked-owner').unlink()
     finally:
         for value in (legacy, current):
             for fd in (value.parent, value.control, value.lock, value.data):
