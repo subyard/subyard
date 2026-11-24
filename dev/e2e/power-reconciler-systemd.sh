@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Real-PID1 regression for the production power reconciler restart contract.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "power-reconciler-systemd-e2e: line %s failed: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
