@@ -5,10 +5,8 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -16,46 +14,51 @@ import (
 )
 
 func TestPersistentCASPreservesOwnerAndACL(t *testing.T) {
-	groups, err := os.Getgroups()
-	if err != nil {
-		t.Fatal(err)
-	}
-	gid := -1
-	for _, group := range groups {
-		if group != os.Getgid() {
-			gid = group
-			break
-		}
-	}
-	if gid < 0 && os.Geteuid() == 0 && os.Getenv("SUBYARD_METADATA_GROUP_TEST") == "" {
-		// Isolate supplementary-group setup from the Go test process and its peers.
-		child := exec.Command(os.Args[0], "-test.run=^TestPersistentCASPreservesOwnerAndACL$", "-test.v")
-		child.Env = append(os.Environ(), "SUBYARD_METADATA_GROUP_TEST=1")
-		child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: uint32(os.Getgid()), Groups: []uint32{uint32(os.Getgid() + 1)}}}
-		output, err := child.CombinedOutput()
-		t.Log(string(output))
+	testkit.UseHostTempDir(t)
+	t.Run("original group", func(t *testing.T) {
+		testPersistentCASMetadata(t, -1)
+	})
+	t.Run("supplementary group", func(t *testing.T) {
+		groups, err := os.Getgroups()
 		if err != nil {
-			t.Fatal(err)
+			t.Skipf("cannot enumerate supplementary groups: %v", err)
 		}
-		return
-	}
-	if gid < 0 {
-		t.Fatal("metadata fixture requires a supplementary group distinct from the primary gid")
-	}
+		probe := filepath.Join(testkit.TempDir(t), "chown-probe")
+		testkit.WriteFile(t, probe, nil, 0600)
+		for _, gid := range groups {
+			if gid == os.Getgid() {
+				continue
+			}
+			if err := os.Chown(probe, os.Getuid(), gid); err != nil {
+				t.Logf("supplementary gid %d is unusable: %v", gid, err)
+				continue
+			}
+			testPersistentCASMetadata(t, gid)
+			return
+		}
+		t.Skip("no usable supplementary group distinct from the primary gid; no candidate passed the scratch-file chown probe")
+	})
+}
+
+func testPersistentCASMetadata(t *testing.T, gid int) {
+	t.Helper()
 	for _, writer := range []string{"cleanup", "shared CAS"} {
 		for _, withACL := range []bool{false, true} {
 			t.Run(writer+"/acl="+strconv.FormatBool(withACL), func(t *testing.T) {
 				root, home, catalog, path := deadAssignmentFixture(t)
 				testkit.WriteFile(t, path, []byte("# keep\nAGENT_sample_CONFIG=\"$SUBYARD_CONFIG_DIR/../private/agents/sample/settings.json\"\n"), 0640)
-				if err := os.Chown(path, os.Getuid(), gid); err != nil {
-					t.Fatal(err)
+				if gid >= 0 {
+					if err := os.Chown(path, os.Getuid(), gid); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if withACL {
 					file, err := os.Open(path)
 					if err != nil {
 						t.Fatal(err)
 					}
-					_, aclErr := testkit.KernelAccessACL(context.Background(), file, strconv.Itoa(os.Getuid()+77))
+					// The current uid is mapped even inside a restricted user namespace.
+					_, aclErr := testkit.KernelAccessACL(context.Background(), file, strconv.Itoa(os.Getuid()))
 					file.Close()
 					if errors.Is(aclErr, unix.ENOTSUP) {
 						t.Skip("filesystem does not support POSIX access ACLs")
@@ -71,6 +74,9 @@ func TestPersistentCASPreservesOwnerAndACL(t *testing.T) {
 				before, err := ReadPersistentFileSnapshot(home, path)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if gid >= 0 && before.Identity.GID != uint32(gid) {
+					t.Fatalf("fixture gid=%d, want supplementary gid=%d", before.Identity.GID, gid)
 				}
 				acl := persistentTestACL(t, path)
 				if withACL && len(acl) == 0 {
