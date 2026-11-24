@@ -170,14 +170,15 @@ func TestPeerFixturePersistsGitHubConsumerRoot(t *testing.T) {
 	if cleanupStart < 0 || cleanupEnd <= cleanupStart {
 		t.Fatal("peer cleanup boundary missing")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
 	engine := filepath.Join(root, "yard-engine")
-	build := exec.CommandContext(ctx, "go", "build", "-o", engine, "./cmd/yard")
+	// Compilation can exceed the fixture's execution budget on busy CI runners.
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", engine, "./cmd/yard")
 	build.Dir = repository
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build peer CLI: %v: %s", err, output)
 	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
 	ssh := filepath.Join(home, ".ssh")
 	registration := filepath.Join(peer, "config/yards/peer/config.env")
 	for _, directory := range []string{ssh, filepath.Dir(registration)} {
