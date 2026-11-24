@@ -2669,9 +2669,20 @@ func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string)
 
 // ProfileServiceObservation retains the same bounded check used for convergence.
 func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
+	return runtime.scopedProfileServiceObservation(ctx, name, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"})
+}
+
+// ProfileServicePostApplyConverged is the scoped post-apply check, with the same
+// SUBYARD_PROFILE_POST_APPLY contract as the init post-apply stage check.
+func (runtime Runtime) ProfileServicePostApplyConverged(ctx context.Context, name string) (bool, error) {
+	observation, err := runtime.scopedProfileServiceObservation(ctx, name, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1", "SUBYARD_PROFILE_POST_APPLY": "1"})
+	return observation.Converged, err
+}
+
+func (runtime Runtime) scopedProfileServiceObservation(ctx context.Context, name string, environment map[string]string) (ports.ReconcileStageObservation, error) {
 	ctx = readOnlyProbeContext(ctx)
 	output := &profileRuntimeBoundedBuffer{limit: 256}
-	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
+	err := runtime.runScriptEnvironment(ctx, output, environment, "profile-services.sh", "--check", name)
 	return profileServiceObservation(output.String(), output.exceeded, err)
 }
 

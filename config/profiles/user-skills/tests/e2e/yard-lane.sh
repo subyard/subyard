@@ -148,7 +148,7 @@ printf 'user-skills_e2e_stage=unavailable\n'
 yard "$first" config set USER_SKILL_SOURCES "$source_url" --scope yard --yes
 yard "$first" config set ENVIRONMENT_PROFILES 'user-skills' --scope yard --yes
 yard "$first" init --yes 2>"$STATE/unavailable.log"
-grep -F >/dev/null 'user-skills: warning: could not clone lane-skills;' "$STATE/unavailable.log" \
+grep -F >/dev/null 'user-skills: warning: could not clone home/dev/lane-skills;' "$STATE/unavailable.log" \
   || die 'missing source retry warning'
 [ "$(ready "$first")" = false ] || die 'an unreachable source reported ready'
 
@@ -165,11 +165,18 @@ ssh-keyscan localhost 2>/dev/null >> "$HOME/.ssh/known_hosts"
 printf "Host localhost\n  IdentityFile ~/.ssh/lane_key\n" >> "$HOME/.ssh/config"
 '
 yard "$first" init --yes
-clone=/home/dev/.local/share/subyard-user-skills/lane-skills
+clone=/home/dev/.local/share/subyard-user-skills/home/dev/lane-skills
 for harness in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do
   [ "$(as_dev "$first" readlink "/home/dev/$harness/lane-skill")" = "$clone/skills/lane-skill" ] \
     || die "link $harness is missing after retry"
 done
 yard "$first" init --yes
 [ "$(ready "$first")" = true ] || die 'the profile is not ready after retry'
-printf 'ok: user-skills selection, unavailable source warning, retry and links\n'
+
+printf 'user-skills_e2e_stage=disable\n'
+yard "$first" profile disable user-skills --yes
+for harness in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do
+  ! as_dev "$first" test -L "/home/dev/$harness/lane-skill" || die "disable kept link $harness"
+done
+as_dev "$first" test -f "$clone/skills/lane-skill/SKILL.md" || die 'disable removed the clone'
+printf 'ok: user-skills selection, unavailable source warning, retry, links and disable\n'

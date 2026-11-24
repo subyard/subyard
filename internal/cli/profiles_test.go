@@ -315,6 +315,31 @@ func TestScopedProfileStoppedAndOverrideRejectBeforeWrite(t *testing.T) {
 	}
 }
 
+// An external source that apply could not fetch stays drift for status but passes the post-apply check.
+type profilePostApplyRuntime struct{ profileRuntimeSelection }
+
+func (profilePostApplyRuntime) ProfileServiceConverged(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (runtime profilePostApplyRuntime) ProfileServicePostApplyConverged(ctx context.Context, name string) (bool, error) {
+	return runtime.profileRuntimeSelection.ProfileServiceConverged(ctx, name)
+}
+
+func TestScopedProfileEnableUsesPostApplyCheck(t *testing.T) {
+	cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+	cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime {
+		return profilePostApplyRuntime{profileRuntimeSelection{fixture, true}}
+	}
+	prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 || strings.Join(fixture.applied, " ") != "fixture" {
+		t.Fatalf("enable=%d applied=%v %s", code, fixture.applied, output)
+	}
+}
+
 func TestScopedProfileFailureRetainsSelectionAndRetryRepairs(t *testing.T) {
 	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 	runtime.fail = true

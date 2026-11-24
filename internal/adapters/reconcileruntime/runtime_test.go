@@ -127,7 +127,7 @@ func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := filepath.Join(root, "events")
-	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s:%s\\n' \"$1\" \"$2\" \"$SUBYARD_PROFILE_DIAGNOSTICS\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1 reason=unit-inactive' >&2\nexit 1\n"), 0o700)
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s:%s%s\\n' \"$1\" \"$2\" \"$SUBYARD_PROFILE_DIAGNOSTICS\" \"$SUBYARD_PROFILE_POST_APPLY\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1 reason=unit-inactive' >&2\nexit 1\n"), 0o700)
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}}
 	observation, err := runtime.ProfileServiceObservation(context.Background(), "sample")
 	data, readErr := os.ReadFile(events)
@@ -137,6 +137,10 @@ func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
 	converged, err := runtime.ProfileServiceConverged(context.Background(), "sample")
 	if err != nil || converged {
 		t.Fatalf("scoped convergence lost drift: %t %v", converged, err)
+	}
+	converged, err = runtime.ProfileServicePostApplyConverged(context.Background(), "sample")
+	if data, _ = os.ReadFile(events); err != nil || converged || !strings.HasSuffix(string(data), "--check:sample:1\n--check:sample:11\n") {
+		t.Fatalf("scoped post-apply check: %t %v %q", converged, err, data)
 	}
 }
 
