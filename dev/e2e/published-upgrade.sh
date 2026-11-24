@@ -60,11 +60,15 @@ configure_published_agents() {
     "$OPERATOR_HOME/.config/subyard/config.env"
   operator_env grep -Fxq "CODING_TOOL_INTEGRATIONS='$PUBLISHED_AGENTS'" \
     "$OPERATOR_HOME/.config/subyard/config.env" || die 'published agent selection was not configured'
+  if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+    # Use the fixed published provisioner to create the retained no-prompt state.
+    operator_env sh -c 'printf "%s\n" DEV_SUDO=yes >> "$1"' _ "$OPERATOR_HOME/.config/subyard/config.env"
+  fi
 }
 
 # Published init renders the config variant for its active approval prompts. The fixture
-# sets neither CODING_TOOL_GIT_APPROVAL nor DEV_SUDO, so a release that declares variants
-# applies its defaults: Git prompts off, sudo prompts on. Older releases declare none.
+# leaves Git approval unset. Sudo also uses the published default except for the
+# 0.31.0 retained-default scenario, which starts with a grant and no prompts.
 published_agent_config_source() { # runtime agent source: prints the source published init renders
   operator_env python3 - "$1/config/agents/$2/integration.json" "$3" \
     "$OPERATOR_HOME/.config/subyard/config.env" <<'PY'
@@ -290,6 +294,27 @@ migrate_retained_git_settings() {
   ok 'candidate sync migrated retained schema-1 settings without changing yard identity, power or data'
 }
 
+prepare_retained_codex_sudo_default() {
+  guest python3 -c 'import pathlib,tomllib
+policy=tomllib.loads(pathlib.Path("/etc/codex/requirements.toml").read_text())
+assert "rules" not in policy and "hooks" not in policy
+for name in ("49-subyard-approval-hook.toml", "50-subyard-git-approval.rules.inc", "51-subyard-sudo-approval.rules.inc"):
+    path=pathlib.Path("/etc/codex")/name
+    assert not path.exists() and not path.is_symlink()'
+  guest codex-policy-check >/dev/null || die 'published no-prompt Codex policy is not ready'
+  guest runuser -u dev -- sudo -n true || die 'published no-prompt installation has no passwordless sudo grant'
+  # Explicit yes is an operator preference that activation must preserve. Reopen
+  # the historical default instead: no authored setting and no retained field
+  # for the then-absent setting, while leaving the valid no-prompt guest intact.
+  operator_env sed -i '/^DEV_SUDO=yes$/d' "$OPERATOR_HOME/.config/subyard/config.env"
+  guest python3 -c 'import json,pathlib
+path=pathlib.Path("/var/lib/subyard/integrations/inventory.json")
+value=json.loads(path.read_text())
+assert value["applied_settings"].pop("DEV_SUDO") == "yes"
+path.write_text(json.dumps(value)+"\n")'
+  ok 'synthetic retained default: running Codex has no sudo prompts and passwordless sudo works'
+}
+
 verify_combined_codex_policy_migration() {
   # Reopen the combined layout after the supported published release hands off
   # to the candidate. Its ordinary init must split the owned policy.
@@ -384,6 +409,9 @@ OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/cur
 write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
 assert_published_agent_configs
 ok 'published runtime created a running yard'
+if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+  prepare_retained_codex_sudo_default
+fi
 prepare_retained_git_settings
 
 if [ "$PUBLISHED_MODE" != direct ]; then
@@ -413,6 +441,14 @@ case " $PUBLISHED_AGENTS " in *" claude "*)
   ;;
 esac
 if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then
+  operator_yard config show DEV_SUDO | grep -Fx 'effective: prompt' >/dev/null \
+    || die 'candidate does not default DEV_SUDO to prompt'
+  guest grep -Fq '{ token = "sudo" }' /etc/codex/51-subyard-sudo-approval.rules.inc \
+    && guest codex-policy-check >/dev/null \
+    || die 'candidate activation did not install default Codex sudo prompts'
+  ok 'candidate activation installed default Codex sudo prompts before ordinary init'
+  guest runuser -u dev -- sudo -n true || die 'candidate activation removed the existing passwordless sudo grant'
+  ok 'candidate activation preserved the existing passwordless sudo grant'
   verify_combined_codex_policy_migration
   assert_ready
 fi
