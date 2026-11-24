@@ -19,8 +19,9 @@ func TestAdmitDirStates(t *testing.T) {
 	}{
 		{"absent", func(string) {}, 0},
 		{"exact", admitFixtureDir(t, 0o700), 0o700 | fs.ModeDir},
-		{"broader", admitFixtureDir(t, 0o750), 0o750 | fs.ModeDir},
-		{"group only", admitFixtureDir(t, 0o050), 0o050 | fs.ModeDir},
+		{"broader", admitFixtureDir(t, 0o750), 0o700 | fs.ModeDir},
+		{"world writable", admitFixtureDir(t, 0o777), 0o700 | fs.ModeDir},
+		{"group only", admitFixtureDir(t, 0o050), 0o700 | fs.ModeDir},
 		{"narrower", admitFixtureDir(t, 0o500), 0o700 | fs.ModeDir},
 		{"no permissions", admitFixtureDir(t, 0o000), 0o700 | fs.ModeDir},
 		{"narrower setgid", admitFixtureDir(t, 0o500|fs.ModeSetgid), 0o500 | fs.ModeSetgid | fs.ModeDir},
