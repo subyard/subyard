@@ -38,6 +38,24 @@ grep -Fxq 'install-runtime-release: rollback is owned by yard update --rollback'
 
 printf 'ok: runtime installer delegates rollback to ReleaseTransition\n'
 
+# The owner barrier restores its own lock directory, including one its owner
+# cannot read, through a pinned inode; the installer requires exactly 0700.
+locks="/tmp/subyard-owner-locks-$(id -u)"
+for mode in 0300 1755; do
+  [ ! -L "$locks" ] && [ -d "$locks" ] && [ "$(stat -c %u "$locks")" = "$(id -u)" ] || break
+  chmod "$mode" "$locks"
+  set +e
+  SUBYARD_HOME="$TMP/home" ENGINE_CAPTURE="$capture" "$ROOT/scripts/install-runtime-release.sh" \
+    --runtime-root "$runtime_root" --rollback >"$TMP/stdout" 2>"$TMP/stderr"
+  status=$?
+  set -e
+  observed="$(stat -c %a "$locks")"
+  chmod 0700 "$locks"
+  [ "$status" -eq 2 ] && [ "$observed" = 700 ] \
+    || { printf 'install runtime rollback: owner lock directory %s was not repaired (status=%s mode=%s)\n' "$mode" "$status" "$observed" >&2; exit 1; }
+done
+printf 'ok: owner barrier repairs its lock directory mode\n'
+
 # Put a harmless absolute member first, then enough names to exceed the pipe buffer.
 member="$TMP/$(printf '%0100d' 0)"
 touch "$member"

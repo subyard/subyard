@@ -176,6 +176,26 @@ def write(path, text):
             os.unlink(temporary)
 
 
+def repair_state_directory(path):
+    """Give our own state directory mode 0700 through a pinned inode.
+
+    O_PATH pins even a directory its owner cannot read. The skill ships without
+    the shared safefs module; like safefs.repair_mode, a directory keeps its
+    set-ID and sticky bits.
+    """
+    try:
+        fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and mode & 0o777 != 0o700:
+            os.chmod(f'/proc/self/fd/{fd}', mode & 0o7000 | 0o700)
+    finally:
+        os.close(fd)
+
+
 def directory(path, *, create=True):
     if create:
         try:
@@ -183,19 +203,7 @@ def directory(path, *, create=True):
             path.chmod(0o700)
         except FileExistsError:
             pass
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        fd = None
-    if fd is not None:
-        try:
-            info = os.fstat(fd)
-            if info.st_uid == os.getuid() and info.st_mode & 0o077:
-                # The skill ships without the shared safefs module; like
-                # safefs.repair_mode, a directory keeps its set-ID and sticky bits.
-                os.fchmod(fd, stat.S_IMODE(info.st_mode) & ~0o077)
-        finally:
-            os.close(fd)
+    repair_state_directory(path)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise BridgeError('state directories must be owned by you with mode 0700')

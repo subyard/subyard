@@ -62,8 +62,11 @@ try:
  except FileExistsError:pass
  directory_info=directory.lstat()
  if stat.S_ISDIR(directory_info.st_mode) and directory_info.st_uid==uid and stat.S_IMODE(directory_info.st_mode)!=0o700:
-  pinned=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-  try:os.fchmod(pinned,0o700)
+  # O_PATH pins even a directory its owner cannot read; chmod changes that inode.
+  pinned=os.open(directory,os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+  try:
+   info=os.fstat(pinned)
+   if stat.S_ISDIR(info.st_mode) and info.st_uid==uid:os.chmod(f"/proc/self/fd/{pinned}",0o700)
   finally:os.close(pinned)
   directory_info=directory.lstat()
  if not stat.S_ISDIR(directory_info.st_mode) or stat.S_IMODE(directory_info.st_mode)!=0o700 or directory_info.st_uid!=uid:raise ValueError()
