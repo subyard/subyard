@@ -282,19 +282,18 @@ These local contracts complement the complete packaged compatibility gate below.
 acceptance remains a CI result; cross-building does not establish it.
 
 This Linux check needs Python 3 and Go for its empty-instance Incus API fixture.
-It runs checksum-pinned released callers through update and `--check` refusal below v0.28.0,
-requiring the exact hop command and unchanged settings, runtime links and data. Sources before
-v0.11.0 retain staged full-uninstall and separate clean-install coverage. Use
-`--only-source-anchor` or `--only-legacy-retirement` for the corresponding focused check;
-publication requires the complete default invocation. Named `--*-baseline-dir` options reuse
-verified official assets. All mutable fixtures remain under `/tmp`.
+It runs the checksum-pinned v0.28.0 caller through read-only update inspection and
+an update to the packaged candidate, requiring completed transition state and
+unchanged retained settings and data. `--baseline-dir` reuses verified official assets.
+All mutable fixtures remain under `/tmp`; CI caches pinned downloads.
 
-The old-source migration, rollback, original-owner recovery and migration-history process corpora
-are frozen in the v0.28.0 tag. Current Go tests retain V2 journal, checkpoint, frozen projection,
-evidence and recovery readers. The published v0.28.0 direct upgrade, the first-boundary-release
-chains from v0.11.0 and v0.27.0 through the v0.28.1 hop, and the agent-free Periodic E2E upgrade
-from v0.28.1 cover the installed transition to the candidate on disposable VMs.
-The host-free verifier does not claim those physical contracts.
+Published release tests never install versions before v0.28.0. Earlier migration,
+rollback and original-owner process corpora remain frozen in the v0.28.0 tag.
+Current Go tests retain V2 journal, checkpoint, frozen projection, evidence and
+recovery reader contracts, and product compatibility code is unchanged. Published
+v0.28.0 direct upgrade and the agent-free Periodic upgrade from v0.28.1 cover the
+installed transition on disposable VMs. The host-free verifier does not claim those
+physical contracts.
 
 Before preparing fixtures, the verifier compares available `/tmp` bytes and inodes with the
 selected archives' known unpacked lower bound. Unknown downloads, build overhead and total peak

@@ -166,7 +166,7 @@ func TestPeerFixturePersistsGitHubConsumerRoot(t *testing.T) {
 		t.Fatal("peer wrapper setup boundary missing")
 	}
 	cleanupStart := strings.Index(string(source), "remove_peer_ssh_include() {\n")
-	cleanupEnd := strings.Index(string(source), "source_upgrade_project_inventory() {\n")
+	cleanupEnd := strings.Index(string(source), "recover_stale_test_default_pool() {\n")
 	if cleanupStart < 0 || cleanupEnd <= cleanupStart {
 		t.Fatal("peer cleanup boundary missing")
 	}
@@ -308,7 +308,7 @@ func TestPeerYardRestoresAccountSSHConfig(t *testing.T) {
 	for _, boundary := range [][2]string{
 		{"install_peer_wrapper() {\n", "reexec_with_incus_group() {\n"},
 		{"peer_yard_start() {\n", "peer_info() {\n"},
-		{"remove_peer_ssh_include() {\n", "source_upgrade_project_inventory() {\n"},
+		{"remove_peer_ssh_include() {\n", "recover_stale_test_default_pool() {\n"},
 	} {
 		start, end := strings.Index(string(source), boundary[0]), strings.Index(string(source), boundary[1])
 		if start < 0 || end <= start {

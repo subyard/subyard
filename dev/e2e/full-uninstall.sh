@@ -143,11 +143,6 @@ PY_PROCESSES
   operator_env env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -c '. "$1"; command -v foreign-control' _ "$state/shell.rc" | grep -Fx >/dev/null "$state/bin/foreign-control"
   operator_env grep -Fq "Host $foreign" "$home/.ssh/config" || fail 'foreign SSH content removed'
   ! operator_env grep -Eq '^Include subyard(-[^ ]+)?\.config$' "$home/.ssh/config" || fail 'managed SSH Includes remain'
-  if [ -f "$state/legacy-result.log" ]; then
-    sudo -n test -d "$state/legacy-host/backups" || fail 'unproven old host backup namespace was removed'
-    operator_env grep -Fxq 'preserved old host content' "$state/legacy-host/foreign.control" || fail 'unproven old host content changed'
-    ! incus project show "subyard-legacy-$token" >/dev/null 2>&1 || fail 'retired old native project reappeared'
-  fi
   printf 'ok: approved artifacts absent; foreign workload, shared pool, user service, host project, SSH and shell controls preserved\n'
 }
 interrupt_full_removal() {
@@ -235,7 +230,7 @@ case "$mode" in
     sudo -n chmod 0750 "$state"
     sudo -n install -d -o dev -g dev -m 0700 "$state/release"
     sudo -n install -d -o root -g root -m 0755 "$state/host-helper"
-    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network legacy-install.log legacy-context.log legacy-init.log legacy-refusal.log legacy-stage.log legacy-foreign-refusal.log legacy-full.log legacy-retry-preview.log legacy-retry.log legacy-clean-install.log legacy-clean-remove.log legacy-result.log released-install.log released-full.log released-retry-preview.log released-retry.log; do
+    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network released-install.log released-full.log released-retry-preview.log released-retry.log; do
       sudo -n install -o dev -g dev -m 0600 /dev/null "$state/$file"
     done
     incus profile device get default root pool --project default > "$state/baseline-pool"
@@ -256,7 +251,6 @@ case "$mode" in
     sudo -n chown -R "$operator:$operator" "$state/release"
     bundle="$state/release/subyard-$version-linux-amd64.tar.gz"
     sudo -n install -o "$operator" -g "$operator" -m 0755 "$ROOT/scripts/install-runtime-release.sh" "$state/installer.sh"
-    legacy_full_uninstall
     operator_env env SUBYARD_HOME="$state/direct-data" SUBYARD_CONFIG_HOME="$state/direct-config" YARD_RELEASE_CACHE="$state/direct-cache" \
       bash "$state/installer.sh" --runtime-root "$state/direct-runtime" --bundle "$bundle" --checksum "$bundle.sha256" --manifest "$bundle.manifest.json" --provenance "$bundle.provenance.json" >/dev/null
     operator_env env SUBYARD_HOME="$state/direct-data" SUBYARD_CONFIG_HOME="$state/direct-config" YARD_RUNTIME_ROOT="$state/direct-runtime" YARD_RELEASE_CACHE="$state/direct-cache" \

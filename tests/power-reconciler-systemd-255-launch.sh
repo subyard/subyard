@@ -127,11 +127,11 @@ case "$verb" in
       *' systemd-analyze --version '*)
         printf 'systemd 255 (255.4-1ubuntu8)\n'
         ;;
-      *' systemd-analyze verify '*v080*)
+      *' systemd-analyze verify '*incompatible*)
         printf "RestartForceExitStatus= set, which isn't allowed for Type=oneshot services\n" >&2
         exit 1
         ;;
-      *' systemctl show '*v080*' --property=LoadState --value '*)
+      *' systemctl show '*incompatible*' --property=LoadState --value '*)
         printf 'bad-setting\n'
         ;;
       *' systemctl show '*candidate*' --property=LoadState --value '*)

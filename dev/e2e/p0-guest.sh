@@ -1506,142 +1506,6 @@ peer_clean() {
   clean_tree "$PEER_ROOT" "$MARKER"
 }
 
-source_upgrade_project_inventory() {
-  local query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}" inventory rc
-  [[ "$query_timeout" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$query_timeout" -le 120 ] \
-    || die 'Incus query timeout is invalid'
-  set +e
-  inventory="$(timeout --foreground "$query_timeout" \
-    incus project list --format csv -c n 2>/dev/null)"
-  rc=$?
-  set -e
-  case "$rc" in
-    0) printf '%s\n' "$inventory" ;;
-    124|137) die "Incus project inventory exceeded ${query_timeout}s" ;;
-    *) return 0 ;;
-  esac
-}
-
-source_upgrade_project_marker() {
-  local project="$1" query_timeout="${P0_E2E_INCUS_QUERY_TIMEOUT:-30}" marker rc
-  set +e
-  marker="$(timeout --foreground "$query_timeout" \
-    incus project get "$project" user.p0-source 2>/dev/null)"
-  rc=$?
-  set -e
-  case "$rc" in
-    0) printf '%s\n' "$marker" ;;
-    124|137) die "Incus source marker query exceeded ${query_timeout}s for $project" ;;
-    *) die "cannot inspect the source-upgrade marker on $project" ;;
-  esac
-}
-
-source_upgrade_shared_root_tokens() {
-  local root token marker nullglob_was_set=0
-  local -a roots=()
-  shopt -q nullglob && nullglob_was_set=1
-  shopt -s nullglob
-  roots=(/var/tmp/subyard-p0-source-*)
-  [ "$nullglob_was_set" = 1 ] || shopt -u nullglob
-  for root in "${roots[@]}"; do
-    token="${root##*/subyard-p0-source-}"
-    [[ "$token" =~ ^[0-9]+$ ]] \
-      || die "refusing malformed durable source-upgrade root $root"
-    [ -d "$root" ] && [ ! -L "$root" ] \
-      || die "refusing unsafe durable source-upgrade root $root"
-    marker="$(cat "$root/.subyard-p0-marker" 2>/dev/null)"
-    [ "$marker" = "subyard-p0-source-$token" ] \
-      || die "refusing unmarked durable source-upgrade root $root"
-    printf '%s\n' "$token"
-  done
-}
-
-source_upgrade_process_matches() {
-  local pattern="$1" query_timeout="${P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS:-10}" rc
-  [[ "$query_timeout" =~ ^[1-9][0-9]?$ ]] && [ "$query_timeout" -le 60 ] \
-    || die 'source-upgrade recovery query timeout must be an integer from 1 through 60 seconds'
-  if timeout --foreground "$query_timeout" pgrep -f -- "$pattern" >/dev/null 2>&1; then
-    return 0
-  else
-    rc=$?
-  fi
-  case "$rc" in
-    1) return 1 ;;
-    *) return 2 ;;
-  esac
-}
-
-source_upgrade_fixture_active() {
-  local token="$1" pattern rc
-  local patterns=(
-    "p0-source-upgrade[.]sh (prepare|resume|finish|clean) $token([[:space:]]|$)"
-    "$HOME/[.]cache/subyard-p0-$token/source-upgrade(/|[[:space:]]|$)"
-    "/home/subyardp0$token(/|[[:space:]]|$)"
-    "/var/tmp/subyard-p0-source-$token(/|[[:space:]]|$)"
-  )
-  [[ "$token" =~ ^[0-9]+$ ]] || return 2
-  for pattern in "${patterns[@]}"; do
-    if source_upgrade_process_matches "$pattern"; then
-      return 0
-    else
-      rc=$?
-    fi
-    [ "$rc" = 1 ] || return 2
-  done
-  return 1
-}
-
-p0_source_fixture_cleanup_token() {
-  local token="$1" cleanup_timeout="${P0_SOURCE_RECOVERY_TIMEOUT_SECONDS:-900}"
-  local kill_after="${P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS:-10}"
-  [[ "$token" =~ ^[0-9]+$ ]] || die 'source-upgrade recovery token is invalid'
-  [[ "$cleanup_timeout" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$cleanup_timeout" -le 1800 ] \
-    || die 'source-upgrade recovery timeout must be an integer from 1 through 1800 seconds'
-  [[ "$kill_after" =~ ^[1-9][0-9]?$ ]] && [ "$kill_after" -le 60 ] \
-    || die 'source-upgrade recovery kill grace must be an integer from 1 through 60 seconds'
-  timeout --signal=TERM --kill-after="$kill_after" "$cleanup_timeout" \
-    bash "$ROOT/dev/e2e/p0-source-upgrade.sh" clean "$token"
-}
-
-recover_stale_source_upgrade_fixture() {
-  local inventory project marker candidate token='' active_rc
-  command -v incus >/dev/null 2>&1 || return 0
-  inventory="$(source_upgrade_project_inventory)"
-  for project in subyard-e2e-yard subyard-test-yard subyard; do
-    grep -Fxq "$project" <<<"$inventory" || continue
-    marker="$(source_upgrade_project_marker "$project")"
-    [ -n "$marker" ] || continue
-    case "$marker" in
-      subyard-p0-source-*)
-        candidate="${marker#subyard-p0-source-}"
-        [[ "$candidate" =~ ^[0-9]+$ ]] \
-          || die "refusing malformed source-upgrade marker on $project"
-        ;;
-      *) die "refusing foreign source-upgrade marker on $project" ;;
-    esac
-    [ -z "$token" ] || [ "$token" = "$candidate" ] \
-      || die 'refusing source-upgrade projects with conflicting fixture markers'
-    token="$candidate"
-  done
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    [ -z "$token" ] || [ "$token" = "$candidate" ] \
-      || die 'refusing source-upgrade projects with conflicting fixture markers'
-    token="$candidate"
-  done < <(source_upgrade_shared_root_tokens)
-  [ -n "$token" ] || return 0
-  if source_upgrade_fixture_active "$token"; then
-    die "source-upgrade fixture still has an active process: subyard-p0-source-$token"
-  else
-    active_rc=$?
-  fi
-  [ "$active_rc" = 1 ] \
-    || die "cannot determine whether source-upgrade fixture is active: subyard-p0-source-$token"
-  printf '  [ .. ] VM%s: recovering marker-owned stale source-upgrade fixture %s\n' \
-    "$SUBYARD_E2E_VM" "subyard-p0-source-$token"
-  p0_source_fixture_cleanup_token "$token"
-}
-
 recover_stale_test_default_pool() {
   local source state status used_by used_by_entries rc project
   local stale_root='' marker='' expected_marker='' markerless_registration=''
@@ -1799,7 +1663,6 @@ capacity_preflight() {
       P0_E2E_INCUS_QUERY_TIMEOUT,P0_SOURCE_RECOVERY_QUERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_TIMEOUT_SECONDS,P0_SOURCE_RECOVERY_KILL_AFTER_SECONDS,P0_REAL_INCUS_COMMAND_TIMEOUT,P0_REAL_INCUS_OBSERVE_TIMEOUT,P0_REAL_INCUS_CLEANUP_WAIT_SECONDS,P0_REAL_INCUS_CLEANUP_POLL_SECONDS,P0_REAL_INCUS_DELETE_RETRY_SECONDS \
       "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
   fi
-  recover_stale_source_upgrade_fixture
   recover_stale_real_incus_fixture
   recover_stale_test_default_pool
   p0_capacity_preflight
@@ -1905,7 +1768,7 @@ capacity_verify_cleanup() {
     "/tmp/subyard-p0-go-cache-$TOKEN" \
     "/tmp/subyard-p0-source-$TOKEN.tar.gz" \
     "/var/tmp/subyard-p0-source-release-$TOKEN" \
-    "/var/tmp/subyard-p0-v0111-$TOKEN" \
+    "/var/tmp/subyard-p0-newer-release-$TOKEN" \
     "/var/tmp/subyard-p0-power-systemd-$TOKEN"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] \
       || die "legacy or transient P0 state remains after cleanup: $path"
@@ -1953,10 +1816,6 @@ capacity_verify_cleanup() {
         "$(incus storage get default source --project default)" incus-default-pool
     fi
   fi
-  ! id "subyardp0$TOKEN" >/dev/null 2>&1 \
-    || die "source-upgrade fixture user remains after cleanup: subyardp0$TOKEN"
-  [ ! -e "/etc/sudoers.d/subyard-p0-source-$TOKEN" ] \
-    || die 'source-upgrade sudoers fixture remains after cleanup'
   ! id "subyardpower$TOKEN" >/dev/null 2>&1 \
     || die "power-systemd fixture user remains after cleanup: subyardpower$TOKEN"
   [ ! -e "/etc/sudoers.d/subyard-p0-power-systemd-$TOKEN" ] \

@@ -1066,8 +1066,13 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	runtime.Profiles = []profile.Definition{}
 	incus.ExecSteps = []testkit.IncusExecStep{{}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing SSH agent environment")
-	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {Result: ports.InstanceExecResult{ExitCode: 1}}}
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}}}
 	assertStage(t, runtime, "ssh", false, "guest missing ClientAlive policy")
+	transport := errors.New("keepalive probe transport failure")
+	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: transport}}
+	if converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageSSH); converged || !errors.Is(err, transport) {
+		t.Fatalf("keepalive transport failure: converged=%v err=%v", converged, err)
+	}
 	incus.ExecSteps = []testkit.IncusExecStep{{}, {}, {}}
 	assertStage(t, runtime, "ssh", true, "guest authorizes canonical public key")
 	keepaliveProbe := incus.ExecCalls[len(incus.ExecCalls)-1].Request

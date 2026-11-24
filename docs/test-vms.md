@@ -770,10 +770,8 @@ The owner fixture uses explicitly synthetic, supported-version bundles built fro
 current frozen source and its ordinary V2 registry. It checks inactive broker preservation,
 active helper replacement and rollback, then creates a fresh current-owned `test-yard`
 through public update and init while retaining protected history. These bundles do not
-represent authentic historical releases. Actual retired-source refusal, staged full uninstall
-and separate clean installation belong to `dev/verify-release-upgrades.py --only-legacy-retirement`
-and the ordinary release compatibility check; native deletion belongs to `full-uninstall`.
-The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent historical contract.
+represent authentic historical releases. Published-release fixtures start at v0.28.0. Native deletion and v0.30.0 checkpoint
+resume belong to `full-uninstall`; older product recovery readers retain host-free contracts.
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
@@ -789,12 +787,11 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `newer-release` | VM1; published v0.31.0 direct pin with the staged candidate's migration registry, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
-| `source-upgrade` | VM1 when targeted; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | optional Periodic-only `p0:source-upgrade`; runnable on demand, outside full P0 and release acceptance |
-| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published-anchor upgrade, refused anchor rollback and a candidate-built compatible rollback/roll-forward fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned synthetic incompatible-unit parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published-anchor upgrade, refused anchor rollback and a candidate-built compatible rollback/roll-forward fixture; two boot checks with bounded power reconciliation: the desired-running yard is restored after the first and the desired-stopped yard stays stopped after the second | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full; release acceptance runs it as `vm:p0-legacy-continuation` |
-| `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.28.1 hop; one container and two bounded VMs, one weighted | VM yards left pending by guest preflight refusals through the hop, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
-| `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
+| `yard-maintenance` | VM1, frozen candidate and pinned published 0.28.0 → 0.28.1 hop; one container and two bounded VMs, one weighted | Explicit synthetic pending-marker/foreign-policy drift after the supported hop on anchor-created VM yards, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
+| `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, config apply/status and a configured guest file hash, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, shared published anchor, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton retained-data/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke and full both cover fresh init/projects/RPC, offline projects and credentials |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -804,19 +801,12 @@ The installed-owner release contract also creates a new named yard without a pro
 checks protected empty selections, a distinct SSH port, retained `/srv` data through a
 controlled init failure and ordinary retry, real SSH access, and unchanged neighboring yards.
 
-The owner chain recovers one authentic v0.11.1 history through the checksum-pinned official
-v0.11.2 bridge. This preserves the closed recovery policy and its historical metadata writers.
-The completed bridge then
-upgrades through the public installer to the unmodified frozen current candidate. The fixture
-records the bridge and current runtime hashes separately and verifies current readiness,
-materialized configuration and retained migration history. It does not interrupt the published
-bridge: published releases before v0.21.2 cannot resume an empty journal staging file left by a kill
-inside a compare-and-swap, which is not a supported state. The current reader's handling of that
-file is covered by the `journal-zero` case in `internal/releasetransition/pending_recovery_test.go`.
 Pre-anchor migration and original-owner recovery acceptance is frozen in the v0.28.0 tag.
-Current Go contracts retain journal, checkpoint and projection reader coverage. This includes the
-refused guest disk-/tmp parent: the anchor completes that policy for the yards these lanes create,
-so its retry is covered by the registered disk-/tmp Go tests, not a VM lane.
+Current Go contracts retain journal, checkpoint and projection reader coverage.
+The yard-maintenance lane creates yards with v0.28.0, whose init completes disk-/tmp
+policy. After the supported v0.28.1 hop, it explicitly reopens the two fixture VM markers and replaces their owned masks
+with foreign policy to exercise pending-policy restart, refusal and retry on supported sources.
+This drift is synthetic and does not claim historical producer coverage.
 The newer-release fixture shares marker-owned runtime and cleanup helpers. It binds valid
 power coordination state before preparing its isolated history; busy or unsafe coordination
 state, or a changed bound generation, refuses without deleting barriers. Producer cleanup
@@ -868,20 +858,19 @@ dev/e2e/disabled-components-release.sh --slot "$slot"
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
 fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0
 with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1 hop has no release
-check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
+check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free.
+That hop lane also seeds explicitly synthetic retained schema-1 Git settings, verifies
+that candidate update preserves them, then migrates them with `config sync` without
+changing the running yard identity, power intent or retained data. A later
 previous release distinct from both remains a direct baseline. When the baseline ships the
 candidate's exact registry bytes, the lane also rolls back to it, checks Ready and unchanged
 migration history, and updates to the candidate again. An owning profile lane can pass a
 `config/profiles/PROFILE/tests/e2e/*.sh` scenario as the third argument; the lane sources it on
 the candidate before the rollback, and requires the rollback target.
-Host-free `dev/verify-release-upgrades.py --only-source-anchor` checks refusal at
-v0.11.0, v0.17.3 and v0.27.0, including update and `--check`, the exact hop command,
-unchanged protected state and rejection of Incus mutations; these have no VM catalog entries.
-
-The second argument is an agent selection for direct rows, or `refusal`/`chain` for refusal rows.
-The first boundary release includes chains from v0.11.0 and v0.27.0: refusal, explicit published
-v0.28.1 hop update and Ready, then plain update to the frozen candidate and Ready. These two catalog
-entries are temporary first-boundary-release acceptance. Each scenario gets a fresh lease.
+Host-free `dev/verify-release-upgrades.py` checks the actual v0.28.0 caller's read-only
+inspection and update to the candidate, including completion and retained settings/data.
+The second argument selects agents for direct upgrade rows. No active lane installs
+published releases before v0.28.0.
 
 ```sh
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
@@ -1319,7 +1308,6 @@ dev/e2e/p0-acceptance.sh --list-lanes
 dev/e2e/p0-acceptance.sh --slot "$slot"
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane full
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane peer
-dev/e2e/p0-acceptance.sh --slot "$slot" --lane source-upgrade
 SUBYARD_P0_WAIT_SECONDS=1200 \
   dev/e2e/p0-acceptance.sh --slot "$slot" --lane power-systemd
 ```
@@ -1358,9 +1346,9 @@ The cache fill and local launch both emit progress. Their independent positive-i
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
 The full matrix keeps the historical owner, real-Incus contract, release and broker-migration chain on VM1.
-VM2 independently runs nested teardown, container-image preparation, source upgrade, power-systemd and legacy-continuation in that order;
+VM2 independently runs nested teardown, container-image preparation, power-systemd and legacy-continuation in that order;
 with `--split-covered` it runs nested teardown only.
-Independent source-upgrade, power-systemd, legacy-continuation, reboot-verify and release-smoke lanes reconcile Incus and cache
+Independent power-systemd, legacy-continuation, reboot-verify and release-smoke lanes reconcile Incus and cache
 their container image without repeating the real-Incus contract's container/VM launches and Go tests.
 The owner fixture packages its candidate once and reuses those exact assets across its independent
 predecessor installations, active/inactive broker checks and rollback scenarios.
@@ -1652,12 +1640,10 @@ a delayed sink tick longer than one minute, guest reboot and repeated verificati
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane full-uninstall
 ```
 
-Its released-source case installs checksum-pinned actual v0.10.0, lets that runtime create a yard,
-refuses upgrade without changing protected config or links, stages current cleanup tooling without
-activation, refuses an unrelated project profile, and interrupts full removal at config deletion.
-A fresh retained recovery process finishes the same plan; a separate clean installation does not
-reuse old configuration. Unproven legacy host namespaces and shared infrastructure remain explicitly
-preserved. The same lane retains its modern ownership, foreign-control and reboot checks.
+Its released checkpoint case installs checksum-pinned v0.30.0 and interrupts full removal
+at config deletion. The current candidate resumes that release-written checkpoint with its
+retained runtime. The lane also retains current ownership, foreign-control and reboot checks;
+it installs no published source older than v0.28.0.
 
 Its marker-owned fixture runs lifecycle commands as an ordinary isolated owner, with root helpers
 confined to the leased VM. It includes direct/custom installer-only and bootstrap-only cases,

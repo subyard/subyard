@@ -146,8 +146,7 @@ install_candidate() {
   jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json"
 }
 
-# Through the public installer, like an operator's install. The published 0.25.5 has no
-# `yard service`, so the pool comes from the candidate itself.
+# Install the candidate through its public installer before creating the test-vms pool.
 install_runtime() {
   local release="$WORKSPACE/.subyard-acceptance/release" version
   version="$(jq -er .version "$WORKSPACE/.subyard-acceptance/candidate.json")"

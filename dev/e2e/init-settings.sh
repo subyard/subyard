@@ -195,7 +195,10 @@ if ! yard config status > "$STATE/config-converged.log" 2>&1 \
   cat "$STATE/config-converged.log" >&2
   printf 'init-settings: config apply did not converge the live yard\n' >&2; exit 1
 fi
-printf 'PASS: installed config apply completes under the owner barrier and converges live drift\n'
+host_hash="$(sha256sum "$STATE/claude.json" | cut -d' ' -f1)"
+guest_hash="$(guest sha256sum /home/dev/.claude/settings.json | cut -d' ' -f1)"
+[ "$host_hash" = "$guest_hash" ]
+printf 'PASS: installed config apply converges live drift and materializes the configured guest file hash\n'
 # Seed the protected legacy inventory shape, preserving its native ownership.
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
 yard config set AGENT_claude_COMMAND fixture-agent-next --scope yard --yes

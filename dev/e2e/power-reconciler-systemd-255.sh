@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce the published v0.8.0 parser failure and candidate boot on Ubuntu 24.04/systemd 255.
+# Verify an incompatible synthetic unit and candidate boot on Ubuntu 24.04/systemd 255.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -9,9 +9,8 @@ INSTANCE="systemd255-$RUN_ID"
 MARKER="subyard-e2e-systemd255-v1 run=$RUN_ID"
 IMAGE_SOURCE="images:ubuntu/24.04/cloud"
 IMAGE_ALIAS="subyard-e2e-ubuntu-24.04-systemd255-container"
-OLD_TEMPLATE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.8.0.service.in"
 CANDIDATE_TEMPLATE="$ROOT/config/systemd/subyard-power-reconcile.service.in"
-OLD_UNIT="subyard-e2e-power-v080-$RUN_ID.service"
+INCOMPATIBLE_UNIT="subyard-e2e-power-incompatible-$RUN_ID.service"
 CANDIDATE_UNIT="subyard-e2e-power-candidate-$RUN_ID.service"
 INSTALL_UNIT="subyard-e2e-power-install-$RUN_ID.service"
 INSTALL_UNIT_PATH="/etc/systemd/system/$INSTALL_UNIT"
@@ -41,7 +40,7 @@ for command in incus sed sudo tar jq sha256sum; do
 done
 INCUS_BINARY="$(command -v incus)"
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
-[ -r "$OLD_TEMPLATE" ] && [ -r "$CANDIDATE_TEMPLATE" ] \
+[ -r "$CANDIDATE_TEMPLATE" ] \
   || die 'power reconciler unit templates are unavailable'
 [[ "$INCUS_COMMAND_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
   || die 'SUBYARD_SYSTEMD255_INCUS_TIMEOUT_SECONDS must be a positive integer'
@@ -241,12 +240,12 @@ version="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
 [ "$version" = 255 ] || die "Ubuntu 24.04 image has systemd $version, want 255"
 
 TEMPORARY="$(mktemp -d "/tmp/subyard-e2e-systemd255.$RUN_ID.XXXXXX")"
-sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$OLD_TEMPLATE" \
-  > "$TEMPORARY/$OLD_UNIT"
 sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$CANDIDATE_TEMPLATE" \
   > "$TEMPORARY/$CANDIDATE_UNIT"
-sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$OLD_TEMPLATE" \
-  > "$TEMPORARY/$INSTALL_UNIT"
+# Reproduce the forbidden Type/RestartForceExitStatus combination without a retired release.
+sed 's/^Type=exec$/Type=oneshot/' "$TEMPORARY/$CANDIDATE_UNIT" \
+  > "$TEMPORARY/$INCOMPATIBLE_UNIT"
+cp "$TEMPORARY/$INCOMPATIBLE_UNIT" "$TEMPORARY/$INSTALL_UNIT"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
   candidate_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
   runtime_file="$(jq -er '.runtime_file' "$ROOT/.subyard-acceptance/candidate.json")"
@@ -276,8 +275,8 @@ case "\$#:\${1-}:\${2-}" in
   *) exit 2 ;;
 esac
 FIXTURE_ENGINE
-bounded_incus file push "$TEMPORARY/$OLD_UNIT" \
-  "$INSTANCE/run/systemd/system/$OLD_UNIT" --project "$PROJECT" >/dev/null
+bounded_incus file push "$TEMPORARY/$INCOMPATIBLE_UNIT" \
+  "$INSTANCE/run/systemd/system/$INCOMPATIBLE_UNIT" --project "$PROJECT" >/dev/null
 bounded_incus file push "$TEMPORARY/$CANDIDATE_UNIT" \
   "$INSTANCE/run/systemd/system/$CANDIDATE_UNIT" --project "$PROJECT" >/dev/null
 bounded_incus file push "$TEMPORARY/$INSTALL_UNIT" \
@@ -312,13 +311,13 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
 
 set +e
 diagnostics="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
-  systemd-analyze verify "/run/systemd/system/$OLD_UNIT" 2>&1)"
+  systemd-analyze verify "/run/systemd/system/$INCOMPATIBLE_UNIT" 2>&1)"
 verify_rc=$?
 set -e
-[ "$verify_rc" -ne 0 ] || die 'systemd 255 unexpectedly verified the published v0.8.0 unit'
+[ "$verify_rc" -ne 0 ] || die 'systemd 255 unexpectedly verified the synthetic oneshot unit'
 grep -Fq "RestartForceExitStatus= set, which isn't allowed for Type=oneshot services" \
   <<<"$diagnostics" \
-  || die 'systemd 255 omitted the expected published v0.8.0 parser diagnostic'
+  || die 'systemd 255 omitted the expected synthetic oneshot parser diagnostic'
 bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemd-analyze verify "/run/systemd/system/$CANDIDATE_UNIT"
 
@@ -329,8 +328,8 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl is-enabled --quiet "$INSTALL_UNIT" \
   || die 'systemd 255 production-installer fixture is not enabled before upgrade'
 [ "$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
-  systemctl show "$OLD_UNIT" --property=LoadState --value)" = bad-setting ] \
-  || die 'systemd 255 did not reproduce published v0.8.0 LoadState=bad-setting'
+  systemctl show "$INCOMPATIBLE_UNIT" --property=LoadState --value)" = bad-setting ] \
+  || die 'systemd 255 did not reproduce synthetic oneshot LoadState=bad-setting'
 [ "$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl show "$CANDIDATE_UNIT" --property=LoadState --value)" = loaded ] \
   || die 'systemd 255 did not load the candidate unit'
@@ -415,4 +414,4 @@ grep -Fxq 'LoadState=loaded' <<<"$manager_state" \
   && [[ "$started" =~ ^[1-9][0-9]*$ ]] \
   || die "systemd 255 candidate did not reach current-boot terminal success: ${manager_state//$'\n'/, }"
 
-printf 'ok: Ubuntu 24.04/systemd 255 rejects published v0.8.0 and starts the persistent candidate after restart\n'
+printf 'ok: Ubuntu 24.04/systemd 255 rejects synthetic oneshot and starts the persistent candidate after restart\n'
