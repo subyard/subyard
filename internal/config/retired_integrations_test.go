@@ -51,7 +51,8 @@ func TestRemovedIntegrationSettingsRemainReadable(t *testing.T) {
 					t.Fatalf("retired assignments=%#v", retired)
 				}
 				for _, assignment := range retired {
-					if !strings.HasPrefix(assignment.Repair(), "remove line ") || assignment.Path != path || strings.Contains(assignment.String(), "retained") || strings.Contains(assignment.String(), "24318") {
+					diagnostic := strings.ReplaceAll(assignment.String(), path, "")
+					if !strings.HasPrefix(assignment.Repair(), "remove line ") || assignment.Path != path || strings.Contains(diagnostic, "retained") || strings.Contains(diagnostic, "24318") {
 						t.Fatalf("retired assignment diagnostic=%#v %s", assignment, assignment)
 					}
 				}
