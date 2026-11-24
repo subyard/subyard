@@ -56,7 +56,7 @@ ssh_transport_identity_prepare() {
 
   lockfile="$keydir/.identity.lock"
   # Default ACLs can override umask. Create new locks privately and repair
-  # existing locks only after validating the opened descriptor's type and owner.
+  # existing locks only after validating the opened descriptor's type, owner and link count.
   if ! python3 - "$lockfile" "$uid" 2>/dev/null <<'PY_LOCK'
 import os
 import stat
@@ -68,14 +68,14 @@ except FileExistsError:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
 try:
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != int(sys.argv[2]):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != int(sys.argv[2]) or info.st_nlink != 1:
         sys.exit(1)
     os.fchmod(fd, 0o600)
 finally:
     os.close(fd)
 PY_LOCK
   then
-    ssh_transport_identity_error "$lockfile: cannot create or secure an operator-owned regular non-symlink lock"
+    ssh_transport_identity_error "$lockfile: cannot create or secure an operator-owned regular non-symlink lock with one link"
     return 1
   fi
   [ -f "$lockfile" ] && [ ! -L "$lockfile" ] \

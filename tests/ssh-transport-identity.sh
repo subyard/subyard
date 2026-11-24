@@ -145,6 +145,26 @@ assert lock.stat().st_mode == before.st_mode and lock.stat().st_ino == before.st
 assert lock.read_text() == "foreign lock contents"
 PY_OWNER
 
+make_hardlink_lock() {
+  mkdir -m 700 "$1/ssh"
+  printf 'unrelated operator file\n' > "$1/unrelated"
+  chmod 0664 "$1/unrelated"
+  cp "$1/unrelated" "$1/expected"
+  ln "$1/unrelated" "$1/ssh/.identity.lock"
+  stat -c '%d:%i:%a:%h' "$1/unrelated" "$1/ssh/.identity.lock" > "$1/before"
+}
+assert_rejected hardlink-lock make_hardlink_lock
+hardlink_root="$TMP/reject-hardlink-lock"
+stat -c '%d:%i:%a:%h' "$hardlink_root/unrelated" "$hardlink_root/ssh/.identity.lock" > "$hardlink_root/after"
+cmp -s "$hardlink_root/before" "$hardlink_root/after" \
+  || fail 'hardlink lock refusal changed an inode, mode or link count'
+for hardlink_path in "$hardlink_root/unrelated" "$hardlink_root/ssh/.identity.lock"; do
+  cmp -s "$hardlink_root/expected" "$hardlink_path" \
+    || fail "hardlink lock refusal changed contents at $hardlink_path"
+done
+grep -Fq "$hardlink_root/ssh/.identity.lock" "$TMP/hardlink-lock.err" \
+  || fail 'hardlink lock refusal omitted its path'
+
 make_symlink_lock() {
   mkdir -m 700 "$1/ssh"
   : > "$1/target"
