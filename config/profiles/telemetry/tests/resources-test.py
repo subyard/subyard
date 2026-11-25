@@ -17,7 +17,7 @@ import tempfile
 import threading
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -95,10 +95,11 @@ class Resources(unittest.TestCase):
 
     def test_capture_wait_for_normal_reader_lock_is_bounded(self):
         with patch.object(sources,'intent_lock',side_effect=BlockingIOError), \
-             patch.object(resource_observer.time,'monotonic',side_effect=[0,0,16]), patch.object(resource_observer.time,'sleep') as sleep:
+             patch.object(resource_observer.time,'monotonic',side_effect=[0,0,21,46]), patch.object(resource_observer.time,'sleep') as sleep:
             with self.assertRaisesRegex(resource_observer.Failure,'reader-lock deadline'):
                 resource_observer.capture(self.root,'vm')
-        sleep.assert_called_once_with(.05)
+        # The wait outlasts one production poll's lock hold before failing.
+        self.assertEqual(sleep.call_args_list, [call(.05), call(.05)])
 
     def test_resource_samples_from_sibling_allocation_cannot_satisfy_current_run(self):
         rows = {'allocations':[dict(object_id=name,object_kind='vm',allocated_memory_bytes=123) for name in ('current','sibling')],
