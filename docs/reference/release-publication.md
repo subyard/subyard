@@ -426,8 +426,9 @@ release is verified and returned as success.
 If dispatch/run discovery was lost, the persisted request UUID locates the original run. Discovery
 timeout leaves outcome unknown without a second dispatch; repeat the same command once the run
 becomes visible. Unknown outcome is never PASS. There is no retirement command: only after the
-Actions inventory shows no run titled `Subyard REQUEST_UUID` may the operator remove that exact
-request file (`requests/X.Y.Z-FULL_SHA.json` or the candidate's `publication.json`) and repeat the command.
+Actions inventory shows no run titled `Subyard REQUEST_UUID`, and no tag or release exists for the
+version, may the operator or the agent running the release remove that exact request file
+(`requests/X.Y.Z-FULL_SHA.json` or the candidate's `publication.json`) and repeat the command.
 
 Once a stable ref exists, its version belongs to that candidate even after failure: retry that
 candidate. The tooling never moves/deletes stable refs or replaces foreign/published releases.
