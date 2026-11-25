@@ -298,6 +298,17 @@ def bundle(root, destination, *extra_paths):
                     str(root), str(destination), *extra_paths], cwd=root, env=clean_environment(), check=True)
 
 
+INTERPRETERS = ("bash", "sh", "python3")
+
+
+def starts_with_runner(root, command):
+    """Whether a profile command starts with an executable, and an interpreter with its script file."""
+    runner = root / command[0] if "/" in command[0] else shutil.which(command[0])
+    if not runner or not Path(runner).is_file() or not os.access(runner, os.X_OK):
+        return False
+    return command[0] not in INTERPRETERS or len(command) > 1 and (root / command[1]).is_file()
+
+
 def profile_inventory(root):
     rows = subprocess.check_output(["bash", "dev/test-profiles.sh", "--e2e", "--list"],
                                    cwd=root, text=True, stderr=subprocess.DEVNULL).splitlines()
@@ -320,7 +331,7 @@ def profile_inventory(root):
                 command = document["preflight"]
                 if (not isinstance(command, list) or not command
                     or any(not isinstance(arg, str) or not arg or len(arg) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in arg) for arg in command)
-                    or "--slot" in command):
+                    or "--slot" in command or not starts_with_runner(root, command)):
                     raise ValueError("invalid profile acceptance preflight command")
                 result[name]["preflight"] = command
             ids = set()
