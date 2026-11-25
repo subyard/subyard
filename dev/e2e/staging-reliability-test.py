@@ -518,7 +518,7 @@ incus() {{
       printf 'instance' > "$PROJECT_STATE"
       [[ " $* " = *" -c user.subyard.initialized=false "* ]] || return 42
       printf 'init\\n' >> "$LOG";;
-    exec) printf 'cloud-init\\n' >> "$LOG";;
+    exec) printf 'guest-prerequisites\\n' >> "$LOG";;
     *) return 42;;
   esac
 }}
@@ -547,7 +547,7 @@ export LOG FAILED
         assert metadata.exists() == (failed != 'legacy')
         if metadata.exists():
             assert metadata.read_text() == f'installation=1\noperator_uid={os.getuid()}\ndata_home=/installed\nconfig_home={checkout / "config"}\n'
-        assert calls[:7] == ['compile','02-create-project.sh','cache-after-create','init','03-create-subyard.sh','cloud-init','prerequisites'], calls
+        assert calls[:7] == ['compile','02-create-project.sh','cache-after-create','init','03-create-subyard.sh','guest-prerequisites','prerequisites'], calls
         assert calls[7:] == ({'prerequisites': [], 'backend': ['backend','verify'], 'evidence-baseline': ['backend','verify','evidence-baseline'], 'audit': ['backend','verify','evidence-baseline','audit'], 'legacy': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold'], '': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold']}[failed]), calls
         assert (checkout/'.build/p0-staging-owner').exists() == (failed not in ('', 'legacy')), calls
 print('minimal owner prerequisites precede product backend and host sink')

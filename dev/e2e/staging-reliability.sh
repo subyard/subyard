@@ -873,7 +873,7 @@ owner_adapter() {
 }
 
 prepare_minimal_owner() {
-  local bootstrap="$ROOT/.build/p0-staging-owner" userdata bootstrap_rc=0 recipes="$SUBYARD_HOME/runtime/current" inventory instances
+  local bootstrap="$ROOT/.build/p0-staging-owner" bootstrap_rc=0 recipes="$SUBYARD_HOME/runtime/current" inventory instances
   [ ! -L "$ROOT/.build" ] || die 'owner driver parent is a symlink'
   [ ! -e "$bootstrap" ] && [ ! -L "$bootstrap" ] || die 'owner driver staging already exists'
   install -d -m 0700 "$bootstrap"
@@ -937,27 +937,25 @@ GOSTAGINGOWNER
   instances="$(incus list --project "$PROJECT" --format csv -c n)" || die 'cannot verify empty owner project'
   [ -z "$instances" ] || die 'owner project was not empty'
   MINIMAL_OWNER=1
-  # Cloud-init supplies only SSH/user and updater Git prerequisites.
-  # Incus, QEMU and broker installation remain in the product Backend.Apply.
+  # The product base image has no cloud-init. Install only SSH/user, Python and
+  # updater Git prerequisites; Incus, QEMU and broker installation remain in the
+  # product Backend.Apply.
   [ "$OWNER_DIAGNOSTIC_DEV_UID" = 1001 ] || die 'minimal owner requires its fixed disposable UID'
-  userdata="$(cat <<'CLOUDOWNER'
-#cloud-config
-users:
-  - name: dev
-    uid: 1001
-    lock_passwd: true
-    shell: /bin/bash
-packages:
-  - openssh-server
-  - git
-CLOUDOWNER
-)"
   incus init "$OWNER_BASE_IMAGE" "$INSTANCE" --project "$PROJECT" \
     -c boot.autostart=false -c user.subyard.managed=true -c user.subyard.name="$YARD" \
     -c user.subyard.bridge=incusbr0 -c user.subyard.desired_power=running \
-    -c user.subyard.initialized=false -c cloud-init.user-data="$userdata" >/dev/null
+    -c user.subyard.initialized=false >/dev/null
   owner_adapter 03-create-subyard.sh
-  timeout --signal=TERM --kill-after=10 300 incus exec "$INSTANCE" --project "$PROJECT" -- cloud-init status --wait --long
+  timeout --signal=TERM --kill-after=10 300 incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c '
+    state=$(systemctl is-system-running --wait) || :
+    case "$state" in running|degraded) ;; *) echo "minimal owner did not finish booting: $state" >&2; exit 1 ;; esac
+    id dev >/dev/null 2>&1 || useradd --uid 1001 --create-home --shell /bin/bash dev
+    export DEBIAN_FRONTEND=noninteractive
+    # The yard bridge is IPv4-only, as in product provisioning.
+    printf "Acquire::ForceIPv4 \"true\";\n" > /etc/apt/apt.conf.d/99force-ipv4
+    apt-get -o Acquire::Retries=5 update -qq
+    apt-get -o Acquire::Retries=5 install -y -qq openssh-server git python3
+  '
   outer_exec sh -eu -c '
     test "$(id -u dev)" = 1001
     command -v python3 >/dev/null
