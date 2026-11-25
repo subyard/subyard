@@ -53,6 +53,7 @@ cat > "$TMP/fake-go-bin/go" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$PWD" = "$EXPECTED_BUILD_CWD" ] || exit 71
+[ "$*" = "mod download" ] && exit 0
 while [ $# -gt 0 ]; do
   if [ "$1" = -o ]; then : > "$2"; exit 0; fi
   shift
