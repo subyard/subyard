@@ -2640,7 +2640,8 @@ Host-free fakes cannot prove Incus, kernel, network, mount, systemd, or real SSH
 operator maintains a configurable pool of disposable one- or two-VM allocations. The canonical pool, exact-slot,
 lease, nested-slot, and cleanup contract lives in [Agent E2E VM pool](test-vms.md). The
 release smoke is `dev/e2e/p0-acceptance.sh --slot N`; the full compatibility matrix is
-`dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using
+`dev/e2e/p0-acceptance.sh --slot N --lane full`. Choose checks using the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) check kinds
+and the Subyard parameters in
 [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk). GitHub workflows do not run
 either VM gate. Do not run them on the operator host or in the privileged outer yard.
 
@@ -2773,6 +2774,9 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+  Init's post-apply check passes `SUBYARD_PROFILE_POST_APPLY=1`; a hook may then accept
+  an external source that apply could not fetch and warned about, while its ordinary check
+  schedules the next init's retry.
   Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
   write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
   `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,

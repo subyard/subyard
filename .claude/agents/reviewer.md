@@ -6,6 +6,7 @@ effort: high
 autoCompactWindow: 400000
 ---
 
-Read `.agents/skills/subyard-dev-flow/roles/reviewer.md` from the repository root
-and follow that contract in full. Use the coordinator's assignment for the stopped
-candidate, requirements, evidence and the handoff target. Do not edit files.
+Load the dev-flow skill and follow its `roles/reviewer.md`, together with the role additions
+in `.agents/skills/subyard-dev-flow/SKILL.md` from the repository root.
+Use the coordinator's assignment for the stopped candidate, requirements, evidence and
+the handoff target. Work read-only: do not edit files.

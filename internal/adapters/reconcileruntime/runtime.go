@@ -229,7 +229,7 @@ func (runtime Runtime) profileRuntimesConverged(observations map[string]ports.Ru
 
 func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
 	if stage == ports.ReconcileStageProfileServices {
-		return runtime.observeProfileServices(ctx)
+		return runtime.observeProfileServices(ctx, false)
 	}
 	if stage == ports.ReconcileStageInstance {
 		var diagnostics []string
@@ -370,6 +370,9 @@ func (runtime Runtime) ProvisionBase(ctx context.Context) error {
 
 func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
 	switch stage {
+	case ports.ReconcileStageProfileServices:
+		observation, err := runtime.observeProfileServices(ctx, true)
+		return observation.Converged, err
 	case ports.ReconcileStageNetwork:
 		return runtime.observedPowerScriptConverged(ctx, true, "06-network.sh", "--verify")
 	case ports.ReconcileStageTestVMs:
@@ -2599,13 +2602,18 @@ func (runtime Runtime) runPathEnvironment(
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
-	observation, err := runtime.observeProfileServices(ctx)
+	observation, err := runtime.observeProfileServices(ctx, false)
 	return observation.Converged, err
 }
 
-func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.ReconcileStageObservation, error) {
+// Post-apply checks get SUBYARD_PROFILE_POST_APPLY=1: a hook may accept an external
+// source that apply could not fetch, while its ordinary check retries it on the next init.
+func (runtime Runtime) observeProfileServices(ctx context.Context, postApply bool) (ports.ReconcileStageObservation, error) {
 	ctx = readOnlyProbeContext(ctx)
 	environment := map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}
+	if postApply {
+		environment["SUBYARD_PROFILE_POST_APPLY"] = "1"
+	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return ports.ReconcileStageObservation{}, err
@@ -2661,9 +2669,20 @@ func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string)
 
 // ProfileServiceObservation retains the same bounded check used for convergence.
 func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
+	return runtime.scopedProfileServiceObservation(ctx, name, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"})
+}
+
+// ProfileServicePostApplyConverged is the scoped post-apply check, with the same
+// SUBYARD_PROFILE_POST_APPLY contract as the init post-apply stage check.
+func (runtime Runtime) ProfileServicePostApplyConverged(ctx context.Context, name string) (bool, error) {
+	observation, err := runtime.scopedProfileServiceObservation(ctx, name, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1", "SUBYARD_PROFILE_POST_APPLY": "1"})
+	return observation.Converged, err
+}
+
+func (runtime Runtime) scopedProfileServiceObservation(ctx context.Context, name string, environment map[string]string) (ports.ReconcileStageObservation, error) {
 	ctx = readOnlyProbeContext(ctx)
 	output := &profileRuntimeBoundedBuffer{limit: 256}
-	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
+	err := runtime.runScriptEnvironment(ctx, output, environment, "profile-services.sh", "--check", name)
 	return profileServiceObservation(output.String(), output.exceeded, err)
 }
 

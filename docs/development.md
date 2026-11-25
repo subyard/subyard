@@ -321,7 +321,8 @@ migration epochs, which excludes v0.29.0 and older. Sources from v0.11.0 to belo
 first run `yard update --version 0.28.1`, then plain `yard update`. Earlier sources retain the
 full-uninstall route. Exact unfinished transitions retain their original owner and bindings.
 
-Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+Choose local checks with the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) check kinds and the Subyard parameters in
+[Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 `./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a
 short parser fuzz smoke, the static binary build, and all Bash unit/contract/integration tests. It
 requires the `systemd-analyze` binary for unprivileged unit parsing, but does not require root, a

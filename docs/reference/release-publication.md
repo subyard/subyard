@@ -444,8 +444,8 @@ never substitute current branch HEAD.
 
 ## Agent release workflow
 
-Agents preparing a release apply the
-[development workflow](../../.agents/skills/subyard-dev-flow/SKILL.md) together with these rules.
+Agents preparing a release apply the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) process and the Subyard parameters in
+[Subyard dev-flow](../../.agents/skills/subyard-dev-flow/SKILL.md) together with these rules.
 
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).

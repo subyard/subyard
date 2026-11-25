@@ -103,7 +103,8 @@ before acquiring its nested lease.
 
 ## Running tests
 
-Choose checks using [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
+Choose checks using the [dev-flow](https://github.com/Dmitry-Borodin/dev-flow) check kinds and the Subyard parameters in
+[Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 This guide describes VM access, prerequisites and execution. Normal checks use the current public
 worktree, including uncommitted and untracked public files. Installed-runtime and reboot checks
 package this source and install the resulting candidate. A published release is only an explicit

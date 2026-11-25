@@ -36,6 +36,11 @@ type profileServiceBinder interface {
 	ProfileServiceBinding(context.Context, string) (string, error)
 }
 
+// profileServicePostApplyChecker verifies a scoped apply as the init post-apply check does.
+type profileServicePostApplyChecker interface {
+	ProfileServicePostApplyConverged(context.Context, string) (bool, error)
+}
+
 type profileServiceObserver interface {
 	ProfileServiceObservation(context.Context, string) (ports.ReconcileStageObservation, error)
 }
@@ -545,7 +550,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if runtime != nil {
-			ready, err := runtime.ProfileServiceConverged(ctx, request.id)
+			verify := runtime.ProfileServiceConverged
+			if checker, ok := runtime.(profileServicePostApplyChecker); ok {
+				verify = checker.ProfileServicePostApplyConverged
+			}
+			ready, err := verify(ctx, request.id)
 			if err != nil {
 				return result, err
 			}
