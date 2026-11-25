@@ -296,7 +296,7 @@ reboot_owner() {
       # Start the reconciliation deadline at the first sight of the new boot.
       # A queued unit can keep systemd in "starting" past that deadline.
       if [ "$after" != "$verified_boot" ]; then
-        (verify_boot_result) || { rc=$?; owner_boot_evidence || true; return "$rc"; }
+        (verify_boot_result "${after#BootID=}") || { rc=$?; owner_boot_evidence || true; return "$rc"; }
         verified_boot="$after"
       fi
       case "${state#*$'\n'}:$rc" in
@@ -335,6 +335,7 @@ owner_boot_evidence() {
 }
 
 verify_boot_result() {
+  local boot="${1:?expected boot ID is required}"
   local state started rc command uptime _ now remaining active sub result status
   local policy_deadline=0 local_deadline=0
   # Match P0's 900-second fixture observation policy, anchored to the first
@@ -344,6 +345,8 @@ verify_boot_result() {
   # Match P0's separate, fixed 30-second wait for its first current-boot start.
   local_deadline=$((${uptime%%.*} + 30))
   command="$(quote_ssh_command sh -ceu '
+    printf "BootID="
+    cat /proc/sys/kernel/random/boot_id
     systemctl show subyard-power-reconcile.service \
       --property=LoadState --property=ActiveState --property=SubState \
       --property=Result --property=ExecMainStatus \
@@ -359,6 +362,8 @@ verify_boot_result() {
     remaining=$((local_deadline - now))
     [ "$remaining" -gt 0 ] || die 'boot power reconciliation observation deadline expired'
     [ "$remaining" -le 10 ] || remaining=10
+    # Let ssh's 3-second ConnectTimeout fire first; the next pass reports the deadline.
+    [ "$remaining" -ge 4 ] || remaining=4
     state="$(timeout --foreground --signal=KILL "$remaining" ssh -F "$CLIENT_CONFIG" -T \
       -o ConnectTimeout=3 -o ConnectionAttempts=1 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
       e2e-vm-1 -- "$command" </dev/null)" || rc=$?
@@ -369,6 +374,9 @@ verify_boot_result() {
       sleep 1
       continue
     fi
+    # A retried read must still observe the boot the caller verified.
+    [ "$(sed -n 's/^BootID=//p' <<<"$state")" = "$boot" ] \
+      || die 'owner host rebooted again during boot power reconciliation observation'
     started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$state")"
     uptime="$(sed -n 's/^BootUptimeSeconds=//p' <<<"$state")"
     if [ "$policy_deadline" -eq 0 ] && [ "$started" = 0 ] \

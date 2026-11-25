@@ -113,6 +113,7 @@ exec /usr/bin/timeout 95 sh "$PROBE"
             ('future', ['2000000 success 0 active running 1'], 1, 2),
             ('transport', [running], 1, 2),
             ('transport-transient', [running, done], 1, 0),
+            ('transport-transient-reboot', [running, done], 1, 2),
             ('queued-deadline', ['0 success 0 inactive dead 0'], 10, 2),
             ('network-online-delayed', ['0 success 0 inactive dead 0'], 10, 2),
             ('stalled-clock', ['1000000 success 75 activating auto-restart 1'], 300, 2))
@@ -142,10 +143,15 @@ ssh() {
       printf 'BootID=new-boot\nrunning\n' ;;
     *systemctl*show*)
       [ "$scenario" != transport ] || return 255
-      if [ "$scenario" = transport-transient ] && [ ! -e "$fixture/transport-failed" ]; then
-        : > "$fixture/transport-failed"
-        return 255
-      fi
+      boot=new-boot
+      case "$scenario" in
+        transport-transient*)
+          if [ ! -e "$fixture/transport-failed" ]; then
+            : > "$fixture/transport-failed"
+            return 255
+          fi
+          [ "$scenario" != transport-transient-reboot ] || boot=other-boot ;;
+      esac
       sample=$(cat "$fixture/samples"); sample=$((sample + 1))
       printf '%s\n' "$sample" > "$fixture/samples"
       frame=$(sed -n "${sample}p" "$fixture/frames")
@@ -158,7 +164,7 @@ ssh() {
         fi
       fi
       builtin read -r started result status active sub uptime <<<"$frame"
-      printf '%s\n' LoadState=loaded "ExecMainStartTimestampMonotonic=$started" \
+      printf '%s\n' "BootID=$boot" LoadState=loaded "ExecMainStartTimestampMonotonic=$started" \
         "Result=$result" "ExecMainStatus=$status" "ActiveState=$active" "SubState=$sub" "BootUptimeSeconds=$uptime" ;;
     *) return 92 ;;
   esac
@@ -167,7 +173,7 @@ timeout() {
   while [[ "$1" = --* ]]; do shift; done
   bound=$1; shift
   if [[ "$*" = *systemctl*show* ]]; then
-    [ "$bound" -gt 0 ] && [ "$bound" -le 10 ] || return 95
+    [ "$bound" -ge 4 ] && [ "$bound" -le 10 ] || return 95
   fi
   "$@"
 }
@@ -180,6 +186,8 @@ timeout() {
                     self.assertGreaterEqual(int((directory / 'samples').read_text()), len(frames))
                 if scenario in ('transport', 'queued-deadline', 'network-online-delayed', 'stalled-clock'):
                     self.assertIn(b'deadline', observed.stderr)
+                if scenario == 'transport-transient-reboot':
+                    self.assertIn(b'rebooted again', observed.stderr)
                 if scenario == 'network-online-delayed':
                     self.assertEqual((directory / 'samples').read_text(), '3\n')
 
