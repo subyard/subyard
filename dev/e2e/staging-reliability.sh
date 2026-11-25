@@ -947,8 +947,15 @@ GOSTAGINGOWNER
     -c user.subyard.initialized=false >/dev/null
   owner_adapter 03-create-subyard.sh
   timeout --signal=TERM --kill-after=10 300 incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c '
-    state=$(systemctl is-system-running --wait) || :
-    case "$state" in running|degraded) ;; *) echo "minimal owner did not finish booting: $state" >&2; exit 1 ;; esac
+    # The first exec can precede the system bus; the outer timeout bounds this wait.
+    while :; do
+      state=$(systemctl is-system-running --wait 2>/dev/null) || :
+      case "$state" in
+        running|degraded) break ;;
+        ""|offline|unknown) sleep 1 ;;
+        *) echo "minimal owner did not finish booting: $state" >&2; exit 1 ;;
+      esac
+    done
     id dev >/dev/null 2>&1 || useradd --uid 1001 --create-home --shell /bin/bash dev
     export DEBIAN_FRONTEND=noninteractive
     # The yard bridge is IPv4-only, as in product provisioning.
