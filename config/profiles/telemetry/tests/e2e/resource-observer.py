@@ -112,7 +112,9 @@ def drain_spool(data_dir):
 def capture(data_dir, kind):
     """Merge real held intents, then replay without writing the replay cursor."""
     root = records.private_directory(Path(data_dir)/'sources')
-    deadline = time.monotonic()+15
+    # A production poll holds the reader lock for its 10s budget plus one
+    # in-flight owner fetch, itself bounded at 10s.
+    deadline = time.monotonic()+45
     while True:
         try:
             # Use the ordinary reader lock and production intent merger. An
