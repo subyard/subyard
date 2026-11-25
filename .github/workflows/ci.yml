@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
@@ -55,7 +55,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
-      # cache-poisoning ignore: CI uploads only failure diagnostics; baselines are hash-pinned.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; baselines are hash-pinned.
       - name: Cache pinned released callers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # zizmor: ignore[cache-poisoning] # v6.1.0
         with:
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
