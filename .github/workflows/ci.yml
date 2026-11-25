@@ -10,9 +10,6 @@ on:
 permissions:
   contents: read
 
-# cache-poisoning ignores: zizmor treats release branch pushes as publishing, but this workflow
-# uploads only failure diagnostics. Release preparation disables setup-go caching, and the
-# compatibility job hash-pins the cached baseline binaries.
 jobs:
   native-engine-arm64:
     runs-on: ubuntu-24.04-arm
@@ -21,8 +18,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -44,8 +42,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -56,8 +55,9 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
+      # cache-poisoning ignore: CI uploads only failure diagnostics; baselines are hash-pinned.
       - name: Cache pinned released callers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # zizmor: ignore[cache-poisoning] # v6.1.0
         with:
           path: .build/published-baselines
           key: published-baselines-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dev/verify-release-upgrades.py', '**/published-upgrade-baselines.tsv') }}
@@ -85,8 +85,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -128,8 +129,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -167,8 +169,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only failure diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum

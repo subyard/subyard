@@ -37,7 +37,7 @@ jobs:
       # cache-poisoning ignore: tag/manual runs only test and build; nothing is uploaded or published.
       - name: Set up native owner Go toolchain
         if: runner.os == 'Linux'
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
