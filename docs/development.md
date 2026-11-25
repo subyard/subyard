@@ -131,6 +131,9 @@ keep its implementation and tests in the owning profile. See the
 
 PR conventions live in the [development workflow](../.agents/skills/subyard-dev-flow/SKILL.md#pull-requests).
 `dev/pr-stats.py` prints the PR statistics block; its host-free test is `bash tests/pr-stats.sh`.
+For a behavior-preserving refactor slice, `python3 dev/litdiff.py --base REF` lists the Go string
+literals of non-test `internal/cli` and `internal/application` code whose count changed; its
+host-free test is `bash tests/litdiff.sh`.
 
 Repository settings the workflow expects:
 
