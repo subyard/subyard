@@ -561,6 +561,8 @@ and ordered `lanes` entries containing `id` and runner `arguments`. A lane marke
 `"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
 acceptance neither runs nor requires it. A schema-version-1
 `acceptance-lanes.json` may declare nonempty `lanes`, a host-free `preflight` command array, or both.
+The preflight array starts with an executable runner, run from the source root; an interpreter
+such as `bash` is followed by its script path.
 A preflight-only declaration preserves the unsplit profile acceptance check. Full collector runs
 execute declared preflights after successful local gates and collect results in profile-name order
 before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`

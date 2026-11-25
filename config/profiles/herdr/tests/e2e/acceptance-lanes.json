@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "preflight": ["--preflight"],
+  "preflight": ["bash", "config/profiles/herdr/tests/e2e/acceptance.sh", "--preflight"],
   "lanes": [
     {"id": "lifecycle", "arguments": ["--lane", "lifecycle"]}
   ]

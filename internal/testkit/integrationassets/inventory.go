@@ -3,12 +3,15 @@
 package integrationassets
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -17,12 +20,33 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
+// TrackedFiles lists root's public source files with the release source
+// enumerator. A clean Git checkout yields its tracked files, and a non-Git
+// release snapshot of it yields the same set.
 func TrackedFiles(root string) ([]string, error) {
-	output, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
-	if err != nil {
-		return nil, err
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		return nil, errors.New("cannot locate the source enumerator")
 	}
-	return strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00"), nil
+	enumerator := filepath.Join(filepath.Dir(source), "..", "..", "..", "tests", "helpers", "source-files.sh")
+	output, err := exec.Command("bash", enumerator, root, "--include-client-aliases").Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("list source files under %s: %w: %s", root, err, bytes.TrimSpace(exit.Stderr))
+		}
+		return nil, fmt.Errorf("list source files under %s: %w", root, err)
+	}
+	var files []string
+	for _, path := range strings.Split(string(output), "\x00") {
+		if path != "" {
+			files = append(files, path)
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no source files under %s", root)
+	}
+	return files, nil
 }
 
 // DigestFiles sorts full relative-path records, independently of directory walk
@@ -59,8 +83,8 @@ type Inventory struct {
 	Profiles map[string]profile.RuntimeHook `json:"profiles"`
 }
 
-// Inspect uses a tracked source mirror so untracked metadata cannot influence
-// discovery. The same operation handles a published tag and a dirty checkout.
+// Inspect uses a mirror of the listed sources so other files cannot influence
+// discovery. The same operation handles a published tag, a checkout and a snapshot.
 func Inspect(root string, tracked []string) (Inventory, error) {
 	mirror, err := os.MkdirTemp("/tmp", "subyard-integration-inventory-")
 	if err != nil {
