@@ -45,6 +45,12 @@
         "/etc/codex/50-subyard-git-approval.rules.inc",
         "/etc/codex/51-subyard-sudo-approval.rules.inc"
       ]
+    },
+    {
+      "component": "registry",
+      "throughVersion": "0.31.0",
+      "reason": "The migration registry retires the six 0.28-era migrations; releases through 0.31.0 cannot read registries with dependencies on retired history.",
+      "recovery": "Keep the current release active. To return to 0.31.0 or older, restore a complete pre-upgrade backup into a clean installation of that release."
     }
   ]
 }

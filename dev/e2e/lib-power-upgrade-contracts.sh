@@ -369,7 +369,10 @@ classify_epoch_rollback_refusal() { # <log> <label>
   progress="(Installed version: [^[:space:];]+$nl)?(Inspecting the installed release[.][.][.]$nl)?"
   fields='active=[^[:space:];]+ previous=[^[:space:];]+ target=[^[:space:];]+ transaction=[^[:space:];]+'
   registry_refusal="^${progress}yard: update: release transition operator-action-required: code=rollback-incompatible $fields; $registry_reason(; next: $registry_retry|; $binding_reason; next: $registry_retry; $binding_detail)$"
-  if grep -Fq "$registry_reason" "$1"; then
+  if grep -Eq '(^|[[:space:]])code=rollback-incompatible([[:space:];]|$)' "$1" \
+    && grep -Eq 'declared rollback boundary for registry through |rollback is blocked by a declared release boundary' "$1"; then
+    printf 'evidence: %s refused by the declared registry rollback boundary\n' "$2"
+  elif grep -Fq "$registry_reason" "$1"; then
     log="$(<"$1")"
     if [[ ! "$log" =~ $registry_refusal ]]; then
       cat "$1" >&2

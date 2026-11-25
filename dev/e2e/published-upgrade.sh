@@ -613,15 +613,38 @@ if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
 fi
 ok 'update reached Ready with the same instance and guest data'
 
-# A published release that ships the candidate's exact registry stays its rollback target.
+# A published release that ships the candidate's exact registry stays its rollback target, as
+# does one with a differing registry unless the candidate declares a registry boundary through it.
 runtime="$OPERATOR_HOME/.subyard/runtime"
 registry_relation=0
 operator_env cmp -s "$runtime/$OLD_RELEASE_TARGET/config/release-transition.json" \
   "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" || registry_relation=$?
 # cmp exits 1 for different registries and 2 when either cannot be read.
 [ "$registry_relation" -le 1 ] || die 'cannot compare the published and candidate registries'
-[ -z "$ROLLBACK_SCENARIO" ] || [ "$registry_relation" = 0 ] || die 'the rollback scenario needs a rollback target'
-if [ "$registry_relation" = 0 ]; then
+registry_boundary=
+if [ "$registry_relation" = 1 ]; then
+  # shellcheck disable=SC2016 # jq binds $version itself.
+  registry_boundary="$(operator_env jq -er --arg version "$OLD_VERSION" '
+    def semver: split(".") | map(tonumber);
+    [.boundaries[]? | select(.component == "registry" and (.throughVersion | semver) >= ($version | semver)) | .throughVersion]
+    | first // ""' "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-rollback.json")" \
+    || die 'cannot read the candidate rollback boundaries'
+fi
+[ -z "$ROLLBACK_SCENARIO" ] || [ -z "$registry_boundary" ] || die 'the rollback scenario needs a rollback target'
+if [ -n "$registry_boundary" ]; then
+  info "expecting the candidate registry boundary through v$registry_boundary to refuse rollback to v$OLD_VERSION"
+  status=0
+  operator_yard update --rollback --yes > "$STATE_ROOT/published-rollback.log" 2>&1 || status=$?
+  [ "$status" != 0 ] && { grep -Fq "declared rollback boundary for registry through $registry_boundary" "$STATE_ROOT/published-rollback.log" \
+      || grep -Fq 'rollback is blocked by a declared release boundary' "$STATE_ROOT/published-rollback.log"; } \
+    && grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/published-rollback.log" \
+    && [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
+    && [ "$(operator_env readlink "$runtime/previous")" = "$OLD_RELEASE_TARGET" ] \
+    || { cat "$STATE_ROOT/published-rollback.log" >&2; die "registry boundary did not refuse rollback to v$OLD_VERSION (exit=$status)"; }
+  cat "$STATE_ROOT/published-rollback.log"
+  assert_ready
+  ok "registry boundary refused rollback to v$OLD_VERSION without changing the runtime links"
+else
   if [ -n "$ROLLBACK_SCENARIO" ]; then
     info "running rollback scenario $ROLLBACK_SCENARIO"
     # shellcheck disable=SC1090

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "predecessorRegistryDigest": "aa4007773efe0e9862479442a5cb2eb4f6f528f86b9047502167d03568f1768b",
+  "migrations": [],
+  "profileFormats": [],
+  "registryFeatures": [
+    "retired-prefix-dependencies"
+  ],
+  "boundaries": [
+    {
+      "component": "agents",
+      "throughVersion": "0.30.0",
+      "reason": "Agent configuration, approval policies, hooks and the project dispatcher changed or added since 0.30.0 survive a release rollback.",
+      "recovery": "Stop agent sessions before rollback. After rollback, back up the listed files, remove only Subyard-managed approval hook and policy files, restore the target release's agent configuration and project dispatcher, and run yard init in each affected yard before restarting agents. Preserve operator-owned content.",
+      "sourceDigest": "16d7bf324dec53c2dbb75b027622f476f5402f402c325db202c19683b847be42",
+      "files": [
+        "/etc/claude-code/managed-settings.d/48-subyard-update-lock.json",
+        "/etc/claude-code/managed-settings.d/49-subyard-approval-hook.json",
+        "/etc/claude-code/managed-settings.d/50-subyard-git-approval.json",
+        "/etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json",
+        "/etc/claude-code/subyard-git-approval-hook",
+        "/etc/codex/49-subyard-approval-hook.toml",
+        "/etc/codex/50-subyard-git-approval.rules.inc",
+        "/etc/codex/51-subyard-sudo-approval.rules.inc",
+        "/etc/codex/requirements.toml",
+        "/etc/codex/subyard-git-approval-hook",
+        "/usr/local/bin/claude-policy-check",
+        "/usr/local/bin/codex-policy-check",
+        "/usr/local/libexec/subyard/projects-changed",
+        "~/.codex/config.toml",
+        "~/.config/opencode/opencode.jsonc"
+      ]
+    },
+    {
+      "component": "agents",
+      "throughVersion": "0.31.0",
+      "reason": "Split Claude approval drop-ins remain active after rollback; Codex approval fragments survive but are inert in 0.31.0.",
+      "recovery": "Stop agent sessions before rollback. After rollback, back up and remove only the listed Subyard-managed files in each affected yard, then run yard init before restarting agents. Preserve operator-owned policies and account for custom installation paths.",
+      "sourceDigest": "16d7bf324dec53c2dbb75b027622f476f5402f402c325db202c19683b847be42",
+      "files": [
+        "/etc/claude-code/managed-settings.d/48-subyard-update-lock.json",
+        "/etc/claude-code/managed-settings.d/49-subyard-approval-hook.json",
+        "/etc/claude-code/managed-settings.d/51-subyard-sudo-approval.json",
+        "/etc/codex/49-subyard-approval-hook.toml",
+        "/etc/codex/50-subyard-git-approval.rules.inc",
+        "/etc/codex/51-subyard-sudo-approval.rules.inc"
+      ]
+    }
+  ]
+}
