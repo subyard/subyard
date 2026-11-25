@@ -42,22 +42,15 @@ def git(*arguments):
     return subprocess.run(["git", *arguments], check=True, stdout=subprocess.PIPE).stdout
 
 
+def go_files(listing):
+    return [path for path in listing.decode().split("\0") if path.endswith(".go") and not path.endswith("_test.go")]
+
+
 def counted(paths, read):
     counts = collections.Counter()
     for path in paths:
-        if path.endswith(".go") and not path.endswith("_test.go"):
-            counts.update(literals(read(path).decode(errors="surrogateescape")))
+        counts.update(literals(read(path).decode(errors="surrogateescape")))
     return counts
-
-
-def at_revision(revision, dirs):
-    paths = git("ls-tree", "-r", "-z", "--name-only", revision, "--", *dirs).decode().split("\0")
-    return counted(filter(None, paths), lambda path: git("show", f"{revision}:{path}"))
-
-
-def in_worktree(dirs):
-    paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *dirs).decode().split("\0")
-    return counted((path for path in paths if os.path.isfile(path)), lambda path: Path(path).read_bytes())
 
 
 def shown(token):
@@ -68,20 +61,33 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/master", help="base revision (default: origin/master)")
     parser.add_argument("--head", help="head revision (default: the working tree, tracked and untracked files)")
-    parser.add_argument("dirs", nargs="*", default=DEFAULT_DIRS,
-                        help=f"directories to compare (default: {' '.join(DEFAULT_DIRS)})")
+    parser.add_argument("dirs", nargs="*", help="directories relative to the current directory "
+                        f"(default: {' '.join(DEFAULT_DIRS)} at the repository root)")
     args = parser.parse_args(argv)
-    os.chdir(git("rev-parse", "--show-toplevel").decode().strip())
+    top = git("rev-parse", "--show-toplevel").decode().strip()
+    given = args.dirs or DEFAULT_DIRS
+    dirs = [os.path.relpath(os.path.realpath(path), top) for path in args.dirs] or list(DEFAULT_DIRS)
+    os.chdir(top)
+    refusals = [f"directory {name!r} is outside the repository"
+                for name, path in zip(given, dirs) if path.split(os.sep)[0] == ".."]
     revisions = [args.base] + ([args.head] if args.head else [])
-    unresolved = [revision for revision in revisions
-                  if subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
-                                    stdout=subprocess.DEVNULL).returncode]
-    if unresolved:
-        for revision in unresolved:
-            print(f"litdiff: refused: cannot resolve revision {revision!r}", file=sys.stderr)
+    refusals += [f"cannot resolve revision {revision!r}" for revision in revisions
+                 if subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
+                                   stdout=subprocess.DEVNULL).returncode]
+    if not refusals:
+        base = go_files(git("ls-tree", "-r", "-z", "--name-only", args.base, "--", *dirs))
+        head = go_files(git("ls-tree", "-r", "-z", "--name-only", args.head, "--", *dirs) if args.head else
+                        git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *dirs))
+        if not args.head:
+            head = [path for path in head if os.path.isfile(path)]
+        refusals += [f"no non-test Go files under {name!r}" for name, path in zip(given, dirs)
+                     if not any(path == "." or file.startswith(path + "/") for file in base + head)]
+    if refusals:
+        for reason in refusals:
+            print(f"litdiff: refused: {reason}", file=sys.stderr)
         return 2
-    before = at_revision(args.base, args.dirs)
-    after = at_revision(args.head, args.dirs) if args.head else in_worktree(args.dirs)
+    before = counted(base, lambda path: git("show", f"{args.base}:{path}"))
+    after = counted(head, lambda path: git("show", f"{args.head}:{path}") if args.head else Path(path).read_bytes())
     removed, added = before - after, after - before
     print(f"literals: {before.total()} before, {after.total()} after; "
           f"{removed.total()} removed, {added.total()} added")

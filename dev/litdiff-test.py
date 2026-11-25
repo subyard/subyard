@@ -26,6 +26,7 @@ import (
 )
 
 var imports = "counted" // "comment"
+var url = "https://x" // c
 /* "block
 comment" */
 var r, q = '"', '\\''
@@ -71,7 +72,7 @@ class LitdiffTest(unittest.TestCase):
 
     def test_literals_skip_comments_runes_and_imports(self):
         self.assertEqual(list(tool.literals(SOURCE)),
-                         ['"counted"', '"escaped \\" quote"', '`multi\n"line"`'])
+                         ['"counted"', '"https://x"', '"escaped \\" quote"', '`multi\n"line"`'])
 
     def test_moved_literals_compare_equal(self):
         base = self.commit({"internal/cli/a.go": 'var a, b = "first: %w", "second"\n'})
@@ -94,15 +95,19 @@ class LitdiffTest(unittest.TestCase):
             '  +1 "new message"',
             "  +1 `untracked`",
         ], []))
-        self.assertEqual(self.invoke("--base", base, "internal/other")[0:2], (1, [
+        os.chdir("internal")
+        self.assertEqual(self.invoke("--base", base, "other")[0:2], (1, [
             "literals: 1 before, 1 after; 1 removed, 1 added", '  -1 "other"', '  +1 "changed other"']))
 
-    def test_unresolved_revisions_are_all_refused(self):
+    def test_every_refusal_is_listed(self):
         self.commit({"internal/cli/a.go": "package cli\n"})
-        self.assertEqual(self.invoke("--base", "missing-base", "--head", "missing-head"), (2, [], [
+        self.assertEqual(self.invoke("--base", "missing-base", "--head", "missing-head", "/"), (2, [], [
+            "litdiff: refused: directory '/' is outside the repository",
             "litdiff: refused: cannot resolve revision 'missing-base'",
             "litdiff: refused: cannot resolve revision 'missing-head'",
         ]))
+        self.assertEqual(self.invoke("--base", "HEAD", "internal/cli", "internal/typo"), (2, [], [
+            "litdiff: refused: no non-test Go files under 'internal/typo'"]))
 
 
 if __name__ == "__main__":
