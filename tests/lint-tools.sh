@@ -104,6 +104,26 @@ grep -q term file
     name: producer {pipe} head -1
 """, [3, 6])
 
+    def test_python_lint_lists_a_release_snapshot_without_git(self):
+        # A release snapshot sits in an ignored directory of a checkout and has no .git.
+        self.write(".gitignore", "/.build/\n")
+        snapshot = self.root / ".build/source"
+        for name in ("dev/lint-python.sh", "tests/helpers/source-files.sh"):
+            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / name, snapshot / name)
+        (snapshot / ".build/tools").mkdir(parents=True)
+        calls = self.root / "calls"
+        tool = f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n'
+        self.write(".build/source/bin/ruff", tool)
+        self.write(".build/source/dev/pinned-tool.sh", f'#!/bin/sh\necho "{snapshot}/bin/ruff"\n')
+        self.write(".build/source/dev/lint-python-safefs.py", f'import sys\nopen("{calls}", "a").write("safefs -- " + " ".join(sys.argv[1:]) + "\\n")\n')
+        self.write(".build/source/app.py", "")
+        subprocess.run(["bash", str(snapshot / "dev/lint-python.sh")], check=True)
+        lines = calls.read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertEqual(sorted(line.partition(" -- ")[2].split()), ["app.py", "dev/lint-python-safefs.py"])
+
     def test_python_safefs_rules_scope_and_exemptions(self):
         for name in ("lint-python-safefs.py", "ruff-safefs.toml"):
             shutil.copy2(source / "dev" / name, self.root / "dev" / name)
