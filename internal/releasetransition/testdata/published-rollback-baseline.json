@@ -1,6 +1,6 @@
 {
-  "agentSourcesDigest": "02e92517724ee6d17a3bb326e88c361d5a7d8172dfd5bd766272f76e2d35df4d",
-  "bundleSHA256": "fd0504fff2cd4155fc65cae8291f2f8fbd3e5a0aff645fed971afce8b3f3365f",
+  "agentSourcesDigest": "16d7bf324dec53c2dbb75b027622f476f5402f402c325db202c19683b847be42",
+  "bundleSHA256": "c63e8ea219890558661fa0b0a16a89a2287bc9f77d5d11e69f3be751d78228ac",
   "predecessorRegistryDigest": "aa4007773efe0e9862479442a5cb2eb4f6f528f86b9047502167d03568f1768b",
   "profiles": {
     "git-fetch-runtime": {
@@ -11,6 +11,13 @@
     "github-runtime": {
       "activation_id": "github-runtime",
       "handler": "runtime.sh"
+    },
+    "herdr-runtime": {
+      "activation_id": "herdr-runtime",
+      "handler": "runtime.sh",
+      "projects_changed_hooks": [
+        "/usr/local/libexec/subyard/projects-changed.d/herdr"
+      ]
     },
     "orca-runtime": {
       "activation_id": "orca-runtime",
@@ -27,6 +34,8 @@
       "prepares_rollback_to": 1
     }
   },
-  "registryFeatures": [],
-  "version": "0.31.0"
+  "registryFeatures": [
+    "retired-prefix-dependencies"
+  ],
+  "version": "0.32.0"
 }

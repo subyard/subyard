@@ -6091,6 +6091,17 @@ retryable_failure_snapshot="$(
   [ "$(published_agent_config_source "$runtime" pi settings.json)" = settings.json ] \
     && [ "$(published_agent_config_source "$runtime" claude settings.json)" = settings.json ] \
     || fail 'published config without approval variants changed its source'
+  # Without a "git sudo" entry the sources are overlays: the base, then each active gate in order.
+  printf '%s\n' '{"artifacts": [{"id": "config", "kind": "config", "source": "opencode.jsonc",' \
+    '"approval_sources": {"git": "50-git.jsonc", "sudo": "51-sudo.jsonc"}}]}' \
+    > "$runtime/config/agents/opencode/integration.json"
+  for variant in "AGENTS=none:opencode.jsonc 51-sudo.jsonc" "DEV_SUDO=no:opencode.jsonc" \
+    $'CODING_TOOL_GIT_APPROVAL=prompt\nDEV_SUDO=no:opencode.jsonc 50-git.jsonc' \
+    "CODING_TOOL_GIT_APPROVAL=prompt:opencode.jsonc 50-git.jsonc 51-sudo.jsonc"; do
+    printf '%s\n' "${variant%:*}" > "$OPERATOR_HOME/.config/subyard/config.env"
+    [ "$(published_agent_config_source "$runtime" opencode opencode.jsonc)" = "${variant##*:}" ] \
+      || fail "published config overlays for ${variant%:*} are not ${variant##*:}"
+  done
 ) || fail 'published config variant contract failed'
 
 # Observe the actual first atomic publication; never create protected state.

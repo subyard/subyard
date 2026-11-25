@@ -62,10 +62,12 @@ configure_published_agents() {
     "$OPERATOR_HOME/.config/subyard/config.env" || die 'published agent selection was not configured'
 }
 
-# Published init renders the config variant for its active approval prompts. The fixture
-# leaves Git approval unset. Sudo also uses the published default except for the
-# 0.30.0 grant scenario, which starts with a grant and no Codex sudo prompts.
-published_agent_config_source() { # runtime agent source: prints the source published init renders
+# Published init renders the config for its active approval prompts: a release whose
+# approval_sources has a "git sudo" entry ships complete variants and prints one source;
+# a later release prints the base and then each active overlay, which init merges.
+# The fixture leaves Git approval unset. Sudo also uses the published default except
+# for the 0.30.0 grant scenario, which starts with a grant and no Codex sudo prompts.
+published_agent_config_source() { # runtime agent source: prints the sources published init renders
   operator_env python3 - "$1/config/agents/$2/integration.json" "$3" \
     "$OPERATOR_HOME/.config/subyard/config.env" <<'PY'
 import json, pathlib, shlex, sys
@@ -79,16 +81,21 @@ for line in settings.read_text().splitlines():
 gates = " ".join(gate for gate, active in (
     ("git", values.get("CODING_TOOL_GIT_APPROVAL", "") not in ("", "off")),
     ("sudo", values.get("DEV_SUDO", "") in ("", "prompt"))) if active)
+sources = [source]
 if integration.exists():
     for artifact in json.loads(integration.read_text()).get("artifacts", []):
         if artifact.get("kind") == "config" and artifact.get("source") == source:
-            source = artifact.get("approval_sources", {}).get(gates, source)
-print(source)
+            approval = artifact.get("approval_sources", {})
+            if "git sudo" in approval:
+                sources = [approval.get(gates, source)]
+            else:
+                sources += [approval[gate] for gate in gates.split() if approval.get(gate)]
+print(" ".join(sources))
 PY
 }
 
 assert_published_agent_configs() {
-  local agent source destination expected observed digest_program runtime
+  local agent source destination expected observed digest_program merged_digest_program runtime sources
   runtime="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET"
   # Compare real published init's JSON/TOML rendering with its own shipped
   # defaults; raw configs and rules retain their exact bytes. No guest contents
@@ -99,6 +106,19 @@ if p.suffix in (".json", ".toml"):
     value=tomllib.loads(raw.decode()) if p.suffix==".toml" else json.loads(raw)
     raw=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
 print(hashlib.sha256(raw).hexdigest())'
+  # Overlays merge into the base like published init: nested objects merge, other values
+  # replace. The composed file is plain JSON, so compare its canonical form.
+  merged_digest_program='import hashlib,json,pathlib,sys
+def merge(base, overlay):
+    for key, value in overlay.items():
+        if isinstance(base.get(key), dict) and isinstance(value, dict):
+            merge(base[key], value)
+        else:
+            base[key] = value
+value=json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+for path in sys.argv[2:]:
+    merge(value, json.loads(pathlib.Path(path).read_bytes()))
+print(hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())'
   for agent in $PUBLISHED_AGENTS; do
     case "$agent" in
       claude) source=settings.json; destination=.claude/settings.json ;;
@@ -108,10 +128,19 @@ print(hashlib.sha256(raw).hexdigest())'
     esac
     source="$(published_agent_config_source "$runtime" "$agent" "$source")" \
       || die "cannot read published $agent integration"
-    expected="$(operator_env python3 -c "$digest_program" "$runtime/config/agents/$agent/$source")" \
-      || die "cannot read published $agent defaults"
-    observed="$(guest python3 -c "$digest_program" "/home/dev/$destination")" \
-      || die "published init did not materialize $agent"
+    if [ "${source#* }" = "$source" ]; then
+      expected="$(operator_env python3 -c "$digest_program" "$runtime/config/agents/$agent/$source")" \
+        || die "cannot read published $agent defaults"
+      observed="$(guest python3 -c "$digest_program" "/home/dev/$destination")" \
+        || die "published init did not materialize $agent"
+    else
+      read -r -a sources <<<"$source"
+      expected="$(operator_env python3 -c "$merged_digest_program" \
+        "${sources[@]/#/$runtime/config/agents/$agent/}")" \
+        || die "cannot read published $agent defaults"
+      observed="$(guest python3 -c "$merged_digest_program" "/home/dev/$destination")" \
+        || die "published init did not materialize $agent"
+    fi
     [ "$observed" = "$expected" ] || die "published init changed the shipped $agent defaults"
     if [ "$agent" = codex ]; then
       expected="$(operator_env sha256sum "$runtime/config/agents/codex/rules/repo.rules" | awk '{print $1}')"
