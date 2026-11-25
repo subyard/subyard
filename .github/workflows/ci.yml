@@ -18,8 +18,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -41,8 +42,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -53,8 +55,9 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; baselines are hash-pinned.
       - name: Cache pinned released callers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # zizmor: ignore[cache-poisoning] # v6.1.0
         with:
           path: .build/published-baselines
           key: published-baselines-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dev/verify-release-upgrades.py', '**/published-upgrade-baselines.tsv') }}
@@ -82,8 +85,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -125,11 +129,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache-dependency-path: go.sum
       - name: Install system test tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y acl binutils curl gcc jq openssh-server ripgrep shellcheck zsh
@@ -164,11 +169,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # cache-poisoning ignore: CI uploads only test logs and diagnostics; release builds disable this cache.
       - name: Set up Go
-        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # zizmor: ignore[cache-poisoning] # v7.1.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache-dependency-path: go.sum
       - name: Install system test tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
@@ -178,6 +184,15 @@ jobs:
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: Complete shipped profile acceptance inventory
         run: bash dev/test-profiles.sh --e2e --list
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            [ "$attempt" = 3 ] && break
+            printf 'Go module download failed (attempt %s/3); retrying in %ss\n' "$attempt" "$((attempt * 5))" >&2
+            sleep "$((attempt * 5))"
+          done
+          exit 1
       - name: Shipped profile verification
         run: |
           set -o pipefail

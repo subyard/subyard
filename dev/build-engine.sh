@@ -41,6 +41,14 @@ lock="$(dirname "$OUTPUT")/.build.lock"
   # Build metadata must not depend on the caller's HOME-level git safe.directory list. Tests and
   # packaged builds deliberately use isolated homes, and the explicit VERSION is authoritative.
   cd "$REPO"
+  # Fetch modules first so a transient proxy error is retried instead of failing a cold build.
+  for attempt in 1 2 3; do
+    go mod download && break
+    [ "$attempt" = 3 ] && exit 1
+    printf 'build-engine: module download failed (attempt %s/3); retrying in %ss\n' \
+      "$attempt" "$((attempt * 5))" >&2
+    sleep "$((attempt * 5))"
+  done
   CGO_ENABLED=0 go build -buildvcs=false -mod=readonly -trimpath \
     -ldflags "-s -w -X github.com/Subyard/Subyard/internal/cli.Version=$VERSION" \
     -o "$tmp" ./cmd/yard
