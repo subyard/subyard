@@ -364,7 +364,10 @@ verify_boot_result() {
       e2e-vm-1 -- "$command" </dev/null)" || rc=$?
     if [ "$rc" -ne 0 ]; then
       printf 'amnezia_acceptance_boot_state_read_exit=%s\n' "$rc" >&2
-      return "$rc"
+      # SSH's own failure (255) during early boot is transient; the deadline bounds it.
+      [ "$rc" -eq 255 ] || return "$rc"
+      sleep 1
+      continue
     fi
     started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$state")"
     uptime="$(sed -n 's/^BootUptimeSeconds=//p' <<<"$state")"

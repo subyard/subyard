@@ -111,7 +111,8 @@ exec /usr/bin/timeout 95 sh "$PROBE"
             ('failed', ['1000000 exit-code 1 failed failed 1'], 1, 2),
             ('malformed', ['invalid success 0 active running 1'], 1, 2),
             ('future', ['2000000 success 0 active running 1'], 1, 2),
-            ('transport', [running], 1, 255),
+            ('transport', [running], 1, 2),
+            ('transport-transient', [running, done], 1, 0),
             ('queued-deadline', ['0 success 0 inactive dead 0'], 10, 2),
             ('network-online-delayed', ['0 success 0 inactive dead 0'], 10, 2),
             ('stalled-clock', ['1000000 success 75 activating auto-restart 1'], 300, 2))
@@ -141,6 +142,10 @@ ssh() {
       printf 'BootID=new-boot\nrunning\n' ;;
     *systemctl*show*)
       [ "$scenario" != transport ] || return 255
+      if [ "$scenario" = transport-transient ] && [ ! -e "$fixture/transport-failed" ]; then
+        : > "$fixture/transport-failed"
+        return 255
+      fi
       sample=$(cat "$fixture/samples"); sample=$((sample + 1))
       printf '%s\n' "$sample" > "$fixture/samples"
       frame=$(sed -n "${sample}p" "$fixture/frames")
@@ -173,7 +178,7 @@ timeout() {
                 self.assertEqual(b'after-wait' in observed.stdout, expected == 0)
                 if expected == 0:
                     self.assertGreaterEqual(int((directory / 'samples').read_text()), len(frames))
-                if scenario in ('queued-deadline', 'network-online-delayed', 'stalled-clock'):
+                if scenario in ('transport', 'queued-deadline', 'network-online-delayed', 'stalled-clock'):
                     self.assertIn(b'deadline', observed.stderr)
                 if scenario == 'network-online-delayed':
                     self.assertEqual((directory / 'samples').read_text(), '3\n')
