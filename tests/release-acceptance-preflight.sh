@@ -73,7 +73,7 @@ class ProfilePreflightTests(unittest.TestCase):
             checks = m.commands(source, "test", inventory, periodic=True)
         profile = {name: command for name, command in checks.items() if command and name.startswith(("profile:", "profile-preflight:"))}
         self.assertTrue(any(name.startswith("profile-preflight:") for name in profile))
-        self.assertEqual([name for name, command in profile.items() if not m.starts_with_runner(source, command)], [])
+        self.assertEqual({name: m.runner_problem(source, command) for name, command in profile.items() if m.runner_problem(source, command)}, {})
 
     def run_collector(self, outcomes, *, only=(), local_failure=False, local_pending=False, excluded=(), stop=False, live="profile:plain", with_vms=True):
         # Synthetic profile names and commands; no installed services or leases.

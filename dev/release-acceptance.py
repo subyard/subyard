@@ -298,15 +298,16 @@ def bundle(root, destination, *extra_paths):
                     str(root), str(destination), *extra_paths], cwd=root, env=clean_environment(), check=True)
 
 
-INTERPRETERS = ("bash", "sh", "python3")
-
-
-def starts_with_runner(root, command):
-    """Whether a profile command starts with an executable, and an interpreter with its script file."""
+def runner_problem(root, command):
+    """Why a profile command does not start with an executable runner and an interpreter's script, or None."""
     runner = root / command[0] if "/" in command[0] else shutil.which(command[0])
-    if not runner or not Path(runner).is_file() or not os.access(runner, os.X_OK):
-        return False
-    return command[0] not in INTERPRETERS or len(command) > 1 and (root / command[1]).is_file()
+    if not runner or not Path(runner).is_file():
+        return f"runner {command[0]} not found"
+    if not os.access(runner, os.X_OK):
+        return f"runner {command[0]} is not executable"
+    if command[0] in ("bash", "sh", "python3") and (len(command) < 2 or not (root / command[1]).is_file()):
+        return f"{command[0]} script {command[1] if len(command) > 1 else '(none)'} not found"
+    return None
 
 
 def profile_inventory(root):
@@ -331,8 +332,10 @@ def profile_inventory(root):
                 command = document["preflight"]
                 if (not isinstance(command, list) or not command
                     or any(not isinstance(arg, str) or not arg or len(arg) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in arg) for arg in command)
-                    or "--slot" in command or not starts_with_runner(root, command)):
+                    or "--slot" in command):
                     raise ValueError("invalid profile acceptance preflight command")
+                if problem := runner_problem(root, command):
+                    raise ValueError(f"invalid profile acceptance preflight command for {name}: {problem}")
                 result[name]["preflight"] = command
             ids = set()
             for lane in lanes:

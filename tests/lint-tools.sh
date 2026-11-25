@@ -123,6 +123,10 @@ grep -q term file
         self.assertEqual(len(lines), 3)
         for line in lines:
             self.assertEqual(sorted(line.partition(" -- ")[2].split()), ["app.py", "dev/lint-python-safefs.py"])
+        for name in ("app.py", "dev/lint-python-safefs.py"):
+            (snapshot / name).unlink()
+        result = subprocess.run(["bash", str(snapshot / "dev/lint-python.sh")], capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stderr), (1, "lint-python: no Python sources\n"))
 
     def test_python_safefs_rules_scope_and_exemptions(self):
         for name in ("lint-python-safefs.py", "ruff-safefs.toml"):

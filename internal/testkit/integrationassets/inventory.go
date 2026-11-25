@@ -83,8 +83,8 @@ type Inventory struct {
 	Profiles map[string]profile.RuntimeHook `json:"profiles"`
 }
 
-// Inspect uses a tracked source mirror so untracked metadata cannot influence
-// discovery. The same operation handles a published tag and a dirty checkout.
+// Inspect uses a mirror of the listed sources so other files cannot influence
+// discovery. The same operation handles a published tag, a checkout and a snapshot.
 func Inspect(root string, tracked []string) (Inventory, error) {
 	mirror, err := os.MkdirTemp("/tmp", "subyard-integration-inventory-")
 	if err != nil {

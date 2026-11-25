@@ -38,10 +38,10 @@ func TestDigestUsesTrackedIntegrationInventory(t *testing.T) {
 		t.Fatalf("installed sources outside config/agents escaped: %v", before.Sources)
 	}
 	writeAsset(t, filepath.Join(root, "config/agents/widget/tests/unused"), []byte("changed unreferenced fixture"), 0o644)
-	writeAsset(t, filepath.Join(root, "config/agents/scratch/integration.json"), []byte("invalid untracked metadata"), 0o644)
+	writeAsset(t, filepath.Join(root, "config/agents/scratch/integration.json"), []byte("invalid unlisted metadata"), 0o644)
 	after, err := Inspect(root, tracked)
 	if err != nil || after.Digest != before.Digest {
-		t.Fatalf("untracked scratch or unreferenced fixture affected inventory: %s %s %v", before.Digest, after.Digest, err)
+		t.Fatalf("unlisted scratch or unreferenced fixture affected inventory: %s %s %v", before.Digest, after.Digest, err)
 	}
 	for _, path := range []string{"config/projects-changed.sh", artifact} {
 		data, err := os.ReadFile(filepath.Join(root, path))
@@ -101,7 +101,6 @@ func TestInventoryUsesTheRuntimeProfileLoader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeAsset(t, filepath.Join(root, "config/profiles/scratch/profile.json"), []byte("invalid untracked descriptor"), 0o644)
 	inventory, err := Inspect(root, tracked)
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +112,11 @@ func TestInventoryUsesTheRuntimeProfileLoader(t *testing.T) {
 	writeAsset(t, filepath.Join(root, "config/profiles/fixture/runtime.sh"), []byte("not executable"), 0o644)
 	if _, err := Inspect(root, tracked); err == nil {
 		t.Fatal("profile package validation bypassed")
+	}
+	// Untracked, non-ignored files are sources, as in the release bundle.
+	writeAsset(t, filepath.Join(root, "config/profiles/scratch/profile.json"), []byte("invalid untracked descriptor"), 0o644)
+	if listed, err := TrackedFiles(root); err != nil || !slices.Contains(listed, "config/profiles/scratch/profile.json") {
+		t.Fatalf("untracked descriptor not listed: %v", err)
 	}
 }
 
@@ -164,16 +168,8 @@ func TestTrackedFilesMatchesGitCheckoutAndReleaseSnapshots(t *testing.T) {
 	var digest string
 	for _, root := range []string{checkout, outside, filepath.Join(checkout, ".build", "source")} {
 		if root != checkout {
-			for _, path := range want {
-				data, err := os.ReadFile(filepath.Join(checkout, path))
-				if err != nil {
-					t.Fatal(err)
-				}
-				info, err := os.Stat(filepath.Join(checkout, path))
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeAsset(t, filepath.Join(root, path), data, info.Mode().Perm())
+			if output, err := exec.Command("git", "-C", checkout, "checkout-index", "--all", "--prefix="+root+"/").CombinedOutput(); err != nil {
+				t.Fatalf("export tracked files: %v: %s", err, output)
 			}
 		}
 		got, err := TrackedFiles(root)

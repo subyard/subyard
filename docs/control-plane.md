@@ -1297,8 +1297,9 @@ reviewed non-blocking `agents` declaration with manual cleanup. This covers inte
 package provisioning and lifecycle sources, every declared artifact and approval variant, shipped
 configuration defaults, the usage provisioner and `config/projects-changed.sh` (installed as
 `/usr/local/libexec/subyard/projects-changed`). Referenced assets under `tests/` are included;
-unreferenced files and untracked scratch files are excluded. Inventory records use sorted full
-repository-relative paths, content hashes and the Git executable flag. Both the gate and snapshot
+unreferenced and ignored files are excluded, while untracked files count, as the release bundle
+ships them. Inventory records use sorted full repository-relative paths, content hashes and the
+Git executable flag. Both the gate and snapshot
 updater use the same Go inventory. Its failure prints the current source digest; a later source
 edit requires renewed review and an updated digest, so an old declaration cannot silently cover new files.
 
