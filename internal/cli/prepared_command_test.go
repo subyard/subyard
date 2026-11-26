@@ -41,18 +41,15 @@ func TestDirectPreparedCommandPreservesFailurePhaseDiagnostics(t *testing.T) {
 	})
 
 	t.Run("update preparation", func(t *testing.T) {
-		root, environment, _ := updateReleaseFixture(t)
+		cliFixture, root, environment, _ := newUpdateReleaseFixture(t)
 		var stderr bytes.Buffer
-		program, err := New(Options{
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments: []string{
 				"update", "--rollback", "--runtime-root", filepath.Join(root, "missing-runtime"),
 			},
 			Environment: environment, WorkingDir: root, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 1 ||
 			!strings.Contains(stderr.String(), "yard: update:") ||
 			strings.Contains(stderr.String(), "yard: prepare update:") {

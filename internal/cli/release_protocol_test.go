@@ -36,16 +36,14 @@ func TestReleaseTransitionRejectsUnknownProtocolBeforeAuthorization(t *testing.T
 		}
 		return
 	}
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Environment: environment,
 		Stdin:  strings.NewReader(`{"schemaVersion":2,"mode":"inspect"}`),
 		Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.runReleaseTransition(context.Background(), nil); code != 2 {
 		t.Fatalf("unsupported protocol exit = %d, stderr = %q", code, stderr.String())
 	}

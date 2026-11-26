@@ -188,7 +188,8 @@ const keepFailedFixturesEnv = "SUBYARD_KEEP_FAILED"
 func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string, directions ...releasetransition.Direction) (*CLI, string, string, *testkit.IncusServer) {
 	t.Helper()
 	toolingVersion := sourceAuthoringToolingVersion(t)
-	original, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	original, environment := cliFixture.Root, cliFixture.Environment
 	oldRoot := original
 	if os.Getenv(keepFailedFixturesEnv) == "1" {
 		// The constructor lives outside t.TempDir only so that an explicit
@@ -410,10 +411,7 @@ case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nAc
 	}
 	environment = append(environment, processEnvironment...)
 	platform := &completedSourcePlatformFixture{initPlatformFixture: newInitPlatformFixture()}
-	program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: fake, Executor: fake, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: fake, Executor: fake, InitPlatform: platform})
 	platform.runtimeIDs = program.profileRuntimeIDs()
 	ready := filepath.Join(original, "config-apply-ready")
 	server.SetProject("subyard", map[string]any{"name": "subyard", "config": map[string]string{}})

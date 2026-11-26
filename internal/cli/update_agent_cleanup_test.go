@@ -46,7 +46,7 @@ func TestRollbackCommandPrintsCleanupOncePerPlan(t *testing.T) {
 	for _, resumed := range []bool{false, true} {
 		for _, assumeYes := range []bool{false, true} {
 			t.Run(fmt.Sprint("resumed=", resumed, "/yes=", assumeYes), func(t *testing.T) {
-				root, environment, runtimeRoot := updateReleaseFixture(t)
+				fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 				environment = append(environment, "ACTIVE_CAPTURE="+filepath.Join(root, "active.log"))
 				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 				active := filepath.Join(runtimeRoot, "releases/current-a")
@@ -91,11 +91,8 @@ func TestRollbackCommandPrintsCleanupOncePerPlan(t *testing.T) {
 				}
 				stdout := cleanupOrderWriter{runtimeRoot: runtimeRoot}
 				var stderr bytes.Buffer
-				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: args, Environment: environment, WorkingDir: root,
+				program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: args, Environment: environment, WorkingDir: root,
 					Stdin: strings.NewReader("y\n"), Stdout: &stdout, Stderr: &stderr})
-				if err != nil {
-					t.Fatal(err)
-				}
 				program.promptInputTerminal = func() bool { return true }
 				if code := program.Run(context.Background()); code != 0 {
 					t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())

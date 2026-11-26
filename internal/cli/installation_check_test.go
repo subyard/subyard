@@ -41,11 +41,8 @@ func runInstallationCheck(t *testing.T, root string, environment []string, argum
 func runInstallationCheckWith(t *testing.T, root string, environment []string, snapshot bool, arguments ...string) (int, application.ConformanceReport, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"check", "--json"}, arguments...),
+	program := mustNew(t, Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"check", "--json"}, arguments...),
 		Environment: environment, Stdout: &stdout, Stderr: &stderr, Incus: lifecycleIncus()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	var before any
 	if snapshot {
 		before = nativeTreeSnapshot(t, root)

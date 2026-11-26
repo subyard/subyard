@@ -844,10 +844,7 @@ func TestSealedDispatcherRemainsExecutableInProfileServiceChild(t *testing.T) {
 			t.Fatal("fixture is not running the memfd image")
 		}
 		var output bytes.Buffer
-		cli, err := New(Options{RepositoryRoot: root, DispatcherPath: self, Environment: os.Environ(), Stdout: &output, Stderr: &output})
-		if err != nil {
-			t.Fatal(err)
-		}
+		cli := mustNew(t, Options{RepositoryRoot: root, DispatcherPath: self, Environment: os.Environ(), Stdout: &output, Stderr: &output})
 		loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", cli.env["SUBYARD_CONFIG_HOME"])
 		if err != nil {
 			t.Fatal(err)
