@@ -1653,8 +1653,12 @@ fn correlation_cohorts_case(normalized: bool, missing_new_proof: bool, runtime: 
     assert!(!guard.replacement_unknown());
     drop(guard);
     if let Some(run) = run {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !root.join("ready.json").exists() && Instant::now() < deadline {
+        // The leaf appears before the writer syncs and settles; stopping it
+        // earlier records Failed, so wait for the outcome, not the file.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while run.writer() == crate::event_correlation::WriterOutcome::Pending
+            && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(2));
         }
         let ready: serde_json::Value =
