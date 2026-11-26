@@ -100,7 +100,7 @@ func TestTeardownArtifactReplacementRejectsPreservedMetadata(t *testing.T) {
 					if err := os.Rename(replacement, path); err != nil {
 						t.Fatal(err)
 					}
-				} else if err := os.WriteFile(path, []byte("after!"), 0600); err != nil {
+				} else if err := os.WriteFile(path, []byte("after!"), 0600); err != nil { //nolint:forbidigo // rewrites the file in place and keeps its mode
 					t.Fatal(err)
 				}
 				if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {

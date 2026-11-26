@@ -4,10 +4,12 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestTailscaleEndpointFallsBackWhenLocalDNSIsUnavailable(t *testing.T) {
-	bin := t.TempDir()
+	bin := testkit.TempDir(t)
 	writeCLIFile(t, filepath.Join(bin, "tailscale"), `#!/bin/sh
 printf '%s\n' '{"BackendState":"Running","Self":{"DNSName":"owner.example.ts.net.","TailscaleIPs":["100.64.1.2"]}}'
 `, 0755)

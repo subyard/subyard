@@ -516,9 +516,7 @@ func TestServiceStageApplicabilityLeavesAbsentAndUnfinishedRuntimes(t *testing.T
 	if _, err := program.serviceStageApplicability(context.Background(), "undeclared-owner", []string{"fixture-runtime"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME"), "yards/fixture-runtime/config.env"), []byte("SSH_PORT=3333\nYARD_KIND=vm\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME"), "yards/fixture-runtime/config.env"), []byte("SSH_PORT=3333\nYARD_KIND=vm\n"), 0o600)
 	if applicability, err := stage.inspectApplicability(context.Background()); err != nil || applicability.state != "absent" || len(applicability.warnings) != 0 {
 		t.Fatalf("a yard without the declared settings is not the service runtime: %+v %v", applicability, err)
 	}

@@ -367,7 +367,7 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o755)
 			configHome := filepath.Join(root, "state")
-			if err := configsync.RegisterSource(configHome, t.TempDir()); err != nil {
+			if err := configsync.RegisterSource(configHome, testkit.TempDir(t)); err != nil {
 				t.Fatal(err)
 			}
 			conflict, _ := json.Marshal(map[string]string{"reason": "unowned selected artifact", "path": path, "detail": test.detail})
@@ -704,7 +704,7 @@ func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
 }
 
 func TestCandidateProcessRejectsUnsafeSourceIngressDescriptor(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	valid := releasetransition.SourceIngressRequest{
 		SchemaVersion: releasetransition.SourceIngressRequestSchemaV1,
 		Kind:          releasetransition.SourceIngressPreGoV1,
@@ -738,7 +738,7 @@ func TestCandidateProcessRejectsUnsafeSourceIngressDescriptor(t *testing.T) {
 				SourceIngress:  &descriptor,
 			}
 			_, err := executeReleaseTransitionRequest(
-				context.Background(), t.TempDir(), request, nil, nil, nil, nil,
+				context.Background(), testkit.TempDir(t), request, nil, nil, nil, nil,
 			)
 			if err == nil || !strings.Contains(err.Error(), "source ingress") {
 				t.Fatalf("unsafe source descriptor error = %v", err)
@@ -791,7 +791,7 @@ func TestCandidateTransitionOptionsCarryTrustedRecoveryInputs(t *testing.T) {
 }
 
 func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
-	repositoryRoot := t.TempDir()
+	repositoryRoot := testkit.TempDir(t)
 	registry := []byte("{}\n")
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600,
@@ -800,8 +800,8 @@ func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
 	request := releasetransition.ProcessRequest{
 		SchemaVersion:  releasetransition.ProcessProtocolSchemaV1,
 		Mode:           releasetransition.ProcessInspect,
-		RuntimeRoot:    t.TempDir(),
-		ConfigHome:     t.TempDir(),
+		RuntimeRoot:    testkit.TempDir(t),
+		ConfigHome:     testkit.TempDir(t),
 		RegistryDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", digest)),
 	}
 	writeReleaseTransitionTestFile(t,
@@ -819,7 +819,7 @@ func TestCandidateProcessRejectsRegistryOutsideVerifiedManifest(t *testing.T) {
 
 func TestReleaseTransitionIngressSkipsUnboundLegacyLeaf(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	program := cliFixture.New(Options{
 		RepositoryRoot: cliFixture.Root,
 		Environment:    []string{"HOME=" + home},
@@ -848,7 +848,7 @@ func TestReleaseTransitionIngressSkipsUnboundLegacyLeaf(t *testing.T) {
 }
 
 func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
-	repositoryRoot := t.TempDir()
+	repositoryRoot := testkit.TempDir(t)
 	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -856,7 +856,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600,
 	)
-	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime")
 	for _, release := range []string{"0.11.0-aaaaaaaaaaaa", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
 			t.Fatal(err)
@@ -865,7 +865,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	if err := os.Symlink("releases/0.11.0-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	settingsPath := filepath.Join(configHome, "yards", "hermes", "config.env")
 	writeReleaseTransitionTestFile(t, settingsPath,
 		[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600,
@@ -1000,7 +1000,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	}
 	for _, mutation := range []string{"changed", "missing"} {
 		if mutation == "changed" {
-			err = os.WriteFile(enginePath, []byte("changed"), 0o700)
+			err = os.WriteFile(enginePath, []byte("changed"), 0o700) //nolint:forbidigo // its error is checked with the other mutation
 		} else {
 			err = os.Remove(enginePath)
 		}
@@ -1020,9 +1020,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 			afterLinks.Active != request.Target || afterLinks.Previous == nil || *afterLinks.Previous != "release-b" {
 			t.Fatal("failed pending rollback verification changed protected state or links")
 		}
-		if err := os.WriteFile(enginePath, engine, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, enginePath, engine, 0o700)
 	}
 	resume, err := executeReleaseTransitionRequest(context.Background(), repositoryRoot, request, verify, reconcilers, owner, nil)
 	if err != nil || resume.Inspection == nil || resume.Inspection.Resume == nil ||
@@ -1055,7 +1053,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 }
 
 func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) {
-	repositoryRoot := t.TempDir()
+	repositoryRoot := testkit.TempDir(t)
 	registryPayload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1069,7 +1067,7 @@ func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1095,7 +1093,7 @@ func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) 
 	if err := store.CompareAndSwapLedger(missing, ledgerPayload); err != nil {
 		t.Fatal(err)
 	}
-	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime")
 	for _, release := range []string{"0.7.9-aaaaaaaaaaaa", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
 			t.Fatal(err)
@@ -1165,10 +1163,10 @@ func TestCandidateProcessCannotRollbackWithoutSealedTarget(t *testing.T) {
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		Mode:          releasetransition.ProcessInspect, Direction: releasetransition.DirectionActivatePrevious,
-		RuntimeRoot: t.TempDir(), ConfigHome: t.TempDir(),
+		RuntimeRoot: testkit.TempDir(t), ConfigHome: testkit.TempDir(t),
 		Target: "0.11.0-aaaaaaaaaaaa", ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
 	}
-	if _, err := executeReleaseTransitionRequest(context.Background(), t.TempDir(), request,
+	if _, err := executeReleaseTransitionRequest(context.Background(), testkit.TempDir(t), request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool {
 			t.Fatal("missing sealed target reached authorization")
 			return false
@@ -1193,9 +1191,9 @@ func writeSealedRollbackTarget(t *testing.T, runtimeRoot, target, version string
 }
 
 func TestCandidateReleaseTransitionProtocolReportsInvalidRegistry(t *testing.T) {
-	repositoryRoot := t.TempDir()
-	runtimeRoot := t.TempDir()
-	configHome := t.TempDir()
+	repositoryRoot := testkit.TempDir(t)
+	runtimeRoot := testkit.TempDir(t)
+	configHome := testkit.TempDir(t)
 	for _, root := range []string{runtimeRoot, configHome} {
 		if err := os.Chmod(root, 0o700); err != nil {
 			t.Fatal(err)
@@ -1276,7 +1274,7 @@ func (reconciler *processDriftReconciler) Reconcile(
 }
 
 func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
-	repositoryRoot := t.TempDir()
+	repositoryRoot := testkit.TempDir(t)
 	registry, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1284,7 +1282,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600,
 	)
-	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	runtimeRoot := filepath.Join(testkit.TempDir(t), "runtime")
 	for _, release := range []string{"release-a", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
 			t.Fatal(err)
@@ -1293,7 +1291,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
-	configHome := filepath.Join(t.TempDir(), "config")
+	configHome := filepath.Join(testkit.TempDir(t), "config")
 	writeReleaseTransitionTestFile(t,
 		filepath.Join(configHome, "yards", "hermes", "config.env"),
 		[]byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n"), 0o600,
@@ -1434,7 +1432,7 @@ func TestCandidateProcessRepairsCompletedJournalActivationDrift(t *testing.T) {
 
 func TestReleaseTransitionEstablishesOperationContextBeforeExecution(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	var stderr bytes.Buffer
 	program := cliFixture.New(Options{
 		RepositoryRoot: cliFixture.Root,
@@ -1452,7 +1450,7 @@ func TestReleaseTransitionEstablishesOperationContextBeforeExecution(t *testing.
 
 func TestReleaseTransitionRejectsInvalidInheritedOperationContext(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	var stderr bytes.Buffer
 	program := cliFixture.New(Options{
 		RepositoryRoot: cliFixture.Root,
@@ -1534,7 +1532,7 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	root := cliFixture.Root
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
 	environment := []string{
 		"HOME=" + home,
@@ -1633,7 +1631,7 @@ func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
 func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	root := cliFixture.Root
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
 	staleRoot := filepath.Join(home, "releases", "stale", "config")
 	staleSource := filepath.Join(home, "releases", "stale", "resolved", "config.toml")
@@ -1755,7 +1753,7 @@ func TestReleaseTransitionRejectsTrailingRequestJSON(t *testing.T) {
 	var stderr bytes.Buffer
 	program := cliFixture.New(Options{
 		RepositoryRoot: cliFixture.Root,
-		Environment:    []string{"HOME=" + t.TempDir()},
+		Environment:    []string{"HOME=" + testkit.TempDir(t)},
 		Stdin:          strings.NewReader("{}{}"),
 		Stderr:         &stderr,
 	})
@@ -2631,7 +2629,7 @@ func (v2PublicStageTestError) ActivationDiagnostic() (string, string) {
 func TestRegisteredMigrationIgnoresParentResolvedSettings(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	repositoryRoot := cliFixture.Root
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
 	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=none\n"), 0o600)
 	program := cliFixture.New(Options{
@@ -2729,7 +2727,7 @@ func activeBrokerProgram(t *testing.T) (*CLI, string) {
 	t.Helper()
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""), withCommands("incus"))
 	repositoryRoot := cliFixture.Root
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
 	bin := cliFixture.Bin
 	t.Setenv("PATH", bin)
@@ -2777,7 +2775,7 @@ func (*activationVerificationFixture) VerifyStage(context.Context, ports.Reconci
 }
 
 func TestInspectPowerActivationApplicabilityRejectsSymlinkAndPreservesAbsence(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	reconcilerPath := filepath.Join(root, "yard-boot-reconcile")
 	unitPath := filepath.Join(root, "subyard-power-reconcile.service")
 	environment := map[string]string{

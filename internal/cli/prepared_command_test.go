@@ -257,7 +257,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 }
 
 func TestPreparedCommandCloseReleasesProjectReservationOnce(t *testing.T) {
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestRPCHandlerCloseReleasesEveryPreparedCommand(t *testing.T) {
 
 func secureTempDirectory(t *testing.T) string {
 	t.Helper()
-	directory := t.TempDir()
+	directory := testkit.TempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestPreparedCommandRequiresConfirmationExecutesOnceAndClosesOnce(t *testing.T) {
@@ -258,7 +259,7 @@ func TestPreparedAdmissionFailureConsumesApproval(t *testing.T) {
 	prepared.Loaded.Context.AccessKind = domain.AccessLocal
 	prepared.ownerAdmission.epoch = 1
 	// An obsolete owner epoch cannot reach physical owner mutation.
-	prepared.ownerAdmission.home = filepath.Join(t.TempDir(), "missing", "owner")
+	prepared.ownerAdmission.home = filepath.Join(testkit.TempDir(t), "missing", "owner")
 	prepared.seal()
 	if _, err := prepared.Confirm(context.Background(), &application.Orchestrator{}, true); err != nil {
 		t.Fatal(err)

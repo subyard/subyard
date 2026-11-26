@@ -101,9 +101,7 @@ func TestProjectRemovalVariantsUseTypedDefaultsAndDeclineWithoutMutation(t *test
 				t.Fatal(err)
 			}
 			hostMarker := filepath.Join(root, "host-source-marker")
-			if err := os.WriteFile(hostMarker, []byte("keep"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, hostMarker, []byte("keep"), 0o600)
 			record.HostPath = hostMarker
 			if err := store.Put(context.Background(), record); err != nil {
 				t.Fatal(err)
@@ -375,7 +373,7 @@ func TestProjectRemovalRejectsUnsafeStateDirectoryBeforePrompt(t *testing.T) {
 			name: "symlink",
 			setup: func(t *testing.T, directory string, record domain.ProjectRecord) {
 				t.Helper()
-				target := filepath.Join(t.TempDir(), "projects")
+				target := filepath.Join(testkit.TempDir(t), "projects")
 				store, err := state.NewFileStore(target)
 				if err != nil {
 					t.Fatal(err)

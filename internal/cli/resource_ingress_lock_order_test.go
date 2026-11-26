@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -86,9 +87,7 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 			switch order {
 			case "barrier-first":
 				// After the retry native apply needs no pause.
-				if err := os.WriteFile(filepath.Join(sync, "go"), nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(sync, "go"), nil, 0o600)
 				proceed := make(chan struct{})
 				go func() { holderDone <- migrateLikeHolder(ctx, program, barrier, proceed) }()
 				<-barrier
@@ -113,9 +112,7 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 					t.Fatal("owner barrier was free while the resource apply held the yard lock")
 				case <-time.After(300 * time.Millisecond):
 				}
-				if err := os.WriteFile(filepath.Join(sync, "go"), nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				testkit.WriteFile(t, filepath.Join(sync, "go"), nil, 0o600)
 			}
 			var code int
 			select {

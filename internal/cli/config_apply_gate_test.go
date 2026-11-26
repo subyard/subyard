@@ -128,9 +128,7 @@ func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := os.WriteFile(fixture.readyMarker, []byte("ready\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.readyMarker, []byte("ready\n"), 0o600)
 	if _, err := fixture.cli.finishConfigApplyRepair(context.Background(), permit); err != nil {
 		t.Fatal(err)
 	}
@@ -203,9 +201,7 @@ func TestConfigApplyRepairRejectsUnfinishedAndCorruptProtectedJournals(t *testin
 	if err != nil || permit != nil {
 		t.Fatalf("pending gate permit=%#v err=%v", permit, err)
 	}
-	if err := os.WriteFile(journalPath, []byte("{broken\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, journalPath, []byte("{broken\n"), 0o600)
 	eligible := releasetransition.Outcome{
 		Status: releasetransition.StatusMigrationRequired,
 		Code:   releasetransition.CodeTransitionRequired,
@@ -240,9 +236,7 @@ func TestConfigApplyRepairLockRejectsJournalChangedAfterConfirmation(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.journalPath, append(payload, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, fixture.journalPath, append(payload, '\n'), 0o600)
 	if unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit); err == nil {
 		unlock()
 		t.Fatal("lock accepted a journal changed after confirmation")
@@ -260,9 +254,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 			}
 		}},
 		{name: "corrupt", mutate: func(t *testing.T, path string) {
-			if err := os.WriteFile(path, []byte("{broken\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, path, []byte("{broken\n"), 0o600)
 		}},
 		{name: "pending", mutate: func(t *testing.T, path string) {
 			registryPayload, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
@@ -281,9 +273,7 @@ func TestConfigApplyRepairRejectsMissingCorruptAndPendingLedgers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, path, payload, 0o600)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

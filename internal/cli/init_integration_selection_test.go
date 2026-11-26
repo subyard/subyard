@@ -34,7 +34,7 @@ func TestInitIntegrationSelectionWithAbsentIncusSocket(t *testing.T) {
 	directory := filepath.Join(root, "incus-state")
 	t.Setenv("INCUS_DIR", directory)
 	t.Setenv("INCUS_SOCKET", "")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testkit.TempDir(t))
 	client := incusclient.New("", "projects")
 	program := fixture.New(Options{Incus: client, Executor: client})
 	loaded, err := program.loadContext("demo")
@@ -262,7 +262,7 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 				writeCLIFile(t, target, "SSH_PORT=2223\n"+test.settings, 0o600)
 			}
 			if test.source {
-				if err := configsync.RegisterSource(filepath.Join(root, "state"), t.TempDir()); err != nil {
+				if err := configsync.RegisterSource(filepath.Join(root, "state"), testkit.TempDir(t)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -463,7 +463,7 @@ func TestInitPreservesProfileSelectionAcrossRuns(t *testing.T) {
 					t.Fatal(err)
 				}
 				if source {
-					if err := configsync.RegisterSource(filepath.Join(root, "state"), t.TempDir()); err != nil {
+					if err := configsync.RegisterSource(filepath.Join(root, "state"), testkit.TempDir(t)); err != nil {
 						t.Fatal(err)
 					}
 				}

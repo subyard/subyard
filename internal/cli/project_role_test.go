@@ -97,7 +97,7 @@ func TestCanonicalProjectRoleDenialPreservesStaleControllerState(t *testing.T) {
 				if err := os.Mkdir(filepath.Join(ownerRoot, "tmp"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				bin := t.TempDir()
+				bin := testkit.TempDir(t)
 				responsePath := filepath.Join(bin, "response")
 				if test.renamed {
 					inventory.HostID = "renamed-owner"
@@ -175,7 +175,7 @@ func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
 			if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{FetchedAt: now, Inventory: inventory}); err != nil {
 				t.Fatal(err)
 			}
-			bin := t.TempDir()
+			bin := testkit.TempDir(t)
 			responsePath := filepath.Join(bin, "response")
 			writeHostRPCFixture(t, responsePath, inventory)
 			physicalCall := filepath.Join(bin, "physical-call")

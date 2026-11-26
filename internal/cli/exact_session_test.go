@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestExactSessionOwnerClockPrunesAndLiveInputsRemainGuarded(t *testing.T) {
 	for _, mode := range []string{"owner-clock", "live-input", "executing-bound"} {
 		t.Run(mode, func(t *testing.T) {
-			program, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+			_, program, _, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 			runtime.plan.Scope = "captured synthetic integration targets"
 			loaded, err := program.loadContext("default")
 			if err != nil {
@@ -61,9 +62,7 @@ func TestExactSessionOwnerClockPrunesAndLiveInputsRemainGuarded(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload = append(payload, []byte("SSH_PORT=2244\n")...)
-			if err := os.WriteFile(path, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, path, payload, 0o600)
 			params, _ := json.Marshal(map[string]any{"confirmed": true, "digest": exact.Digest})
 			if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "captured", Params: params}, nil); err == nil {
 				t.Fatal("real config drift accepted")

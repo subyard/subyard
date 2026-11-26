@@ -262,7 +262,8 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 // TestRunAdmissionTeardownFull characterizes full-teardown pre-admission through Run: the
 // remote selector refusal, resume of a pending .uninstall store and its inventory failure.
 func TestRunAdmissionTeardownFull(t *testing.T) {
-	root, environment, _ := resourceCommandFixture(t)
+	fixture, _ := newResourceCommandFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	shipped, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "commands.registry"))
 	if err != nil {
 		t.Fatal(err)

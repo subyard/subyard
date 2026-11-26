@@ -119,7 +119,7 @@ func TestRPCManifestMethodsAndDispatch(t *testing.T) {
 			continue
 		} // Session owns the handshake.
 		t.Run(method, func(t *testing.T) {
-			handler, _, _ := ownerQueryFixture(t)
+			_, handler, _, _ := newOwnerQueryFixture(t)
 			defer handler.closePlans()
 			// Invalid params stop mutating/streaming methods before side effects. Queries
 			// with no params still execute against their ordinary native fixture.

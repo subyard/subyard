@@ -991,7 +991,7 @@ func (fixture *initPlatformFixture) ApplyStage(_ context.Context, stage ports.Re
 		fixture.runtimeObserveErr = errors.New("injected profile runtime observation failure")
 	}
 	if stage == ports.ReconcileStageProfileRuntimes && fixture.readyOnProfileRuntime != "" {
-		if err := os.WriteFile(fixture.readyOnProfileRuntime, []byte("ready\n"), 0o600); err != nil {
+		if err := os.WriteFile(fixture.readyOnProfileRuntime, []byte("ready\n"), 0o600); err != nil { //nolint:forbidigo // fake without testing.TB
 			return err
 		}
 	}

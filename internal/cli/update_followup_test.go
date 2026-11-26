@@ -96,7 +96,7 @@ func (yard *updateFollowupYard) Observe(context.Context, releasetransition.Relea
 		Consequences: []string{"yard " + yard.name + ": reconcile materialized configuration"}}, nil
 }
 func (yard *updateFollowupYard) Reconcile(context.Context, releasetransition.ReleaseLinks) error {
-	return os.WriteFile(filepath.Join(yard.home, "converged-"+yard.name), []byte("ready"), 0o600)
+	return os.WriteFile(filepath.Join(yard.home, "converged-"+yard.name), []byte("ready"), 0o600) //nolint:forbidigo // fake without testing.TB
 }
 
 func newUpdateFollowupFixture(t *testing.T) (*cliFixture, string, []string, string) {
@@ -368,7 +368,7 @@ func TestUpdateDiskTmpRetryPrecedesFreshFinalCheck(t *testing.T) {
 				if runtimeDrift {
 					return nil
 				}
-				return os.WriteFile(filepath.Join(home, "converged-secondary"), []byte("ready"), 0o600)
+				return os.WriteFile(filepath.Join(home, "converged-secondary"), []byte("ready"), 0o600) //nolint:forbidigo // fake without testing.TB
 			}
 			if code := program.runPreparedCommand(context.Background(), prepared, true); code != 0 || calls != 1 || strings.Count(output.String(), "Operation plan:") != map[bool]int{false: 1, true: 2}[runtimeDrift] || !strings.Contains(output.String(), "Status: ready") {
 				t.Fatalf("retry did not precede the final check: code=%d calls=%d %s", code, calls, output.String())

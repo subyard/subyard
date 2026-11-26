@@ -21,7 +21,7 @@ import (
 func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
 	for _, kind := range []string{"success", "tampered", "other-session", "stopped"} {
 		t.Run(kind, func(t *testing.T) {
-			cli, incus, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+			_, cli, incus, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 			runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 			loaded, err := cli.loadContext("default")
 			if err != nil {
@@ -78,7 +78,7 @@ func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
 }
 
 func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
-	cli, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 	loaded, err := cli.loadContext("default")
 	if err != nil {
@@ -128,7 +128,7 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 			if kind == "no-op" {
 				selection = "CODING_TOOL_INTEGRATIONS='codex'\n"
 			}
-			cli, _, runtime, _, output := integrationFixture(t, selection)
+			_, cli, _, runtime, _, output := newIntegrationFixture(t, selection)
 			runtime.plan.Scope = "subyard/yard:owned integration fixtures"
 			if kind == "no-op" {
 				runtime.plan.Changed = false
@@ -176,7 +176,7 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			folder := t.TempDir()
+			folder := testkit.TempDir(t)
 			writeCLIFile(t, filepath.Join(folder, "plan.json"), string(fixture), 0600)
 			writeCLIFile(t, filepath.Join(folder, "ssh"), `#!/usr/bin/python3
 import json,os,struct,sys

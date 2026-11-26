@@ -49,12 +49,6 @@ func TestProjectTransferPlanUsesOwnerConsentAndPreservesScope(t *testing.T) {
 
 const ownerCopyHook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
 
-func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
-	t.Helper()
-	_, program, prepared, changed := newOwnerProjectCopyFixture(t)
-	return program, prepared, changed
-}
-
 func newOwnerProjectCopyFixture(t *testing.T) (*cliFixture, *CLI, *preparedCommand, *bool) {
 	t.Helper()
 	cliFixture := newFixture(t)
@@ -117,7 +111,7 @@ func newOwnerProjectCopyFixture(t *testing.T) (*cliFixture, *CLI, *preparedComma
 }
 
 func TestProjectOwnerCopyPrepareDoesNotReserveOrOpenControllerSource(t *testing.T) {
-	program, prepared, _ := ownerProjectCopyFixture(t)
+	_, program, prepared, _ := newOwnerProjectCopyFixture(t)
 	if prepared.Project.ownerCopy.reservation != nil || prepared.Project.Commit != projectCommitNone {
 		t.Fatal("copy prepare acquired an admission or enabled early commit")
 	}
@@ -132,7 +126,7 @@ func TestProjectOwnerCopyPrepareDoesNotReserveOrOpenControllerSource(t *testing.
 func TestProjectOwnerCopyFinalizesOnlyAfterIndependentContentVerification(t *testing.T) {
 	for _, corrupt := range []bool{false, true} {
 		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
-			program, prepared, changed := ownerProjectCopyFixture(t)
+			_, program, prepared, changed := newOwnerProjectCopyFixture(t)
 			authorizePreparedFixture(prepared)
 			admission, err := program.beginOwnerProjectCopy(context.Background(), prepared)
 			if err != nil {
@@ -169,7 +163,7 @@ func TestProjectOwnerCopyFinalizesOnlyAfterIndependentContentVerification(t *tes
 }
 
 func TestProjectOwnerCopyCloseAbortsAdmission(t *testing.T) {
-	program, prepared, _ := ownerProjectCopyFixture(t)
+	_, program, prepared, _ := newOwnerProjectCopyFixture(t)
 	authorizePreparedFixture(prepared)
 	if _, err := program.beginOwnerProjectCopy(context.Background(), prepared); err != nil {
 		t.Fatal(err)

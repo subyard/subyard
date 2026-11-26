@@ -51,11 +51,9 @@ func hostAddSSHFixture(t *testing.T, inventory any) (string, ownerinventory.SSHH
 			t.Fatal(err)
 		}
 	}
-	bin := t.TempDir()
+	bin := testkit.TempDir(t)
 	responsePath := filepath.Join(bin, "response")
-	if err := os.WriteFile(responsePath, framed.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, responsePath, framed.Bytes(), 0o600)
 	program := filepath.Join(bin, "ssh")
 	script := strings.ReplaceAll(`#!/bin/sh
 if [ "${1-}" = -G ]; then
@@ -81,9 +79,7 @@ if [ "$assessment" = 1 ]; then
 fi
 cat "$SSH_RPC_RESPONSE"
 `, "__KNOWN_HOSTS__", filepath.Join(bin, "known_hosts"))
-	if err := os.WriteFile(program, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, program, []byte(script), 0o700)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	t.Setenv("SSH_ASSESS_LINE", trust.KnownHostsLine)
 	t.Setenv("SSH_RPC_RESPONSE", responsePath)
@@ -102,9 +98,7 @@ func writeHostRPCFixture(t *testing.T, path string, inventory any) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(path, framed.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, framed.Bytes(), 0o600)
 }
 
 func TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether(t *testing.T) {

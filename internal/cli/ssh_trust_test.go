@@ -9,6 +9,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/sshtrust"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload(t *testing.T) {
@@ -33,7 +34,7 @@ func TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload(t *testing.T) {
 			input := strings.NewReader(test.input)
 			cli := cliFixture.New(Options{RepositoryRoot: cliFixture.Root, Stdin: input, Stderr: &output})
 			cli.promptInputTerminal = func() bool { return test.tty }
-			manager := cli.sshTrust(t.TempDir(), test.automation || commandAssumeYes(test.arguments))
+			manager := cli.sshTrust(testkit.TempDir(t), test.automation || commandAssumeYes(test.arguments))
 			defer manager.Close()
 			err := manager.Confirm(context.Background(), []sshtrust.Proposal{{Target: "yard-example", Namespace: "subyard-remote-example", File: "/state/known_hosts", Algorithm: "ssh-ed25519", Fingerprint: "SHA256:example"}})
 			if !errors.Is(err, test.want) {

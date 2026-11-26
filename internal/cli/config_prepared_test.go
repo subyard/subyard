@@ -577,7 +577,7 @@ func TestConfigProspectiveExternalReadInputsDoNotRequireWriterPermissions(t *tes
 		t.Run(change, func(t *testing.T) {
 			fixture := newFixture(t, withCheckoutConfig())
 			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
-			asset := filepath.Join(t.TempDir(), "codex.toml")
+			asset := filepath.Join(testkit.TempDir(t), "codex.toml")
 			content := "# external configuration\n"
 			if change == "large unchanged" {
 				content = "# " + strings.Repeat("x", 9<<20) + "\n"
