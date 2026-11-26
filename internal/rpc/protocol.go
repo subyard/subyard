@@ -43,7 +43,9 @@ type Response struct {
 type Error struct {
 	Code    ErrorCode `json:"code"`
 	Message string    `json:"message"`
-	relayed bool      // Set only when decoding an owner response; never serialized.
+	// Data is an encoded ErrorData; relays forward it verbatim.
+	Data    json.RawMessage `json:"data,omitempty"`
+	relayed bool            // Set only when decoding an owner response; never serialized.
 }
 
 func (fault *Error) Error() string { return string(fault.Code) + ": " + fault.Message }

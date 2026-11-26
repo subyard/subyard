@@ -153,7 +153,7 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 				// A newer owner may return an ordinary code unknown to this relay.
 				// Keep the message and unrelated operations alive; never mutate a
 				// shared handler error or emit a code outside our vocabulary.
-				response.Error = &Error{Code: CodeInternal, Message: response.Error.Message}
+				response.Error = &Error{Code: CodeInternal, Message: response.Error.Message, Data: response.Error.Data}
 			}
 			err := codec.Write(response)
 			watchdog.Stop()
