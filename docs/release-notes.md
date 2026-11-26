@@ -37,6 +37,13 @@
 - Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.
   Existing combined policies migrate on reprovision; the configured approval behavior stays the same.
 
+### Claude managed instructions
+
+- Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by
+  literal absolute path; `claude-policy-check` reports its absence and drift. Disabling Claude keeps it.
+- **Rollback to 0.32.0 keeps the file.** It is listed in the rollback plan output and result.
+  After rollback, back it up and remove it in each affected yard if you do not want the rule.
+
 ### Rollback to 0.31.0
 
 - **Agent cleanup is manual and does not refuse rollback.** Stop agent sessions before rollback.
