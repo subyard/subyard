@@ -96,6 +96,7 @@ sudo_policy="$policy_dir/51-subyard-sudo-approval.json"
 hook_policy="$policy_dir/49-subyard-approval-hook.json"
 update_policy="$policy_dir/48-subyard-update-lock.json"
 git_hook="$(dirname "$policy_dir")/subyard-git-approval-hook"
+instructions="$(dirname "$policy_dir")/CLAUDE.md"
 install -d -m 0755 "$policy_dir"
 printf '{"permissions":{"deny":["Bash(secret *)"]}}\n' > "$policy_dir/10-foreign.json"
 before="$(sha256sum "$policy_dir/10-foreign.json")"
@@ -107,6 +108,10 @@ grep -Fq ' ready' "$tmp/first.out" && fail 'provisioning repeated the adapter re
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] || fail 'canonical command is not managed'
 [ "$("$link" --version)" = '2.1.0 (Claude Code)' ] || fail 'wrong installed version'
 "$check" >/dev/null
+[ "$(stat -c '%a:%u:%g' "$instructions")" = "644:$(id -u):$(id -g)" ] || fail 'incorrect instructions mode or owner'
+[ "$(head -n 1 "$instructions")" = '<!-- Subyard Claude permission policy: yard init installs and checks this file. -->' ] \
+  || fail 'instructions lack the ownership marker'
+grep -Fq '`$(...)` in `rm` targets' "$instructions" || fail 'instructions lack the deletion rule'
 run_hook "$root" >/dev/null
 [ "$(wc -l < "$tmp/fetch.log")" -eq 5 ] || fail 'repeat provision re-downloaded the binary'
 printf '2.2.0\n' > "$tmp/releases/latest"
@@ -170,6 +175,18 @@ if run_hook "$root" >/dev/null 2>&1; then fail 'foreign policy was overwritten';
 rm "$policy"
 ln -s "$policy_dir/10-foreign.json" "$policy"
 if run_hook "$root" >/dev/null 2>&1; then fail 'policy symlink accepted'; fi
+# Foreign instructions are refused before any managed file changes.
+rm "$policy"
+cp "$instructions" "$tmp/instructions"
+printf '# operator rules\n' > "$instructions"
+if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'foreign instructions were overwritten'; fi
+grep -Fxq "Claude policy: existing file belongs to another policy: $instructions" "$tmp/error" || fail 'foreign instructions refusal not named'
+[ ! -e "$policy" ] && [ "$(cat "$instructions")" = '# operator rules' ] || fail 'foreign instructions refusal mutated'
+rm "$instructions"
+ln -s "$tmp/instructions" "$instructions"
+if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'instructions symlink accepted'; fi
+grep -Fxq "Claude policy: managed path is not a regular file: $instructions" "$tmp/error" || fail 'instructions symlink refusal not named'
+rm "$instructions"
 
 # The update lock and arbiter are independent of either approval policy.
 rm -f "$policy"
@@ -193,14 +210,26 @@ jq -e '.permissions.ask == ["Bash(git commit)","Bash(git commit:*)","Bash(git pu
 cp "$policy" "$tmp/git-policy"
 CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
 [ ! -e "$policy" ] && [ ! -e "$hook_policy" ] || fail 'off mode kept the Git policy or hook registration'
+cmp "$instructions" "$tmp/instructions" || fail 'off mode changed the instructions'
 jq -e '.env == {DISABLE_UPDATES: "1"}' "$update_policy" >/dev/null
 "$check" | grep -F >/dev/null 'managed Git prompts off'
+# The managed directory is checked without any approval hook as well.
+assert_claude_dir_drift() {
+  chmod 0775 "$(dirname "$policy_dir")"
+  if "$check" >/dev/null 2>"$tmp/dir-drift.err"; then fail "managed Claude directory drift passed readiness: $1"; fi
+  grep -Fxq 'claude-policy-check: managed Claude directory drifted; run yard init' "$tmp/dir-drift.err" \
+    || fail "managed Claude directory drift was not reported: $1"
+  chmod 0755 "$(dirname "$policy_dir")"
+  "$check" >/dev/null || fail "restored managed Claude directory failed readiness: $1"
+}
+assert_claude_dir_drift 'prompts off'
 cp "$tmp/git-policy" "$policy"
 if "$check" >/dev/null 2>&1; then fail 'off mode accepted a stale Git policy'; fi
 if CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
 run_hook "$root" >/dev/null
 cmp "$policy" "$tmp/git-policy"
 [ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
+assert_claude_dir_drift 'prompts on'
 
 # Migrate an old combined file. Both policies and the one arbiter survive reprovision.
 jq -s '.[0] * .[1] * .[2] | .permissions.ask += ["Bash(sudo)", "Bash(sudo:*)"] |
@@ -212,9 +241,9 @@ DEV_SUDO=prompt run_hook "$root" >/dev/null
 cmp "$policy" "$tmp/git-policy"
 jq -e '.permissions.ask == ["Bash(sudo)","Bash(sudo:*)","Bash(su)","Bash(su:*)","Bash(doas)","Bash(doas:*)","Bash(pkexec)","Bash(pkexec:*)","Bash(sudoedit)","Bash(sudoedit:*)","Bash(run0)","Bash(run0:*)"]' "$sudo_policy" >/dev/null
 [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$hook_policy")" = "$registration" ]
-installed="$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy")"
+installed="$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy" "$instructions")"
 DEV_SUDO=prompt run_hook "$root" >/dev/null
-[ "$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy")" = "$installed" ]
+[ "$(stat -c '%i:%Y' "$policy" "$sudo_policy" "$hook_policy" "$update_policy" "$instructions")" = "$installed" ]
 "$check" | grep -F >/dev/null 'Managed sudo ask rules installed (DEV_SUDO=prompt)'
 if printf '{"tool_input":{"command":"env sudo id"}}' | bash -c "$registration" >/dev/null 2>&1; then
   fail 'installed hook allowed a wrapped sudo'
@@ -303,6 +332,7 @@ mkdir "$dev_home/data/claude/versions/3.0.0"
 ln -s "$dev_home/data/claude/versions/3.0.0" "$shadow"; assert_foreign_shadow 'directory target'
 # Independent refusals are all reported, in order. Findings about a missing file are skipped.
 mv "$policy" "$policy.saved"
+mv "$instructions" "$instructions.saved"
 rm -f "$link"
 ln -s "$dev_home/data/claude/versions/2.0.1" "$shadow"
 if "$check" >"$tmp/refusals.out" 2>"$tmp/refusals.err"; then fail 'readiness passed with refusals'; fi
@@ -310,12 +340,14 @@ grep -Fq ' ready' "$tmp/refusals.out" && fail 'refused readiness still reported 
 sed -e 's/^claude-policy-check: //' -e 's/;.*//' "$tmp/refusals.err" > "$tmp/refusals.actual"
 cat > "$tmp/refusals.expected" <<REFUSALS
 managed Git approval policy is missing
+managed Claude instructions is missing
 canonical command does not point to the managed runtime
 a native self-installed link shadows $link
 REFUSALS
 diff "$tmp/refusals.expected" "$tmp/refusals.actual" >&2 || fail 'refusals are incomplete or out of order'
 rm -f -- "$shadow"
 ln -s "$root/opt/subyard/claude/claude" "$link"
+mv "$instructions.saved" "$instructions"
 # A missing policy alone still fails, and a conflict stays visible beside a refusal.
 if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'a missing policy passed readiness'; fi
 [ "$(cat "$tmp/refusals.err")" = 'claude-policy-check: managed Git approval policy is missing; run yard init' ] \
@@ -326,15 +358,29 @@ grep -Fq 'Conflict:' "$tmp/refusals.out" || fail 'a refusal hid a conflict'
 rm -f -- "$shadow"
 mv "$policy.saved" "$policy"
 # Permission and content drift of one present file are separate findings.
-chmod 0600 "$policy"
+chmod 0600 "$policy" "$instructions"
 cp "$policy" "$policy.saved"
+cp "$instructions" "$instructions.saved"
 printf '{}\n' > "$policy"
+printf '\n' >> "$instructions"
 if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'policy drift passed readiness'; fi
-grep -Fq 'permissions drifted' "$tmp/refusals.err" || fail 'policy permission drift was not reported'
+grep -Fq 'managed Git approval policy permissions drifted' "$tmp/refusals.err" || fail 'policy permission drift was not reported'
 grep -Fq 'managed Git approval policy drifted' "$tmp/refusals.err" || fail 'policy content drift was not reported'
+grep -Fq 'managed Claude instructions permissions drifted' "$tmp/refusals.err" || fail 'instructions mode drift was not reported'
+grep -Fq 'managed Claude instructions content drifted' "$tmp/refusals.err" || fail 'instructions content drift was not reported'
 mv "$policy.saved" "$policy"
-chmod 0644 "$policy"
+mv "$instructions.saved" "$instructions"
+chmod 0644 "$policy" "$instructions"
 "$check" >/dev/null || fail 'restored policy did not restore readiness'
+# An unreadable file is reported as such, never as content drift.
+if [ "$(id -u)" != 0 ]; then
+  chmod 0200 "$instructions"
+  if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'unreadable instructions passed readiness'; fi
+  printf '%s\n' 'claude-policy-check: managed Claude instructions permissions drifted; run yard init' \
+    'claude-policy-check: managed Claude instructions could not be read; run yard init' > "$tmp/unreadable.expected"
+  diff "$tmp/unreadable.expected" "$tmp/refusals.err" >&2 || fail 'unreadable instructions were misreported'
+  chmod 0644 "$instructions"
+fi
 # Hermetic callers without an explicit fixture home must never reach the caller's own home.
 mkdir -p "$tmp/home/.local/bin"
 ln -s "$dev_home/data/claude/versions/2.0.1" "$tmp/home/.local/bin/claude"
@@ -398,6 +444,7 @@ run_hook "$root" >/dev/null
 printf 'FOREIGN_BEFORE=keep\nFOREIGN_AFTER=keep\n' > "$tmp/environment.foreign"
 env CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ETC_DIR="$root/etc" bash "$hook" --remove
 [ ! -e "$profile_env" ] || fail 'removal kept the login environment'
+cmp "$instructions" "$tmp/instructions" || fail 'removal changed the instructions'
 cmp "$environment" "$tmp/environment.foreign" || fail 'removal changed unrelated environment'
 env CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ETC_DIR="$root/etc" bash "$hook" --remove
 cmp "$environment" "$tmp/environment.foreign" || fail 'removal was not idempotent'

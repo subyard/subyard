@@ -355,9 +355,13 @@ approval_file_present() {
 }
 
 check_approval_hash() {
+  local actual
   if approval_file_present "$1" "$2" "$3" "$4"; then
-    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
-      || refuse "$4 content drifted; run yard init"
+    if actual="$(sha256sum 2>/dev/null < "$1")"; then
+      [ "${actual%% *}" = "$2" ] || refuse "$4 content drifted; run yard init"
+    else
+      refuse "$4 could not be read; run yard init"
+    fi
   fi
 }
 
@@ -406,6 +410,14 @@ hook_policy="$POLICY_DIR/49-subyard-approval-hook.json"
 git_policy="$POLICY_DIR/50-subyard-git-approval.json"
 sudo_policy="$POLICY_DIR/51-subyard-sudo-approval.json"
 git_hook="$(dirname "$POLICY_DIR")/subyard-git-approval-hook"
+# Claude Code loads this managed memory file in every session; nothing else may own it.
+instructions="$(dirname "$POLICY_DIR")/CLAUDE.md"
+instructions_md="$(printf '<!-- %s: yard init installs and checks this file. -->\n' "$MARKER"; cat <<'INSTRUCTIONS'
+# Subyard rules
+
+- Delete by literal absolute path: no globs, relative paths, variables or `$(...)` in `rm` targets.
+INSTRUCTIONS
+)"
 if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
   [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for managed approval'
   if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
@@ -415,12 +427,12 @@ if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
     die 'existing approval hook belongs to another policy'
   fi
 fi
-for path in "$update_policy" "$hook_policy" "$git_policy" "$sudo_policy" "$CHECK_PATH"; do
+for path in "$update_policy" "$hook_policy" "$git_policy" "$sudo_policy" "$instructions" "$CHECK_PATH"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
-    die 'managed path is not a regular file'
+    die "managed path is not a regular file: $path"
   fi
   if [ -f "$path" ]; then
-    grep -Fq "$MARKER" "$path" || die 'existing file belongs to another policy'
+    grep -Fq "$MARKER" "$path" || die "existing file belongs to another policy: $path"
   fi
 done
 if [ -L "$BIN_LINK" ]; then
@@ -557,6 +569,7 @@ fi
 reconcile_approval_file "$sudo_policy" "$sudo_policy_json"
 reconcile_approval_file "$git_policy" "$git_policy_json"
 [ -n "$hook_policy_json" ] || reconcile_approval_file "$hook_policy" ''
+reconcile_approval_file "$instructions" "$instructions_md"
 # /etc/profile.d covers login shells; PAM reads /etc/environment for yard shell -- cmd.
 # These Claude safety switches are ignored in settings env: they must precede CLI startup.
 install -d -m 0755 "$ETC_DIR/profile.d"
@@ -626,6 +639,7 @@ stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
   printf 'git_hook=%q\ngit_hook_sha=%q\n' "$git_hook" "$(git_approval_hook | sha256sum | cut -d' ' -f1)"
+  printf 'instructions=%q\ninstructions_sha=%q\n' "$instructions" "$(printf '%s\n' "$instructions_md" | sha256sum | cut -d' ' -f1)"
   declare -f approval_file_present check_approval_hash check_git_approval_hook check_policy_json is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
 # Report every refusal that does not depend on a failed read, in this order.
@@ -637,12 +651,11 @@ check_policy_json "$update_policy" "$update_policy_json" 'managed Claude update 
 check_policy_json "$git_policy" "$git_policy_json" 'managed Git approval policy'
 check_policy_json "$sudo_policy" "$sudo_policy_json" 'managed sudo approval policy'
 check_policy_json "$hook_policy" "$hook_policy_json" 'managed approval hook registration'
-if [ -n "$hook_policy_json" ]; then
-  hook_dir="$(dirname "$git_hook")"
-  [ ! -L "$hook_dir" ] && [ "$(stat -c '%a:%u:%g' "$hook_dir" 2>/dev/null)" = "755:$expected_owner" ] \
-    || refuse 'managed approval hook directory drifted; run yard init'
-  check_git_approval_hook
-fi
+claude_dir="$(dirname "$git_hook")"
+[ ! -L "$claude_dir" ] && [ "$(stat -c '%a:%u:%g' "$claude_dir" 2>/dev/null)" = "755:$expected_owner" ] \
+  || refuse 'managed Claude directory drifted; run yard init'
+check_approval_hash "$instructions" "$instructions_sha" 644 'managed Claude instructions'
+[ -z "$hook_policy_json" ] || check_git_approval_hook
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
   || refuse 'canonical command does not point to the managed runtime; run yard init'
 is_working_binary "$runtime" || refuse 'managed runtime failed validation; run yard init'

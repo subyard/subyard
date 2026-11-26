@@ -15,10 +15,30 @@ fi
 if [ "${1:-}" = --install-only ]; then
   version="$(claude --version)"
   claude --help >/dev/null
-  before="$(sha256sum /opt/subyard/claude/claude)"
+  instructions=/etc/claude-code/CLAUDE.md
+  [ "$(stat -c '%a:%U:%G' "$instructions")" = 644:root:root ]
+  grep -Fq 'Subyard Claude permission policy' "$instructions"
+  before="$(sha256sum /opt/subyard/claude/claude; stat -c '%i:%Y' "$instructions")"
   sudo -n env CODING_TOOL_GIT_APPROVAL=off bash "$ROOT/config/agents/claude/provision.sh"
-  [ "$before" = "$(sha256sum /opt/subyard/claude/claude)" ]
+  [ "$before" = "$(sha256sum /opt/subyard/claude/claude; stat -c '%i:%Y' "$instructions")" ]
   claude-policy-check
+  # Mode and content drift are separate findings, each repaired by provisioning.
+  # The developer cannot read a 0600 root file, so that read failure is reported too.
+  instructions_drift() { # expected findings...
+    local finding
+    if claude-policy-check 2>"$fixture/drift.err"; then
+      printf 'FAIL: drifted managed instructions passed readiness\n' >&2
+      exit 1
+    fi
+    for finding in "$@"; do grep -Fq "managed Claude instructions $finding" "$fixture/drift.err"; done
+    [ "$(grep -c 'managed Claude instructions' "$fixture/drift.err")" = "$#" ]
+    sudo -n env CODING_TOOL_GIT_APPROVAL=off bash "$ROOT/config/agents/claude/provision.sh"
+    claude-policy-check
+  }
+  sudo -n chmod 0600 "$instructions"
+  instructions_drift 'permissions drifted' 'could not be read'
+  sudo -n sh -c 'printf "drift\n" >> /etc/claude-code/CLAUDE.md'
+  instructions_drift 'content drifted'
   sudo -n chmod 0777 /opt/subyard/claude
   if claude-policy-check >/dev/null 2>&1; then
     printf 'FAIL: writable runtime directory passed readiness\n' >&2
@@ -26,7 +46,7 @@ if [ "${1:-}" = --install-only ]; then
   fi
   sudo -n chmod 0755 /opt/subyard/claude
   claude-policy-check
-  printf 'ok: native Claude CLI installation, repeat provision and directory drift: %s\n' "$version"
+  printf 'ok: native Claude CLI installation, repeat provision, directory and instructions drift: %s\n' "$version"
   exit 0
 fi
 if ! python3 -m venv "$fixture/venv"; then

@@ -45,6 +45,16 @@
         "/etc/codex/50-subyard-git-approval.rules.inc",
         "/etc/codex/51-subyard-sudo-approval.rules.inc"
       ]
+    },
+    {
+      "component": "agents",
+      "throughVersion": "0.32.0",
+      "reason": "Managed Claude instructions added after 0.32.0 remain active after rollback.",
+      "recovery": "After rollback, back up and remove the listed Subyard-managed file in each affected yard if its rule is unwanted, then restart Claude sessions. Account for custom installation paths.",
+      "sourceDigest": "f17f1163b7daa719210fe54c384539468d712587f9a6c2b06366a613df081768",
+      "files": [
+        "/etc/claude-code/CLAUDE.md"
+      ]
     }
   ]
 }

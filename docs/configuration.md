@@ -1052,7 +1052,8 @@ The update lock lives in `48-subyard-update-lock.json`, the Bash hook registrati
 files and user/project denies and
 refuses foreign files at its own managed path. It does not enable `allowManagedPermissionRulesOnly`,
 which would discard those user/project restrictions. `claude-policy-check` verifies the managed
-runtime and its command link, the drop-in and hook, and the absence of a native
+runtime and its command link, the drop-in and hook, the managed instructions
+`/etc/claude-code/CLAUDE.md` (delete only by literal absolute path), and the absence of a native
 self-installed link; it does not show that an active client loaded the policy. Both `claude-policy-check`
 and `codex-policy-check` report every refusal they can determine.
 In a new client, inspect `/status` for the managed file/drop-ins source and `/permissions` for

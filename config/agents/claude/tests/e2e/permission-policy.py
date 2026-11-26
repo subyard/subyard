@@ -34,6 +34,7 @@ GIT_COMMANDS = ["./ordinary.sh", "./private-denied.sh", "./project-denied.sh", "
             "git commit --allow-empty -m parity-two",
             "git commit --amend --allow-empty -m parity-amended", "git push"]
 COMMANDS = SUDO_COMMANDS if SUDO else GIT_COMMANDS
+INSTRUCTIONS = Path("/etc/claude-code/CLAUDE.md")
 STATE = {}
 
 
@@ -61,6 +62,7 @@ class Model(BaseHTTPRequestHandler):
         index = STATE["step"]
         if main:
             STATE["step"] += 1
+            STATE["main_text"] += json.dumps(body, ensure_ascii=False)
             emit("model_request", index=index, messages=body.get("messages"))
         if classifier:
             STATE["classifier"] += 1
@@ -144,7 +146,7 @@ async def run_case(source, mode, decision, base, server):
     settings["autoMemoryDirectory"] = str(home / "memory")
     asks, native = [], []
     with (base / f"{case}.jsonl").open("w") as log:
-        STATE.update(step=0, classifier=0, classifier_text="", log=log)
+        STATE.update(step=0, classifier=0, classifier_text="", main_text="", log=log)
 
         async def permission(name, inputs, context):
             asks.append(inputs.get("command"))
@@ -190,6 +192,11 @@ async def run_case(source, mode, decision, base, server):
         emit("summary", **result)
         print(json.dumps(result), flush=True)
         assert effective == [mode], result
+        if os.environ.get("PARITY_CLAUDE_CLI"):
+            # The managed CLI sends the managed instructions to the model in every session.
+            rules = [line for line in INSTRUCTIONS.read_text().splitlines() if line and not line.startswith("<!--")]
+            missing = [line for line in rules if json.dumps(line, ensure_ascii=False)[1:-1] not in STATE["main_text"]]
+            assert rules and not missing, missing
         assert (result["classifier_requests"] > 0) == (mode == "auto"), result
         if SUDO:
             markers = {name: (repo / f"{name}.marker").exists() for name in SUDO_ASKED + SUDO_BLOCKED}
@@ -223,6 +230,7 @@ async def main():
     directory = Path("/etc/claude-code/managed-settings.d")
     policy = directory / ("51-subyard-sudo-approval.json" if SUDO else "50-subyard-git-approval.json")
     asked = json.loads(policy.read_text())["permissions"]["ask"] if policy.is_file() else []
+    assert INSTRUCTIONS.is_file(), "managed instructions are missing"
     if SUDO:
         assert "Bash(sudo:*)" in asked, "drop-in lacks the sudo ask rules"
     else:

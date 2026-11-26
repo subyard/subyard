@@ -560,6 +560,8 @@ migrate_retained_git_settings
 case " $PUBLISHED_AGENTS " in *" claude "*)
   [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
     || die 'updated Claude login-shell environment is missing'
+  guest grep -Fq 'Subyard Claude permission policy' /etc/claude-code/CLAUDE.md \
+    || die 'candidate activation did not install the managed Claude instructions'
   operator_yard shell -- env > "$STATE_ROOT/shell-environment"
   grep -Fxq 'CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT=1' "$STATE_ROOT/shell-environment"
   grep -Fxq 'CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1' "$STATE_ROOT/shell-environment"
