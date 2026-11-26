@@ -2,9 +2,32 @@ package domain
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestConfigRefusalCodesHaveStableUniqueWireNames(t *testing.T) {
+	pattern := regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	seen := map[string]ConfigRefusalCode{}
+	for code := range configRefusalTexts {
+		name := code.Name()
+		if !pattern.MatchString(name) || len(name) > 64 {
+			t.Fatalf("code %d has no valid wire name: %q", code, name)
+		}
+		if previous, ok := seen[name]; ok {
+			t.Fatalf("codes %d and %d share wire name %q", previous, code, name)
+		}
+		seen[name] = code
+	}
+	if len(configRefusalNames) != len(configRefusalTexts) || ConfigRefusalCode(0).Name() != "" {
+		t.Fatalf("wire names %d differ from texts %d", len(configRefusalNames), len(configRefusalTexts))
+	}
+	// Spot-check that names are pinned, not derived at run time.
+	if ConfigRoleForbidsSetting.Name() != "role-forbids-setting" || ConfigE2EVMCPU.Name() != "e2e-vm-cpu" {
+		t.Fatal("wire names changed")
+	}
+}
 
 func TestConfigRefusalRendersOnlyValidatedNames(t *testing.T) {
 	const sentinel = "secret value/SENTINEL"

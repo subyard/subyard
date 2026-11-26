@@ -38,6 +38,12 @@ var verbWords = map[Verb]string{
 	VerbIntegrationStatus: "integration status",
 }
 
+// VerbName is the verb's stable wire name: its command words joined by '-',
+// such as "migrate-check"; empty for VerbNone or an unknown verb.
+func VerbName(verb Verb) string {
+	return strings.ReplaceAll(strings.ReplaceAll(verbWords[verb], "--", ""), " ", "-")
+}
+
 // Host verbs act on the whole host and never select a yard.
 func (verb Verb) Host() bool {
 	return verb == VerbMigrate || verb == VerbMigrateCheck || verb == VerbUpdate || verb == VerbUpdateCheck || verb == VerbUpdateRollback

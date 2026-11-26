@@ -353,12 +353,26 @@ func SourceAliasRepairRetry(home, yard string, cause error) string {
 // validation failure: every classified refusal in its collected order, fixed
 // next steps, and whether some cause has no public classification.
 type ConfigDiagnostic struct {
-	Refusals     []string
-	Next         []string
+	Refusals []string
+	Next     []string
+	// Typed holds the refusals that are domain.ConfigRefusal values, in
+	// collected order; their texts are also in Refusals.
+	Typed        []TypedRefusal
 	Unclassified bool
 	known        []KnownCause
 	seenRefusals map[string]bool
 	seenNext     map[string]bool
+}
+
+// TypedRefusal is one rendered domain.ConfigRefusal with its fixed next step.
+type TypedRefusal struct {
+	Code       domain.ConfigRefusalCode
+	Text, Next string
+}
+
+// Complete reports that every cause is a typed refusal.
+func (diagnostic ConfigDiagnostic) Complete() bool {
+	return !diagnostic.Unclassified && len(diagnostic.Typed) == len(diagnostic.Refusals)
 }
 
 // KnownCause is a boundary's own sentinel with fixed, value-free text.
@@ -413,7 +427,9 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			}
 			return
 		case *domain.ConfigRefusal:
-			diagnostic.addRefusal(typed.Error())
+			if diagnostic.addRefusal(typed.Error()) {
+				diagnostic.Typed = append(diagnostic.Typed, TypedRefusal{typed.Code(), typed.Error(), typed.Next()})
+			}
 			diagnostic.addNext(typed.Next())
 			return
 		case *retiredYardTemplateError:
@@ -431,11 +447,21 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			// A boundary label prefixes each classified cause; next steps are kept.
 			nested := ConfigDiagnostic{known: diagnostic.known}
 			nested.add(configHome, typed.Unwrap())
-			for _, refusal := range nested.Refusals {
+			labeled := func(refusal string) string {
 				if label := typed.PublicConfigLabel(); label != "" {
-					refusal = label + ": " + refusal
+					return label + ": " + refusal
 				}
-				diagnostic.addRefusal(refusal)
+				return refusal
+			}
+			for _, refusal := range nested.Refusals {
+				if diagnostic.addRefusal(labeled(refusal)) {
+					for _, refusalTyped := range nested.Typed {
+						if refusalTyped.Text == refusal {
+							refusalTyped.Text = labeled(refusal)
+							diagnostic.Typed = append(diagnostic.Typed, refusalTyped)
+						}
+					}
+				}
 			}
 			for _, next := range nested.Next {
 				diagnostic.addNext(next)
@@ -480,14 +506,17 @@ func operationSentinel(err error) (text, next string, ok bool) {
 
 // addRefusal keeps one copy of each rendered refusal; distinct values that
 // render alike would otherwise repeat the same fixed text.
-func (diagnostic *ConfigDiagnostic) addRefusal(refusal string) {
+// It reports whether refusal is new.
+func (diagnostic *ConfigDiagnostic) addRefusal(refusal string) bool {
 	if diagnostic.seenRefusals == nil {
 		diagnostic.seenRefusals = make(map[string]bool)
 	}
-	if !diagnostic.seenRefusals[refusal] {
-		diagnostic.seenRefusals[refusal] = true
-		diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+	if diagnostic.seenRefusals[refusal] {
+		return false
 	}
+	diagnostic.seenRefusals[refusal] = true
+	diagnostic.Refusals = append(diagnostic.Refusals, refusal)
+	return true
 }
 
 func (diagnostic *ConfigDiagnostic) addNext(next string) {

@@ -72,3 +72,20 @@ func TestNextStepNeverRepeatsTheAttemptedCommand(t *testing.T) {
 		t.Fatalf("unreachable sequence: %s", got)
 	}
 }
+
+func TestVerbWireNamesArePinned(t *testing.T) {
+	want := map[Verb]string{
+		VerbInit: "init", VerbConfigApply: "config-apply", VerbConfigStatus: "config-status",
+		VerbConfigValidate: "config-validate", VerbMigrate: "migrate", VerbMigrateCheck: "migrate-check",
+		VerbUpdate: "update", VerbUpdateCheck: "update-check", VerbUpdateRollback: "update-rollback",
+		VerbStart: "start", VerbStopForce: "stop-force", VerbIntegrationStatus: "integration-status",
+	}
+	if len(want) != len(verbWords) || VerbName(VerbNone) != "" {
+		t.Fatalf("verbs %d, pinned %d", len(verbWords), len(want))
+	}
+	for verb, name := range want {
+		if VerbName(verb) != name {
+			t.Fatalf("verb %d = %q, want %q", verb, VerbName(verb), name)
+		}
+	}
+}
