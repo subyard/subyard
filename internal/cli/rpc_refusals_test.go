@@ -98,8 +98,11 @@ func TestMutationGateRPCErrorCarriesEveryBlockerAndTypedAction(t *testing.T) {
 				Message: "profile runtime is unavailable", Retry: "restore the profile runtime"},
 		}}
 	fault := mutationGateRPCError(outcome, inspection)
-	if fault.Code != "precondition-blocked" || fault.Message != outcome.Message {
-		t.Fatalf("fault = %#v", fault)
+	// A client or relay that ignores data still shows every blocker and retry.
+	if want := "release activation is blocked: release operator-action-required (precondition-blocked): active release-a, target release-b; " +
+		"cause: yard default has pending configuration (activation.core.pending-configuration), next: finish the pending change, then run yard -Y default start; " +
+		"cause: profile runtime is unavailable (activation.profile.route), next: restore the profile runtime"; fault.Code != "precondition-blocked" || fault.Message != want {
+		t.Fatalf("message = %q", fault.Message)
 	}
 	data := decodeErrorData(t, fault)
 	want := []rpc.Refusal{
@@ -275,7 +278,8 @@ while True:
 		at += found + len(line)
 	}
 	// The gate's own next step is already a blocker's and is not repeated.
-	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") || strings.Count(output, "Next: run yard migrate") != 1 {
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") || strings.Count(output, "Next: run yard migrate") != 1 ||
+		strings.Contains(output, "; cause:") {
 		t.Fatalf("stderr = %q", output)
 	}
 }
@@ -384,4 +388,45 @@ func mustJSON(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+// A client that ignores data, or sits behind a relay that drops it, still sees
+// every blocker and the next step in the message; this CLI shows the data
+// instead, so its output does not repeat them.
+func TestGateRefusalMessageIsSelfContainedWithoutData(t *testing.T) {
+	outcome := &releasetransition.Outcome{
+		Status: releasetransition.StatusMigrationRequired, Code: releasetransition.CodeTransitionRequired,
+		Active: "release-a", Target: "release-b", Message: "release migration is required", Retry: "run yard migrate",
+	}
+	inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{
+		{Code: releasetransition.CodeTransitionRequired, Resource: "migration.settings", Message: "settings need migration"},
+		{Code: releasetransition.CodePreconditionBlocked, Resource: "activation.core.pending-configuration",
+			Message: "yard inner has pending configuration\x1b[2J", Retry: "finish the pending change, then run yard -Y inner start"},
+	}}
+	fault := mutationGateRPCError(outcome, inspection)
+	want := "transition-required: release migration is required: release migration-required (transition-required): active release-a, target release-b; " +
+		"next: run yard migrate; cause: settings need migration (migration.settings); " +
+		"cause: yard inner has pending configuration [2J (activation.core.pending-configuration), next: finish the pending change, then run yard -Y inner start"
+	// An older CLI prints the error text as is.
+	if got := fault.Error(); got != want {
+		t.Fatalf("old client text = %q", got)
+	}
+	stripped := &rpc.Error{Code: fault.Code, Message: fault.Message}
+	if text, lines, _ := ownerErrorReport(fmt.Errorf("prepare start: %w", stripped)); text != "prepare start: "+want || lines != nil {
+		t.Fatalf("data-less text = %q lines = %q", text, lines)
+	}
+	text, lines, _ := ownerErrorReport(fmt.Errorf("prepare start: %w", fault))
+	if text != "prepare start: transition-required: the owner's release gate refused this command" || len(lines) == 0 ||
+		strings.Contains(text+strings.Join(lines, "\n"), "; cause:") {
+		t.Fatalf("new client text = %q lines = %q", text, lines)
+	}
+	long := &releasetransition.Inspection{Outcome: outcome}
+	for index := 0; index < 100; index++ {
+		long.Blockers = append(long.Blockers, releasetransition.Blocker{Code: releasetransition.CodeTransitionRequired,
+			Message: fmt.Sprintf("blocker %d %s", index, strings.Repeat("x", 100))})
+	}
+	if message := mutationGateRPCError(outcome, long).Message; len(message) > maxGateMessage || !strings.HasSuffix(message, "…") ||
+		!strings.Contains(message, "; next: run yard migrate; cause: blocker 0 ") {
+		t.Fatalf("message is not bounded: %d bytes", len(message))
+	}
 }

@@ -3381,7 +3381,7 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 		}
 		unmarshalErr := json.Unmarshal(fault.Data, &data)
 		outcome := data.Gate
-		if unmarshalErr != nil || fault.Message != outcome.Message || len(data.Refusals) == 0 ||
+		if unmarshalErr != nil || !strings.HasPrefix(fault.Message, outcome.Message+": ") || !strings.Contains(fault.Message, "; next: "+outcome.Action) || len(data.Refusals) == 0 ||
 			data.Refusals[0].Source != rpc.RefusalSourceGate ||
 			outcome.Status != releasetransition.StatusOperatorActionRequired ||
 			outcome.Code != releasetransition.CodeDependencyUnavailable ||

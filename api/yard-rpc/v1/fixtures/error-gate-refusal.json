@@ -5,7 +5,7 @@
   "operationId": "op-plan",
   "error": {
     "code": "precondition-blocked",
-    "message": "release activation is blocked",
+    "message": "release activation is blocked: release operator-action-required (precondition-blocked): active 0.32.0-bbbbbbbbbbbb, target 0.32.0-bbbbbbbbbbbb; next: run yard migrate; cause: yard default has a pending configuration change (activation.core.pending-configuration), next: start the yard, then run yard -Y default start; cause: profile route-client runtime is unavailable (activation.profile.route-client)",
     "data": {
       "schemaVersion": 1,
       "refusals": [

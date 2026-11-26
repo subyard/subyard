@@ -29,8 +29,12 @@ func configRefusalData(err error) rpc.ErrorData {
 	return data
 }
 
+// maxGateMessage bounds the plain-text message of a gate refusal.
+const maxGateMessage = 2048
+
 // mutationGateRPCError carries every gate blocker as a typed refusal and the
-// public outcome as gate data; message is the outcome's own message.
+// public outcome as gate data. Its message stays self-contained for clients
+// and relays that do not read data: see gateRPCMessage.
 func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
 	public := publicInspectedMutationGateOutcome(outcome, inspection)
 	refusals := []rpc.Refusal{}
@@ -48,8 +52,44 @@ func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releas
 	if len(refusals) == 0 {
 		add(public.Code, "", firstNonempty(public.Message, string(public.Code)), public.Action)
 	}
-	return rpc.RefusalError(rpc.ErrorCode(outcome.Code), firstNonempty(outcome.Message, string(outcome.Code)),
+	return rpc.RefusalError(rpc.ErrorCode(outcome.Code), gateRPCMessage(public),
 		rpc.ErrorData{Refusals: refusals, Gate: rpcGateOutcome(public)})
+}
+
+// gateRPCMessage renders the gate refusal as one bounded plain-text line, in the
+// style of mutationGateRefusalText: the outcome message and release state, the
+// outcome's next step unless a blocker carries it, then every distinct cause with
+// its resource and retry. The next step precedes the causes so the bound cuts
+// causes first.
+func gateRPCMessage(public mutationGateOutcome) string {
+	var text strings.Builder
+	transaction := ""
+	if public.Transaction != nil {
+		transaction = ", transaction " + string(*public.Transaction)
+	}
+	fmt.Fprintf(&text, "%s: release %s (%s): active %s, target %s%s",
+		firstNonempty(public.Message, string(public.Code)), public.Status, public.Code,
+		firstNonempty(string(public.Active), "unknown"), firstNonempty(string(public.Target), "unknown"), transaction)
+	if public.Action != "" && !slices.ContainsFunc(public.Blockers, func(blocker releasetransition.Blocker) bool {
+		return blocker.Retry == public.Action
+	}) {
+		text.WriteString("; next: " + public.Action)
+	}
+	seen := []string{}
+	for _, blocker := range public.Blockers {
+		cause := "cause: " + firstNonempty(blocker.Message, string(blocker.Code))
+		if blocker.Resource != "" {
+			cause += " (" + blocker.Resource + ")"
+		}
+		if blocker.Retry != "" {
+			cause += ", next: " + blocker.Retry
+		}
+		if !slices.Contains(seen, cause) {
+			seen = append(seen, cause)
+			text.WriteString("; " + cause)
+		}
+	}
+	return rpc.BoundText(text.String(), maxGateMessage)
 }
 
 // rpcGateOutcome is the rendered part of the public outcome; its blockers are

@@ -37,7 +37,10 @@ data `incomplete`, which also means the error had causes that are not typed
 refusals; the owner's own diagnostics (`config validate`, `yard migrate --check`)
 report them. A release-gate refusal adds `gate`, the public gate outcome
 (status, code, active and target releases, transaction, message and action)
-within the same text bounds, and its error `message` is the outcome message.
+within the same text bounds. Its error `message` stays self-contained for
+clients and relays that do not read `data`: one plain-text line of at most 2048
+bytes with the outcome message and release state, the next step and every cause
+with its resource and retry.
 Other errors carry no `data`. A client skips a refusal whose `source` it does
 not know and treats the data as `incomplete`. `data` is optional: older clients
 ignore it, and older owners omit it, in which case clients keep their fixed text

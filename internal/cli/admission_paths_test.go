@@ -20,6 +20,9 @@ import (
 // that newConfigApplyRepairFixture installs.
 const blockedGateRefusal = `{"status":"migration-required","code":"transition-required","active":"1.2.3-aaaaaaaaaaaa","target":"1.2.3-aaaaaaaaaaaa","transaction":null,"message":"activation drift","action":"run yard migrate"}`
 
+// blockedGateRPCMessage is the self-contained message of the same refusal.
+const blockedGateRPCMessage = "activation drift: release migration-required (transition-required): active 1.2.3-aaaaaaaaaaaa, target 1.2.3-aaaaaaaaaaaa; next: run yard migrate"
+
 // blockedGateTextRefusal is the direct CLI's text rendering of the same gate.
 const blockedGateTextRefusal = "yard: release gate: release migration-required (transition-required): active 1.2.3-aaaaaaaaaaaa, target 1.2.3-aaaaaaaaaaaa; this command is not run\n" +
 	"yard: cause: activation drift\nyard: next: run yard migrate\n"
@@ -123,7 +126,7 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 	refused := func(t *testing.T, err error) {
 		t.Helper()
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "transition-required" || fault.Message != "activation drift" || string(rpcGatePayload(fault)) != blockedGateRefusal {
+		if !ok || fault.Code != "transition-required" || fault.Message != blockedGateRPCMessage || string(rpcGatePayload(fault)) != blockedGateRefusal {
 			t.Fatalf("gate refusal=%#v", err)
 		}
 	}
