@@ -69,3 +69,29 @@ func TestRPCErrorLogRefusesALinkedLog(t *testing.T) {
 		t.Fatalf("link target received %q", payload)
 	}
 }
+
+func TestRPCErrorLogNarrowsAnExistingReadableLogAndItsRotation(t *testing.T) {
+	// A small log is narrowed and kept; a full one is narrowed and rotated.
+	for name, size := range map[string]int{"kept": 8, "rotated": 64} {
+		t.Run(name, func(t *testing.T) {
+			home := testkit.TempDir(t)
+			path := filepath.Join(home, "logs", rpcErrorFile)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, []byte(strings.Repeat("x", size-1)+"\n"), 0o644)
+			if err := (RPCErrorLog{Home: home, Maximum: 32}).Append(RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err != nil {
+				t.Fatal(err)
+			}
+			names := []string{path}
+			if size > 32 {
+				names = append(names, path+".1")
+			}
+			for _, name := range names {
+				if info, err := os.Stat(name); err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("%s: info=%v err=%v", name, info, err)
+				}
+			}
+		})
+	}
+}

@@ -74,16 +74,6 @@ func (log RPCErrorLog) Append(record RPCError) error {
 	if maximum <= 0 {
 		maximum = defaultRPCErrorMaximum
 	}
-	path := filepath.Join(directory, rpcErrorFile)
-	info, err := os.Lstat(path)
-	if err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing non-regular RPC error log %s", path)
-	}
-	if err == nil && info.Size() >= maximum {
-		if err := os.Rename(path, path+".1"); err != nil {
-			return err
-		}
-	}
 	if len(record.Error) > maxRPCErrorText {
 		record.Error = record.Error[:maxRPCErrorText] + "…"
 	}
@@ -95,13 +85,43 @@ func (log RPCErrorLog) Append(record RPCError) error {
 	if err != nil {
 		return err
 	}
-	// O_NOFOLLOW keeps a link created after the check from receiving the entry.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	path := filepath.Join(directory, rpcErrorFile)
+	file, err := openRPCErrorLog(path)
 	if err != nil {
 		return err
 	}
+	if info, err := file.Stat(); err != nil || info.Size() >= maximum {
+		// The full log, already private, becomes the previous generation.
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
+		if err := os.Rename(path, path+".1"); err != nil {
+			return err
+		}
+		if file, err = openRPCErrorLog(path); err != nil {
+			return err
+		}
+	}
 	_, err = file.Write(append(line, '\n'))
 	return errors.Join(err, file.Close())
+}
+
+// openRPCErrorLog opens the regular log for appending and narrows a file that
+// an earlier writer left readable by others.
+func openRPCErrorLog(path string) (*os.File, error) {
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing non-regular RPC error log %s", path)
+	}
+	// O_NOFOLLOW keeps a link created after the check from receiving the entry.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := safefs.RepairMode(file, 0o077); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
 }
 
 // Read returns the newest records, oldest first, at most limit of them.
