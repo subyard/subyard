@@ -46,7 +46,7 @@ func TestQueuedHostRenameCannotRecreateRetiredConfiguration(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- authority.withLock(ctx, program, func() error {
-			return os.WriteFile(filepath.Join(configHome, "late-rename"), []byte("unexpected"), 0o600) //nolint:forbidigo // fake without testing.TB
+			return os.WriteFile(filepath.Join(configHome, "late-rename"), []byte("unexpected"), 0o600) //nolint:forbidigo // runs in a goroutine, where t.Fatal is not allowed
 		})
 	}()
 	select {

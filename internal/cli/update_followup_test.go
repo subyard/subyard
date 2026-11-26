@@ -368,7 +368,7 @@ func TestUpdateDiskTmpRetryPrecedesFreshFinalCheck(t *testing.T) {
 				if runtimeDrift {
 					return nil
 				}
-				return os.WriteFile(filepath.Join(home, "converged-secondary"), []byte("ready"), 0o600) //nolint:forbidigo // fake without testing.TB
+				return os.WriteFile(filepath.Join(home, "converged-secondary"), []byte("ready"), 0o600) //nolint:forbidigo // the fake returns its write error to the caller
 			}
 			if code := program.runPreparedCommand(context.Background(), prepared, true); code != 0 || calls != 1 || strings.Count(output.String(), "Operation plan:") != map[bool]int{false: 1, true: 2}[runtimeDrift] || !strings.Contains(output.String(), "Status: ready") {
 				t.Fatalf("retry did not precede the final check: code=%d calls=%d %s", code, calls, output.String())

@@ -1000,7 +1000,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	}
 	for _, mutation := range []string{"changed", "missing"} {
 		if mutation == "changed" {
-			err = os.WriteFile(enginePath, []byte("changed"), 0o700) //nolint:forbidigo // its error is checked with the other mutation
+			err = os.WriteFile(enginePath, []byte("changed"), 0o700) //nolint:forbidigo // keeps the engine's existing mode; testkit.WriteFile would chmod it
 		} else {
 			err = os.Remove(enginePath)
 		}

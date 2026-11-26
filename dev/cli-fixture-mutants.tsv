@@ -1571,3 +1571,4 @@ internal/cli/fixture_test.go	^TestCLIFixtureCheckoutConfigIsAFixtureOwnedCopy$	i
 internal/cli/fixture_test.go	^TestCLIFixtureCheckoutConfigIsAFixtureOwnedCopy$	internal/cli/fixture_test.go	configHome := filepath.Join(home, ".config", "subyard")	configHome := filepath.Join(home, ".config", "other")
 internal/cli/fixture_test.go	^TestCLIFixtureCheckoutConfigIsAFixtureOwnedCopy$	internal/cli/fixture_test.go	"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),	"SUBYARD_HOME=" + filepath.Join(home, ".other"),
 internal/cli/fixture_test.go	^TestCLIFixtureNativeFlavour$	internal/cli/fixture_test.go	home := filepath.Join(root, "home")	home := filepath.Join(root, "other-home")
+internal/cli/project_rpc_copy_test.go	^TestProjectRPCActiveCopyFinalizesOnce$	internal/cli/cli.go	manifestFile, err := os.Open(filepath.Join(root, "config", "commands.registry"))	manifestFile, err := os.Open(filepath.Join(root, "config", "missing.commands.registry"))
