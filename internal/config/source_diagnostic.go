@@ -359,6 +359,8 @@ type ConfigDiagnostic struct {
 	// collected order; their texts are also in Refusals.
 	Typed        []TypedRefusal
 	Unclassified bool
+	// typedAt is the index in Refusals of each Typed entry.
+	typedAt      []int
 	known        []KnownCause
 	seenRefusals map[string]bool
 	seenNext     map[string]bool
@@ -429,6 +431,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 		case *domain.ConfigRefusal:
 			if diagnostic.addRefusal(typed.Error()) {
 				diagnostic.Typed = append(diagnostic.Typed, TypedRefusal{typed.Code(), typed.Error(), typed.Next()})
+				diagnostic.typedAt = append(diagnostic.typedAt, len(diagnostic.Refusals)-1)
 			}
 			diagnostic.addNext(typed.Next())
 			return
@@ -453,14 +456,15 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 				}
 				return refusal
 			}
-			for _, refusal := range nested.Refusals {
-				if diagnostic.addRefusal(labeled(refusal)) {
-					for _, refusalTyped := range nested.Typed {
-						if refusalTyped.Text == refusal {
-							refusalTyped.Text = labeled(refusal)
-							diagnostic.Typed = append(diagnostic.Typed, refusalTyped)
-						}
-					}
+			for index, refusal := range nested.Refusals {
+				if !diagnostic.addRefusal(labeled(refusal)) {
+					continue
+				}
+				if at := slices.Index(nested.typedAt, index); at >= 0 {
+					refusalTyped := nested.Typed[at]
+					refusalTyped.Text = labeled(refusal)
+					diagnostic.Typed = append(diagnostic.Typed, refusalTyped)
+					diagnostic.typedAt = append(diagnostic.typedAt, len(diagnostic.Refusals)-1)
 				}
 			}
 			for _, next := range nested.Next {
