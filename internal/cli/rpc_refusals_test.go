@@ -319,10 +319,10 @@ func TestOwnerErrorReportPrintsEachRefusalOnceAndCleansOwnerText(t *testing.T) {
 		strings.Count(text+strings.Join(lines, "\n"), refusal) != 1 {
 		t.Fatalf("text = %q lines = %q", text, lines)
 	}
-	raw := &rpc.Error{Code: "plan_failed", Message: "owner said \u202eevil\x1b[2J\n" + strings.Repeat("x", 900)}
+	raw := &rpc.Error{Code: "plan_failed", Message: "owner said \u202eevil\x1b[2J\n" + strings.Repeat("x", 3000)}
 	text, lines, ok = ownerErrorReport(fmt.Errorf("start: %w", raw))
 	if !ok || lines != nil || !strings.HasPrefix(text, "start: plan_failed: owner said  evil [2J ") ||
-		len(text) > len("start: plan_failed: ")+rpc.MaxRefusalText || strings.ContainsAny(text, "\u202e\x1b\n") {
+		len(text) != len("start: plan_failed: ")+maxGateMessage || strings.ContainsAny(text, "\u202e\x1b\n") {
 		t.Fatalf("text = %q lines = %q", text, lines)
 	}
 	if _, _, ok := ownerErrorReport(errors.New("local")); ok {
@@ -425,8 +425,14 @@ func TestGateRefusalMessageIsSelfContainedWithoutData(t *testing.T) {
 		long.Blockers = append(long.Blockers, releasetransition.Blocker{Code: releasetransition.CodeTransitionRequired,
 			Message: fmt.Sprintf("blocker %d %s", index, strings.Repeat("x", 100))})
 	}
-	if message := mutationGateRPCError(outcome, long).Message; len(message) > maxGateMessage || !strings.HasSuffix(message, "…") ||
+	message := mutationGateRPCError(outcome, long).Message
+	if len(message) > maxGateMessage || len(message) <= rpc.MaxRefusalText || !strings.HasSuffix(message, "…") ||
 		!strings.Contains(message, "; next: run yard migrate; cause: blocker 0 ") {
 		t.Fatalf("message is not bounded: %d bytes", len(message))
+	}
+	// Behind a relay that drops data, this CLI keeps every cause the owner sent.
+	stripped = &rpc.Error{Code: fault.Code, Message: message}
+	if text, _, _ := ownerErrorReport(stripped); text != "transition-required: "+message {
+		t.Fatalf("data-less long text lost causes: %d of %d bytes", len(text), len(message))
 	}
 }

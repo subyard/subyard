@@ -127,7 +127,8 @@ func ownerErrorReport(err error) (string, []string, bool) {
 	if !errors.As(err, &fault) {
 		return "", nil, false
 	}
-	summary := rpc.BoundText(fault.Message, rpc.MaxRefusalText)
+	// The longest message an owner sends is a self-contained gate refusal.
+	summary := rpc.BoundText(fault.Message, maxGateMessage)
 	lines := ownerRefusalLines(fault)
 	if data, ok := rpc.DecodeErrorData(fault); ok {
 		summary = "the owner refused this request"
