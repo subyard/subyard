@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {"path": "config/profiles/user-dotfiles/guest.sh", "kind": "embedded", "owner": "config/profiles/user-dotfiles/owner.sh", "reference": "guest.sh"}
+  ]
+}

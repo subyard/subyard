@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "settings": [
+    {
+      "name": "USER_DOTFILES_SOURCE",
+      "type": "string",
+      "scopes": ["shipped", "shared", "host", "yard", "command"],
+      "application": "yard-init",
+      "syncable": true,
+      "optional": true,
+      "default": ""
+    },
+    {
+      "name": "USER_DOTFILES_SUBDIR",
+      "type": "string",
+      "scopes": ["shipped", "shared", "host", "yard", "command"],
+      "application": "yard-init",
+      "syncable": true,
+      "optional": true,
+      "default": ""
+    }
+  ],
+  "owner_service": "owner.sh"
+}
