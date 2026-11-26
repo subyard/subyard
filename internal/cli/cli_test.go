@@ -230,13 +230,10 @@ printf '%s|%s|%s\n' "$SUBYARD_CONFIG_LOADED" "$SSH_HOST" "$HOST_BASE"
 		"SUBYARD_NO_AUDIT=1",
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := mustNew(t, Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"show"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("adapter failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -306,7 +303,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		queryEnvironment := append([]string(nil), environment...)
 		queryEnvironment = append(queryEnvironment, "SUBYARD_YARD=e2e-yard")
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := mustNew(t, Options{
 			RepositoryRoot: root,
 			Program:        "yard",
 			Arguments:      []string{query},
@@ -315,9 +312,6 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 			Stdout:         &stdout,
 			Stderr:         &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("global %s was blocked by retired registration: code=%d stderr=%q",
 				query, code, stderr.String())
@@ -338,7 +332,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 	}
 
 	var explicitListStderr bytes.Buffer
-	explicitList, err := New(Options{
+	explicitList := mustNew(t, Options{
 		RepositoryRoot: root,
 		Program:        "yard",
 		Arguments:      []string{"-Y", "e2e-yard", "list"},
@@ -346,9 +340,6 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		WorkingDir:     root,
 		Stderr:         &explicitListStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := explicitList.Run(context.Background()); code == 0 ||
 		!strings.Contains(explicitListStderr.String(), "YARD_TEMPLATE=test-vms") {
 		t.Fatalf("explicit retired-yard list did not fail closed: code=%d stderr=%q",
@@ -357,7 +348,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 
 	retiredRunner := &testkit.ScriptedAdapter{}
 	var retiredStderr bytes.Buffer
-	program, err := New(Options{
+	program := mustNew(t, Options{
 		RepositoryRoot: root,
 		Program:        "yard",
 		Arguments:      []string{"-Y", "e2e-yard", "teardown", "--yes"},
@@ -366,9 +357,6 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		Stderr:         &retiredStderr,
 		AdapterRunner:  retiredRunner,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code == 0 {
 		t.Fatal("teardown loaded the retired template")
 	}
@@ -387,7 +375,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 	}}}}
 	teardownIncus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}}
 	var stderr bytes.Buffer
-	program, err = New(Options{
+	program = mustNew(t, Options{
 		RepositoryRoot: root,
 		Program:        "yard",
 		Arguments:      []string{"-Y", "e2e-yard", "teardown", "--yes"},
@@ -398,9 +386,6 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		Incus:          teardownIncus,
 		NetworkPolicy:  allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	teardownLoaded, err := program.loadContext("e2e-yard")
 	if err != nil {
 		t.Fatal(err)

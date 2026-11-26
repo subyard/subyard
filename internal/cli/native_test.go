@@ -125,7 +125,8 @@ func TestNativeCodeAndShellDoNotStartCredentialAutoSync(t *testing.T) {
 	} else if !errors.Is(err, syscall.EADDRINUSE) {
 		t.Fatal(err)
 	}
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -186,15 +187,12 @@ printf '%s\0' "$@" > "$CODE_LOG"
 	testkit.WriteFile(t, snippet, []byte(originalSnippet), 0o600)
 	codePrompt := &testkit.Prompt{}
 	var codeStderr bytes.Buffer
-	codeProgram, err := New(Options{
+	codeProgram := fixture.New(Options{
 		RepositoryRoot: root, DispatcherPath: dispatcher, Program: "yard",
 		Arguments: []string{"code", "Demo"}, Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader(""), Incus: incus, Executor: incus,
 		Prompt: codePrompt, Stderr: &codeStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := codeProgram.Run(context.Background()); code != 0 {
 		t.Fatalf("code failed: code=%d stderr=%q", code, codeStderr.String())
 	}
@@ -226,14 +224,11 @@ printf '%s\0' "$@" > "$CODE_LOG"
 	}
 
 	var shellStderr bytes.Buffer
-	shellProgram, err := New(Options{
+	shellProgram := fixture.New(Options{
 		RepositoryRoot: root, DispatcherPath: dispatcher, Program: "yard",
 		Arguments: []string{"shell", "--", "true"}, Environment: environment, WorkingDir: root,
 		Stderr: &shellStderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := shellProgram.Run(context.Background()); code != 0 {
 		t.Fatalf("shell failed: code=%d stderr=%q", code, shellStderr.String())
 	}
@@ -252,7 +247,8 @@ printf '%s\0' "$@" > "$CODE_LOG"
 }
 
 func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment, stateDirectory := cliFixture.Root, cliFixture.Environment, filepath.Join(cliFixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -277,15 +273,12 @@ func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testi
 		RecipientActors: []string{"actor-a"}, Syncable: true, ActorID: "actor-a",
 		ActorCounter: 1, Timestamp: time.Unix(100, 0).UTC(),
 	}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: fakeIncus, Executor: fakeIncus,
 		StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "static-only", Space: "unknown"}},
 		Credentials: &testkit.CredentialMetadataReader{Metadata: []domain.CredentialMetadata{metadata}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +387,8 @@ func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testi
 }
 
 func TestRPCIncusEventsAreTypedAndBoundToCancellation(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	events := make(chan domain.OperationEvent, 1)
 	errorsOut := make(chan error)
 	events <- domain.OperationEvent{
@@ -404,13 +398,10 @@ func TestRPCIncusEventsAreTypedAndBoundToCancellation(t *testing.T) {
 	close(events)
 	close(errorsOut)
 	fakeIncus := &testkit.Incus{EventsOut: events, ErrorsOut: errorsOut}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Incus: fakeIncus, Executor: fakeIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -432,23 +423,21 @@ func TestRPCIncusEventsAreTypedAndBoundToCancellation(t *testing.T) {
 }
 
 func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	clock := testkit.NewManualClock(time.Unix(100, 0))
 	cliRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-cli", Status: "ok",
 	}}}}
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-cli"),
 		WorkingDir:  root,
 		Stdout:      &stdout, Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
 		Incus: powerScriptedIncus(cliRunner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("structured CLI start failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -463,14 +452,11 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 	rpcRunner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-rpc", Status: "ok",
 	}}}}
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: powerScriptedIncus(rpcRunner, nil),
 		NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -517,7 +503,8 @@ func TestStructuredStartSharesPlanAndAdapterAcrossCLIAndRPC(t *testing.T) {
 }
 
 func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
 	assets := filepath.Join(root, "release")
 	cache := filepath.Join(root, "cache")
 	runtimeRoot := filepath.Join(root, "runtime")
@@ -540,14 +527,11 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 	)
 	configApplier := &recordingConfigApplier{}
 	var stdout bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment,
 		Clock: testkit.NewManualClock(time.Unix(100, 0)), Config: configApplier,
 		Stdout: &stdout,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if records, readErr := (audit.UpdateHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10); readErr != nil || len(records) != 0 {
 		t.Fatalf("RPC preparation wrote update history: records=%#v err=%v", records, readErr)
 	}
@@ -621,21 +605,18 @@ func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 
 func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *testing.T) {
 	t.Run("check is bounded and never prompts or activates", func(t *testing.T) {
-		root, environment, runtimeRoot := updateReleaseFixture(t)
+		fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 		capture := filepath.Join(root, "check-installer.args")
 		environment = append(environment, "RELEASE_CAPTURE="+capture)
 		prompt := &testkit.Prompt{}
 		configs := &recordingConfigApplier{}
 		var stderr bytes.Buffer
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments:   []string{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 			Environment: environment, WorkingDir: root, Prompt: prompt, Config: configs,
 			Stdout: &bytes.Buffer{}, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -653,7 +634,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 	})
 
 	t.Run("check reports ignored profile-only assignments as structured state and does not refuse", func(t *testing.T) {
-		root, environment, runtimeRoot := updateReleaseFixture(t)
+		fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 		host := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "config.env")
 		settings, err := os.ReadFile(host)
 		if err != nil && !os.IsNotExist(err) {
@@ -676,14 +657,11 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		} {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{}, Config: &recordingConfigApplier{},
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			code := program.Run(context.Background())
 			var report struct {
 				Configuration []config.ConfigurationState `json:"configuration"`
@@ -714,18 +692,15 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 	})
 
 	t.Run("declined activation removes private draft without publishing candidate", func(t *testing.T) {
-		root, environment, runtimeRoot := updateReleaseFixture(t)
+		fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 		configs := &recordingConfigApplier{}
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 			Environment: environment, WorkingDir: root, Config: configs,
 			Stdin: strings.NewReader("n\n"), Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		program.promptInputTerminal = func() bool { return true }
 		if code := program.Run(context.Background()); code != 1 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -753,20 +728,17 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 
 	for _, assumeYes := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rollback precondition yes=%v", assumeYes), func(t *testing.T) {
-			root, environment, _ := updateReleaseFixture(t)
+			fixture, root, environment, _ := newUpdateReleaseFixture(t)
 			arguments := []string{"update", "--rollback", "--runtime-root", filepath.Join(root, "missing-runtime")}
 			if assumeYes {
 				arguments = append([]string{"update", "--yes"}, arguments[1:]...)
 			}
 			prompt := &testkit.Prompt{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Prompt: prompt, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), "previous") || len(prompt.Requests) != 0 {
 				t.Fatalf("code=%d prompt=%#v stderr=%q", code, prompt.Requests, stderr.String())
@@ -776,19 +748,16 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 }
 
 func TestUpdateCheckReturnsZeroForBlockedV2Inspection(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	environment = append(environment, "UPDATE_BLOCK_INSPECTION=1")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"update", "--check", "--json", "--version", "1.2.3", "--runtime-root", runtimeRoot,
 		},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("blocked update check: code=%d stdout=%q stderr=%q",
 			code, stdout.String(), stderr.String())
@@ -810,20 +779,17 @@ func TestUpdateCheckReturnsZeroForBlockedV2Inspection(t *testing.T) {
 }
 
 func TestUpdateReportsPreparationDiagnosticWithoutReinspection(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	capture := filepath.Join(root, "transition-modes")
 	environment = append(environment, "UPDATE_BLOCK_INSPECTION=1", "UPDATE_TRANSITION_CAPTURE="+capture)
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{}
 	configs := &recordingConfigApplier{}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
 		Arguments: []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Prompt:    prompt, Config: configs, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -843,13 +809,13 @@ func TestUpdateReportsPreparationDiagnosticWithoutReinspection(t *testing.T) {
 }
 
 func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 	marker := filepath.Join(root, "unverified-retained-engine-ran")
 	engine := filepath.Join(runtimeRoot, "releases", "previous-b", "bin", "yard-engine")
 	writeCLIFile(t, engine, fmt.Sprintf("#!/bin/sh\n: > %q\nprintf 'yard-engine 1.2.3\\n'\n", marker), 0o700)
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root,
 		Program:        "yard",
 		Arguments:      []string{"update", "--yes", "--runtime-root", runtimeRoot, "--rollback"},
@@ -857,9 +823,6 @@ func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
 		WorkingDir:     root,
 		Stderr:         &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("tampered rollback exit=%d stderr=%q", code, stderr.String())
 	}
@@ -941,19 +904,16 @@ func TestUpdatePrintsFinalBlockerResources(t *testing.T) {
 }
 
 func TestUpdateReportsFailedExecutionOutcomeWithoutReinspection(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	capture := filepath.Join(root, "transition-modes")
 	environment = append(environment, "UPDATE_CONVERGENCE_FAIL=1", "UPDATE_TRANSITION_CAPTURE="+capture)
 	var stdout, stderr bytes.Buffer
 	configs := &recordingConfigApplier{}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
 		Arguments: []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Config:    configs, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -978,20 +938,17 @@ func TestUpdateReportsFailedExecutionOutcomeWithoutReinspection(t *testing.T) {
 func TestUpdatePrintsFinalReadinessAndFailsOnDrift(t *testing.T) {
 	for _, drift := range []bool{false, true} {
 		t.Run(fmt.Sprintf("drift=%v", drift), func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			if drift {
 				environment = append(environment, "UPDATE_FINAL_CHECK_FAIL=1")
 			}
 			var stdout, stderr bytes.Buffer
 			configs := &recordingConfigApplier{}
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
 				Arguments: []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 				Config:    configs, Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			wantCode, status, heading := 0, "ready", "[ ok ] Update completed successfully"
 			if drift {
 				wantCode, status, heading = 1, "migration-required", "[FAIL] Update did not complete successfully"
@@ -1053,7 +1010,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			if test.defaultRoot {
 				runtimeRoot = filepath.Join(root, "data", "runtime")
 				prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
@@ -1079,14 +1036,11 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, DispatcherPath: oldDispatcher, Program: "yard",
 				Arguments: test.arguments(runtimeRoot), Environment: environment, WorkingDir: root,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("update failed: code=%d stderr=%q", code, stderr.String())
 			}
@@ -1211,22 +1165,19 @@ esac
 }
 
 func TestUpdateRefreshesAfterOperationFinishedRecordError(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	oldDispatcher := filepath.Join(root, "old-dispatcher")
 	oldLog := filepath.Join(root, "old-dispatcher.log")
 	activeLog := filepath.Join(root, "active-launcher.log")
 	writeCLIFile(t, oldDispatcher, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$OLD_DISPATCHER_LOG\"\nexit 97\n", 0o700)
 	environment = append(environment, "OLD_DISPATCHER_LOG="+oldLog, "ACTIVE_CAPTURE="+activeLog)
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, DispatcherPath: oldDispatcher, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
 		Audit: &finishedOperationAudit{err: errors.New("operation finished sentinel")},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation finished sentinel") {
 		t.Fatalf("update recording failure = code=%d stderr=%q", code, stderr.String())
@@ -1243,18 +1194,15 @@ func TestUpdateRefreshesAfterOperationFinishedRecordError(t *testing.T) {
 }
 
 func TestUpdateJoinsRefreshAndOperationFinishedErrors(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
 		Audit:  &finishedOperationAudit{err: errors.New("operation finished sentinel")},
 		Config: failingConfigApplier{err: errors.New("config applier sentinel")},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation finished sentinel") ||
 		!strings.Contains(stderr.String(), "config applier sentinel") {
@@ -1270,7 +1218,7 @@ func TestUpdateReportsActivatedRuntimeWhenConfigRefreshFails(t *testing.T) {
 		{name: "named", yard: "named", retry: "yard -Y named config apply"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			if test.yard != "default" {
 				path := filepath.Join(
 					environmentValue(environment, "SUBYARD_CONFIG_HOME"), "yards", test.yard, "config.env",
@@ -1281,15 +1229,12 @@ func TestUpdateReportsActivatedRuntimeWhenConfigRefreshFails(t *testing.T) {
 				writeCLIFile(t, path, "", 0o600)
 			}
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments:   []string{"-Y", test.yard, "update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 				Environment: append(environment, "PRIVATE_CONFIG_VALUE=must-not-appear"), WorkingDir: root,
 				Config: failingConfigApplier{err: errors.New("config applier sentinel")}, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), "runtime activation completed") ||
 				!strings.Contains(stderr.String(), test.retry) ||
@@ -1311,7 +1256,7 @@ func TestUpdateRefreshAcceptsReadableConfigAndRepairsWritableConfigAfterActivati
 		{name: "group writable", mode: 0o660},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			yardDirectory := filepath.Join(configHome, "yards", "hermes")
 			if err := os.MkdirAll(yardDirectory, 0o755); err != nil {
@@ -1325,7 +1270,7 @@ func TestUpdateRefreshAcceptsReadableConfigAndRepairsWritableConfigAfterActivati
 
 			var stderr bytes.Buffer
 			applier := &validatingConfigApplier{configHome: configHome}
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments: []string{
 					"-Y", "hermes", "update", "--yes", "--version", "1.2.3",
@@ -1333,9 +1278,6 @@ func TestUpdateRefreshAcceptsReadableConfigAndRepairsWritableConfigAfterActivati
 				},
 				Environment: environment, WorkingDir: root, Config: applier, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != test.wantCode ||
 				(test.wantErr != "" && !strings.Contains(stderr.String(), test.wantErr)) {
 				t.Fatalf("update mode %04o: code=%d stderr=%q", test.mode, code, stderr.String())
@@ -1383,28 +1325,6 @@ func (sink *finishedOperationAudit) WriteAudit(_ context.Context, event domain.O
 		return sink.err
 	}
 	return nil
-}
-
-func updateReleaseFixture(t *testing.T) (string, []string, string) {
-	t.Helper()
-	root, environment, _ := nativeFixture(t)
-	assets := filepath.Join(root, "release")
-	cache := filepath.Join(root, "cache")
-	runtimeRoot := filepath.Join(root, "runtime")
-	if err := os.MkdirAll(assets, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	name := "subyard-1.2.3-linux-" + runtime.GOARCH + ".tar.gz"
-	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
-	}
-	writeCLIUpdateInstaller(t, root)
-	prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
-	return root, append(environment,
-		"YARD_RELEASE_BASE_URL=file://"+assets,
-		"YARD_RELEASE_CACHE="+cache,
-		"MIGRATION_FINALIZE_CAPTURE="+filepath.Join(root, "migration-finalize.log"),
-	), runtimeRoot
 }
 
 const cliUpdateFixtureRegistry = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`
@@ -1536,7 +1456,8 @@ printf '%s\n' "$target"
 }
 
 func TestNetworkManagerPrivilegesAuthorizeBeforeBoundedAdapter(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -1556,13 +1477,10 @@ fi
 	t.Setenv("PATH", bin)
 	environment = append(environment, "PATH="+bin, "SUDO_LOG="+logPath, "SUDO_NONINTERACTIVE_RC=1")
 	var diagnostics bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader("operator input\n"), Stdout: &diagnostics, Stderr: &diagnostics,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.operatorTerminal = func() bool { return true }
 	if err := program.prepareNetworkManagerPrivileges(
 		context.Background(), &diagnostics, 1000, "start",
@@ -1593,14 +1511,12 @@ fi
 }
 
 func TestSudoPreauthorizationIsProcessLocal(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
-	program, err := New(Options{
+	fixture := newFixture(t, withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
+	program := fixture.New(Options{
 		RepositoryRoot: root,
 		Environment:    append(environment, "SUBYARD_SUDO_PREAUTHORIZED=1"),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if program.env["SUBYARD_SUDO_PREAUTHORIZED"] != "" ||
 		program.baseEnv["SUBYARD_SUDO_PREAUTHORIZED"] != "" {
 		t.Fatal("CLI inherited sudo preauthorization from another process")
@@ -1608,7 +1524,8 @@ func TestSudoPreauthorizationIsProcessLocal(t *testing.T) {
 }
 
 func TestRootStepPrivilegesAuthorizeBeforeBoundedAdapter(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -1629,13 +1546,10 @@ printf 'input=%s\n' "$input" >> "$SUDO_LOG"
 	t.Setenv("PATH", bin)
 	environment = append(environment, "PATH="+bin, "SUDO_LOG="+logPath, "SUDO_NONINTERACTIVE_RC=1")
 	var diagnostics bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader("operator-terminal-input\n"), Stdout: &diagnostics, Stderr: &diagnostics,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.operatorTerminal = func() bool { return true }
 	if err := program.prepareSudoPrivileges(
 		context.Background(), &diagnostics, 1000, "teardown",
@@ -1664,13 +1578,10 @@ printf 'input=%s\n' "$input" >> "$SUDO_LOG"
 			noninteractiveEnvironment[index] = "SUDO_NONINTERACTIVE_RC=0"
 		}
 	}
-	noninteractive, err := New(Options{
+	noninteractive := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: noninteractiveEnvironment, WorkingDir: root,
 		Stdin: strings.NewReader("must-not-be-read\n"), Stdout: &diagnostics, Stderr: &diagnostics,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := noninteractive.prepareSudoPrivileges(
 		context.Background(), &diagnostics, 1000, "teardown",
 	); err != nil {
@@ -1705,13 +1616,10 @@ printf 'input=%s\n' "$input" >> "$SUDO_LOG"
 	if err := os.Remove(logPath + ".auth"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	blocked, err := New(Options{
+	blocked := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader("must-not-be-read\n"), Stdout: &diagnostics, Stderr: &diagnostics,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	blocked.operatorTerminal = func() bool { return false }
 	if err := blocked.prepareSudoPrivileges(
 		context.Background(), &diagnostics, 1000, "teardown",
@@ -1731,7 +1639,8 @@ printf 'input=%s\n' "$input" >> "$SUDO_LOG"
 }
 
 func TestMigrationRootStepsAuthorizeThroughControllingTerminal(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -1759,13 +1668,10 @@ fi
 		"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
 	)
 	var diagnostics bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stdin: strings.NewReader("closed migration stdin"), Stdout: &diagnostics, Stderr: &diagnostics,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.operatorTerminal = func() bool { return false }
 	program.openTerminal = func() (*os.File, error) {
 		return os.OpenFile(terminalPath, os.O_RDWR, 0)
@@ -1786,7 +1692,8 @@ fi
 }
 
 func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	clock := testkit.NewManualClock(time.Unix(100, 0))
 	cliIncus := lifecycleIncus()
 	cliInstance := cliIncus.Instances["subyard/yard"]
@@ -1798,16 +1705,13 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	powerScriptedIncus(cliRunner, cliIncus)
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop", "--force"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-cli"), WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: cliRunner, Prompt: prompt, Clock: clock,
 		Incus: cliIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("structured CLI stop failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -1825,14 +1729,11 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 	rpcInstance.Status = "Running"
 	rpcIncus.Instances["subyard/yard"] = rpcInstance
 	powerScriptedIncus(rpcRunner, rpcIncus)
-	program, err = New(Options{
+	program = fixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stderr: &stderr, AdapterRunner: rpcRunner, Clock: clock, Incus: rpcIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -1858,19 +1759,17 @@ func TestStructuredMutationSharesTypedAdapterAcrossCLIAndRPC(t *testing.T) {
 }
 
 func TestStructuredStoppedYardIsNoOpWithoutPromptOrAdapter(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runner := &testkit.ScriptedAdapter{}
 	prompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-noop"),
 		WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
 		Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("stopped-yard no-op failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -1880,7 +1779,8 @@ func TestStructuredStoppedYardIsNoOpWithoutPromptOrAdapter(t *testing.T) {
 }
 
 func TestStructuredActionRechecksNoOpAfterConsent(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	incus := lifecycleIncus()
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
@@ -1892,15 +1792,12 @@ func TestStructuredActionRechecksNoOpAfterConsent(t *testing.T) {
 		incus.Instances["subyard/yard"] = current
 	}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		InitPlatform:   newInitPlatformFixture(),
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"stop"},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=operation-stop-recheck"),
 		WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt, Incus: incus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("post-consent no-op failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -1920,22 +1817,20 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 		{name: "automation environment", arguments: []string{"start"}, environment: []string{"ASSUME_YES=1"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			environment = append(environment, test.environment...)
 			runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 				Schema: 1, OperationID: "operation-automation", Status: "ok",
 			}}}}
 			prompt := &testkit.Prompt{}
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: append(environment, "SUBYARD_OPERATION_ID=operation-automation"),
 				WorkingDir:  root, Stderr: &stderr, AdapterRunner: runner, Prompt: prompt,
 				Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("automated start failed: code=%d stderr=%q", code, stderr.String())
 			}
@@ -1948,19 +1843,17 @@ func TestStructuredStartAutomationSkipsOnlyTheLocalPrompt(t *testing.T) {
 }
 
 func TestProductionStartAdapterUsesGuardedShellHandler(t *testing.T) {
-	fixtureRoot, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	fixtureRoot, environment := fixture.Root, fixture.Environment
 	profileRoot := filepath.Join(fixtureRoot, "config", "profiles", "synthetic")
 	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(profileRoot, "profile.json"), `{"schema_version":1,"settings":[{"name":"SAMPLE_PROFILE_VALUE","type":"string","scopes":["command"],"application":"next-command","optional":true}],"guest_environment":{"handler":"guest.sh"}}`, 0o600)
 	writeCLIFile(t, filepath.Join(profileRoot, "guest.sh"), "#!/bin/sh\n", 0o700)
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: fixtureRoot, Program: "yard", Environment: environment, WorkingDir: fixtureRoot,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -2083,7 +1976,8 @@ exit 90
 }
 
 func TestStructuredStartRunsOverFramedRPCSession(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "operation-wire", Status: "ok",
 	}}}}
@@ -2093,15 +1987,12 @@ func TestStructuredStartRunsOverFramedRPCSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"rpc", "--stdio"},
 		Environment: environment, WorkingDir: root, Stdin: server, Stdout: server, Stderr: &stderr,
 		AdapterRunner: runner, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 		Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	done := make(chan int, 1)
 	go func() {
 		done <- program.Run(context.Background())
@@ -2173,7 +2064,8 @@ func (stub projectObserverStub) Observe(
 }
 
 func TestNativeOwnerInfoUsesTypedContextAndLiveInventory(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	fakeIncus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.23"},
 		Instances:  map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}},
@@ -2182,14 +2074,11 @@ func TestNativeOwnerInfoUsesTypedContextAndLiveInventory(t *testing.T) {
 		{ProjectID: "demo-12345678"}, {ProjectID: "demo-12345678"},
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"_info"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus,
 		ProjectObserver: projectObserverStub{value: observation},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("_info failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -2204,7 +2093,8 @@ func TestNativeOwnerInfoUsesTypedContextAndLiveInventory(t *testing.T) {
 }
 
 func TestNativeAuthorizeValidatesAndWritesOneControllerKey(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	fakeIncus := &testkit.Incus{
 		Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}},
 		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{
@@ -2213,14 +2103,11 @@ func TestNativeAuthorizeValidatesAndWritesOneControllerKey(t *testing.T) {
 	}
 	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA controller"
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"_authorize"}, Environment: environment,
 		WorkingDir: root, Stdin: strings.NewReader(key + "\n"), Stderr: &stderr,
 		Incus: fakeIncus, Executor: fakeIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("_authorize failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -2242,7 +2129,8 @@ func TestNativeLogArgumentsAreBounded(t *testing.T) {
 }
 
 func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -2271,7 +2159,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 		},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "default", "status"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus, Executor: fakeIncus,
 		StatusFacts: statusFactsStub{value: domain.StatusFacts{
@@ -2286,9 +2174,6 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 			Security: "static-only", Space: "1G  (in-yard rootfs, 1s ago)",
 		}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("status failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -2533,7 +2418,8 @@ func TestRemoteStatusFactsPreserveProfilesAgentsAndResources(t *testing.T) {
 }
 
 func TestReadQueriesDoNotFinalizeInvalidPendingReleaseMigration(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	sum := sha256.Sum256([]byte(Version))
 	journalPath := filepath.Join(
@@ -2565,15 +2451,12 @@ func TestReadQueriesDoNotFinalizeInvalidPendingReleaseMigration(t *testing.T) {
 					Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
 				},
 			}}
-			program, err := New(Options{
+			program := mustNew(t, Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: append(environment, "SUBYARD_HOST_ID=owner-a"), WorkingDir: root,
 				Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus,
 				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("read query failed: code=%d stderr=%q", code, stderr.String())
 			}
@@ -2627,7 +2510,8 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 			{name: "command help", arguments: []string{"update", "--help"}},
 		} {
 			t.Run(recovery.name+"/"+invocation.name, func(t *testing.T) {
-				root, environment, _ := nativeFixture(t)
+				fixture := newFixture(t)
+				root, environment := fixture.Root, fixture.Environment
 				environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 				journalPath := recovery.path(environment)
 				journal := []byte("{invalid-recovery\n")
@@ -2643,15 +2527,12 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 						Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{},
 					},
 				}}
-				program, err := New(Options{
+				program := fixture.New(Options{
 					RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
 					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 					Incus: incus, Executor: incus,
 					StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				wantCode := 0
 				if recovery.name == "owner inventory" && (invocation.name == "status" || invocation.name == "project list" || invocation.name == "yard list") {
 					// Active inventory queries own controller metadata refreshes. A
@@ -2674,7 +2555,8 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 }
 
 func TestMutationStillRequiresOwnerInventoryRecovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	journalPath := filepath.Join(
 		environmentValue(environment, "SUBYARD_HOME"),
 		"owner-inventory",
@@ -2687,13 +2569,10 @@ func TestMutationStillRequiresOwnerInventoryRecovery(t *testing.T) {
 	writeCLIFile(t, journalPath, string(journal), 0o600)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "recover owner inventory transaction") {
 		t.Fatalf("mutation bypassed recovery gate: code=%d stderr=%q", code, stderr.String())
@@ -2782,7 +2661,8 @@ func installUnfinishedMutationGateFixture(
 }
 
 func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -2801,13 +2681,10 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	}
 
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("gated mutation exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -2851,7 +2728,8 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 }
 
 func TestRetiredSourceHelpersDoNotWritePathsDuringRecovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -2889,13 +2767,10 @@ func TestRetiredSourceHelpersDoNotWritePathsDuringRecovery(t *testing.T) {
 
 	run := func(input string, arguments []string) (int, string, string) {
 		var stdout, stderr bytes.Buffer
-		program, newErr := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 			Stdin: strings.NewReader(input), Stdout: &stdout, Stderr: &stderr,
 		})
-		if newErr != nil {
-			t.Fatal(newErr)
-		}
 		return program.runMigration(context.Background(), "default", arguments), stdout.String(), stderr.String()
 	}
 	for _, action := range []string{"normalize-yard-config", "overlay-manifest"} {
@@ -3102,7 +2977,8 @@ esac
 }
 
 func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment := cliFixture.Root, cliFixture.Environment
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -3131,14 +3007,11 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		Schema: 1, OperationID: "unexpected-v2-mutation", Status: "ok",
 	}}}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 		AdapterRunner: runner, Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 {
 		t.Fatalf("v2 gated mutation: code=%d requests=%#v stderr=%q",
 			code, runner.Requests, stderr.String())
@@ -3168,14 +3041,11 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	}
 
 	var statusStderr bytes.Buffer
-	status, err := New(Options{
+	status := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"status"},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &statusStderr,
 		Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := status.Run(context.Background()); code != 0 {
 		t.Fatalf("status during v2 recovery: code=%d stderr=%q", code, statusStderr.String())
 	}
@@ -3187,7 +3057,7 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	testVMInstance.Status = "Running"
 	testVMIncus.Instances["subyard/yard"] = testVMInstance
 	var testVMStderr bytes.Buffer
-	testVMStatus, err := New(Options{
+	testVMStatus := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "status"},
 		Environment: append(environment,
 			"NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=v2-read-only-test-vms-status",
@@ -3195,9 +3065,6 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &testVMStderr,
 		AdapterRunner: testVMRunner, Incus: testVMIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	infrastructureFixture(t, testVMStatus, testVMIncus, "test-vms")
 	if code := testVMStatus.Run(context.Background()); code != 0 || len(testVMRunner.Requests) != 1 {
 		t.Fatalf("test-vms status during v2 recovery: code=%d requests=%#v stderr=%q",
@@ -3220,14 +3087,11 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		var keyStderr bytes.Buffer
 		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
 		incus := lifecycleIncus()
-		query, err := New(Options{
+		query := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Stdin: input,
 			Stdout: &bytes.Buffer{}, Stderr: &keyStderr, Incus: incus, Executor: incus,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := query.Run(context.Background()); code != 0 || input.reads != 0 || len(incus.ExecCalls) != 0 {
 			t.Fatalf("exclusive read during recovery: code=%d input=%d native=%d stderr=%q",
 				code, input.reads, len(incus.ExecCalls), keyStderr.String())
@@ -3253,13 +3117,10 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	} {
 		var keyStderr bytes.Buffer
 		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
-		mutation, err := New(Options{
+		mutation := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Stdin: input, Stderr: &keyStderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := mutation.Run(context.Background()); code != 1 || input.reads != 0 || !strings.Contains(keyStderr.String(), "recovery-pending") {
 			t.Fatalf("key mutation bypassed recovery: code=%d input=%d stderr=%q", code, input.reads, keyStderr.String())
 		}
@@ -3282,7 +3143,8 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 }
 
 func TestV2MutationGateIgnoresUnrelatedV1Journal(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-with-v1")
 	capture := filepath.Join(root, "v2-with-v1-candidate-inspections")
 	environment = append(environment,
@@ -3291,16 +3153,13 @@ func TestV2MutationGateIgnoresUnrelatedV1Journal(t *testing.T) {
 	)
 	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root,
 		Program:        "yard",
 		Environment:    environment,
 		WorkingDir:     root,
 		Stderr:         &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	outcome, err := program.inspectMutationGate(context.Background(), "default")
 	if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering ||
 		outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" {
@@ -3309,7 +3168,8 @@ func TestV2MutationGateIgnoresUnrelatedV1Journal(t *testing.T) {
 }
 
 func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-redaction")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
@@ -3325,14 +3185,11 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 
 	t.Run("CLI", func(t *testing.T) {
 		var stderr bytes.Buffer
-		program, err := New(Options{
+		program := mustNew(t, Options{
 			RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 			Environment: environment, WorkingDir: root,
 			Stdout: &bytes.Buffer{}, Stderr: &stderr, Incus: lifecycleIncus(),
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 1 ||
 			strings.Contains(stderr.String(), runtimeRoot) || strings.Contains(stderr.String(), configHome) {
 			t.Fatalf("redacted CLI gate: code=%d stderr=%q", code, stderr.String())
@@ -3350,13 +3207,10 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 	})
 
 	t.Run("RPC", func(t *testing.T) {
-		program, err := New(Options{
+		program := mustNew(t, Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
 			WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		loaded, err := program.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
@@ -3388,21 +3242,19 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 }
 
 func TestV2MutationGateReportsCorruptJournalAsStructuredOutcome(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-corrupt-journal")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	writeCLIFile(t, journal, `{`, 0o600)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &bytes.Buffer{}, Stderr: &stderr, Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("corrupt journal gate: code=%d stderr=%q", code, stderr.String())
 	}
@@ -3418,15 +3270,12 @@ func TestV2MutationGateReportsCorruptJournalAsStructuredOutcome(t *testing.T) {
 
 	var stdout bytes.Buffer
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--check", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("corrupt journal update check: code=%d stdout=%q stderr=%q",
 			code, stdout.String(), stderr.String())
@@ -3446,7 +3295,8 @@ func TestV2MutationGateReportsCorruptJournalAsStructuredOutcome(t *testing.T) {
 }
 
 func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-rpc-update")
 	cache := filepath.Join(root, "rpc-update-cache")
 	gateCapture := filepath.Join(root, "rpc-update-gate-inspection")
@@ -3461,13 +3311,10 @@ func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "scripts", "install-runtime-release.sh"),
 		"#!/bin/sh\n# --publish-only\nprintf called > \"$RPC_UPDATE_PUBLICATION_CAPTURE\"\nexit 91\n", 0o700)
 	environment = append(environment, "RPC_UPDATE_PUBLICATION_CAPTURE="+publicationCapture)
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -3496,7 +3343,8 @@ func TestRPCUpdateDifferentTargetIsGatedBeforePublication(t *testing.T) {
 }
 
 func TestV2MutationGateFailsClosedOnTamperedJournal(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-v2-tampered")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
@@ -3509,14 +3357,11 @@ func TestV2MutationGateFailsClosedOnTamperedJournal(t *testing.T) {
 		Schema: 1, OperationID: "unexpected-tampered-mutation", Status: "ok",
 	}}}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 		AdapterRunner: runner, Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 ||
 		strings.Contains(stderr.String(), `"status":"recovering"`) ||
 		strings.Contains(stderr.String(), `"action":"run yard update"`) {
@@ -3526,7 +3371,8 @@ func TestV2MutationGateFailsClosedOnTamperedJournal(t *testing.T) {
 }
 
 func TestMutationGateDoesNotHideTamperedV2BehindV1Recovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	runtimeRoot := filepath.Join(root, "runtime-combined-tamper")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
@@ -3540,14 +3386,11 @@ func TestMutationGateDoesNotHideTamperedV2BehindV1Recovery(t *testing.T) {
 		Schema: 1, OperationID: "unexpected-combined-mutation", Status: "ok",
 	}}}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"start"},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 		AdapterRunner: runner, Incus: lifecycleIncus(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || len(runner.Requests) != 0 ||
 		strings.Contains(stderr.String(), `"status":"recovering"`) ||
 		strings.Contains(stderr.String(), `"action":"run yard update"`) {
@@ -3558,7 +3401,8 @@ func TestMutationGateDoesNotHideTamperedV2BehindV1Recovery(t *testing.T) {
 
 func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 	t.Run("plan before project preparation", func(t *testing.T) {
-		root, environment, stateDirectory := nativeFixture(t)
+		fixture := newFixture(t)
+		root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 		runtimeRoot := filepath.Join(root, "runtime")
 		environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 		store, err := state.NewFileStore(stateDirectory)
@@ -3577,12 +3421,9 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 		writeCLIFile(t, projectJournalPath, string(projectJournal), 0o600)
 		installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		loaded, err := program.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
@@ -3603,19 +3444,17 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 	})
 
 	t.Run("execute recheck", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		fixture := newFixture(t)
+		root, environment := fixture.Root, fixture.Environment
 		runtimeRoot := filepath.Join(root, "runtime")
 		environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 		runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 			Schema: 1, OperationID: "gated-execute", Status: "ok",
 		}}}}
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 			AdapterRunner: runner, Incus: lifecycleIncus(),
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		loaded, err := program.loadContext("default")
 		if err != nil {
 			t.Fatal(err)
@@ -3642,10 +3481,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 }
 
 func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := mustNew(t, Options{RepositoryRoot: repositoryRoot(t)})
 	definition, ok := program.manifest.Lookup("_migrate")
 	if !ok {
 		t.Fatal("_migrate command is missing")
@@ -3655,16 +3491,14 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 			t.Errorf("_migrate manifest still advertises superseded verb %q", verb)
 		}
 		t.Run(verb, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Environment: environment, WorkingDir: root,
 				Stdout: &bytes.Buffer{}, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.runMigration(context.Background(), "default", []string{verb}); code != 2 ||
 				!strings.Contains(stderr.String(), "before v0.11.0") {
 				t.Fatalf("_migrate %s result: code=%d stderr=%q", verb, code, stderr.String())
@@ -3677,7 +3511,7 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 }
 
 func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
 	capture := filepath.Join(root, "update-exempt-called")
@@ -3685,14 +3519,11 @@ func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
 		"#!/bin/sh\n# --publish-only\nprintf called > \"$UPDATE_EXEMPT_CAPTURE\"\nexit 17\n", 0o700)
 	environment = append(environment, "UPDATE_EXEMPT_CAPTURE="+capture)
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("update failure exit=%d stderr=%q", code, stderr.String())
 	}
@@ -3704,13 +3535,11 @@ func TestMutatingUpdateIsExemptFromMutationGate(t *testing.T) {
 
 func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 	t.Run("operator home unavailable", func(t *testing.T) {
-		root, _, _ := nativeFixture(t)
-		program, err := New(Options{
+		fixture := newFixture(t)
+		root := fixture.Root
+		program := mustNew(t, Options{
 			RepositoryRoot: root, Program: "yard", WorkingDir: root,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
 		if err != nil || outcome != nil {
 			t.Fatalf("operator-home-free mutation gate outcome=%#v err=%v", outcome, err)
@@ -3718,15 +3547,13 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 	})
 
 	t.Run("missing metadata", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		fixture := newFixture(t)
+		root, environment := fixture.Root, fixture.Environment
 		configHome := filepath.Join(root, "missing-config-home")
 		environment = append(environment, "SUBYARD_CONFIG_HOME="+configHome)
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
 		if err != nil || outcome != nil {
 			t.Fatalf("missing mutation metadata outcome=%#v err=%v", outcome, err)
@@ -3737,19 +3564,17 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 	})
 
 	t.Run("internal migration child", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		fixture := newFixture(t)
+		root, environment := fixture.Root, fixture.Environment
 		runtimeRoot := filepath.Join(root, "runtime")
 		environment = append(environment,
 			"YARD_RUNTIME_ROOT="+runtimeRoot,
 			"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
 		)
 		installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
 		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering {
 			t.Fatalf("caller-controlled child marker bypassed mutation gate: outcome=%#v err=%v",
@@ -3759,7 +3584,8 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 }
 
 func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
@@ -3781,14 +3607,11 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 		Schema: 1, OperationID: "trusted-release-child", Status: "ok",
 	}}}}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Environment: environment, WorkingDir: root, Stderr: &stderr,
 		AdapterRunner: runner, Incus: powerScriptedIncus(runner, nil), NetworkPolicy: allowTestNetworkPolicy(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := program.runReleaseTransitionYardCommand(
 		context.Background(), "default", &stderr, "start",
 	); err != nil || len(runner.Requests) != 1 {
@@ -3798,7 +3621,8 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 }
 
 func TestReleaseTransitionChildUsesSanitizedCandidateContext(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	candidateConfig := filepath.Join(root, "config", "agents", "codex", "config.toml")
 	previousConfig := filepath.Join(root, "previous-runtime", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(candidateConfig), 0o700); err != nil {
@@ -3837,13 +3661,10 @@ func TestReleaseTransitionChildUsesSanitizedCandidateContext(t *testing.T) {
 	}
 	candidateDispatcher := filepath.Join(root, "bin", "yard-engine")
 	writeCLIFile(t, candidateDispatcher, "#!/bin/sh\nexit 0\n", 0o700)
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, DispatcherPath: filepath.Join(root, "removed-candidate"),
 		Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	var output bytes.Buffer
 	if err := program.runReleaseTransitionYardCommand(
 		context.Background(), "default", &output, "probe-dispatch",
@@ -3867,7 +3688,8 @@ func TestCoreReadCommandsDoNotRecoverProjectStore(t *testing.T) {
 		{name: "yard list", arguments: []string{"yards"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, stateDirectory := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 			if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
 				t.Fatal(err)
@@ -3882,15 +3704,12 @@ func TestCoreReadCommandsDoNotRecoverProjectStore(t *testing.T) {
 				},
 			}}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				Incus: incus, Executor: incus,
 				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("read command recovered project state: code=%d stderr=%q", code, stderr.String())
 			}
@@ -3909,7 +3728,8 @@ func TestCoreReadCommandsDoNotRecoverProjectStore(t *testing.T) {
 }
 
 func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
-	root, environment, projectDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, projectDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	environment = append(environment,
 		"SUBYARD_HOST_ID=owner-a",
 		"SUBYARD_OPERATION_ID=read-project-info",
@@ -3948,7 +3768,7 @@ func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
 	writeCLIFile(t, projectJournalPath, string(projectJournal), 0o600)
 
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"info", "Remote"},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
@@ -3956,9 +3776,6 @@ func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
 			return ports.InstanceExecResult{ExitCode: 0, Stdout: []byte("{}\n")}, nil
 		}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("project info failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -3978,7 +3795,8 @@ func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
 func TestRPCReadsDoNotRecoverProjectStore(t *testing.T) {
 	for _, method := range []string{"project.list", "yard.status", "yard.status.profile-dashboards"} {
 		t.Run(method, func(t *testing.T) {
-			root, environment, stateDirectory := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 			if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
 				t.Fatal(err)
@@ -3992,14 +3810,11 @@ func TestRPCReadsDoNotRecoverProjectStore(t *testing.T) {
 					Status: "Stopped", Config: map[string]string{}, Devices: map[string]map[string]string{},
 				},
 			}}
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, Incus: incus, Executor: incus,
 				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -4049,7 +3864,7 @@ func TestUpdateCheckDoesNotRecoverUnrelatedOwnerState(t *testing.T) {
 		},
 	} {
 		t.Run(recovery.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 			journalPath := recovery.path(environment)
 			journal := []byte("{invalid-owner-recovery\n")
@@ -4059,16 +3874,13 @@ func TestUpdateCheckDoesNotRecoverUnrelatedOwnerState(t *testing.T) {
 			writeCLIFile(t, journalPath, string(journal), 0o600)
 
 			var stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments: []string{
 					"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot,
 				},
 				Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("update check recovered owner state: code=%d stderr=%q", code, stderr.String())
 			}
@@ -4084,7 +3896,8 @@ func TestUpdateCheckDoesNotRecoverUnrelatedOwnerState(t *testing.T) {
 }
 
 func TestSpaceListsEveryLocalYardFromCache(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {
@@ -4101,14 +3914,11 @@ func TestSpaceListsEveryLocalYardFromCache(t *testing.T) {
 		"subyard-demo/yard-demo": {Status: "Stopped"},
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"space"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		Incus: incus, Executor: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("space failed: code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4121,7 +3931,8 @@ func TestSpaceListsEveryLocalYardFromCache(t *testing.T) {
 }
 
 func TestSpaceRefreshesOnlyRunningYards(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
@@ -4145,14 +3956,11 @@ func TestSpaceRefreshesOnlyRunningYards(t *testing.T) {
 		}},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"space", "--refresh"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		Incus: incus, Executor: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("space refresh failed: code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4172,7 +3980,8 @@ func TestSpaceRefreshesOnlyRunningYards(t *testing.T) {
 }
 
 func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(dataHome, 0o700); err != nil {
@@ -4183,7 +3992,7 @@ func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
 		"subyard/yard": {Status: "Running"},
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"space", "--refresh"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		Incus: incus,
@@ -4192,9 +4001,6 @@ func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
 		},
 		Clock: clock,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("space refresh failed: code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4205,7 +4011,8 @@ func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
 }
 
 func TestSpaceRefreshContinuesAfterFailureAndPreservesCache(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
@@ -4230,14 +4037,11 @@ func TestSpaceRefreshContinuesAfterFailureAndPreservesCache(t *testing.T) {
 		},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"space", "--refresh"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		Incus: incus, Executor: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("space refresh code=%d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4259,7 +4063,8 @@ func TestSpaceRefreshContinuesAfterFailureAndPreservesCache(t *testing.T) {
 }
 
 func TestSpaceRefreshReportsStateFailureAndContinues(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
@@ -4287,14 +4092,11 @@ func TestSpaceRefreshReportsStateFailureAndContinues(t *testing.T) {
 		},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"space", "--refresh"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		Incus: incus, Executor: executor, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("space refresh code=%d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4315,7 +4117,8 @@ func TestSpaceRefreshReportsStateFailureAndContinues(t *testing.T) {
 func TestSpaceHonorsExplicitYardSelectors(t *testing.T) {
 	for _, arguments := range [][]string{{"-Y", "demo", "space"}, {"@demo", "space"}} {
 		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			dataHome := environmentValue(environment, "SUBYARD_HOME")
 			if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {
@@ -4332,14 +4135,11 @@ func TestSpaceHonorsExplicitYardSelectors(t *testing.T) {
 				"subyard-demo/yard-demo": {Status: "Stopped"},
 			}}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				Incus: incus, Executor: incus, Clock: testkit.NewManualClock(time.Unix(100, 0)),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("selected space failed: code=%d stderr=%q", code, stderr.String())
 			}
@@ -4401,7 +4201,8 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 			if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {
 				t.Fatal(err)
@@ -4423,15 +4224,12 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 				ExecSteps: make([]testkit.IncusExecStep, 8),
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				Incus: incus, Executor: incus,
 				StatusFacts: statusFactsStub{value: domain.StatusFacts{Security: "live", Space: "unknown"}},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("status failed: code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 			}
@@ -4457,7 +4255,8 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 }
 
 func TestNativeLiveListDoesNotImportL1Metadata(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	observation := domain.ProjectObservation{
 		Reached: true,
 		Live: []domain.ProjectRecord{{
@@ -4468,14 +4267,11 @@ func TestNativeLiveListDoesNotImportL1Metadata(t *testing.T) {
 		Boxes:    map[string]domain.ProjectBoxState{"live-12345678": domain.ProjectBoxNone},
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"list", "--live"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 		ProjectObserver: projectObserverStub{value: observation},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -4492,7 +4288,8 @@ func TestNativeLiveListDoesNotImportL1Metadata(t *testing.T) {
 }
 
 func TestNativeListPreservesLegacyProjectPermissions(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -4508,13 +4305,10 @@ func TestNativeListPreservesLegacyProjectPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"list"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -4531,7 +4325,8 @@ func TestNativeListPreservesLegacyProjectPermissions(t *testing.T) {
 }
 
 func TestNativeListBoundsOnlyOwnerDisplay(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	store, err := state.NewFileStore(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -4548,13 +4343,10 @@ func TestNativeListBoundsOnlyOwnerDisplay(t *testing.T) {
 	fakeIncus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"list"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -4567,14 +4359,11 @@ func TestNativeListBoundsOnlyOwnerDisplay(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{"list", "--complete-projects"}, Environment: environment,
 		WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: fakeIncus,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("project completion failed: code=%d stderr=%q", code, stderr.String())
 	}
@@ -4584,7 +4373,8 @@ func TestNativeListBoundsOnlyOwnerDisplay(t *testing.T) {
 }
 
 func TestNativeCompletionProvidersReturnPartialOwnerInventoryWithoutWrites(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	now := time.Unix(1_000, 0).UTC()
@@ -4675,14 +4465,11 @@ exit 17
 	runCompletion := func(flag, want string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: []string{"list", flag},
 			Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 			Incus: incus, Clock: testkit.NewManualClock(now),
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("%s failed: code=%d stdout=%q stderr=%q", flag, code, stdout.String(), stderr.String())
 		}
@@ -4706,17 +4493,15 @@ exit 17
 }
 
 func TestProjectAdaptersReceiveGoResolvedSnapshotAndGoCommitsState(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	projectPath := filepath.Join(root, "Demo")
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -4778,17 +4563,15 @@ func TestProjectAdaptersReceiveGoResolvedSnapshotAndGoCommitsState(t *testing.T)
 }
 
 func TestProjectPreparationDoesNotPublishAdmissionBeforeConsent(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	projectPath := filepath.Join(root, "Preview")
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -4843,7 +4626,8 @@ func TestProjectExecutionBuildsTypedActionVariants(t *testing.T) {
 }
 
 func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	record := domain.ProjectRecord{
 		Schema: 1, IdentityVersion: 2, ProjectID: "Demo", Name: "Demo",
 		HostPath: filepath.Join(root, "Demo"), SourceKey: state.SourceKey(filepath.Join(root, "Demo")),
@@ -4862,13 +4646,10 @@ func TestExistingProjectExportCarriesOperationIDIntoAssessment(t *testing.T) {
 	) (ports.InstanceExecResult, error) {
 		return ports.InstanceExecResult{ExitCode: 0}, nil
 	}}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment,
 		WorkingDir: root, ProjectData: probe, ProjectArchive: projectActionArchive("archive"),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	program.env["SUBYARD_OPERATION_ID"] = "operation-export"
 	loaded, err := program.loadContext("default")
 	if err != nil {
@@ -4962,16 +4743,14 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 		{name: "export diff", exitCode: 1, changed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
 			probe := projectActionObservationProbe{execute: projectExportObservation(test.changed)}
-			program, err := New(Options{
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
 				ProjectArchive: projectActionArchive("archive"),
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			execution := &projectExecution{
 				Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 				Record: record, OperationID: "operation-export-assessment",
@@ -4986,17 +4765,16 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 		})
 	}
 	t.Run("unowned environment", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		cliFixture := newFixture(t)
+		root, environment := cliFixture.Root, cliFixture.Environment
 		probe := projectActionObservationProbe{execute: func(ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 			return ports.InstanceExecResult{Stdout: []byte("running\tcontainer-fixture\t\t\t"), ExitCode: 0}, nil
 		}}
-		program, err := New(Options{
+		var err error
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
 			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		environmentRecord := record
 		environmentRecord.Target = "fixture"
 		execution := &projectExecution{
@@ -5009,20 +4787,19 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 		}
 	})
 	t.Run("environment manifest drift", func(t *testing.T) {
-		root, environment, _ := nativeFixture(t)
+		cliFixture := newFixture(t)
+		root, environment := cliFixture.Root, cliFixture.Environment
 		probe := projectActionObservationProbe{execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 			if slices.Contains(request.Command, "/srv/env-meta/Demo/profile.json") {
 				return ports.InstanceExecResult{Stdout: []byte("different"), ExitCode: 0}, nil
 			}
 			return ports.InstanceExecResult{Stdout: []byte("running\tcontainer-fixture\t1\tDemo\tfixture"), ExitCode: 0}, nil
 		}}
-		program, err := New(Options{
+		var err error
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment,
 			WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		environmentRecord := record
 		environmentRecord.Target = "fixture"
 		execution := &projectExecution{
@@ -5053,7 +4830,8 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			environmentRecord := record
 			environmentRecord.Target = "fixture"
-			root, environment, _ := nativeFixture(t)
+			cliFixture := newFixture(t)
+			root, environment := cliFixture.Root, cliFixture.Environment
 			containerID := strings.Repeat("a", 64)
 			observation := test.state
 			if test.state != "missing" {
@@ -5065,13 +4843,11 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 				}
 				return ports.InstanceExecResult{Stdout: []byte(observation + "\n"), ExitCode: 0}, nil
 			}}
-			program, err := New(Options{
+			var err error
+			program := cliFixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Environment: environment,
 				WorkingDir: root, Incus: lifecycleIncus(), ProjectData: probe,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			execution := &projectExecution{
 				Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal}},
 				Record: environmentRecord, Environment: map[string]string{},
@@ -5129,17 +4905,15 @@ func TestObserveProjectActionDetectsExportAndEnvironmentNoOps(t *testing.T) {
 }
 
 func TestProjectReservationRejectsIdentityDriftAfterConsent(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	projectPath := filepath.Join(root, "sources", "Demo")
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -5272,18 +5046,16 @@ func TestProjectParsersRejectEmptyExplicitName(t *testing.T) {
 func TestProjectImportAndCloneAllocateSameBasenameInEitherOrder(t *testing.T) {
 	for _, first := range []string{"bind", "clone"} {
 		t.Run(first+"-first", func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			projectPath := filepath.Join(root, "sources", "Demo")
 			if err := os.MkdirAll(projectPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Environment: environment, WorkingDir: root,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -5352,17 +5124,15 @@ func TestProjectImportAndCloneAllocateSameBasenameInEitherOrder(t *testing.T) {
 }
 
 func TestBindAcceptsExplicitPathAndPlansExposure(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	projectPath := filepath.Join(root, "home", ".ssh")
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -5382,7 +5152,8 @@ func TestBindAcceptsExplicitPathAndPlansExposure(t *testing.T) {
 }
 
 func TestProjectSelectionRoutesAcrossYardsBeforeAdapter(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	cliFixture := newFixture(t)
+	root, environment, stateDirectory := cliFixture.Root, cliFixture.Environment, filepath.Join(cliFixture.ConfigHome, "projects")
 	configHome := ""
 	for _, pair := range environment {
 		if strings.HasPrefix(pair, "SUBYARD_CONFIG_HOME=") {
@@ -5411,12 +5182,9 @@ func TestProjectSelectionRoutesAcrossYardsBeforeAdapter(t *testing.T) {
 	if err := store.Put(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -5468,7 +5236,8 @@ func TestProjectSelectionRoutesAcrossYardsBeforeAdapter(t *testing.T) {
 }
 
 func TestProjectSelectorsDoNotLetBareNamesBeShadowedByHostPaths(t *testing.T) {
-	root, environment, stateDirectory := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment, stateDirectory := fixture.Root, fixture.Environment, filepath.Join(fixture.ConfigHome, "projects")
 	collidingPath := filepath.Join(root, "Subyard")
 	if err := os.MkdirAll(collidingPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -5487,12 +5256,9 @@ func TestProjectSelectorsDoNotLetBareNamesBeShadowedByHostPaths(t *testing.T) {
 	if err := store.Put(context.Background(), registered); err != nil {
 		t.Fatal(err)
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	loaded, err := program.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -5740,7 +5506,8 @@ func lifecycleIncus() *testkit.Incus {
 }
 
 func TestConfigStatusRemainsReadOnlyDuringReleaseRecovery(t *testing.T) {
-	root, environment, _ := nativeFixture(t)
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -5768,13 +5535,10 @@ func TestConfigStatusRemainsReadOnlyDuringReleaseRecovery(t *testing.T) {
 		t.Run(action, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			incus := lifecycleIncus()
-			program, err := New(Options{
+			program := mustNew(t, Options{
 				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", action},
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("read-only config %s blocked: code=%d stderr=%s", action, code, stderr.String())
 			}
@@ -5806,7 +5570,8 @@ func projectExportObservation(changed bool) func(ports.InstanceExecRequest) (por
 func TestCanonicalSelectorMutationGateUsesControllerLocalScope(t *testing.T) {
 	for _, complete := range []bool{false, true} {
 		t.Run(fmt.Sprintf("complete=%t", complete), func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			runtimeRoot := filepath.Join(root, "runtime-v2")
 			capture := filepath.Join(root, "v2-candidate-inspections")
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+capture)
@@ -5837,11 +5602,8 @@ func TestCanonicalSelectorMutationGateUsesControllerLocalScope(t *testing.T) {
 			control := &remoteControlStub{}
 			incus := lifecycleIncus()
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, RemoteControl: control, Incus: incus,
+			program := fixture.New(Options{RepositoryRoot: root, Environment: environment, RemoteControl: control, Incus: incus,
 				Arguments: []string{"-Y", "remote-owner/build", "start", "--yes"}, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			outcome, err := program.inspectMutationGate(context.Background(), "remote-owner/build")
 			if err != nil || (outcome == nil) != complete {
 				t.Fatalf("local gate complete=%t outcome=%v err=%v", complete, outcome, err)
@@ -5871,7 +5633,8 @@ func TestCanonicalSelectorMutationGateUsesControllerLocalScope(t *testing.T) {
 func TestMutationGateIgnoresV1Files(t *testing.T) {
 	for _, state := range []string{"unfinished", "invalid", "multiple", "unsafe-directory", "symlink"} {
 		t.Run(state, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			runtimeRoot := filepath.Join(root, "runtime")
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
 			id := installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
@@ -5902,10 +5665,7 @@ func TestMutationGateIgnoresV1Files(t *testing.T) {
 			writeCLIFile(t, filepath.Join(legacy, "state.json"), "invalid retained state\n", 0644)
 			before := nativeTreeSnapshot(t, legacy)
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
 			outcome, err := program.inspectMutationGate(context.Background(), "default")
 			if err != nil || outcome != nil {
 				t.Fatalf("V1 files gated mutation: %#v, %v", outcome, err)

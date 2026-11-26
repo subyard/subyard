@@ -39,13 +39,10 @@ func TestResourceAuditedReaderProcess(t *testing.T) {
 		}
 		return
 	}
-	program, err := New(Options{RepositoryRoot: os.Getenv("SUBYARD_REPOSITORY_ROOT"),
+	program := mustNew(t, Options{RepositoryRoot: os.Getenv("SUBYARD_REPOSITORY_ROOT"),
 		Program: "yard", Arguments: []string{"keys", "check-exclusive", "fixture-zone"},
 		Environment: os.Environ(), WorkingDir: os.Getenv("SUBYARD_REPOSITORY_ROOT"),
 		Stdout: io.Discard, Stderr: os.Stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("nested key reader returned %d", code)
 	}

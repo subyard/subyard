@@ -45,7 +45,7 @@ func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t 
 		t.Run(entrypoint, func(t *testing.T) {
 			for _, test := range protectedOwnerInputCases() {
 				t.Run(test.name, func(t *testing.T) {
-					root, environment, runtimeRoot := updateReleaseFixture(t)
+					fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 					writeCLIFile(t, filepath.Join(root, "config", "host.env"), "HOST_MOUNTS=derived:/mnt/derived:ro:0700\n", 0o600)
 					capture := filepath.Join(root, "protected-owner-request.json")
 					environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "UPDATE_OWNER_CAPTURE="+capture, "SUBYARD_NO_AUDIT=1")
@@ -58,10 +58,7 @@ func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t 
 						t.Fatal(err)
 					}
 					var stdout, stderr bytes.Buffer
-					program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
-					if err != nil {
-						t.Fatal(err)
-					}
+					program := fixture.New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
 					loaded, err := program.loadContext("default")
 					if err != nil {
 						t.Fatal(err)
@@ -125,7 +122,7 @@ func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t 
 func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) {
 	for _, test := range protectedOwnerInputCases() {
 		t.Run(test.name, func(t *testing.T) {
-			root, environment, runtimeRoot := updateReleaseFixture(t)
+			cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 			writeCLIFile(t, filepath.Join(root, "config", "host.env"), "HOST_MOUNTS=derived:/mnt/derived:ro:0700\n", 0o600)
 			capture := filepath.Join(root, "protected-owner-request.json")
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "UPDATE_OWNER_CAPTURE="+capture)
@@ -145,11 +142,8 @@ func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) 
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 				Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			loaded, err := program.loadContext("default")
 			if err != nil {
 				t.Fatal(err)
@@ -288,20 +282,17 @@ esac
 }
 
 func TestUpdateHistoryRecordsActivationRollbackFailureAndDecline(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	cliFixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	home := environmentValue(environment, "SUBYARD_HOME")
 	var lastStderr string
 	run := func(operationID string, prompt *testkit.Prompt, arguments ...string) int {
 		var stderr bytes.Buffer
-		program, err := New(Options{
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: append(environment, "SUBYARD_OPERATION_ID="+operationID),
 			WorkingDir:  root, Prompt: prompt, Config: &recordingConfigApplier{},
 			Stdout: &bytes.Buffer{}, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		code := program.Run(context.Background())
 		lastStderr = stderr.String()
 		return code
@@ -362,18 +353,15 @@ func TestUpdateHistoryRecordsActivationRollbackFailureAndDecline(t *testing.T) {
 }
 
 func TestPostVerificationPreparationFailureKeepsVerifiedTarget(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	environment = append(environment,
 		"UPDATE_BLOCK_INSPECTION=1",
 		"SUBYARD_OPERATION_ID=op-verified-preparation-failure",
 	)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("blocked preparation code=%d", code)
 	}
@@ -385,18 +373,15 @@ func TestPostVerificationPreparationFailureKeepsVerifiedTarget(t *testing.T) {
 }
 
 func TestPostVerificationPreparationCancellationKeepsTargetAndStatus(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	environment = append(environment,
 		"UPDATE_CANCEL_INSPECTION=1",
 		"SUBYARD_OPERATION_ID=op-verified-preparation-cancelled",
 	)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if code := program.Run(ctx); code != 1 {
@@ -410,7 +395,7 @@ func TestPostVerificationPreparationCancellationKeepsTargetAndStatus(t *testing.
 }
 
 func TestPostVerificationRollbackFailureKeepsVerifiedTarget(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 	releaseRoot := filepath.Join(runtimeRoot, "releases", "previous-b")
 	enginePath := filepath.Join(releaseRoot, "bin", "yard-engine")
@@ -430,13 +415,10 @@ func TestPostVerificationRollbackFailureKeepsVerifiedTarget(t *testing.T) {
 	}
 	writeCLIFile(t, manifestPath, strings.Join(lines, "\n")+"\n", 0o600)
 	environment = append(environment, "SUBYARD_OPERATION_ID=op-verified-rollback-failure")
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--rollback", "--runtime-root", runtimeRoot},
 		Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("blocked rollback preparation code=%d", code)
 	}
@@ -448,17 +430,14 @@ func TestPostVerificationRollbackFailureKeepsVerifiedTarget(t *testing.T) {
 }
 
 func TestCancelledUpdatePreparationRecordsInterrupted(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--yes", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=op-prepare-cancelled"), WorkingDir: root,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(ctx); code != 1 {
 		t.Fatalf("cancelled preparation code=%d", code)
 	}
@@ -470,15 +449,12 @@ func TestCancelledUpdatePreparationRecordsInterrupted(t *testing.T) {
 }
 
 func TestCancelledUpdateConfirmationRecordsInterrupted(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
-	program, err := New(Options{RepositoryRoot: root, Program: "yard",
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"update", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		Environment: append(environment, "SUBYARD_OPERATION_ID=op-confirm-cancelled"), WorkingDir: root,
 		Prompt: &testkit.Prompt{Err: context.Canceled}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("cancelled confirmation code=%d", code)
 	}
@@ -491,16 +467,13 @@ func TestCancelledUpdateConfirmationRecordsInterrupted(t *testing.T) {
 }
 
 func TestUpdateCheckAndHelpDoNotCreateHistory(t *testing.T) {
-	root, environment, runtimeRoot := updateReleaseFixture(t)
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
 	for _, arguments := range [][]string{
 		{"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot},
 		{"update", "--help"},
 	} {
-		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+		program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code != 0 {
 			t.Fatalf("arguments=%v code=%d", arguments, code)
 		}

@@ -37,7 +37,8 @@ func (fixture *installedIncusAccess) Server(context.Context) (ports.ServerInfo, 
 func TestIncusInstallationRetainsPreparedCommandEnvironment(t *testing.T) {
 	for _, scenario := range []string{"access restored", "access unavailable", "resource continuation"} {
 		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t)
+			root, environment := fixture.Root, fixture.Environment
 			if scenario == "resource continuation" {
 				root, environment, _ = bootstrapCommandFixture(t)
 			}
@@ -127,7 +128,8 @@ func TestIncusInstallationRetainsPreparedCommandEnvironment(t *testing.T) {
 func TestIncusPrerequisiteRejectsInstallerDriftBeforeOwnerPublication(t *testing.T) {
 	for _, changed := range []string{"unchanged", "configuration", "hook source", "project records"} {
 		t.Run(changed, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
+			fixture := newFixture(t, withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			marker := filepath.Join(root, "installed")
 			later := filepath.Join(root, "later")
 			projectDir := filepath.Join(root, "state", "projects")
@@ -149,10 +151,7 @@ func TestIncusPrerequisiteRejectsInstallerDriftBeforeOwnerPublication(t *testing
 			testkit.WriteFile(t, filepath.Join(root, "scripts", "01-install-incus.sh"), []byte("#!/bin/sh\nset -eu\n"+mutation+"\nprintf installed > '"+marker+"'\n"), 0700)
 			testkit.WriteFile(t, filepath.Join(root, "scripts", "02-create-project.sh"), []byte("#!/bin/sh\nprintf later > '"+later+"'\nexit 69\n"), 0700)
 			native := &installedIncusAccess{Incus: &testkit.Incus{Reconcile: ports.ReconcileState{HostPoolFound: true, HostNetworkFound: true}}, marker: marker}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: native})
 			loaded, err := program.resolveContextWithYardSettings("", "")
 			if err != nil {
 				t.Fatal(err)
