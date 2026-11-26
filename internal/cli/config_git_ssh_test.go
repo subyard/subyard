@@ -203,7 +203,8 @@ func writeConfigFakeSSH(t *testing.T) (bin, ssh, log string) {
 
 func newConfigSSHFixture(t *testing.T, extra ...string) *configSSHFixture {
 	t.Helper()
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	return newConfigSSHFixtureFrom(t, root, environment, extra...)
 }
 
@@ -320,11 +321,8 @@ func (f *configSSHFixture) commitCount() string {
 func (f *configSSHFixture) runWithPrompt(prompt *callbackPrompt, arguments ...string) (int, string) {
 	f.t.Helper()
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Prompt: prompt, Environment: f.environment,
+	program := mustNew(f.t, Options{RepositoryRoot: f.root, Program: "yard", Prompt: prompt, Environment: f.environment,
 		WorkingDir: f.root, Stdout: &stdout, Stderr: &stderr, Arguments: arguments})
-	if err != nil {
-		f.t.Fatal(err)
-	}
 	return program.Run(context.Background()), stdout.String() + stderr.String()
 }
 
@@ -448,11 +446,8 @@ func TestConfigGitSSHTerminatesOnlyItsMasterThatDoesNotExit(t *testing.T) {
 
 func TestConfigGitSSHTerminatesMasterAfterWatchdogLoss(t *testing.T) {
 	f := newConfigSSHFixture(t)
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
+	program := mustNew(t, Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
 		WorkingDir: f.root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "ssh://config.invalid" + f.remote
 	release := program.shareConfigGitSSH(context.Background(), "/", []configGitSSHRemote{{remote, "git-upload-pack"}})
 	session := program.configGitSSH
@@ -480,11 +475,8 @@ func TestConfigGitSSHTerminatesMasterAfterWatchdogLoss(t *testing.T) {
 
 func TestConfigGitSSHClosesPromptly(t *testing.T) {
 	f := newConfigSSHFixture(t)
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
+	program := mustNew(t, Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
 		WorkingDir: f.root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "ssh://config.invalid" + f.remote
 	release := program.shareConfigGitSSH(context.Background(), "/", []configGitSSHRemote{{remote, "git-upload-pack"}})
 	if program.configGitSSH == nil {
@@ -507,11 +499,8 @@ func TestConfigGitSSHWithoutRegisteredWatchdogClosesNormally(t *testing.T) {
 	configGitSSHWatchdogRegistered = false
 	t.Cleanup(RegisterConfigGitSSHWatchdog)
 	f := newConfigSSHFixture(t)
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
+	program := mustNew(t, Options{RepositoryRoot: f.root, Program: "yard", Environment: f.environment,
 		WorkingDir: f.root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "ssh://config.invalid" + f.remote
 	release := program.shareConfigGitSSH(context.Background(), "/", []configGitSSHRemote{{remote, "git-upload-pack"}})
 	session := program.configGitSSH
@@ -541,13 +530,10 @@ func TestConfigGitSSHSharesOnlyIdenticalConfigurationPerSocket(t *testing.T) {
 		{"ro=config.invalid:/keys/same rw=config.invalid:/keys/same", true},
 		{"ro=one.invalid:/keys/ro rw=two.invalid:/keys/rw", true},
 	} {
-		program, err := New(Options{RepositoryRoot: repositoryRoot(t), Program: "yard", WorkingDir: "/",
+		program := mustNew(t, Options{RepositoryRoot: repositoryRoot(t), Program: "yard", WorkingDir: "/",
 			Environment: []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"SUBYARD_TEST_SSH_LOG=" + log, "SUBYARD_TEST_SSH_ALIASES=" + test.aliases},
 			Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-		if err != nil {
-			t.Fatal(err)
-		}
 		fetch, _ := configGitSSHEndpointFor("ro:config.git", "git-upload-pack")
 		push, _ := configGitSSHEndpointFor("rw:config.git", "git-receive-pack")
 		if shared, _ := program.configGitSSHUnmultiplexed(context.Background(), filepath.Join(bin, "ssh"),
@@ -670,13 +656,10 @@ func TestConfigGitSSHUsesEffectiveRemoteURL(t *testing.T) {
 	runConfigSyncGit(t, checkout, "fetch", "-q", f.remote, "main")
 	runConfigSyncGit(t, checkout, "reset", "-q", "--hard", "FETCH_HEAD")
 	runConfigSyncGit(t, checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
-	program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Environment: append(slices.Clone(f.environment),
+	program := mustNew(t, Options{RepositoryRoot: f.root, Program: "yard", Environment: append(slices.Clone(f.environment),
 		"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=url.ssh://fetch.invalid/.insteadOf", "GIT_CONFIG_VALUE_0=https://alias.invalid/",
 		"GIT_CONFIG_KEY_1=url.git@push.invalid:.pushInsteadOf", "GIT_CONFIG_VALUE_1=https://alias.invalid/"),
 		WorkingDir: f.root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	remotes, err := program.configGitEffectiveRemotes(context.Background(), checkout, true)
 	if err != nil || !slices.Equal(remotes, []configGitSSHRemote{
 		{"ssh://fetch.invalid/config.git", "git-upload-pack"}, {"git@push.invalid:config.git", "git-receive-pack"},
@@ -725,11 +708,8 @@ func TestConfigGitSSHHelperProcess(t *testing.T) {
 		t.Skip("helper process")
 	}
 	configGitSSHExitWait = time.Second
-	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Program: "yard", Environment: os.Environ(),
+	program := mustNew(t, Options{RepositoryRoot: repositoryRoot(t), Program: "yard", Environment: os.Environ(),
 		WorkingDir: "/", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "ssh://config.invalid" + os.Getenv("SUBYARD_TEST_SSH_REMOTE")
 	program.shareConfigGitSSH(context.Background(), "/", []configGitSSHRemote{{remote, "git-upload-pack"}})
 	session := program.configGitSSH
@@ -987,8 +967,9 @@ func withSyntheticYardTemplate(t *testing.T, root string, environment []string) 
 }
 
 func TestConfigSetSeveralPairsValidatesCombinedTarget(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
-	withSyntheticYardTemplate(t, root, environment)
+	fixture := newFixture(t, withCheckoutConfig())
+	root := fixture.Root
+	environment := withPreparedYardTemplate(t, fixture)
 	f := newConfigSSHFixtureFrom(t, root, environment)
 	f.run(0, "config", "set", "YARD_TEMPLATE", "no-tools", "--scope", "yard", "--git", "--yes")
 	// The current template forbids coding tools; the combined target clears it.
