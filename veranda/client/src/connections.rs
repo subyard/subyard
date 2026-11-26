@@ -1113,44 +1113,52 @@ fn safe_editor_id(id: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
-/// Appends one line to a private store file, creating the root privately. A
-/// file the line would grow past `limit` bytes first becomes `<name>.1`, so the
-/// pair stays bounded. Nothing is synced: callers use it for best-effort logs.
+/// Appends one line to a private store file, creating the root privately, and
+/// returns the byte range it occupies. With `replace`, the range of the last
+/// line, that line is rewritten instead while it is still the end of the file.
+/// A file the line would grow past `limit` bytes first becomes `<name>.1`, so
+/// the pair stays bounded. Nothing is synced or locked across processes: two
+/// Veranda processes appending at once may lose or interleave a line, which a
+/// best-effort log accepts.
 pub(crate) fn append_private_store_line(
     root: &Path,
     name: &str,
     line: &[u8],
     limit: u64,
-) -> Result<(), NativeError> {
+    replace: Option<std::ops::Range<u64>>,
+) -> Result<std::ops::Range<u64>, NativeError> {
+    use std::io::{Seek, SeekFrom};
     ensure_private_root(root)?;
     let path = root.join(name);
     let mut file = match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_private_file(&path)?,
         Err(_) => return Err(store_io()),
-        Ok(_) => {
-            let size = open_private_read(&path)?
-                .metadata()
-                .map_err(|_| store_io())?
-                .len();
-            if size + line.len() as u64 > limit {
-                let previous = root.join(format!("{name}.1"));
-                match fs::symlink_metadata(&previous) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(store_io()),
-                    Ok(_) => check_private_file(&previous)?,
-                }
-                fs::rename(&path, &previous).map_err(|_| store_io())?;
-                create_private_file(&path)?
-            } else {
-                open_private_append(&path)?
-            }
-        }
+        Ok(_) => open_private_write(&path)?,
     };
-    file.write_all(line).map_err(|_| store_io())
+    let mut start = file.metadata().map_err(|_| store_io())?.len();
+    let length = line.len() as u64;
+    if let Some(range) = replace.filter(|range| range.end == start && range.start + length <= limit)
+    {
+        file.set_len(range.start).map_err(|_| store_io())?;
+        start = range.start;
+    } else if start + length > limit {
+        let previous = root.join(format!("{name}.1"));
+        match fs::symlink_metadata(&previous) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(store_io()),
+            Ok(_) => check_private_file(&previous)?,
+        }
+        fs::rename(&path, &previous).map_err(|_| store_io())?;
+        file = create_private_file(&path)?;
+        start = 0;
+    }
+    file.seek(SeekFrom::Start(start)).map_err(|_| store_io())?;
+    file.write_all(line).map_err(|_| store_io())?;
+    Ok(start..start + length)
 }
-fn open_private_append(path: &Path) -> Result<File, NativeError> {
+fn open_private_write(path: &Path) -> Result<File, NativeError> {
     let mut options = OpenOptions::new();
-    options.append(true);
+    options.write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

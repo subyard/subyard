@@ -284,7 +284,7 @@ impl Client {
             .as_ref()
             .and_then(Observation::child_usage_context);
         crate::ssh::require_agent(usage.as_ref())?;
-        let rpc = RpcClient::open_attempt_logged(
+        let rpc = RpcClient::open_tracked_attempt_usage(
             pin.command(None)?,
             product_version(),
             Arc::new(|_| {}),
@@ -437,7 +437,7 @@ impl Client {
         let event_key = key.clone();
         let wake = self.wake.clone();
         let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-        let rpc = RpcClient::open_observed_logged(
+        let rpc = RpcClient::open_observed(
             command,
             product_version(),
             Arc::new(move |event| {

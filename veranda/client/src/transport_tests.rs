@@ -860,6 +860,7 @@ fn correlation_actual_transport_invalid_event_never_calls_classifier() {
         }),
         None,
         Some(source),
+        None,
     )
     .unwrap();
     assert!(rpc
@@ -901,6 +902,7 @@ fn correlation_actual_transport_failure_duplicate_and_empty_data_still_dispatch(
         }),
         None,
         Some(source.clone()),
+        None,
     )
     .unwrap();
     rpc.call(
@@ -987,6 +989,7 @@ fn correlation_actual_transport_classifies_when_ticket_admission_is_full() {
         }),
         None,
         Some(source),
+        None,
     )
     .unwrap();
     rpc.call(
@@ -1053,6 +1056,7 @@ fn correlation_framed_seal_retains_validated_receipt_during_held_classifier() {
             }),
             None,
             Some(source),
+            None,
         )
         .unwrap(),
     );
@@ -1185,7 +1189,7 @@ fn logged(
     log: &Arc<crate::diagnostics::DiagnosticLog>,
     mode: &str,
 ) -> Result<RpcClient, NativeError> {
-    RpcClient::open_observed_logged(
+    RpcClient::open_observed(
         fixture.command(mode),
         PRODUCT_VERSION,
         Arc::new(|_| {}),
@@ -1353,7 +1357,7 @@ fn closing_the_session_and_negotiation_failures_are_logged_only_when_they_are_fa
         assert!(logged(&fixture, &log, mode).is_err());
     }
     let missing = Command::new(fixture.store_root().join("missing-program"));
-    assert!(RpcClient::open_observed_logged(
+    assert!(RpcClient::open_observed(
         missing,
         PRODUCT_VERSION,
         Arc::new(|_| {}),
@@ -1376,45 +1380,6 @@ fn closing_the_session_and_negotiation_failures_are_logged_only_when_they_are_fa
                 Class::TransportUnavailable,
                 "transport_unavailable".to_string()
             ),
-        ]
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn an_ssh_failure_is_told_apart_from_an_owner_disconnect() {
-    use crate::diagnostics::Class;
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = OwnerFixture::new();
-    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
-    let bin = fixture.store_root().with_file_name("bin");
-    fs::create_dir_all(&bin).unwrap();
-    for (name, status) in [("ssh", 255), ("yard", 255)] {
-        let program = bin.join(name);
-        fs::write(&program, format!("#!/bin/sh\nexit {status}\n")).unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = RpcClient::open_observed_logged(
-            Command::new(&program),
-            PRODUCT_VERSION,
-            Arc::new(|_| {}),
-            None,
-            None,
-            Some(log.clone()),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(error.code, "disconnected");
-    }
-    let classes: Vec<_> = log
-        .records()
-        .into_iter()
-        .map(|record| (record.class, record.method))
-        .collect();
-    assert_eq!(
-        classes,
-        vec![
-            (Class::SshFailed, "rpc.negotiate".to_string()),
-            (Class::Disconnected, "rpc.negotiate".to_string())
         ]
     );
 }

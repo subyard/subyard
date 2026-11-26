@@ -215,27 +215,10 @@ impl RpcClient {
             processes,
             attempt,
             None,
-        )
-    }
-    pub(crate) fn open_tracked_attempt_usage(
-        command: Command,
-        expected_version: &str,
-        notify: Notify,
-        processes: Option<&Processes>,
-        attempt: Option<&Processes>,
-        usage: Option<UsageContext>,
-    ) -> Result<Self, NativeError> {
-        Self::open_attempt_logged(
-            command,
-            expected_version,
-            notify,
-            processes,
-            attempt,
-            usage,
             None,
         )
     }
-    pub(crate) fn open_attempt_logged(
+    pub(crate) fn open_tracked_attempt_usage(
         command: Command,
         expected_version: &str,
         notify: Notify,
@@ -258,24 +241,7 @@ impl RpcClient {
             },
         )
     }
-    #[cfg(test)]
     pub(crate) fn open_observed(
-        command: Command,
-        expected_version: &str,
-        notify: Notify,
-        processes: Option<&Processes>,
-        observation: Option<Source>,
-    ) -> Result<Self, NativeError> {
-        Self::open_observed_logged(
-            command,
-            expected_version,
-            notify,
-            processes,
-            observation,
-            None,
-        )
-    }
-    pub(crate) fn open_observed_logged(
         command: Command,
         expected_version: &str,
         notify: Notify,
@@ -312,9 +278,6 @@ impl RpcClient {
             kind: child_kind,
             diagnostics,
         } = child_observation;
-        let ssh = std::path::Path::new(command.get_program())
-            .file_stem()
-            .is_some_and(|name| name == "ssh");
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -478,20 +441,9 @@ impl RpcClient {
         let raw = client
             .wait_unrecorded(call, Duration::from_secs(8))
             .inspect_err(|error| {
-                // ssh exits with 255 for its own failures, such as an
-                // unreachable host or refused authentication.
-                if ssh && error.code == "disconnected" && client.exit_code() == Some(255) {
-                    client.shared.record(
-                        Class::SshFailed,
-                        "rpc.negotiate",
-                        "disconnected",
-                        &request,
-                    );
-                } else {
-                    client
-                        .shared
-                        .record_failure("rpc.negotiate", &request, error);
-                }
+                client
+                    .shared
+                    .record_failure("rpc.negotiate", &request, error)
             })?;
         let negotiation: Negotiation = client.decode("rpc.negotiate", raw)?;
         if negotiation.version != PROTOCOL_VERSION
@@ -538,18 +490,6 @@ impl RpcClient {
             );
         })?;
         Ok(client)
-    }
-
-    /// The child's exit code once it has exited, waiting briefly for it.
-    fn exit_code(&self) -> Option<i32> {
-        let deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            let code = self.child.lock().ok()?.as_mut()?.exit_code();
-            if code.is_some() || Instant::now() >= deadline {
-                return code;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
     }
 
     pub fn require(&self, capability: &str) -> Result<(), NativeError> {

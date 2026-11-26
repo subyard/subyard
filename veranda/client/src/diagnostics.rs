@@ -17,8 +17,6 @@ const MAX_PATH: usize = 128;
 pub enum Class {
     /// The connection closed without Veranda closing it.
     Disconnected,
-    /// SSH itself failed before the owner answered.
-    SshFailed,
     /// Yard or SSH could not be started.
     TransportUnavailable,
     /// A frame or result did not match the contract.
@@ -46,10 +44,17 @@ pub enum Structure {
     Other,
 }
 
-/// One failure, stored as one JSON line.
+/// One failure, stored as one JSON line. Repeats of the same failure update
+/// the line in place, so a long outage keeps its first record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub at: u64,
+    /// How many times this failure happened in a row, the first at `at`.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub count: u64,
+    /// When the last repeat happened.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last: u64,
     pub class: Class,
     pub method: String,
     pub code: String,
@@ -63,22 +68,35 @@ pub struct Record {
     pub path: String,
 }
 
+fn one() -> u64 {
+    1
+}
+fn is_one(count: &u64) -> bool {
+    *count == 1
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 pub struct DiagnosticLog {
     root: PathBuf,
-    lock: Mutex<()>,
+    /// The last record this process wrote and the bytes it occupies.
+    lock: Mutex<Option<(Record, std::ops::Range<u64>)>>,
 }
 
 impl DiagnosticLog {
     pub fn new(root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             root,
-            lock: Mutex::new(()),
+            lock: Mutex::new(None),
         })
     }
     /// Best effort: a log failure never changes the request result.
     pub fn record(&self, class: Class, method: &str, code: &str, request: &str) {
         self.write(Record {
             at: 0,
+            count: 1,
+            last: 0,
             class,
             method: method.into(),
             code: code.into(),
@@ -107,19 +125,18 @@ impl DiagnosticLog {
             .and_then(|name| name.rsplit("::").next())
             .unwrap_or("value");
         let mut path = target.to_string();
-        // Only field names: serde quotes them between backticks after these
-        // prefixes, while values appear only in other messages.
-        if let Some((
-            prefix,
-            Structure::MissingField | Structure::UnknownField | Structure::DuplicateField,
-        )) = structure
-        {
+        // Only names of fields that `T` declares: serde quotes them between
+        // backticks after these prefixes. An unknown field is named by the
+        // owner, so only its type is kept.
+        if let Some((prefix, Structure::MissingField | Structure::DuplicateField)) = structure {
             if let Some(field) = message[prefix.len()..].split('`').next() {
                 path = format!("{target}.{field}");
             }
         }
         self.write(Record {
             at: 0,
+            count: 1,
+            last: 0,
             class: Class::InvalidResponse,
             method: method.into(),
             code: "invalid_response".into(),
@@ -147,9 +164,10 @@ impl DiagnosticLog {
             .collect()
     }
     fn write(&self, mut record: Record) {
-        record.at = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
+        record.at = now;
         record.method = name_or(&record.method, "unknown");
         record.code = name_or(&record.code, "unknown");
         record.request = name_or(&record.request, "");
@@ -162,14 +180,32 @@ impl DiagnosticLog {
         {
             record.path.clear();
         }
+        let Ok(mut last) = self.lock.lock() else {
+            return;
+        };
+        let mut replace = None;
+        if let Some((previous, range)) = last.take() {
+            if (previous.class, previous.structure) == (record.class, record.structure)
+                && (&previous.method, &previous.code, &previous.path)
+                    == (&record.method, &record.code, &record.path)
+            {
+                record = Record {
+                    count: previous.count.saturating_add(1),
+                    last: now,
+                    ..previous
+                };
+                replace = Some(range);
+            }
+        }
         let Ok(mut line) = serde_json::to_vec(&record) else {
             return;
         };
         line.push(b'\n');
-        let Ok(_guard) = self.lock.lock() else {
-            return;
-        };
-        let _ = crate::connections::append_private_store_line(&self.root, FILE, &line, MAX_FILE);
+        if let Ok(range) = crate::connections::append_private_store_line(
+            &self.root, FILE, &line, MAX_FILE, replace,
+        ) {
+            *last = Some((record, range));
+        }
     }
 }
 

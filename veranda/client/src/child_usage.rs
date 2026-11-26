@@ -469,31 +469,6 @@ impl OwnedChild {
         self.usage.as_mut().unwrap().finish(&result, finished);
         result
     }
-    /// The exit code of an exited child, without reaping it on Unix.
-    pub(crate) fn exit_code(&mut self) -> Option<i32> {
-        #[cfg(unix)]
-        {
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    self.id(),
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            };
-            (result == 0 && unsafe { info.si_pid() } != 0 && info.si_code == libc::CLD_EXITED)
-                .then(|| unsafe { info.si_status() })
-        }
-        #[cfg(not(unix))]
-        {
-            self.child
-                .try_wait()
-                .ok()
-                .flatten()
-                .and_then(|status| status.code())
-        }
-    }
     pub(crate) fn exited(&mut self) -> bool {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if self

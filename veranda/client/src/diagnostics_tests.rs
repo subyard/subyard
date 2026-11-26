@@ -51,6 +51,7 @@ fn records_keep_only_validated_names_and_closed_classes() {
 #[test]
 fn decode_failures_name_the_type_and_field_but_never_the_value() {
     #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     #[allow(dead_code)]
     struct Inventory {
         projects: Vec<String>,
@@ -59,6 +60,7 @@ fn decode_failures_name_the_type_and_field_but_never_the_value() {
     for value in [
         serde_json::json!({"projects": "SECRET-VALUE"}),
         serde_json::json!({}),
+        serde_json::json!({"projects": [], "SECRET_KEY": 1}),
     ] {
         let error = serde_json::from_value::<Inventory>(value).unwrap_err();
         log.decode_failed::<Inventory>("owner.inventory", &error);
@@ -76,6 +78,7 @@ fn decode_failures_name_the_type_and_field_but_never_the_value() {
                 Some(Structure::MissingField),
                 "Inventory.projects".to_string()
             ),
+            (Some(Structure::UnknownField), "Inventory".to_string()),
         ]
     );
     let raw = fs::read_to_string(log.root.join(FILE)).unwrap();
@@ -86,9 +89,10 @@ fn decode_failures_name_the_type_and_field_but_never_the_value() {
 fn the_log_and_its_previous_generation_stay_bounded() {
     let log = DiagnosticLog::new(root());
     for index in 0..2000 {
+        // Alternating methods, so no record repeats the previous one.
         log.record(
             Class::RpcTimeout,
-            "owner.inventory",
+            ["owner.inventory", "owner.status"][index % 2],
             "rpc_timeout",
             &format!("veranda-{index}"),
         );
@@ -104,4 +108,51 @@ fn the_log_and_its_previous_generation_stay_bounded() {
         let number = |record: &Record| record.request["veranda-".len()..].parse::<u32>().unwrap();
         number(&pair[0]) + 1 == number(&pair[1])
     }));
+}
+
+#[test]
+fn a_repeated_failure_updates_its_first_record_instead_of_filling_the_log() {
+    let log = DiagnosticLog::new(root());
+    log.record(
+        Class::OwnerError,
+        "owner.inventory",
+        "plan_failed",
+        "veranda-1",
+    );
+    for index in 2..5000 {
+        log.record(
+            Class::Disconnected,
+            "rpc.negotiate",
+            "disconnected",
+            &format!("veranda-{index}"),
+        );
+    }
+    log.record(
+        Class::Disconnected,
+        "owner.inventory",
+        "disconnected",
+        "veranda-5000",
+    );
+    let records = log.records();
+    let facts: Vec<_> = records
+        .iter()
+        .map(|record| {
+            (
+                record.method.as_str(),
+                record.request.as_str(),
+                record.count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        facts,
+        vec![
+            ("owner.inventory", "veranda-1", 1),
+            ("rpc.negotiate", "veranda-2", 4998),
+            ("owner.inventory", "veranda-5000", 1),
+        ]
+    );
+    assert!(records[1].last >= records[1].at && records[1].at > 0);
+    assert_eq!(records[0].last, 0);
+    assert!(!log.root.join(format!("{FILE}.1")).exists());
 }

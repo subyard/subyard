@@ -51,7 +51,7 @@ The owner keeps each failed request's full local error text with its request
 ID, operation ID, method and code; `yard logs --rpc` on the owner shows them.
 Veranda records only value-free facts about the failures it shows generically
 in `rpc-errors.log` in its private store (0600, two 32 KiB generations): time,
-method, code, request ID, a class (`disconnected`, `ssh_failed`,
+method, code, request ID, a class (`disconnected`,
 `transport_unavailable`, `invalid_response`, `rpc_timeout`,
 `incompatible_engine`, `owner_error`, `error_data_rejected`) and, for an
 undecodable result, the serde category and the decoded type and field name.
