@@ -1223,9 +1223,9 @@ fn rpc_failures_are_logged_as_closed_facts_without_values() {
             Duration::from_secs(2),
         )
         .unwrap();
-    let invalid: Result<Count, _> = client.decode("synthetic.bad-result", value.clone());
+    let invalid: Result<Count, _> = client.decode("owner.inventory", value.clone());
     assert_eq!(invalid.unwrap_err().code, "invalid_response");
-    let missing: Result<Total, _> = client.decode("synthetic.bad-result", value);
+    let missing: Result<Total, _> = client.decode("owner.inventory", value);
     assert_eq!(missing.unwrap_err().code, "invalid_response");
     let _ = client
         .call(
@@ -1270,12 +1270,13 @@ fn rpc_failures_are_logged_as_closed_facts_without_values() {
             path.to_string(),
         )
     };
+    // Test-only methods are outside the vocabulary.
     assert_eq!(
         facts,
         vec![
             fact(
                 Class::InvalidResponse,
-                "synthetic.bad-result",
+                "owner.inventory",
                 "invalid_response",
                 true,
                 Some(Structure::InvalidType),
@@ -1283,7 +1284,7 @@ fn rpc_failures_are_logged_as_closed_facts_without_values() {
             ),
             fact(
                 Class::InvalidResponse,
-                "synthetic.bad-result",
+                "owner.inventory",
                 "invalid_response",
                 true,
                 Some(Structure::MissingField),
@@ -1291,23 +1292,16 @@ fn rpc_failures_are_logged_as_closed_facts_without_values() {
             ),
             fact(
                 Class::ErrorDataRejected,
-                "synthetic.error-data",
+                "unknown",
                 "plan_failed",
                 false,
                 None,
                 ""
             ),
-            fact(
-                Class::OwnerError,
-                "synthetic.error-data",
-                "plan_failed",
-                false,
-                None,
-                ""
-            ),
+            fact(Class::OwnerError, "unknown", "plan_failed", false, None, ""),
             fact(
                 Class::Disconnected,
-                "synthetic.exit",
+                "unknown",
                 "disconnected",
                 false,
                 None,

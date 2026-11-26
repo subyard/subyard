@@ -44,15 +44,17 @@ pub enum Structure {
     Other,
 }
 
-/// One failure, stored as one JSON line. Repeats of the same failure update
-/// the line in place, so a long outage keeps its first record.
+/// One failure, stored as one JSON line. Repeats of the record before it are
+/// counted in memory and appended as one summary record when another failure
+/// arrives, hourly during a long outage and when the log is dropped, so an
+/// outage keeps its first record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub at: u64,
-    /// How many times this failure happened in a row, the first at `at`.
+    /// In a summary, how many repeats it counts, the first at `at`.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub count: u64,
-    /// When the last repeat happened.
+    /// In a summary, when the last repeat happened; zero otherwise.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub last: u64,
     pub class: Class,
@@ -78,17 +80,35 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// A summary of repeats is appended at least this often, in seconds.
+const REPEAT_INTERVAL: u64 = 3600;
+/// Codes this client sets itself; owner codes come from the vocabulary.
+const LOCAL_CODES: &[&str] = &[
+    "disconnected",
+    "rpc_timeout",
+    "invalid_response",
+    "incompatible_engine",
+    "transport_unavailable",
+];
+
+#[derive(Default)]
+struct State {
+    /// The last record appended by this process.
+    last: Option<Record>,
+    /// Repeats of `last` not yet appended.
+    repeats: Option<Record>,
+}
+
 pub struct DiagnosticLog {
     root: PathBuf,
-    /// The last record this process wrote and the bytes it occupies.
-    lock: Mutex<Option<(Record, std::ops::Range<u64>)>>,
+    lock: Mutex<State>,
 }
 
 impl DiagnosticLog {
     pub fn new(root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             root,
-            lock: Mutex::new(None),
+            lock: Mutex::new(State::default()),
         })
     }
     /// Best effort: a log failure never changes the request result.
@@ -168,11 +188,25 @@ impl DiagnosticLog {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
         record.at = now;
-        record.method = name_or(&record.method, "unknown");
-        record.code = name_or(&record.code, "unknown");
-        record.request = name_or(&record.request, "");
-        if record.path.is_empty()
-            || record.path.len() > MAX_PATH
+        // Only names from closed sets: an owner-chosen code or method could
+        // carry a value.
+        record.method = crate::vocabulary::Method::parse(&record.method)
+            .map_or("unknown", |method| method.as_str())
+            .into();
+        record.code = crate::vocabulary::ErrorCode::parse(&record.code)
+            .map(|code| code.as_str())
+            .or_else(|| {
+                LOCAL_CODES
+                    .iter()
+                    .copied()
+                    .find(|code| *code == record.code)
+            })
+            .unwrap_or("unknown")
+            .into();
+        if !own_request(&record.request) {
+            record.request.clear();
+        }
+        if record.path.len() > MAX_PATH
             || !record
                 .path
                 .bytes()
@@ -180,41 +214,58 @@ impl DiagnosticLog {
         {
             record.path.clear();
         }
-        let Ok(mut last) = self.lock.lock() else {
+        let Ok(mut state) = self.lock.lock() else {
             return;
         };
-        let mut replace = None;
-        if let Some((previous, range)) = last.take() {
-            if (previous.class, previous.structure) == (record.class, record.structure)
-                && (&previous.method, &previous.code, &previous.path)
-                    == (&record.method, &record.code, &record.path)
-            {
-                record = Record {
-                    count: previous.count.saturating_add(1),
-                    last: now,
-                    ..previous
-                };
-                replace = Some(range);
+        if state.last.as_ref().is_some_and(|last| same(last, &record)) {
+            let repeats = state.repeats.get_or_insert(Record {
+                count: 0,
+                ..record.clone()
+            });
+            repeats.count = repeats.count.saturating_add(1);
+            repeats.last = now;
+            repeats.request = record.request;
+            if now.saturating_sub(repeats.at) >= REPEAT_INTERVAL {
+                self.flush(&mut state);
             }
+            return;
         }
-        let Ok(mut line) = serde_json::to_vec(&record) else {
+        self.flush(&mut state);
+        self.append(&record);
+        state.last = Some(record);
+    }
+    fn flush(&self, state: &mut State) {
+        if let Some(repeats) = state.repeats.take() {
+            self.append(&repeats);
+        }
+    }
+    fn append(&self, record: &Record) {
+        let Ok(mut line) = serde_json::to_vec(record) else {
             return;
         };
         line.push(b'\n');
-        if let Ok(range) = crate::connections::append_private_store_line(
-            &self.root, FILE, &line, MAX_FILE, replace,
-        ) {
-            *last = Some((record, range));
+        let _ = crate::connections::append_private_store_line(&self.root, FILE, &line, MAX_FILE);
+    }
+}
+
+impl Drop for DiagnosticLog {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.lock.lock() {
+            self.flush(&mut state);
         }
     }
 }
 
-fn name_or(value: &str, fallback: &str) -> String {
-    if crate::transport::identity(value) {
-        value.into()
-    } else {
-        fallback.into()
-    }
+fn same(left: &Record, right: &Record) -> bool {
+    (left.class, left.structure) == (right.class, right.structure)
+        && (&left.method, &left.code, &left.path) == (&right.method, &right.code, &right.path)
+}
+
+/// Request IDs this client generates.
+fn own_request(request: &str) -> bool {
+    request.strip_prefix("veranda-").is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 #[cfg(test)]

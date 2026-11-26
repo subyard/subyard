@@ -92,7 +92,7 @@ fn the_log_and_its_previous_generation_stay_bounded() {
         // Alternating methods, so no record repeats the previous one.
         log.record(
             Class::RpcTimeout,
-            ["owner.inventory", "owner.status"][index % 2],
+            ["owner.inventory", "rpc.negotiate"][index % 2],
             "rpc_timeout",
             &format!("veranda-{index}"),
         );
@@ -111,8 +111,9 @@ fn the_log_and_its_previous_generation_stay_bounded() {
 }
 
 #[test]
-fn a_repeated_failure_updates_its_first_record_instead_of_filling_the_log() {
-    let log = DiagnosticLog::new(root());
+fn repeats_are_counted_and_appended_as_one_summary_without_rewriting() {
+    let root = root();
+    let log = DiagnosticLog::new(root.clone());
     log.record(
         Class::OwnerError,
         "owner.inventory",
@@ -133,6 +134,16 @@ fn a_repeated_failure_updates_its_first_record_instead_of_filling_the_log() {
         "disconnected",
         "veranda-5000",
     );
+    for index in 5001..5004 {
+        log.record(
+            Class::Disconnected,
+            "owner.inventory",
+            "disconnected",
+            &format!("veranda-{index}"),
+        );
+    }
+    drop(log);
+    let log = DiagnosticLog::new(root);
     let records = log.records();
     let facts: Vec<_> = records
         .iter()
@@ -141,18 +152,52 @@ fn a_repeated_failure_updates_its_first_record_instead_of_filling_the_log() {
                 record.method.as_str(),
                 record.request.as_str(),
                 record.count,
+                record.last > 0,
             )
         })
         .collect();
     assert_eq!(
         facts,
         vec![
-            ("owner.inventory", "veranda-1", 1),
-            ("rpc.negotiate", "veranda-2", 4998),
-            ("owner.inventory", "veranda-5000", 1),
+            ("owner.inventory", "veranda-1", 1, false),
+            ("rpc.negotiate", "veranda-2", 1, false),
+            ("rpc.negotiate", "veranda-4999", 4997, true),
+            ("owner.inventory", "veranda-5000", 1, false),
+            ("owner.inventory", "veranda-5003", 3, true),
         ]
     );
-    assert!(records[1].last >= records[1].at && records[1].at > 0);
-    assert_eq!(records[0].last, 0);
+    assert!(records[2].last >= records[2].at && records[2].at >= records[1].at);
     assert!(!log.root.join(format!("{FILE}.1")).exists());
+}
+
+#[test]
+fn owner_chosen_codes_methods_and_requests_outside_the_vocabulary_are_not_kept() {
+    let log = DiagnosticLog::new(root());
+    log.record(
+        Class::OwnerError,
+        "SECRET_method",
+        "SECRET_TOKEN_hunter2",
+        "SECRET-7",
+    );
+    log.record(
+        Class::OwnerError,
+        "operation.plan",
+        "plan_failed",
+        "veranda-x",
+    );
+    let facts: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| (record.method, record.code, record.request))
+        .collect();
+    let fact = |method: &str, code: &str| (method.to_string(), code.to_string(), String::new());
+    assert_eq!(
+        facts,
+        vec![
+            fact("unknown", "unknown"),
+            fact("operation.plan", "plan_failed")
+        ]
+    );
+    let raw = fs::read_to_string(log.root.join(FILE)).unwrap();
+    assert!(!raw.contains("SECRET") && !raw.contains("hunter2"), "{raw}");
 }
