@@ -171,6 +171,11 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 			if ownerPredecessors[transaction] {
 				continue
 			}
+			if _, exists := journals[transaction]; !exists {
+				if _, currentErr := store.sourceRetainedTerminalEvidence(transaction, registry); currentErr != nil && store.sourceRetiredPrefixHistory(transaction, registry) == nil {
+					continue
+				}
+			}
 			bound, exists := journals[transaction]
 			if !exists {
 				bound, err = store.sourceRetainedTerminalEvidence(transaction, registry)
@@ -247,6 +252,19 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 	}
 	proof.Binding = before
 	return proof, nil
+}
+
+// sourceRetiredPrefixHistory proves a closed retained transaction written with
+// the frozen predecessor vocabulary that this registry retires exactly.
+func (store *POSIXV2Store) sourceRetiredPrefixHistory(transaction TransactionID, registry RegistryV2) error {
+	if _, err := registry.closedRetiredMigrationIDs(); err != nil {
+		return err
+	}
+	bound, err := store.sourceRetainedTerminalEvidence(transaction, frozenV030Registry)
+	if err != nil {
+		return err
+	}
+	return store.sourceTerminalBindings(bound, frozenV030Registry, "", MigrationLedgerSnapshot{})
 }
 
 func (store *POSIXV2Store) sourceTerminalEvidence(journal JournalRecord, registry RegistryV2, state MigrationLedgerSnapshot) error {
