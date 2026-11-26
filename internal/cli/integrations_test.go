@@ -49,7 +49,7 @@ func (fixture *appliedProfilesPlatformFixture) AppliedEnvironmentProfiles(contex
 
 func TestReleaseMaterializationUsesVerifiedAppliedProfilesIncludingEmpty(t *testing.T) {
 	for _, applied := range [][]string{{}, {"retained"}} {
-		cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+		_, cli, _, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 		cli.options.InitPlatform = &appliedProfilesPlatformFixture{appliedSelectionPlatformFixture: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}}, profiles: applied, known: true}
 		loaded, err := cli.loadContext("default")
 		if err != nil {
@@ -69,7 +69,7 @@ func TestReleaseMaterializationUsesVerifiedAppliedProfilesIncludingEmpty(t *test
 func TestReleaseMaterializationRetainsEveryAppliedIntegrationInitField(t *testing.T) {
 	for _, suffix := range []string{"COMMAND", "CHECK", "HEALTH", "PROJECTS_CHANGED", "DEPENDS", "PERSIST", "PROVISION"} {
 		t.Run(suffix, func(t *testing.T) {
-			cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+			_, cli, _, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 			name, value := "AGENT_codex_"+suffix, "old-command"
 			switch suffix {
 			case "DEPENDS":
@@ -95,7 +95,7 @@ func TestReleaseMaterializationRetainsEveryAppliedIntegrationInitField(t *testin
 }
 
 func TestReleaseMaterializationUsesAppliedCodingSelection(t *testing.T) {
-	cli, _, _, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
+	_, cli, _, _, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
 	cli.options.InitPlatform = &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture(), selected: []string{"codex"}}
 	loaded, err := cli.loadContext("default")
 	if err != nil {
@@ -113,7 +113,7 @@ func TestReleaseMaterializationUsesAppliedCodingSelection(t *testing.T) {
 }
 
 func TestReleaseMaterializationKeepsFirstAuthoredHookPending(t *testing.T) {
-	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	_, cli, _, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -146,12 +146,6 @@ func (fixture *integrationRuntimeFixture) ApplyIntegrations(context.Context, rec
 	}
 	return fixture.applyErr
 }
-func integrationFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *integrationRuntimeFixture, string, *bytes.Buffer) {
-	t.Helper()
-	_, cli, incus, runtime, path, output := newIntegrationFixture(t, selection)
-	return cli, incus, runtime, path, output
-}
-
 func newIntegrationFixture(t *testing.T, selection string) (*cliFixture, *CLI, *testkit.Incus, *integrationRuntimeFixture, string, *bytes.Buffer) {
 	t.Helper()
 	cliFixture := newFixture(t)
@@ -192,7 +186,7 @@ func prepareIntegrationTest(t *testing.T, cli *CLI, arguments ...string) (*prepa
 func TestIntegrationStoppedAndMissingRejectBeforePlanOrWrite(t *testing.T) {
 	for _, state := range []string{"Stopped", "missing"} {
 		t.Run(state, func(t *testing.T) {
-			cli, incus, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+			_, cli, incus, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 			if state == "missing" {
 				delete(incus.Instances, "subyard/yard")
 			} else {
@@ -213,11 +207,11 @@ func TestIntegrationStoppedAndMissingRejectBeforePlanOrWrite(t *testing.T) {
 	}
 }
 func TestIntegrationDependencyDisableAndTemporaryOverrideRejected(t *testing.T) {
-	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
+	_, cli, _, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=relay\n")
 	if _, err := prepareIntegrationTest(t, cli, "disable", "codex"); err == nil || !strings.Contains(err.Error(), "required by relay") {
 		t.Fatalf("dependency error=%v", err)
 	}
-	cli, _, _, _, _ = integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, _, _, _ = newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	cli.baseEnv["CODING_TOOL_INTEGRATIONS"] = "codex"
 	cli.env["CODING_TOOL_INTEGRATIONS"] = "codex"
 	if _, err := prepareIntegrationTest(t, cli, "enable", "codex"); err == nil || !strings.Contains(err.Error(), "temporary") {
@@ -225,7 +219,7 @@ func TestIntegrationDependencyDisableAndTemporaryOverrideRejected(t *testing.T) 
 	}
 }
 func TestIntegrationRegisteredSourceAllowsLocalWrite(t *testing.T) {
-	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, runtime, path, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	if err := configsync.RegisterSource(filepath.Join(cli.options.RepositoryRoot, "state"), filepath.Join(cli.options.RepositoryRoot, "checkout")); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +238,7 @@ func TestIntegrationRegisteredSourceAllowsLocalWrite(t *testing.T) {
 }
 
 func TestIntegrationUnmigratedOwnershipPreventsWrite(t *testing.T) {
-	cli, _, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, runtime, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	writeUnmigratedSettingsManifest(t, filepath.Join(cli.options.RepositoryRoot, "state"))
 	before, _ := os.ReadFile(path)
 	if _, err := prepareIntegrationTest(t, cli, "enable", "codex"); err == nil || !strings.Contains(err.Error(), "migrate Git settings") {
@@ -256,7 +250,7 @@ func TestIntegrationUnmigratedOwnershipPreventsWrite(t *testing.T) {
 	}
 }
 func TestIntegrationDesiredPersistsOnApplyFailureAndRetry(t *testing.T) {
-	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, runtime, path, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	prepared, err := prepareIntegrationTest(t, cli, "enable", "codex")
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +279,7 @@ func TestIntegrationDesiredPersistsOnApplyFailureAndRetry(t *testing.T) {
 }
 
 func TestIntegrationDisableLastSelectionPreparesAndPersistsEmptySet(t *testing.T) {
-	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	_, cli, _, runtime, path, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	runtime.plan.Scope = "native integration inventory"
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -313,7 +307,7 @@ func TestIntegrationDisableLastSelectionPreparesAndPersistsEmptySet(t *testing.T
 func TestIntegrationStoppedAfterPlanAndCASRacePreserveDesired(t *testing.T) {
 	for _, failure := range []string{"stopped", "cas", "runtime"} {
 		t.Run(failure, func(t *testing.T) {
-			cli, incus, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+			_, cli, incus, runtime, path, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 			prepared, err := prepareIntegrationTest(t, cli, "enable", "codex")
 			if err != nil {
 				t.Fatal(err)
@@ -343,7 +337,7 @@ func TestIntegrationStoppedAfterPlanAndCASRacePreserveDesired(t *testing.T) {
 	}
 }
 func TestIntegrationStatusStoppedReadOnly(t *testing.T) {
-	cli, incus, _, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, incus, _, path, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Stopped"
 	incus.Instances["subyard/yard"] = instance
@@ -361,7 +355,7 @@ func TestIntegrationStatusStoppedReadOnly(t *testing.T) {
 }
 
 func TestIntegrationStatusSeparatesHealthFromConvergence(t *testing.T) {
-	cli, incus, runtime, _, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
+	_, cli, incus, runtime, _, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
 	writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config", "agents.env"), "AGENT_sample_COMMAND=sample\nAGENT_sample_HEALTH=sample-health\nAGENT_other_COMMAND=other\nAGENT_other_HEALTH=other-health\n", 0o600)
 	runtime.plan.Changed = false
 	cli.options.Executor = incus
@@ -403,7 +397,7 @@ func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 			name = "ownership conflict"
 		}
 		t.Run(name, func(t *testing.T) {
-			cli, incus, _, settingsPath, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+			_, cli, incus, _, settingsPath, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 			root := cli.options.RepositoryRoot
 			writeCLIFile(t, filepath.Join(root, "config/projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
 			instructions := filepath.Join(root, "instructions.md")
@@ -448,7 +442,7 @@ func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 }
 
 func TestIntegrationConcurrentHostSettingsChangeCannotReportReady(t *testing.T) {
-	cli, _, runtime, path, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
+	_, cli, _, runtime, path, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 	prepared, err := prepareIntegrationTest(t, cli, "enable", "codex")
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +546,7 @@ func (fixture persistRetainedExecutor) Exec(_ context.Context, _, _ string, requ
 
 func TestIntegrationStatusOmitsGuestText(t *testing.T) {
 	const canary = "SUBYARD-CANARY-7f3a"
-	cli, _, runtime, _, output := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	_, cli, _, runtime, _, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	root := cli.options.RepositoryRoot
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_codex_PERSIST=.codex/sessions:/mnt/host/agent-sessions/codex/sessions\n", 0o600)
 	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")

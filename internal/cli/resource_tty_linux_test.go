@@ -626,7 +626,7 @@ func TestResourceSessionUnwaitableChildDoesNotSignalGroup(t *testing.T) {
 	// Keep this process-wide signal setting isolated in the helper subprocess.
 	signal.Ignore(syscall.SIGCHLD)
 	defer signal.Reset(syscall.SIGCHLD)
-	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	pidPath := filepath.Join(testkit.TempDir(t), "child.pid")
 	command := exec.CommandContext(context.Background(), "sh", "-c",
 		`sleep 300 >/dev/null 2>&1 & printf '%s\n' "$!" >"$1"`, "sh", pidPath)
 	configureResourceProcess(command)

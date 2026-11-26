@@ -69,7 +69,7 @@ func (runtime *profileDiagnosticRuntime) ProfileServiceConverged(ctx context.Con
 func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
 	for _, reason := range []string{"boot-dependency-unloaded", "private-canary"} {
 		t.Run(reason, func(t *testing.T) {
-			cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+			_, cli, _, fixture, _, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
 			runtime := &profileDiagnosticRuntime{profileRuntimeSelection: profileRuntimeSelection{fixture, true}, observation: ports.ReconcileStageObservation{Owner: "fixture", NativeExit: 1, Reason: reason}}
 			cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime { return runtime }
 			for _, asJSON := range []bool{false, true} {
@@ -106,7 +106,7 @@ func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
 }
 
 func TestScopedProfileStatusShowsDeclaredAdvisoryOfConvergedProfile(t *testing.T) {
-	cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+	_, cli, _, fixture, _, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
 	runtime := &profileDiagnosticRuntime{profileRuntimeSelection: profileRuntimeSelection{fixture, true}, observation: ports.ReconcileStageObservation{Converged: true,
 		Advisories: []ports.ProfileAdvisory{{Owner: "fixture", Code: "storage-capacity"}, {Owner: "other", Code: "storage-capacity"}, {Owner: "fixture", Code: "private-canary"}}}}
 	cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime { return runtime }
@@ -130,12 +130,6 @@ func TestScopedProfileStatusShowsDeclaredAdvisoryOfConvergedProfile(t *testing.T
 			t.Fatalf("status exit=%d: %s", code, output)
 		}
 	}
-}
-
-func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
-	t.Helper()
-	_, cli, incus, runtime, path, output := newScopedProfileFixture(t, selection)
-	return cli, incus, runtime, path, output
 }
 
 func newScopedProfileFixture(t *testing.T, selection string) (*cliFixture, *CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
@@ -187,7 +181,7 @@ func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) 
 		"ENVIRONMENT_PROFILES='neighbor'\nYARD_PROFILES='neighbor'\n",
 	} {
 		t.Run(selection, func(t *testing.T) {
-			cli, _, runtime, path, output := scopedProfileFixture(t, "# keep this comment\n"+selection+"SSH_PORT=2222\n")
+			_, cli, _, runtime, path, output := newScopedProfileFixture(t, "# keep this comment\n"+selection+"SSH_PORT=2222\n")
 			for _, verb := range []string{"enable", "enable", "disable", "disable", "enable"} {
 				prepared, err := prepareScopedProfile(t, cli, verb, "fixture")
 				if err != nil {
@@ -229,7 +223,7 @@ func TestScopedProfileDisabledGuardRejectsEnableBeforeWrite(t *testing.T) {
 	for _, policy := range []string{`"disabled_when":{"SSH_PORT":"2222"}`, `"disabled":true`} {
 		for _, selection := range []string{"", "fixture"} {
 			t.Run(policy+"/selection="+selection, func(t *testing.T) {
-				cli, _, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES="+selection+"\nSSH_PORT=2222\n")
+				_, cli, _, runtime, path, _ := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES="+selection+"\nSSH_PORT=2222\n")
 				writeProfileTestFile(t, filepath.Join(cli.options.RepositoryRoot, "config", "profiles", "fixture", "profile.json"), []byte(`{"schema_version":1,"owner_service":"owner.sh",`+policy+`}`), 0600)
 				before, err := os.ReadFile(path)
 				if err != nil {
@@ -257,7 +251,7 @@ func TestScopedProfileRejectsExpansionsBeforeApply(t *testing.T) {
 	} {
 		t.Run(test.verb, func(t *testing.T) {
 			initial := test.initial
-			cli, _, runtime, path, _ := scopedProfileFixture(t, initial)
+			_, cli, _, runtime, path, _ := newScopedProfileFixture(t, initial)
 			runtime.installed = test.verb == "disable"
 			if _, err := prepareScopedProfile(t, cli, test.verb, "fixture"); err == nil || !strings.Contains(err.Error(), "only literal values") {
 				t.Fatalf("conditional alias accepted: %v", err)
@@ -276,7 +270,7 @@ func TestScopedProfileRejectsExpansionsBeforeApply(t *testing.T) {
 func TestScopedProfileStoppedAndOverrideRejectBeforeWrite(t *testing.T) {
 	for _, condition := range []string{"stopped", "missing", "override", "unmanaged", "uninitialized", "wrong-yard", "inherited-ownership"} {
 		t.Run(condition, func(t *testing.T) {
-			cli, incus, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+			_, cli, incus, runtime, path, _ := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 			if condition == "missing" {
 				delete(incus.Instances, "subyard/yard")
 			}
@@ -326,7 +320,7 @@ func (runtime profilePostApplyRuntime) ProfileServicePostApplyConverged(ctx cont
 }
 
 func TestScopedProfileEnableUsesPostApplyCheck(t *testing.T) {
-	cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+	_, cli, _, fixture, _, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 	cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime {
 		return profilePostApplyRuntime{profileRuntimeSelection{fixture, true}}
 	}
@@ -341,7 +335,7 @@ func TestScopedProfileEnableUsesPostApplyCheck(t *testing.T) {
 }
 
 func TestScopedProfileFailureRetainsSelectionAndRetryRepairs(t *testing.T) {
-	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+	_, cli, _, runtime, path, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 	runtime.fail = true
 	prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
 	if err != nil {
@@ -369,7 +363,7 @@ func TestScopedProfileFailureRetainsSelectionAndRetryRepairs(t *testing.T) {
 func TestScopedProfileStaleAndDeclinePreserveSelection(t *testing.T) {
 	for _, condition := range []string{"stale", "decline", "stopped-after-prepare", "replaced-after-prepare"} {
 		t.Run(condition, func(t *testing.T) {
-			cli, incus, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
+			_, cli, incus, runtime, path, _ := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES=neighbor\n")
 			cli.options.Prompt = &testkit.Prompt{Answers: []bool{false}}
 			prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
 			if err != nil {
@@ -402,7 +396,7 @@ func TestScopedProfileStaleAndDeclinePreserveSelection(t *testing.T) {
 }
 
 func TestScopedProfileImplicitNoOpKeepsDefaults(t *testing.T) {
-	cli, _, runtime, path, output := scopedProfileFixture(t, "SSH_PORT=2222\n")
+	_, cli, _, runtime, path, output := newScopedProfileFixture(t, "SSH_PORT=2222\n")
 	runtime.installed = true
 	before, _ := os.ReadFile(path)
 	prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
@@ -420,7 +414,7 @@ func TestScopedProfileImplicitNoOpKeepsDefaults(t *testing.T) {
 }
 
 func TestScopedProfileDisableRejectsArtifactReplacement(t *testing.T) {
-	cli, _, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor fixture'\n")
+	_, cli, _, runtime, path, _ := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor fixture'\n")
 	runtime.installed = true
 	artifact := filepath.Join(cli.options.RepositoryRoot, "data", "profile-fixture", "default")
 	writeProfileTestFile(t, artifact, []byte("original"), 0600)
@@ -543,7 +537,7 @@ func TestScopedProfileSetupPromptDeclineAndCredentialOnlyApply(t *testing.T) {
 }
 
 func TestScopedProfileFirstEditPreservesDeclaredDefaultPeers(t *testing.T) {
-	cli, _, _, path, output := scopedProfileFixture(t, "SSH_PORT=2222\n")
+	_, cli, _, _, path, output := newScopedProfileFixture(t, "SSH_PORT=2222\n")
 	peer := filepath.Join(cli.options.RepositoryRoot, "config/profiles/peer")
 	if err := os.MkdirAll(peer, 0700); err != nil {
 		t.Fatal(err)
@@ -580,7 +574,7 @@ func TestScopedProfileFirstEditPreservesDeclaredDefaultPeers(t *testing.T) {
 // A converged runtime whose applied selection could not be recorded fails the
 // operation; the saved selection stays and a retry records it.
 func TestScopedProfileRecordFailureRetainsSelectionAndRetryRecords(t *testing.T) {
-	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor'\n")
+	_, cli, _, runtime, path, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor'\n")
 	runtime.recordFail = true
 	run := func() int {
 		prepared, err := prepareScopedProfile(t, cli, "enable", "fixture")
@@ -606,7 +600,7 @@ func TestScopedProfileRecordFailureRetainsSelectionAndRetryRecords(t *testing.T)
 func TestRemovedProfileStatusDisableAndStaleConsent(t *testing.T) {
 	for _, change := range []string{"none", "settings", "declaration"} {
 		t.Run(change, func(t *testing.T) {
-			cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=none\n")
+			_, cli, _, runtime, path, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=none\n")
 			declaration := filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json")
 			writeCLIFile(t, declaration, `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile","settings":["REMOVED_PORT"]}]}`, 0644)
 			var err error
@@ -680,7 +674,7 @@ func TestRemovedProfileStatusDisableAndStaleConsent(t *testing.T) {
 func TestRemovedProfileEnableRefusesBeforeEffects(t *testing.T) {
 	for _, id := range []string{"removed-profile", "unknown-profile"} {
 		t.Run(id, func(t *testing.T) {
-			cli, incus, _, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\n")
+			_, cli, incus, _, path, output := newScopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\n")
 			writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json"), `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile"}]}`, 0644)
 			var err error
 			cli.catalog, err = config.LoadCatalog(cli.options.RepositoryRoot)

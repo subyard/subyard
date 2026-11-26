@@ -23,12 +23,6 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]string) (string, string, string, []string) {
-	t.Helper()
-	_, value0, value1, value2, value3 := newActivationSelectionRepairFixture(t, extraAssets...)
-	return value0, value1, value2, value3
-}
-
 func newActivationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]string) (*cliFixture, string, string, string, []string) {
 	t.Helper()
 	cliFixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
@@ -359,7 +353,7 @@ func testActivationSelectionRepairRejections(t *testing.T, selection activationS
 
 func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *testing.T) {
 	t.Run("dependency-only-disable", func(t *testing.T) {
-		root, home, path, environment := activationSelectionRepairFixture(t, map[string]string{
+		_, root, home, path, environment := newActivationSelectionRepairFixture(t, map[string]string{
 			"config/agents/wrapper/integration.json": `{"schema_version":1,"command":"synthetic-cli","depends":["base"]}`,
 			"config/agents/base/integration.json":    `{"schema_version":1,"command":"synthetic-cli"}`,
 		})
@@ -1106,7 +1100,7 @@ func TestCompletedSelectionAuthoringAdmitsIntegrationOnlyDriftWithCurrentFiles(t
 }
 
 func TestActivationSelectionRepairCanDisableRemovedProfile(t *testing.T) {
-	root, home, path, environment := activationSelectionRepairFixture(t, map[string]string{
+	_, root, home, path, environment := newActivationSelectionRepairFixture(t, map[string]string{
 		"config/retired-components.json": `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile","settings":["REMOVED_PORT"]}]}`,
 	})
 	testkit.WriteFile(t, path, []byte("ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=none\n"), 0600)

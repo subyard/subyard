@@ -13,7 +13,7 @@ import (
 
 func activeProjectRPCFixture(t *testing.T) (*rpcHandler, *preparedCommand, exactOperationPlan, *time.Time) {
 	t.Helper()
-	program, prepared, _ := ownerProjectCopyFixture(t)
+	_, program, prepared, _ := newOwnerProjectCopyFixture(t)
 	now := time.Now()
 	exact := bindExactOperationPlan(prepared, now)
 	id := prepared.Plan.OperationID

@@ -125,7 +125,7 @@ func TestLegacyIntegrationSettingsCapturedBeforeDesiredWrite(t *testing.T) {
 }
 
 func TestHostIntegrationSettingsCaptureSkipsUnaffectedStoppedYard(t *testing.T) {
-	cli, incus, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	_, cli, incus, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestHostIntegrationSettingsCaptureSkipsUnaffectedStoppedYard(t *testing.T) 
 }
 
 func TestHostIntegrationSettingsCaptureReportsAllStoppedYards(t *testing.T) {
-	cli, incus, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
+	_, cli, incus, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)

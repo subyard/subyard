@@ -24,7 +24,7 @@ func TestRepositoryQueriesUseGoManifest(t *testing.T) {
 	var stdout bytes.Buffer
 	program := fixture.New(Options{
 		Arguments:   []string{"--command-effect", "status"},
-		Environment: []string{"HOME=" + t.TempDir(), "SUBYARD_NO_AUDIT=1"}, Stdout: &stdout,
+		Environment: []string{"HOME=" + testkit.TempDir(t), "SUBYARD_NO_AUDIT=1"}, Stdout: &stdout,
 	})
 	if code := program.Run(context.Background()); code != 0 || stdout.String() != "read\n" {
 		t.Fatalf("manifest query failed: code=%d output=%q", code, stdout.String())
@@ -204,7 +204,7 @@ func TestOperationPromptAcceptsInteractiveInputWithRedirectedOutput(t *testing.T
 }
 
 func TestValidatedContextIsHandedToShellAdapterWithoutReload(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	for _, directory := range []string{"config", "scripts"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
 			t.Fatal(err)
@@ -247,7 +247,7 @@ func TestUnknownCommandIsDiagnosticOnly(t *testing.T) {
 	var stderr bytes.Buffer
 	program := fixture.New(Options{
 		Arguments:   []string{"not-a-command"},
-		Environment: []string{"HOME=" + t.TempDir(), "SUBYARD_NO_AUDIT=1"}, Stderr: &stderr,
+		Environment: []string{"HOME=" + testkit.TempDir(t), "SUBYARD_NO_AUDIT=1"}, Stderr: &stderr,
 	})
 	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("unexpected diagnostic: code=%d stderr=%q", code, stderr.String())
@@ -255,7 +255,7 @@ func TestUnknownCommandIsDiagnosticOnly(t *testing.T) {
 }
 
 func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	configHome := filepath.Join(root, "config-home")
 	yardFile := filepath.Join(configHome, "yards", "e2e-yard.env")
 	for _, directory := range []string{
@@ -413,7 +413,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 
 func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
 	dataHome := filepath.Join(home, ".subyard")
 	explicitState := filepath.Join(home, "custom-projects")
@@ -454,7 +454,7 @@ func TestMigrationPathsLoadExplicitMachineContext(t *testing.T) {
 }
 
 func TestMigrationEnvironmentDropsPreviousRuntimeContext(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "candidate")
+	target := filepath.Join(testkit.TempDir(t), "candidate")
 	environment := (&CLI{}).freshMigrationEnvironment(map[string]string{
 		"HOME":                           "/operator",
 		"PATH":                           "/usr/bin",
@@ -515,7 +515,7 @@ func writeCLIFile(t *testing.T, path, contents string, mode os.FileMode) {
 
 func trustedSSHMock(t *testing.T) string {
 	t.Helper()
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	knownHosts := filepath.Join(testkit.TempDir(t), "known_hosts")
 	writeCLIFile(t, knownHosts,
 		"owner.example,remote.example,127.0.0.1,yard-legacy-route ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture\n",
 		0o600)

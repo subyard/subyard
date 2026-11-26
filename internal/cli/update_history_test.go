@@ -485,7 +485,7 @@ func TestUpdateCheckAndHelpDoNotCreateHistory(t *testing.T) {
 }
 
 func TestUpdateHistoryRecordsInterruptedExecutionPhase(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	history := audit.UpdateHistory{Home: home}
 	recorder, err := history.Begin(audit.UpdateRecord{
 		OperationID: "op-interrupted", Direction: "activate",
@@ -510,7 +510,7 @@ func TestUpdateHistoryRecordsInterruptedExecutionPhase(t *testing.T) {
 }
 
 func TestSuccessfulUpdateHistoryIgnoresLateContextCancellation(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	history := audit.UpdateHistory{Home: home}
 	recorder, err := history.Begin(audit.UpdateRecord{OperationID: "op-late-cancel", Direction: "activate"})
 	if err != nil {
@@ -531,7 +531,7 @@ func TestSuccessfulUpdateHistoryIgnoresLateContextCancellation(t *testing.T) {
 }
 
 func TestUpdateHistoryWriteFailureDoesNotSkipConfigRefresh(t *testing.T) {
-	home := t.TempDir()
+	home := testkit.TempDir(t)
 	history := audit.UpdateHistory{Home: home}
 	recorder, err := history.Begin(audit.UpdateRecord{
 		OperationID: "op-history-write-failure", Direction: "activate",
@@ -541,9 +541,7 @@ func TestUpdateHistoryWriteFailureDoesNotSkipConfigRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := filepath.Join(home, "logs", "updates")
-	if err := os.WriteFile(filepath.Join(directory, "corrupt.json"), []byte("not-json\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(directory, "corrupt.json"), []byte("not-json\n"), 0o600)
 	applier := &recordingConfigApplier{}
 	program := &CLI{env: map[string]string{"SUBYARD_HOME": home}, baseEnv: map[string]string{}, options: Options{Config: applier}}
 	execution := &releaseExecution{

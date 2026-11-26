@@ -25,12 +25,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func ownerQueryFixture(t *testing.T) (*rpcHandler, *testkit.ScriptedAdapter, *testkit.Incus) {
-	t.Helper()
-	_, value0, value1, value2 := newOwnerQueryFixture(t)
-	return value0, value1, value2
-}
-
 func newOwnerQueryFixture(t *testing.T) (*cliFixture, *rpcHandler, *testkit.ScriptedAdapter, *testkit.Incus) {
 	t.Helper()
 	cliFixture := newFixture(t, withWorkingDir(""))

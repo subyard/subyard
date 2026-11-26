@@ -20,12 +20,6 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func bootstrapCommandFixture(t *testing.T) (string, []string, string) {
-	t.Helper()
-	fixture, applyLog := newBootstrapCommandFixture(t)
-	return fixture.Root, fixture.Environment, applyLog
-}
-
 func newBootstrapCommandFixture(t *testing.T) (*cliFixture, string) {
 	t.Helper()
 	fixture, applyLog := newResourceCommandFixture(t, withWorkingDir(""))

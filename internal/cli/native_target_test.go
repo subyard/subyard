@@ -18,12 +18,6 @@ import (
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
-func nativeTargetFixture(t *testing.T) (*CLI, *testkit.Incus, string) {
-	t.Helper()
-	_, program, native, home := newNativeTargetFixture(t)
-	return program, native, home
-}
-
 func newNativeTargetFixture(t *testing.T) (*cliFixture, *CLI, *testkit.Incus, string) {
 	t.Helper()
 	cliFixture := newFixture(t)
@@ -48,7 +42,7 @@ func nativeInstance(owner string) ports.InstanceInfo {
 }
 
 func TestActivationAndProfileRefuseForeignMarkerBeforeGuest(t *testing.T) {
-	cli, native, home := nativeTargetFixture(t)
+	_, cli, native, home := newNativeTargetFixture(t)
 	native.Instances["custom/yard-named"] = nativeInstance("foreign")
 	loaded, err := cli.loadReleaseTransitionContext("named", home, nil)
 	if err != nil {
@@ -68,7 +62,7 @@ func TestActivationAndProfileRefuseForeignMarkerBeforeGuest(t *testing.T) {
 }
 
 func TestNativeTargetChecksRetainIndependentCollisionAndForeignOwner(t *testing.T) {
-	cli, native, home := nativeTargetFixture(t)
+	_, cli, native, home := newNativeTargetFixture(t)
 	native.Instances["custom/yard-named"] = nativeInstance("foreign")
 	for _, name := range []string{"alpha", "beta"} {
 		content := "INCUS_PROJECT=duplicate\nYARD_INSTANCE_NAME=duplicate\n"
@@ -110,7 +104,7 @@ func TestNativeTargetChecksRetainIndependentCollisionAndForeignOwner(t *testing.
 }
 
 func TestSelectedActivationIgnoresUnrelatedLoadFailuresAndKeepsRemote(t *testing.T) {
-	cli, _, home := nativeTargetFixture(t)
+	_, cli, _, home := newNativeTargetFixture(t)
 	writeEmptyNamedFile(t, filepath.Join(home, "yards/broken/config.env"), "invalid assignment\n", 0600)
 	writeEmptyNamedFile(t, filepath.Join(home, "yards/remote/config.env"), "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=default\n", 0600)
 	for _, name := range []string{"named", "remote"} {

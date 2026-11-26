@@ -210,7 +210,7 @@ func TestIntegrationStatusCLIUsesDependencyRoleAndCommandSourceSnapshot(t *testi
 }
 
 func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T) {
-	cli, _, _, _, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
+	_, cli, _, _, _, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=sample\n")
 	writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/agents.env"), "AGENT_sample_COMMAND=sample\nAGENT_sample_DEPENDS=base\nAGENT_base_COMMAND=base\nAGENT_other_COMMAND=other\n", 0o600)
 	loaded, err := cli.loadContext("default")
 	if err != nil {

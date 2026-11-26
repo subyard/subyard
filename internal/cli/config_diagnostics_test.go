@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,8 +75,8 @@ func TestConfigAssessmentKeepsIndependentDriftAfterSourceFailure(t *testing.T) {
 	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude codex"
-	loaded.Environment["AGENT_claude_CONFIG"] = t.TempDir()
-	source := filepath.Join(t.TempDir(), "config")
+	loaded.Environment["AGENT_claude_CONFIG"] = testkit.TempDir(t)
+	source := filepath.Join(testkit.TempDir(t), "config")
 	writeConfigCommandFile(t, source, "model = 'example'\n")
 	loaded.Environment["AGENT_codex_CONFIG"] = source
 	assets, err := effectiveConfigAssets(loaded)
@@ -167,17 +166,13 @@ func TestConfigSettingDiagnosticReportsSamePathContentChange(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	path := filepath.Join(t.TempDir(), "config")
-	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(testkit.TempDir(t), "config")
+	testkit.WriteFile(t, path, []byte("old content"), 0o600)
 	loaded.Environment["AGENT_sample_PROVISION"] = path
 	loaded.Integrations.Effective = []string{"sample"}
 	key := bytes.Repeat([]byte{7}, 32)
 	applied := reconcileruntime.AppliedIntegrationConfiguration{Settings: loaded.Catalog.IntegrationInitSettings(loaded.Environment), Diagnostics: &reconcileruntime.IntegrationDiagnosticEvidence{Key: hex.EncodeToString(key), Digests: loaded.Catalog.IntegrationDiagnosticDigests(loaded.Environment, key, nil)}}
-	if err := os.WriteFile(path, []byte("new content"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("new content"), 0o600)
 	message := domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{configContentDiagnostics(configTarget{Name: "default", Loaded: loaded}, applied)})
 	if !strings.Contains(message, "AGENT_sample_PROVISION  content changed") || strings.Contains(message, "old content") || strings.Contains(message, "new content") {
 		t.Fatalf("unexpected diagnostic %q", message)
@@ -188,10 +183,8 @@ func TestConfigSettingDiagnosticReportsCommittedConfigSourceChange(t *testing.T)
 	fixture := newFixture(t, withCheckoutConfig())
 	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	path := filepath.Join(t.TempDir(), "config")
-	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(testkit.TempDir(t), "config")
+	testkit.WriteFile(t, path, []byte("original"), 0o600)
 	loaded.Environment["CODING_TOOL_INTEGRATIONS"] = "claude"
 	loaded.Environment["AGENT_claude_CONFIG"] = path
 	key := bytes.Repeat([]byte{8}, 32)
@@ -200,9 +193,7 @@ func TestConfigSettingDiagnosticReportsCommittedConfigSourceChange(t *testing.T)
 		t.Fatal("missing setting")
 	}
 	applied := reconcileruntime.AppliedIntegrationConfiguration{Settings: loaded.Catalog.IntegrationInitSettings(loaded.Environment), Diagnostics: &reconcileruntime.IntegrationDiagnosticEvidence{Key: hex.EncodeToString(key), Digests: loaded.Catalog.IntegrationDiagnosticDigests(loaded.Environment, key, nil), Files: map[string]reconcileruntime.IntegrationDiagnosticFile{"AGENT_claude_CONFIG": {Path: path, Digest: config.ConfigurationInputDigest("AGENT_claude_CONFIG", definition.Kind, key, []byte("original"))}}}}
-	if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, path, []byte("changed"), 0o600)
 	message := domain.FormatConfigurationDiagnostics([]domain.YardConfigurationDiagnostic{configContentDiagnostics(configTarget{Name: "default", Loaded: loaded}, applied)})
 	if !strings.Contains(message, "AGENT_claude_CONFIG  content changed") {
 		t.Fatalf("unexpected diagnostic %q", message)

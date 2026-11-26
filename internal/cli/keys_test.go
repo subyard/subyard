@@ -65,7 +65,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 	})
 
 	t.Run("yes cannot bypass rotate preflight or open its source", func(t *testing.T) {
-		source := filepath.Join(t.TempDir(), "replacement")
+		source := filepath.Join(testkit.TempDir(t), "replacement")
 		prompt := &testkit.Prompt{}
 		program, loaded, definition, _ := credentialCLIFixture(
 			t, strings.NewReader("unused"), prompt, true,

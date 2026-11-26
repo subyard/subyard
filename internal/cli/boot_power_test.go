@@ -122,7 +122,7 @@ func TestRunBootPowerRecoversAfterAsyncStorageUnavailable(t *testing.T) {
 		exit    int
 	}{{`Storage pool "default" unavailable on this server`, 75}, {"disk source is not mounted yet", 1}} {
 		t.Run(test.message, func(t *testing.T) {
-			server, err := testkit.NewIncusServer(t.TempDir())
+			server, err := testkit.NewIncusServer(testkit.TempDir(t))
 			if err != nil {
 				t.Fatal(err)
 			}

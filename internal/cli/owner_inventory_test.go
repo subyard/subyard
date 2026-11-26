@@ -64,7 +64,7 @@ func TestCompactProjectListOwner(t *testing.T) {
 }
 
 func TestCanonicalYardIdentity(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	configHome := filepath.Join(root, "config")
 	dataHome := filepath.Join(root, "data")
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
@@ -136,7 +136,7 @@ func TestCanonicalYardIdentity(t *testing.T) {
 }
 
 func TestCanonicalYardIdentityRejectsUnknownRemoteOwner(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	_, err := canonicalYardIdentity(config.Loaded{Context: domain.Context{
 		YardName: "default", AccessKind: domain.AccessRemote, OwnerEndpoint: "dev@missing.example",
 		Paths: domain.RuntimePaths{

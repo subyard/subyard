@@ -40,7 +40,8 @@ func TestIncusInstallationRetainsPreparedCommandEnvironment(t *testing.T) {
 			fixture := newFixture(t)
 			root, environment := fixture.Root, fixture.Environment
 			if scenario == "resource continuation" {
-				root, environment, _ = bootstrapCommandFixture(t)
+				resourceFixture, _ := newBootstrapCommandFixture(t)
+				root, environment = resourceFixture.Root, resourceFixture.Environment
 			}
 			values := environmentMap(environment)
 			delete(values, "SSH_PORT")

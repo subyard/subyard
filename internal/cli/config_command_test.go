@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,8 +62,8 @@ func TestConfigDesiredFingerprintIgnoresReleaseRootAlias(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
-	aliasOne := filepath.Join(t.TempDir(), "release-one", "agents", "codex", "config.toml")
-	aliasTwo := filepath.Join(t.TempDir(), "release-two", "agents", "codex", "config.toml")
+	aliasOne := filepath.Join(testkit.TempDir(t), "release-one", "agents", "codex", "config.toml")
+	aliasTwo := filepath.Join(testkit.TempDir(t), "release-two", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, aliasOne, "model = \"stable\"\n")
 	writeConfigCommandFile(t, aliasTwo, "model = \"stable\"\n")
 
@@ -269,7 +268,7 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 }
 
 func TestDispatcherConfigApplierSelectsDirectAndDriftAwareCommands(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	capture := filepath.Join(root, "arguments")
 	dispatcher := filepath.Join(root, "yard")
 	writeConfigCommandFile(t, dispatcher, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nif [ \"${6:-}\" = --config-consent-fd ]; then cat <&3 > \"$CAPTURE.consent\"; fi\n", 0o700)
@@ -653,7 +652,7 @@ func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t
 		{name: "group and world writable", relative: "config.env", mode: 0o666},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configHome := filepath.Join(t.TempDir(), "config")
+			configHome := filepath.Join(testkit.TempDir(t), "config")
 			path := filepath.Join(configHome, filepath.FromSlash(test.relative))
 			writeConfigCommandFile(t, path, "value\n", test.mode)
 			if err := os.Chmod(path, test.mode); err != nil {
@@ -676,7 +675,7 @@ func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t
 
 func TestConfigValidationKeepsOwnershipSymlinkAndTypeChecks(t *testing.T) {
 	t.Run("foreign owner", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "config.env")
+		path := filepath.Join(testkit.TempDir(t), "config.env")
 		writeConfigCommandFile(t, path, "value\n", 0o600)
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -689,8 +688,8 @@ func TestConfigValidationKeepsOwnershipSymlinkAndTypeChecks(t *testing.T) {
 	})
 
 	t.Run("symlink", func(t *testing.T) {
-		configHome := filepath.Join(t.TempDir(), "config")
-		target := filepath.Join(t.TempDir(), "target")
+		configHome := filepath.Join(testkit.TempDir(t), "config")
+		target := filepath.Join(testkit.TempDir(t), "target")
 		writeConfigCommandFile(t, target, "value\n", 0o600)
 		if err := os.MkdirAll(configHome, 0o700); err != nil {
 			t.Fatal(err)
@@ -704,7 +703,7 @@ func TestConfigValidationKeepsOwnershipSymlinkAndTypeChecks(t *testing.T) {
 	})
 
 	t.Run("non regular file", func(t *testing.T) {
-		configHome := filepath.Join(t.TempDir(), "config")
+		configHome := filepath.Join(testkit.TempDir(t), "config")
 		path := filepath.Join(configHome, "config.env")
 		if err := os.MkdirAll(configHome, 0o700); err != nil {
 			t.Fatal(err)
@@ -808,7 +807,7 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 	cliFixture := newFixture(t, withCheckoutConfig())
 	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	content := "model = \"fixture\"\n"
-	source := filepath.Join(t.TempDir(), "config.toml")
+	source := filepath.Join(testkit.TempDir(t), "config.toml")
 	writeConfigCommandFile(t, source, content)
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, content)
@@ -841,7 +840,7 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
-	source := filepath.Join(t.TempDir(), "config.toml")
+	source := filepath.Join(testkit.TempDir(t), "config.toml")
 	writeConfigCommandFile(t, source, "")
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -874,7 +873,7 @@ func TestConfigEditUnchangedDoesNotPromptAfterEditingDraft(t *testing.T) {
 	content := "model = \"fixture\"\n"
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, content)
-	marker := filepath.Join(t.TempDir(), "editor-ran")
+	marker := filepath.Join(testkit.TempDir(t), "editor-ran")
 	editor := writeConfigAuthoringEditor(t, ": >\"$EDITOR_MARKER\"\n")
 	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
 	prompt := &testkit.Prompt{}
@@ -904,7 +903,7 @@ func TestConfigEditChangedDeclineLeavesPersistentTargetUntouched(t *testing.T) {
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, "model = \"before\"\n")
-	marker := filepath.Join(t.TempDir(), "editor-ran")
+	marker := filepath.Join(testkit.TempDir(t), "editor-ran")
 	editor := writeConfigAuthoringEditor(t, "printf '%s\\n' 'model = \\\"after\\\"' >\"$1\"\n: >\"$EDITOR_MARKER\"\n")
 	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
@@ -1060,7 +1059,7 @@ func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, "model = \"before\"\n")
-	source := filepath.Join(t.TempDir(), "config.toml")
+	source := filepath.Join(testkit.TempDir(t), "config.toml")
 	writeConfigCommandFile(t, source, "model = \"after\"\n")
 	prompt := &callbackPrompt{callback: func() {
 		if err := os.Remove(target); err != nil {
@@ -1090,7 +1089,7 @@ func TestConfigAuthoringNoOpWithAssumeYesStillSkipsWriterSafetyChecks(t *testing
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
-	linked := filepath.Join(t.TempDir(), "linked-config.env")
+	linked := filepath.Join(testkit.TempDir(t), "linked-config.env")
 	if err := os.Link(target, linked); err != nil {
 		t.Fatal(err)
 	}
@@ -1558,7 +1557,7 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(testkit.TempDir(t), "source")
 	if err := os.MkdirAll(filepath.Join(source, "hosts", "owner-a"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1711,7 +1710,7 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 `, transactionID, strings.Repeat("a", 64), strings.Repeat("b", 64),
 			fmt.Sprintf("%x", sha256.Sum256(before)), fmt.Sprintf("%x", sha256.Sum256(after))),
 	)
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(testkit.TempDir(t), "source")
 	if err := os.MkdirAll(filepath.Join(source, "hosts", "owner-a"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1815,7 +1814,7 @@ func TestConfigSyncAssumeYesRejectsInvalidRecoveryJournalBeforePlanning(t *testi
 	var stdout, stderr bytes.Buffer
 	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"config", "sync", filepath.Join(t.TempDir(), "source"), "--yes"},
+		Arguments:   []string{"config", "sync", filepath.Join(testkit.TempDir(t), "source"), "--yes"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
@@ -2517,7 +2516,7 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, home, environment := fixture.Root, fixture.Home, fixture.Environment
-	remote := filepath.Join(t.TempDir(), "empty.git")
+	remote := filepath.Join(testkit.TempDir(t), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	environment = append(environment,
 		"GIT_AUTHOR_NAME=Subyard Test",
@@ -2557,7 +2556,7 @@ func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
-	remote := filepath.Join(t.TempDir(), "empty.git")
+	remote := filepath.Join(testkit.TempDir(t), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	checkout := filepath.Join(home, "existing-empty")
 	runConfigSyncGit(t, home, "clone", "-q", remote, checkout)
@@ -2598,7 +2597,7 @@ func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) 
 func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, home, environment := fixture.Root, fixture.Home, fixture.Environment
-	remote := filepath.Join(t.TempDir(), "empty.git")
+	remote := filepath.Join(testkit.TempDir(t), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	checkout := filepath.Join(home, "existing-empty")
 	runConfigSyncGit(t, home, "clone", "-q", remote, checkout)
@@ -2640,7 +2639,7 @@ func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) 
 func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
 		"{\n  \"schemaVersion\": 1\n}\n")
 	relative := filepath.Join("codex", "config.toml")
@@ -3040,7 +3039,7 @@ func TestConfigSyncNoOpPreflightDoesNotRefreshRegisteredIndex(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fakeBin := t.TempDir()
+			fakeBin := testkit.TempDir(t)
 			gitLog := filepath.Join(fakeBin, "registered-checkout-git.log")
 			writeConfigCommandFile(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
 set -eu
@@ -3081,9 +3080,7 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(gitLog, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			testkit.WriteFile(t, gitLog, nil, 0o600)
 
 			prompt := &testkit.Prompt{}
 			stdout.Reset()
@@ -3460,7 +3457,7 @@ func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.
 func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 	fixture := newFixture(t, withCheckoutConfig())
 	source, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
-	root := checkoutMirrorFixture(t, source)
+	root := source
 	flat := filepath.Join(home, "yards/neighbor.env")
 	overlay := filepath.Join(root, "private/yards/neighbor.env")
 	const ignored = "SSH_PORT=2399\nGIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
@@ -3700,7 +3697,7 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	runConfigSyncGit(t, checkout, "remote", "set-url", "origin",
-		filepath.Join(t.TempDir(), "changed.git"))
+		filepath.Join(testkit.TempDir(t), "changed.git"))
 	if code := run("config", "sync", "status", "--offline"); code != 1 ||
 		!strings.Contains(stdout.String(), "remote identity changed") {
 		t.Fatalf("changed origin status: code=%d stdout=%s stderr=%s",
@@ -3859,107 +3856,6 @@ func (applier *recordingConfigApplier) ApplyConfig(_ context.Context, yard strin
 	return nil
 }
 
-func configCommandFixture(t *testing.T) (string, string, string, []string) {
-	t.Helper()
-	root := repositoryRoot(t)
-	temp := t.TempDir()
-	home := filepath.Join(temp, "home")
-	configHome := filepath.Join(home, ".config", "subyard")
-	configDir := filepath.Join(temp, "source", "config")
-	for _, directory := range []string{home, configHome, filepath.Dir(configDir)} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink(filepath.Join(root, "config"), configDir); err != nil {
-		t.Fatal(err)
-	}
-	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "")
-	environment := []string{
-		"HOME=" + home,
-		"SUBYARD_OPERATOR_HOME=" + home,
-		"SUBYARD_CONFIG_HOME=" + configHome,
-		"SUBYARD_CONFIG_DIR=" + configDir,
-		"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
-		"SUBYARD_NO_AUDIT=1",
-	}
-	return root, home, configHome, environment
-}
-
-// checkoutMirrorFixture returns a temporary repository root for tests that seed a
-// checkout overlay under private/. It copies the tracked config/ files, whose shipped
-// packages must be real directories, and links every other top-level entry of source
-// except private/.
-func checkoutMirrorFixture(t *testing.T, source string) string {
-	t.Helper()
-	entries, err := os.ReadDir(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := filepath.Join(t.TempDir(), "checkout")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		switch entry.Name() {
-		case "private", "config":
-		default:
-			if err := os.Symlink(filepath.Join(source, entry.Name()), filepath.Join(root, entry.Name())); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	for _, relative := range checkoutConfigFiles(t, source) {
-		info, err := os.Lstat(filepath.Join(source, relative))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() {
-			t.Fatalf("unsupported checkout entry %s", relative)
-		}
-		data, err := os.ReadFile(filepath.Join(source, relative))
-		if err != nil {
-			t.Fatal(err)
-		}
-		destination := filepath.Join(root, relative)
-		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, destination, data, info.Mode().Perm())
-	}
-	return root
-}
-
-// checkoutConfigFiles lists the tracked config/ files of a Git checkout, leaving out
-// ignored operator-local files. A source tree without Git metadata has no ignore list,
-// so all of its regular config/ files are listed.
-func checkoutConfigFiles(t *testing.T, source string) []string {
-	t.Helper()
-	if prefix, err := exec.Command("git", "-C", source, "rev-parse", "--show-prefix").Output(); err == nil && strings.TrimSpace(string(prefix)) == "" {
-		listed, err := exec.Command("git", "-C", source, "ls-files", "-z", "--", "config").Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.Split(strings.TrimSuffix(string(listed), "\x00"), "\x00")
-	}
-	var files []string
-	err := filepath.WalkDir(filepath.Join(source, "config"), func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return err
-		}
-		relative, err := filepath.Rel(source, path)
-		files = append(files, relative)
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return files
-}
-
 func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -3974,7 +3870,7 @@ func writeConfigCommandFile(t *testing.T, path, contents string, modes ...os.Fil
 
 func writeConfigAuthoringEditor(t *testing.T, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "editor")
+	path := filepath.Join(testkit.TempDir(t), "editor")
 	writeConfigCommandFile(t, path, "#!/bin/sh\nset -eu\n"+body, 0o700)
 	return path
 }
@@ -4070,7 +3966,7 @@ func configSourceGitRepository(
 	hostConfig string,
 ) string {
 	t.Helper()
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
 		"{\n  \"schemaVersion\": 1\n}\n")
 	writeConfigCommandFile(t,
@@ -4085,7 +3981,7 @@ func configSourceGitRepository(
 
 func configSharedOnlyGitRepository(t *testing.T) string {
 	t.Helper()
-	source := filepath.Join(t.TempDir(), "source")
+	source := filepath.Join(testkit.TempDir(t), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
 		"{\n  \"schemaVersion\": 1\n}\n")
 	writeConfigCommandFile(t, filepath.Join(source, "shared", "config.env"),
@@ -4101,7 +3997,7 @@ func configBareSourceRepository(
 	hostConfig string,
 ) (string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	remote := filepath.Join(root, "remote.git")
 	publisher := filepath.Join(root, "publisher")
 	if err := os.MkdirAll(publisher, 0o700); err != nil {
@@ -4294,7 +4190,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
 			root, environment := fixture.Root, fixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
-			source := filepath.Join(t.TempDir(), "imported-without-extension")
+			source := filepath.Join(testkit.TempDir(t), "imported-without-extension")
 			writeConfigCommandFile(t, source, test.payload)
 			loaded.Environment["CODING_TOOL_INTEGRATIONS"] = test.agent
 			loaded.Environment["AGENT_"+test.agent+"_CONFIG"] = source
@@ -4384,7 +4280,7 @@ func TestConfigYardAuthoringWaitsForIntegrationLock(t *testing.T) {
 			writeConfigCommandFile(t, target, "CODING_TOOL_INTEGRATIONS=''\n")
 			arguments := []string{"config", "set", "SSH_PORT", "2237", "--scope", "yard", "--yes"}
 			if fileSetting {
-				source := filepath.Join(t.TempDir(), "rules")
+				source := filepath.Join(testkit.TempDir(t), "rules")
 				writeConfigCommandFile(t, source, "new rules\n")
 				target = filepath.Join(configHome, "yards/default/overrides/agents/codex/rules/repo.rules")
 				arguments = []string{"config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--yes"}

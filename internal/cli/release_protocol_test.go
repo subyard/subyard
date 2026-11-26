@@ -11,13 +11,14 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestReleaseTransitionRejectsUnknownProtocolBeforeAuthorization(t *testing.T) {
 	// A version mismatch must be rejected before touching the authorization
 	// channel. Released launchers cannot recover by speaking a newer schema.
 	if os.Getenv("SUBYARD_TEST_UNKNOWN_PROTOCOL_CHILD") != "1" {
-		grant, err := os.CreateTemp(t.TempDir(), "grant")
+		grant, err := os.CreateTemp(testkit.TempDir(t), "grant")
 		if err != nil {
 			t.Fatal(err)
 		}

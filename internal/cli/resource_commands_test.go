@@ -517,12 +517,6 @@ func TestRemoteResourceCommandIsPreparedOnlyByOwner(t *testing.T) {
 	}
 }
 
-func resourceCommandFixture(t *testing.T) (string, []string, string) {
-	t.Helper()
-	fixture, applyLog := newResourceCommandFixture(t)
-	return fixture.Root, fixture.Environment, applyLog
-}
-
 func newResourceCommandFixture(t *testing.T, options ...fixtureOption) (*cliFixture, string) {
 	t.Helper()
 	fixture := newFixture(t, options...)

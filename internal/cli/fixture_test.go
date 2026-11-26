@@ -163,31 +163,27 @@ func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 	t.Helper()
 	fixture := &cliFixture{t: t}
 	if slices.ContainsFunc(options, func(option fixtureOption) bool { return option.checkout }) {
-		_, home, _, environment := configCommandFixture(t)
-		private := filepath.Dir(home)
-		if err := os.Chmod(private, 0o700); err != nil {
+		private := testkit.TempDir(t)
+		home := filepath.Join(private, "home")
+		configHome := filepath.Join(home, ".config", "subyard")
+		if err := os.MkdirAll(configHome, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		// configCommandFixture links source/config to the checkout; the copy replaces it.
-		link := filepath.Join(private, "source", "config")
-		if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("configCommandFixture layout changed: %v %v", info, err)
-		}
-		if err := errors.Join(os.Remove(link), os.Remove(filepath.Dir(link))); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, filepath.Join(configHome, "config.env"), nil, 0o600)
 		fixture.Root = testkit.TempDir(t)
 		copyCheckoutTrees(t, fixture.Root)
-		fixture.Environment = append(slices.DeleteFunc(environment, func(assignment string) bool {
-			return strings.HasPrefix(assignment, "SUBYARD_CONFIG_DIR=")
-		}), "SUBYARD_CONFIG_DIR="+filepath.Join(fixture.Root, "config"))
+		fixture.Environment = []string{
+			"HOME=" + home,
+			"SUBYARD_OPERATOR_HOME=" + home,
+			"SUBYARD_CONFIG_HOME=" + configHome,
+			"SUBYARD_HOME=" + filepath.Join(home, ".subyard"),
+			"SUBYARD_NO_AUDIT=1",
+			"SUBYARD_CONFIG_DIR=" + filepath.Join(fixture.Root, "config"),
+		}
 		fixture.owned = []string{fixture.Root, private}
 	} else {
-		root, environment, _ := nativeFixture(t)
-		if err := os.Chmod(root, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		fixture.Root, fixture.Environment, fixture.owned = root, environment, []string{root}
+		fixture.Root, fixture.Environment = syntheticFixtureRoot(t)
+		fixture.owned = []string{fixture.Root}
 	}
 	fixture.Environment = slices.Clip(fixture.Environment)
 	fixture.Home, fixture.ConfigHome, fixture.DataHome = fixture.Env("HOME"), fixture.Env("SUBYARD_CONFIG_HOME"), fixture.Env("SUBYARD_HOME")
@@ -205,6 +201,69 @@ func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 		}
 	}
 	return fixture
+}
+
+// syntheticFixtureRoot builds the default flavour: a private root with a
+// minimal command registry, empty shipped config and homes below it.
+func syntheticFixtureRoot(t *testing.T) (string, []string) {
+	t.Helper()
+	root := testkit.TempDir(t)
+	for _, directory := range []string{"config", "scripts"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := strings.Join([]string{
+		"init||@init||forward|mutate|dynamic|public|lifecycle|simple|init|init|--configs --reset --profile --yes --help|",
+		"start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start|--yes --help|",
+		"stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|simple|stop|stop|--force --yes --help|",
+		"provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|provision|-l --list --yes --help|",
+		"test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|test-vms|--slot -n -f --yes --help|logs status revoke recover",
+		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
+		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
+		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
+		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
+		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
+		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|manage temporary SSH access|--key --ttl --json --yes --help|unlock status lock",
+		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
+		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
+		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",
+		"remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|remove|--soft --yes --help|",
+		"yards||@yards||local|read|never|public|lifecycle|simple|yards|yards|--help|",
+		"remote||@remote||local|mutate|dynamic|public|remote|remote|remote|remote|--yard --yes --help|add repair-key remove list",
+		"update||@update||local|mutate|dynamic|public|lifecycle|simple|update|update|--check --version --offline --rollback --force --yes --help|",
+		"migrate||@current-migration||deny|mutate|dynamic|public|lifecycle|simple|migrate|inspect or finish migrations for the installed release|--check --json --yes --help|",
+		"list||@list||local|read|never|public|projects|simple|list|list|--live --help|",
+		"_info||@info||local|read|never|hidden|internal|none|_info|info||",
+		"_authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize||",
+		"rpc||@rpc||local|mutate|dynamic|hidden|internal|none|rpc --stdio|rpc|--stdio|",
+		"_state||@state||local|mutate|dynamic|hidden|internal|none|_state|state||",
+	}, "\n") + "\n"
+	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
+	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
+		content := ""
+		// Required context has persistent shipped defaults; command values may
+		// override these for ordinary requests but cannot mask authored drafts.
+		if name == "subyard.env" {
+			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
+		}
+		if name == "agents.env" {
+			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
+		}
+		writeCLIFile(t, filepath.Join(root, "config", name), content, 0o600)
+	}
+	home := filepath.Join(root, "home")
+	configHome := filepath.Join(root, "state")
+	hostBase := filepath.Join(root, "host")
+	environment := []string{
+		"HOME=" + home, "SUBYARD_OPERATOR_HOME=" + home, "SUBYARD_CONFIG_HOME=" + configHome,
+		"SUBYARD_HOME=" + filepath.Join(root, "data"),
+		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
+		"HOST_BASE=" + hostBase, "RESTRICTED_DISK_PATHS=" + hostBase,
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
+		"DEV_USER=dev", "SSH_PORT=2222", "SUBYARD_NO_AUDIT=1",
+	}
+	return root, environment
 }
 
 var checkoutFiles = sync.OnceValues(func() ([]string, error) { return trackedCheckoutFiles(checkoutSource()) })

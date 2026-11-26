@@ -13,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 const (
@@ -34,7 +35,7 @@ type equivalentRollbackFixture struct {
 
 func newEquivalentRollbackFixture(t *testing.T, successorRegistry []byte, predecessor releasetransition.Fingerprint, targetFeatures ...string) equivalentRollbackFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	fixture := equivalentRollbackFixture{runtimeRoot: filepath.Join(root, "runtime"), configHome: filepath.Join(root, "config")}
 	var err error
 	if fixture.v030, err = os.ReadFile(filepath.Join("..", "releasetransition", "testdata", "v0.30.0-release-transition.json")); err != nil {
@@ -255,7 +256,7 @@ func TestEngineRollbackAdmitsDeclaredEquivalentPredecessor(t *testing.T) {
 			if test.identity {
 				registry = fixture.v030
 			}
-			repositoryRoot := t.TempDir()
+			repositoryRoot := testkit.TempDir(t)
 			writeReleaseTransitionTestFile(t, filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600)
 			writeReleaseTransitionTestFile(t, filepath.Join(repositoryRoot, "config", "release-rollback.json"), own, 0o600)
 			if refused := rollbackIncompatible(inspectEquivalentRollback(t, repositoryRoot, fixture.request)); refused != test.refused {
@@ -274,7 +275,7 @@ func TestEngineRollbackToSealedRetiredDependencyReader(t *testing.T) {
 	}
 	for _, features := range [][]string{nil, {"future"}, releasetransition.RegistryReaderFeatures()} {
 		fixture := newEquivalentRollbackFixture(t, retired, v030CanonicalDigest(t), features...)
-		root := t.TempDir()
+		root := testkit.TempDir(t)
 		writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), retired, 0o600)
 		declaration := []byte(fmt.Sprintf(`{"schemaVersion":1,"predecessorRegistryDigest":%q,"migrations":[],"profileFormats":[]}`, fixture.v030Canonical))
 		writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-rollback.json"), declaration, 0o600)

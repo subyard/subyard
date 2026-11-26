@@ -585,7 +585,7 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 }
 
 func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
-	repositoryRoot := filepath.Join(t.TempDir(), "runtime", "releases", "0.11.2-candidate")
+	repositoryRoot := filepath.Join(testkit.TempDir(t), "runtime", "releases", "0.11.2-candidate")
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"project/yard": {Name: "yard", LocalConfig: map[string]string{"raw.qemu.conf": domain.VMRawQEMUConfig(true)}}}}
 	program := &CLI{options: Options{
 		RepositoryRoot: repositoryRoot,
@@ -1859,7 +1859,7 @@ func TestProductionStartAdapterUsesGuardedShellHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := repositoryRoot(t)
-	temporary := t.TempDir()
+	temporary := testkit.TempDir(t)
 	bin := filepath.Join(temporary, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -4444,7 +4444,7 @@ func TestNativeCompletionProvidersReturnPartialOwnerInventoryWithoutWrites(t *te
 	}
 	writeCLIFile(t, filepath.Join(ownerRoot, "registration.json"), "{unfinished\n", 0o600)
 
-	transportRoot := t.TempDir()
+	transportRoot := testkit.TempDir(t)
 	sshLog := filepath.Join(transportRoot, "ssh.log")
 	writeCLIFile(t, filepath.Join(transportRoot, "ssh"), `#!/bin/sh
 printf 'called\n' >> "$SUBYARD_TEST_SSH_LOG"
@@ -4945,7 +4945,7 @@ func TestProjectReservationRejectsIdentityDriftAfterConsent(t *testing.T) {
 }
 
 func TestOwnerProjectPreviewIsReadOnly(t *testing.T) {
-	stateDirectory := t.TempDir()
+	stateDirectory := testkit.TempDir(t)
 	if err := os.Chmod(stateDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -4979,13 +4979,13 @@ func TestOwnerProjectPreviewIsReadOnly(t *testing.T) {
 }
 
 func TestRemoteProjectAdmissionUsesOwnerReadOnlyPreview(t *testing.T) {
-	fakeBin := t.TempDir()
+	fakeBin := testkit.TempDir(t)
 	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
 printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","existing":null}'
 `, 0o700)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	program := &CLI{
-		options: Options{WorkingDir: t.TempDir(), Stderr: io.Discard},
+		options: Options{WorkingDir: testkit.TempDir(t), Stderr: io.Discard},
 		env:     map[string]string{"PATH": fakeBin, "SUBYARD_OPERATION_ID": "preview-operation"},
 	}
 	loaded := config.Loaded{Context: domain.Context{
@@ -5004,13 +5004,13 @@ printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","existing":null}'
 }
 
 func TestRemoteProjectReservationRejectsPreviewDriftAfterConsent(t *testing.T) {
-	fakeBin := t.TempDir()
+	fakeBin := testkit.TempDir(t)
 	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), `#!/bin/sh
 printf '%s\n' '{"projectId":"Demo-2","name":"Demo-2","reserved":true,"existing":null}'
 `, 0o700)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	program := &CLI{
-		options: Options{WorkingDir: t.TempDir(), Stderr: io.Discard},
+		options: Options{WorkingDir: testkit.TempDir(t), Stderr: io.Discard},
 		env:     map[string]string{"PATH": fakeBin, "SUBYARD_OPERATION_ID": "reserve-operation"},
 	}
 	execution := &projectExecution{
@@ -5433,68 +5433,6 @@ func containsSequence(values, sequence []string) bool {
 	return false
 }
 
-func nativeFixture(t *testing.T) (string, []string, string) {
-	t.Helper()
-	root := t.TempDir()
-	for _, directory := range []string{"config", "scripts"} {
-		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	manifest := strings.Join([]string{
-		"init||@init||forward|mutate|dynamic|public|lifecycle|simple|init|init|--configs --reset --profile --yes --help|",
-		"start||@lifecycle||forward|mutate|never|public|lifecycle|simple|start|start|--yes --help|",
-		"stop||@lifecycle||forward|mutate|dynamic|public|lifecycle|simple|stop|stop|--force --yes --help|",
-		"provision||@provision||forward|mutate|dynamic|public|lifecycle|profiles|provision [profile]|provision|-l --list --yes --help|",
-		"test-vms||@test-vms||forward|mutate|dynamic|public|lifecycle|simple|test-vms <command>|test-vms|--slot -n -f --yes --help|logs status revoke recover",
-		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
-		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
-		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
-		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
-		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
-		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|manage temporary SSH access|--key --ttl --json --yes --help|unlock status lock",
-		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",
-		"clone||@project||local|mutate|dynamic|public|projects|clone|clone <url>|clone|--target --yes --help|",
-		"code||@project||local|mutate|never|public|projects|project|code [project]|code|--yes --help|",
-		"remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|remove|--soft --yes --help|",
-		"yards||@yards||local|read|never|public|lifecycle|simple|yards|yards|--help|",
-		"remote||@remote||local|mutate|dynamic|public|remote|remote|remote|remote|--yard --yes --help|add repair-key remove list",
-		"update||@update||local|mutate|dynamic|public|lifecycle|simple|update|update|--check --version --offline --rollback --force --yes --help|",
-		"migrate||@current-migration||deny|mutate|dynamic|public|lifecycle|simple|migrate|inspect or finish migrations for the installed release|--check --json --yes --help|",
-		"list||@list||local|read|never|public|projects|simple|list|list|--live --help|",
-		"_info||@info||local|read|never|hidden|internal|none|_info|info||",
-		"_authorize||@authorize||forward|mutate|dynamic|hidden|internal|none|_authorize|authorize||",
-		"rpc||@rpc||local|mutate|dynamic|hidden|internal|none|rpc --stdio|rpc|--stdio|",
-		"_state||@state||local|mutate|dynamic|hidden|internal|none|_state|state||",
-	}, "\n") + "\n"
-	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
-	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
-		content := ""
-		// Required context has persistent shipped defaults; command values may
-		// override these for ordinary requests but cannot mask authored drafts.
-		if name == "subyard.env" {
-			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
-		}
-		if name == "agents.env" {
-			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
-		}
-		writeCLIFile(t, filepath.Join(root, "config", name), content, 0o600)
-	}
-	home := filepath.Join(root, "home")
-	configHome := filepath.Join(root, "state")
-	stateDirectory := filepath.Join(configHome, "projects")
-	hostBase := filepath.Join(root, "host")
-	environment := []string{
-		"HOME=" + home, "SUBYARD_OPERATOR_HOME=" + home, "SUBYARD_CONFIG_HOME=" + configHome,
-		"SUBYARD_HOME=" + filepath.Join(root, "data"),
-		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
-		"HOST_BASE=" + hostBase, "RESTRICTED_DISK_PATHS=" + hostBase,
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
-		"DEV_USER=dev", "SSH_PORT=2222", "SUBYARD_NO_AUDIT=1",
-	}
-	return root, environment, stateDirectory
-}
-
 func lifecycleIncus() *testkit.Incus {
 	return &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {
 		Name: "yard", Project: "subyard", Status: "Stopped", Config: map[string]string{
@@ -5688,7 +5626,7 @@ func TestMutationGateIgnoresV1Files(t *testing.T) {
 }
 
 func TestReleaseRuntimeConfigRunsRollbackActionsFromTheGivenRoot(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "releases", "0.31.0-candidate")
+	root := filepath.Join(testkit.TempDir(t), "releases", "0.31.0-candidate")
 	profileRoot := filepath.Join(root, "config", "profiles", "sample")
 	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -5703,7 +5641,7 @@ rollback-observe) printf '{"state":"current","actual":"`+digest+`","desired":"`+
 esac
 `), 0o700)
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"project/yard": {Name: "yard", Status: "Running"}}}
-	program := &CLI{options: Options{RepositoryRoot: t.TempDir(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Incus: incus}}
+	program := &CLI{options: Options{RepositoryRoot: testkit.TempDir(t), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Incus: incus}}
 	runtimeConfig := program.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
 	catalog, err := config.LoadCatalog(root)
 	if err != nil {

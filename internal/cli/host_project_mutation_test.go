@@ -56,7 +56,7 @@ func TestHostRemoveRefreshesInventoryAfterConfirmation(t *testing.T) {
 
 func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testing.T) {
 	ctx := context.Background()
-	data := t.TempDir()
+	data := testkit.TempDir(t)
 	store := ownerinventory.Connections{Root: filepath.Join(data, "owner-inventory")}
 	connection := ownerinventory.Connection{HostID: "owner-a", Destination: "owner-alias",
 		Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-alias"}}}
