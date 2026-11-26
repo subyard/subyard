@@ -46,6 +46,13 @@
 - Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.
   Existing combined policies migrate on reprovision; the configured approval behavior stays the same.
 
+### User skills
+
+- GitHub skill sources clone in yards with the GitHub profile. Its Git wiring sends github.com
+  URLs through the `subyard-github` broker transport, which the user-skills clone did not allow,
+  so these sources were skipped with a clone warning. Run `yard init` or
+  `yard profile enable user-skills` after updating to clone them.
+
 ### Rollback to 0.31.0
 
 - **Agent cleanup is manual and does not refuse rollback.** Stop agent sessions before rollback.

@@ -33,9 +33,10 @@ accepts skipped sources.
   name, never URL text; check reports drift, so status shows `ready: false`; verify accepts it,
   so init and `yard profile enable user-skills` complete and the next enable or init retries.
 - **Clone.** Only when `~/.local/share/subyard-user-skills/<name>` is missing or empty: one
-  `git clone` with `GIT_ALLOW_PROTOCOL=https:ssh:file`, no terminal prompt and no input, stopped
-  after 60 seconds (killed 10 seconds later), into a sibling temporary directory that is then
-  moved into place. A non-empty directory is never touched.
+  `git clone` with `GIT_ALLOW_PROTOCOL=https:ssh:file:subyard-github` (`subyard-github` is the
+  GitHub profile's broker transport), no terminal prompt and no input, stopped after 60 seconds
+  (killed 10 seconds later), into a sibling temporary directory that is then moved into place.
+  A non-empty directory is never touched.
 - **Link.** Each `skills/<skill>/SKILL.md`, except `subyard-*` names, is linked as
   `<harness>/<skill>` → `<store>/<name>/skills/<skill>` in `~/.agents/skills`,
   `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills` and `~/.hermes/skills`,

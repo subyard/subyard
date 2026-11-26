@@ -47,7 +47,7 @@ for url in "$@"; do
     case "$mode" in check) work=1; continue ;; verify) continue ;; esac
     mkdir -p "${clone%/*}"
     temporary="$(mktemp -d "${clone%/*}/.tmp-${clone##*/}.XXXXXX")"
-    if GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:ssh:file timeout -k 10 60 \
+    if GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:ssh:file:subyard-github timeout -k 10 60 \
       git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1; then
       mv -T "$temporary" "$clone" # replaces only an empty directory
     else
