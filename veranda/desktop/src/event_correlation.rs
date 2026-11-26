@@ -665,6 +665,11 @@ impl RuntimeRun {
     pub fn handle(&self) -> RuntimeHandle {
         self.handle.clone()
     }
+    /// The writer outcome so far; `Pending` until the readiness thread settles.
+    #[cfg(test)]
+    pub(crate) fn writer(&self) -> WriterOutcome {
+        self.state.lock().unwrap().writer
+    }
     pub fn finish(mut self) -> RuntimeEnvelope {
         self.stop();
         let state = self.state.lock().unwrap();
