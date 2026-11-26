@@ -74,3 +74,14 @@ func TestRefusalErrorBoundsTheGateAndDecodeAppliesTheSameBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundTextReplacesControlAndFormatCharacters(t *testing.T) {
+	// U+202E and U+2066 reorder terminal text; U+200B and U+FEFF hide in it.
+	got := BoundText("safe\u202Eexe.txt\u2066x\u2069\u200b\ufeff\x00\x1b[0m", MaxRefusalText)
+	if got != "safe exe.txt x     [0m" {
+		t.Fatalf("got %q", got)
+	}
+	if got := BoundText("café ok", MaxRefusalText); got != "café ok" {
+		t.Fatalf("ordinary text changed: %q", got)
+	}
+}

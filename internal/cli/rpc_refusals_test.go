@@ -258,7 +258,7 @@ while True:
 		t.Fatalf("refused start succeeded: %s", stderr.String())
 	}
 	want := []string{
-		": release migration is required\n",
+		"yard: prepare start: transition-required: the owner's release gate refused this command\n",
 		"yard: owner release gate: release migration-required (transition-required): active release-a, target release-b\n",
 		"yard: cause: settings need migration [31m\nyard: Next: run yard migrate\n",
 		"yard: cause: yard inner has pending configuration\nyard: Next: finish the pending change, then run yard -Y inner start\n",
@@ -271,7 +271,7 @@ while True:
 		}
 		at += found + len(line)
 	}
-	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") {
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") || strings.Contains(output, outcome.Message) {
 		t.Fatalf("stderr = %q", output)
 	}
 }
@@ -293,5 +293,31 @@ func TestOwnerRefusalLinesRenderConfigRefusalsAndWhatWasLeftOut(t *testing.T) {
 	}
 	if lines := ownerRefusalLines(&rpc.Error{Code: rpc.CodeInternal, Message: "m"}); lines != nil {
 		t.Fatalf("plain error lines = %q", lines)
+	}
+}
+
+// The owner message of a config refusal repeats its refusals; with valid data
+// only a fixed summary and the refusal lines print, and any owner text is
+// cleaned and bounded.
+func TestOwnerErrorReportPrintsEachRefusalOnceAndCleansOwnerText(t *testing.T) {
+	setting, _ := domain.ConfigSettingName("HOST_LINKS")
+	fault := operationRPCError(rpc.CodeInvalidParams, domain.NewConfigRefusal(domain.ConfigSettingNumeric, setting))
+	refusal := domain.NewConfigRefusal(domain.ConfigSettingNumeric, setting).Error()
+	if !strings.Contains(fault.Message, refusal) {
+		t.Fatalf("fixture message %q does not repeat the refusal", fault.Message)
+	}
+	text, lines, ok := ownerErrorReport(fmt.Errorf("prepare config: %w", fault))
+	if !ok || text != "prepare config: invalid_params: the owner refused this request" ||
+		strings.Count(text+strings.Join(lines, "\n"), refusal) != 1 {
+		t.Fatalf("text = %q lines = %q", text, lines)
+	}
+	raw := &rpc.Error{Code: "plan_failed", Message: "owner said \u202eevil\x1b[2J\n" + strings.Repeat("x", 900)}
+	text, lines, ok = ownerErrorReport(fmt.Errorf("start: %w", raw))
+	if !ok || lines != nil || !strings.HasPrefix(text, "start: plan_failed: owner said  evil [2J ") ||
+		len(text) > len("start: plan_failed: ")+rpc.MaxRefusalText || strings.ContainsAny(text, "\u202e\x1b\n") {
+		t.Fatalf("text = %q lines = %q", text, lines)
+	}
+	if _, _, ok := ownerErrorReport(errors.New("local")); ok {
+		t.Fatal("a local error was treated as an owner error")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -88,6 +89,32 @@ func gateRPCRefusal(code releasetransition.OutcomeCode, resource, text, retry st
 		}
 	}
 	return refusal
+}
+
+// ownerErrorReport renders an error carrying an owner RPC error for local
+// stderr. The owner's code and message pass through rpc.BoundText; with valid
+// typed data the message, which repeats the refusals, becomes a fixed summary
+// and the refusal lines follow it.
+func ownerErrorReport(err error) (string, []string, bool) {
+	var fault *rpc.Error
+	if !errors.As(err, &fault) {
+		return "", nil, false
+	}
+	summary := rpc.BoundText(fault.Message, rpc.MaxRefusalText)
+	lines := ownerRefusalLines(fault)
+	if data, ok := rpc.DecodeErrorData(fault); ok {
+		summary = "the owner refused this request"
+		if data.Gate != nil {
+			summary = "the owner's release gate refused this command"
+		}
+	}
+	owner := rpc.BoundText(string(fault.Code), rpc.MaxRefusalName) + ": " + summary
+	text := err.Error()
+	if raw := fault.Error(); strings.Contains(text, raw) {
+		return strings.Replace(text, raw, owner, 1), lines, true
+	}
+	// A wrapper that reworded the owner text still prints no raw peer text.
+	return rpc.BoundText(text, len(text)), lines, true
 }
 
 // ownerRefusalLines renders the error data of an owner RPC error: the gate

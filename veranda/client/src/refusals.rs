@@ -148,7 +148,36 @@ fn name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
 }
 fn text(value: &str, limit: usize) -> bool {
-    !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= limit
+        && !value.chars().any(|c| c.is_control() || is_format(c))
+}
+
+/// Unicode format characters (general category Cf), such as bidirectional
+/// overrides and zero-width characters, which reorder or hide displayed text.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}'
+        | '\u{600}'..='\u{605}'
+        | '\u{61c}'
+        | '\u{6dd}'
+        | '\u{70f}'
+        | '\u{890}'..='\u{891}'
+        | '\u{8e2}'
+        | '\u{180e}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206f}'
+        | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}'
+        | '\u{110bd}'
+        | '\u{110cd}'
+        | '\u{13430}'..='\u{1343f}'
+        | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0001}'
+        | '\u{e0020}'..='\u{e007f}')
 }
 fn optional(value: &Option<String>, limit: usize) -> bool {
     value.as_deref().is_none_or(|value| text(value, limit))

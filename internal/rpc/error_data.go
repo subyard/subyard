@@ -114,17 +114,17 @@ func (data ErrorData) bounded() ErrorData {
 	}
 	refusals := make([]Refusal, len(data.Refusals))
 	for index, refusal := range data.Refusals {
-		refusal.Source = boundText(refusal.Source, MaxRefusalName)
-		refusal.Code = boundText(refusal.Code, MaxRefusalName)
-		refusal.Resource = boundText(refusal.Resource, MaxRefusalName)
-		refusal.Text = boundText(refusal.Text, MaxRefusalText)
-		refusal.Next = boundText(refusal.Next, MaxRefusalText)
+		refusal.Source = BoundText(refusal.Source, MaxRefusalName)
+		refusal.Code = BoundText(refusal.Code, MaxRefusalName)
+		refusal.Resource = BoundText(refusal.Resource, MaxRefusalName)
+		refusal.Text = BoundText(refusal.Text, MaxRefusalText)
+		refusal.Next = BoundText(refusal.Next, MaxRefusalText)
 		if refusal.Action != nil {
 			action := *refusal.Action
-			action.Verb = boundText(action.Verb, MaxRefusalName)
-			action.Yard = boundText(action.Yard, MaxRefusalName)
-			action.Version = boundText(action.Version, MaxRefusalName)
-			action.Command = boundText(action.Command, MaxRefusalText)
+			action.Verb = BoundText(action.Verb, MaxRefusalName)
+			action.Yard = BoundText(action.Yard, MaxRefusalName)
+			action.Version = BoundText(action.Version, MaxRefusalName)
+			action.Command = BoundText(action.Command, MaxRefusalText)
 			refusal.Action = &action
 		}
 		refusals[index] = refusal
@@ -132,14 +132,14 @@ func (data ErrorData) bounded() ErrorData {
 	data.Refusals = refusals
 	if data.Gate != nil {
 		gate := *data.Gate
-		gate.Status = boundText(gate.Status, MaxRefusalName)
-		gate.Code = boundText(gate.Code, MaxRefusalName)
-		gate.Active = boundText(gate.Active, MaxRefusalName)
+		gate.Status = BoundText(gate.Status, MaxRefusalName)
+		gate.Code = BoundText(gate.Code, MaxRefusalName)
+		gate.Active = BoundText(gate.Active, MaxRefusalName)
 		gate.Previous = boundOptional(gate.Previous, MaxRefusalName)
-		gate.Target = boundText(gate.Target, MaxRefusalName)
+		gate.Target = BoundText(gate.Target, MaxRefusalName)
 		gate.Transaction = boundOptional(gate.Transaction, MaxRefusalName)
-		gate.Message = boundText(gate.Message, MaxRefusalText)
-		gate.Action = boundText(gate.Action, MaxRefusalText)
+		gate.Message = BoundText(gate.Message, MaxRefusalText)
+		gate.Action = BoundText(gate.Action, MaxRefusalText)
 		if gate.OmittedDecisions < 0 {
 			gate.OmittedDecisions = 0
 		}
@@ -150,8 +150,8 @@ func (data ErrorData) bounded() ErrorData {
 		decisions := make([]GateDecision, len(gate.Decisions))
 		for index, decision := range gate.Decisions {
 			decisions[index] = GateDecision{
-				Resource: boundText(decision.Resource, MaxRefusalName), Scope: boundText(decision.Scope, MaxRefusalName),
-				Decision: boundText(decision.Decision, MaxRefusalName), Result: boundText(decision.Result, MaxRefusalText),
+				Resource: BoundText(decision.Resource, MaxRefusalName), Scope: BoundText(decision.Scope, MaxRefusalName),
+				Decision: BoundText(decision.Decision, MaxRefusalName), Result: BoundText(decision.Result, MaxRefusalText),
 			}
 		}
 		if len(decisions) == 0 {
@@ -167,15 +167,15 @@ func boundOptional(text *string, limit int) *string {
 	if text == nil {
 		return nil
 	}
-	bounded := boundText(*text, limit)
+	bounded := BoundText(*text, limit)
 	return &bounded
 }
 
 // boundText replaces control characters and cuts text to limit bytes at a
 // UTF-8 boundary, marking the cut with an ellipsis.
-func boundText(text string, limit int) string {
+func BoundText(text string, limit int) string {
 	text = strings.Map(func(char rune) rune {
-		if unicode.IsControl(char) || char == utf8.RuneError {
+		if unicode.IsControl(char) || unicode.Is(unicode.Cf, char) || char == utf8.RuneError {
 			return ' '
 		}
 		return char

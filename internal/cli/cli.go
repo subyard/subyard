@@ -3890,9 +3890,13 @@ func (cli *CLI) errorf(format string, arguments ...any) {
 		if !ok {
 			continue
 		}
-		// An owner error's message is only its summary; its typed refusals and
+		// An owner error prints as its cleaned summary; its typed refusals and
 		// next steps follow it.
-		refusals = append(refusals, ownerRefusalLines(cause)...)
+		if text, lines, owner := ownerErrorReport(cause); owner {
+			arguments[index] = text
+			refusals = append(refusals, lines...)
+			continue
+		}
 		if cli.localMetadataDiagnostics {
 			if diagnostic, local := config.OwnerSourceDiagnostic(cause); local {
 				arguments[index] = diagnostic

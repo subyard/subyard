@@ -30,7 +30,7 @@ step and a typed `action` (`verb`, optional `yard` or `version`, and the rendere
 `command`). Configuration refusals name only validated profile, setting,
 integration or yard-kind names, never a setting value, secret or path. At most 32
 refusals are sent; `omitted` counts the rest. Texts are at most 512 bytes and
-contain no control characters. `incomplete` means the error also had causes that
+contain no control or format characters. `incomplete` means the error also had causes that
 are not typed refusals; the owner's own diagnostics (`config validate`,
 `yard migrate --check`) report them. A release-gate refusal adds `gate`, the public
 gate outcome (status, code, releases, transaction, message, action and at most 32

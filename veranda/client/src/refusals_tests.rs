@@ -78,6 +78,22 @@ fn a_refusal_from_an_unknown_source_is_skipped_and_marks_the_data_incomplete() {
 }
 
 #[test]
+fn format_characters_are_detected_and_ordinary_text_is_accepted() {
+    for c in [
+        '\u{ad}',
+        '\u{61c}',
+        '\u{200e}',
+        '\u{2066}',
+        '\u{feff}',
+        '\u{e0041}',
+    ] {
+        assert!(is_format(c), "{c:?}");
+    }
+    assert!(text("café — ok", MAX_TEXT));
+    assert!(!text("a\u{2069}b", MAX_TEXT));
+}
+
+#[test]
 fn data_outside_the_contract_is_rejected_whole() {
     type Mutation = Box<dyn Fn(&mut Value)>;
     let cases: Vec<(&str, Mutation, Rejected)> = vec![
@@ -117,6 +133,16 @@ fn data_outside_the_contract_is_rejected_whole() {
         (
             "control",
             Box::new(|v| v["refusals"][0]["text"] = json!("a\u{1b}[31m")),
+            Rejected::Text,
+        ),
+        (
+            "bidi override",
+            Box::new(|v| v["refusals"][0]["text"] = json!("safe\u{202e}txt.exe")),
+            Rejected::Text,
+        ),
+        (
+            "zero width",
+            Box::new(|v| v["refusals"][0]["next"] = json!("run\u{200b} yard")),
             Rejected::Text,
         ),
         (
