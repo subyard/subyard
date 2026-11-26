@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "plan",
+  "operationId": "op-plan",
+  "error": {
+    "code": "precondition-blocked",
+    "message": "release activation is blocked: release operator-action-required (precondition-blocked): active 0.32.0-bbbbbbbbbbbb, target 0.32.0-bbbbbbbbbbbb; next: run yard migrate; cause: yard default has a pending configuration change (activation.core.pending-configuration), next: start the yard, then run yard -Y default start; cause: profile route-client runtime is unavailable (activation.profile.route-client)",
+    "data": {
+      "schemaVersion": 1,
+      "refusals": [
+        {
+          "source": "release-gate",
+          "code": "precondition-blocked",
+          "resource": "activation.core.pending-configuration",
+          "text": "yard default has a pending configuration change",
+          "next": "start the yard",
+          "action": {
+            "verb": "start",
+            "command": "yard -Y default start"
+          }
+        },
+        {
+          "source": "release-gate",
+          "code": "dependency-unavailable",
+          "resource": "activation.profile.route-client",
+          "text": "profile route-client runtime is unavailable",
+          "action": {
+            "verb": "migrate",
+            "command": "yard migrate"
+          }
+        }
+      ],
+      "gate": {
+        "status": "operator-action-required",
+        "code": "precondition-blocked",
+        "active": "0.32.0-bbbbbbbbbbbb",
+        "target": "0.32.0-bbbbbbbbbbbb",
+        "transaction": null,
+        "message": "release activation is blocked",
+        "action": "run yard migrate"
+      }
+    }
+  }
+}

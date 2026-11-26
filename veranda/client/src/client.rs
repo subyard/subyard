@@ -1100,7 +1100,7 @@ impl Client {
                 {
                     ("unknown", error.message)
                 }
-                Err(error) => ("failed", error.message),
+                Err(error) => ("failed", error.detail()),
             };
             if let Ok(mut running) = client.running.lock() {
                 running.remove(&held.plan.operation_id);

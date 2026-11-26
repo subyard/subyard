@@ -63,6 +63,9 @@ pub struct LocalFleetSnapshot {
 pub struct NativeError {
     pub code: String,
     pub message: String,
+    /// The owner's typed refusals; `message` stays this client's fixed text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusals: Option<crate::refusals::Refusals>,
 }
 
 impl NativeError {
@@ -70,7 +73,22 @@ impl NativeError {
         Self {
             code: code.into(),
             message: message.into(),
+            refusals: None,
         }
+    }
+
+    /// The fixed message followed by every owner refusal and its next step.
+    pub fn detail(&self) -> String {
+        let mut lines = vec![self.message.clone()];
+        if let Some(refusals) = &self.refusals {
+            lines.extend(refusals.lines());
+        }
+        lines.join("\n")
+    }
+
+    /// `code: detail`, for status lines and banners.
+    pub fn summary(&self) -> String {
+        format!("{}: {}", self.code, self.detail())
     }
 
     fn io(context: &'static str, error: io::Error) -> Self {

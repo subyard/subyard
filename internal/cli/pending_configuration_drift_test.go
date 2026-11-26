@@ -254,7 +254,7 @@ func (fixture pendingDriftFixture) rpcGateRefusal(t *testing.T, yard, params str
 	_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "pending-drift",
 		Params: json.RawMessage(params)}, nil)
 	var fault *rpc.Error
-	return errors.As(err, &fault) && gateRefusal([]byte(fault.Message)), err
+	return errors.As(err, &fault) && gateRefusal(rpcGatePayload(fault)), err
 }
 
 // A command is admitted the same way by the direct CLI and by RPC, by the

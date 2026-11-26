@@ -370,14 +370,6 @@ const (
 	rpcTransitionRequiredCode = rpc.CodeTransitionRequired
 )
 
-func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
-	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
-	if err != nil {
-		return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: outcome.Message}
-	}
-	return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: string(payload)}
-}
-
 func New(options Options) (*CLI, error) {
 	root, err := filepath.Abs(options.RepositoryRoot)
 	if err != nil {
@@ -3892,8 +3884,20 @@ func (cli *CLI) ensureOperationID() string {
 func (cli *CLI) errorf(format string, arguments ...any) {
 	// Only this local stderr boundary may expose trusted owner path metadata.
 	// The error itself remains safe for RPC and activation consumers.
+	var refusals []string
 	for index, argument := range arguments {
-		if cause, ok := argument.(error); ok && cli.localMetadataDiagnostics {
+		cause, ok := argument.(error)
+		if !ok {
+			continue
+		}
+		// An owner error prints as its cleaned summary; its typed refusals and
+		// next steps follow it.
+		if text, lines, owner := ownerErrorReport(cause); owner {
+			arguments[index] = text
+			refusals = append(refusals, lines...)
+			continue
+		}
+		if cli.localMetadataDiagnostics {
 			if diagnostic, local := config.OwnerSourceDiagnostic(cause); local {
 				arguments[index] = diagnostic
 			}
@@ -3902,6 +3906,9 @@ func (cli *CLI) errorf(format string, arguments ...any) {
 	fmt.Fprintf(cli.options.Stderr, "%s: ", cli.options.Program)
 	fmt.Fprintf(cli.options.Stderr, format, arguments...)
 	fmt.Fprintln(cli.options.Stderr)
+	for _, line := range refusals {
+		fmt.Fprintf(cli.options.Stderr, "%s: %s\n", cli.options.Program, line)
+	}
 }
 
 func parseGlobals(arguments []string, inheritedYard string) (yard string, explicit, yes bool, remaining []string, err error) {
@@ -4081,7 +4088,7 @@ func operationRPCError(fallback rpc.ErrorCode, err error) *rpc.Error {
 		domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
 		code = rpc.CodeActionPolicyInvalid
 	}
-	return &rpc.Error{Code: code, Message: err.Error()}
+	return rpc.RefusalError(code, err.Error(), configRefusalData(err))
 }
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {

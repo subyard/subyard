@@ -73,7 +73,7 @@ impl<P> Operation<P> {
         self.text = "The owner is executing the reviewed plan…".into();
     }
     pub fn execution_not_submitted(&mut self, error: &NativeError) {
-        let message = format!("Not submitted · {}: {}", error.code, error.message);
+        let message = format!("Not submitted · {}", error.summary());
         if retryable_not_submitted(error) && self.plan.is_some() {
             self.phase = Phase::Review;
             self.text = format!(

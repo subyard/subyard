@@ -130,6 +130,9 @@
             "message": {
               "type": "string",
               "maxLength": 8192
+            },
+            "data": {
+              "$ref": "#/$defs/errorData"
             }
           },
           "required": [
@@ -204,6 +207,140 @@
         "event"
       ],
       "additionalProperties": false
+    },
+    "errorData": {
+      "description": "Typed, value-free refusals of an error. Optional; clients that do not support it ignore it.",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "refusals": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/refusal"
+          }
+        },
+        "omitted": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "incomplete": {
+          "const": true
+        },
+        "gate": {
+          "type": "object",
+          "description": "Public release-gate outcome of a gate refusal; its blockers are the refusals.",
+          "properties": {
+            "status": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "active": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "target": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "transaction": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "action": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "active",
+            "target",
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "refusals"
+      ]
+    },
+    "refusal": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "enum": [
+            "config",
+            "release-gate"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "next": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "action": {
+          "type": "object",
+          "properties": {
+            "verb": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9_-]+$"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^yard "
+            }
+          },
+          "required": [
+            "verb",
+            "command"
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "code",
+        "text"
+      ]
     }
   }
 }

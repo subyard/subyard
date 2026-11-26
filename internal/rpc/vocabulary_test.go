@@ -170,7 +170,7 @@ func TestSessionRejectsUndeclaredMethodsBeforeDispatch(t *testing.T) {
 }
 
 func TestRelayedUnknownErrorKeepsSessionAndConcurrentOperationAlive(t *testing.T) {
-	remoteFault := &Error{Code: "future_owner_code", Message: "original owner message\nwith detail"}
+	remoteFault := &Error{Code: "future_owner_code", Message: "original owner message\nwith detail", Data: json.RawMessage(`{"schemaVersion":1,"refusals":[{"source":"future","code":"x","text":"t"}],"future":true}`)}
 	var wire bytes.Buffer
 	if err := NewCodec(nil, &wire).Write(Response{Version: ProtocolVersion, Type: "response", ID: "owner", Error: remoteFault}); err != nil {
 		t.Fatal(err)
@@ -234,7 +234,8 @@ func TestRelayedUnknownErrorKeepsSessionAndConcurrentOperationAlive(t *testing.T
 	}
 	send("relay", MethodContextGet)
 	response := readResponse(t, codec)
-	if response.ID != "relay" || response.Error == nil || response.Error.Code != CodeInternal || response.Error.Message != remoteFault.Message {
+	if response.ID != "relay" || response.Error == nil || response.Error.Code != CodeInternal || response.Error.Message != remoteFault.Message ||
+		string(response.Error.Data) != string(remoteFault.Data) {
 		t.Fatalf("relayed fault: %#v", response)
 	}
 	send("after", MethodSystemPing)

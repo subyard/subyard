@@ -33,6 +33,7 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 			var stderr bytes.Buffer
 			program := cliFixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"start"}, Environment: environment, WorkingDir: root, Stderr: &stderr, Incus: lifecycleIncus(), AdapterRunner: runner})
 			var payload []byte
+			var refusals []rpc.Refusal
 			if transport == "CLI" {
 				if code := program.Run(context.Background()); code != 1 {
 					t.Fatalf("refusal exit=%d stderr=%q", code, stderr.String())
@@ -49,7 +50,8 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				if !ok || fault.Code != "dependency-unavailable" {
 					t.Fatalf("RPC refusal=%#v", err)
 				}
-				payload = []byte(fault.Message)
+				payload = rpcGatePayload(fault)
+				refusals = decodeErrorData(t, fault).Refusals
 			}
 			if transport == "CLI" {
 				// The CLI renders the same inspection as text: one cause, one next step.
@@ -64,8 +66,8 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				t.Fatalf("refusal JSON=%q: %v", payload, err)
 			}
 			if refused.Status != releasetransition.StatusOperatorActionRequired || refused.Action != "restore fixture dependency" ||
-				len(refused.Decisions) != 1 || refused.Decisions[0].Resource != "activation.fixture-runtime" ||
-				len(refused.Blockers) != 1 || refused.Blockers[0].Message != "fixture dependency is unavailable" {
+				len(refusals) != 1 || refusals[0].Text != "fixture dependency is unavailable" ||
+				refusals[0].Resource != "activation.fixture-runtime" || refusals[0].Next != "restore fixture dependency" {
 				t.Fatalf("lost same-inspection diagnostics: %#v", refused)
 			}
 			calls, err := os.ReadFile(capture)
@@ -98,7 +100,7 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				t.Fatalf("later readiness=%#v err=%v", later, err)
 			}
 			// The already emitted refusal must keep its original resource and reason.
-			if !bytes.Contains(payload, []byte("activation.fixture-runtime")) || !bytes.Contains(payload, []byte("fixture dependency is unavailable")) {
+			if refusals[0].Resource != "activation.fixture-runtime" || !bytes.Contains(payload, []byte("fixture dependency is unavailable")) {
 				t.Fatalf("later readiness erased refusal: %q", payload)
 			}
 		})
