@@ -28,20 +28,18 @@ import (
 )
 
 func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	configDir := loadConfigCommandContext(t, root, environment, "default").Context.Paths.ConfigDir
 	hostRule := filepath.Join(configHome, "overrides", "host", "agents", "codex", "rules", "repo.rules")
 	writeConfigCommandFile(t, hostRule, "private-canary-value\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
 		"AGENT_codex_RULES='"+filepath.Join(configDir, "../private/agents/codex/rules/repo.rules")+"'\n", 0o600)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "paths"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("config paths failed: code=%d stderr=%s", code, stderr.String())
 	}
@@ -62,7 +60,8 @@ func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 }
 
 func TestConfigDesiredFingerprintIgnoresReleaseRootAlias(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	aliasOne := filepath.Join(t.TempDir(), "release-one", "agents", "codex", "config.toml")
 	aliasTwo := filepath.Join(t.TempDir(), "release-two", "agents", "codex", "config.toml")
@@ -81,14 +80,11 @@ func TestConfigDesiredFingerprintIgnoresReleaseRootAlias(t *testing.T) {
 		targetLoaded.Environment["AGENT_codex_RULES"] = ""
 		return configTarget{Name: "default", Loaded: targetLoaded}
 	}
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root,
 		Environment:    environment,
 		Incus:          &testkit.Incus{Instances: map[string]ports.InstanceInfo{}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	first, err := program.assessConfigTarget(context.Background(), targetFor(aliasOne), true)
 	if err != nil {
@@ -114,7 +110,8 @@ func TestConfigDesiredFingerprintIgnoresReleaseRootAlias(t *testing.T) {
 }
 
 func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	hostRule := filepath.Join(
 		configHome, "overrides", "host", "agents", "codex", "rules", "repo.rules",
 	)
@@ -164,13 +161,10 @@ func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := mustNew(t, Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("config show failed: code=%d stderr=%s", code, stderr.String())
 			}
@@ -191,14 +185,11 @@ func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing
 	}
 
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"-Y", "named", "config", "show", "SECRET_TOKEN"},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 ||
 		!strings.Contains(stderr.String(), `unknown setting "SECRET_TOKEN"`) {
 		t.Fatalf("unknown setting diagnostic: code=%d stdout=%s stderr=%s",
@@ -212,7 +203,8 @@ func TestConfigShowExplainsScalarDerivedAndFileSettingsWithoutSecrets(t *testing
 }
 
 func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	environment = append(environment,
 		"SUBYARD_ENGINE_CONTEXT=1", "SUBYARD_CONFIG_LOADED=1", "ACCESS_KIND=local")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"),
@@ -237,16 +229,13 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "status", "--all-local"},
 		Environment: environment, WorkingDir: root,
 		InitPlatform: &appliedSelectionPlatformFixture{initPlatformFixture: newInitPlatformFixture()},
 		Incus:        fake, Executor: fake, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("config status failed: code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
@@ -265,15 +254,12 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	applier := &recordingConfigApplier{}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "apply", "--all-local", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("config apply failed: code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
@@ -392,7 +378,8 @@ func TestDispatcherConfigApplierRelaysOnlyTypedFileRefusals(t *testing.T) {
 // through the in-process refresh print the same final line, which names the
 // writer's step; a child that relays nothing is run again.
 func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	dispatcher := filepath.Join(testkit.TempDir(t), "yard")
@@ -408,14 +395,11 @@ func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
 			childEnvironment = append(childEnvironment, "REPORT="+path)
 		}
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "named", "config", "apply", "--yes"},
 			Environment: childEnvironment, WorkingDir: root, DispatcherPath: dispatcher, Prompt: &testkit.Prompt{},
 			Incus: fake, Executor: symlinkedSettingsExecutor{}, Config: applier, Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		if code := program.Run(context.Background()); code == 0 {
 			t.Fatalf("config apply succeeded:\n%s%s", stdout.String(), stderr.String())
 		}
@@ -452,7 +436,8 @@ func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
 }
 
 func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -461,14 +446,11 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "status"},
 		Environment: environment, WorkingDir: root,
 		Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "agent config drift") {
 		t.Fatalf("drift was not detected: code=%d stdout=%s stderr=%s",
@@ -498,7 +480,8 @@ func (executor symlinkedSettingsExecutor) Exec(_ context.Context, _, instance st
 // file and the operator's step; the other yard is refreshed, and the plan
 // does not read as one without drift.
 func TestConfigApplyRefusesOnlyTheYardWithAnUnreadableFile(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
 	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
@@ -517,14 +500,11 @@ func TestConfigApplyRefusesOnlyTheYardWithAnUnreadableFile(t *testing.T) {
 	for _, arguments := range [][]string{{"-Y", "named", "config", "status"}, {"config", "apply", "--all-local", "--yes"}} {
 		applier := &recordingConfigApplier{}
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := cliFixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 			Incus: fake, Executor: executor, Config: applier, Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		code := program.Run(context.Background())
 		output := stdout.String() + stderr.String()
 		if !strings.Contains(output, step) || strings.Contains(output, "no running local yards have materialized configuration drift") {
@@ -553,7 +533,8 @@ func (executor lostGuestExecutor) Exec(ctx context.Context, project, instance st
 // A yard that can no longer be assessed after confirmation is refused alone:
 // the other yard of the plan is still refreshed.
 func TestConfigApplyRefusesOnlyTheYardThatFailsReassessment(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	var named config.Loaded
@@ -566,14 +547,11 @@ func TestConfigApplyRefusesOnlyTheYardThatFailsReassessment(t *testing.T) {
 	lost := false
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--all-local"},
 		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{callback: func() { lost = true }},
 		Incus: fake, Executor: lostGuestExecutor{instance: named.Context.YardInstanceName, lost: &lost}, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	code := program.Run(context.Background())
 	output := stdout.String() + stderr.String()
 	if code == 0 || !slices.Equal(applier.yards, []string{"default"}) || !strings.Contains(output, "yard named materialized config") || !strings.Contains(output, "guest transport lost") {
@@ -582,25 +560,24 @@ func TestConfigApplyRefusesOnlyTheYardThatFailsReassessment(t *testing.T) {
 }
 
 func TestConfigStatusRendersProfileRuntimeDiagnostics(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"}}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	diagnostics := ports.RuntimeDiagnostics{{Parameter: "sample.input.invalid", Installed: "changed", Desired: "current"}}
 	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "status"}, Environment: environment,
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "status"}, Environment: environment,
 		WorkingDir: root, Incus: fake, Executor: fake, InitPlatform: platform, Stdout: &stdout, Stderr: &stderr})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stdout.String(), "sample.input.invalid") || strings.Contains(stdout.String()+stderr.String(), "yard is stopped") {
 		t.Fatalf("profile diagnostic hidden: exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
 func TestConfigApplyRepairsWritableSettingsAndRejectsWritableSecrets(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writable := filepath.Join(configHome, "overrides", "host", "writable.conf")
 	writeConfigCommandFile(t, writable, "value\n")
 	if err := os.Chmod(writable, 0o666); err != nil {
@@ -616,15 +593,12 @@ func TestConfigApplyRepairsWritableSettingsAndRejectsWritableSecrets(t *testing.
 	}
 	applier := &recordingConfigApplier{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "apply", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Config: applier, Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "group/world writable: "+secret) || strings.Contains(stderr.String(), "writable.conf") {
 		t.Fatalf("writable secret was not the only refusal: code=%d stderr=%s", code, stderr.String())
@@ -746,7 +720,8 @@ func TestConfigValidationKeepsOwnershipSymlinkAndTypeChecks(t *testing.T) {
 }
 
 func TestConfigValidationExcludesRuntimeStateTrees(t *testing.T) {
-	_, _, configHome, _ := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	configHome := fixture.ConfigHome
 	for _, path := range []string{
 		filepath.Join(configHome, "keys", "ledger.lock"),
 		filepath.Join(configHome, "projects", "default.json"),
@@ -774,7 +749,8 @@ func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			target := filepath.Join(configHome, "config.env")
 			writeConfigCommandFile(t, target, test.initial)
 			before, err := os.ReadFile(target)
@@ -783,14 +759,11 @@ func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
 			}
 			prompt := &testkit.Prompt{}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("command failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 			}
@@ -806,22 +779,20 @@ func TestConfigAuthoringNoOpsDoNotPromptOrRewriteTargets(t *testing.T) {
 }
 
 func TestConfigUnsetAbsentTargetDoesNotPrompt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "shared", "config.env")
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "unset", "E2E_VM_CPU", "--scope", "shared"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("absent unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -834,7 +805,8 @@ func TestConfigUnsetAbsentTargetDoesNotPrompt(t *testing.T) {
 }
 
 func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	content := "model = \"fixture\"\n"
 	source := filepath.Join(t.TempDir(), "config.toml")
 	writeConfigCommandFile(t, source, content)
@@ -846,7 +818,7 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 	}
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
@@ -854,9 +826,6 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("import failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -870,7 +839,8 @@ func TestConfigImportUnchangedDoesNotPromptOrRewriteTarget(t *testing.T) {
 }
 
 func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	source := filepath.Join(t.TempDir(), "config.toml")
 	writeConfigCommandFile(t, source, "")
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
@@ -879,7 +849,7 @@ func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
 	}
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
@@ -887,9 +857,6 @@ func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("empty import failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -902,7 +869,8 @@ func TestConfigImportEmptyContentCreatesMissingTarget(t *testing.T) {
 }
 
 func TestConfigEditUnchangedDoesNotPromptAfterEditingDraft(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	cliFixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := cliFixture.Root, cliFixture.ConfigHome, cliFixture.Environment
 	content := "model = \"fixture\"\n"
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, content)
@@ -911,15 +879,12 @@ func TestConfigEditUnchangedDoesNotPromptAfterEditingDraft(t *testing.T) {
 	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := cliFixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("edit failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -935,7 +900,8 @@ func TestConfigEditUnchangedDoesNotPromptAfterEditingDraft(t *testing.T) {
 }
 
 func TestConfigEditChangedDeclineLeavesPersistentTargetUntouched(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, "model = \"before\"\n")
 	marker := filepath.Join(t.TempDir(), "editor-ran")
@@ -943,15 +909,12 @@ func TestConfigEditChangedDeclineLeavesPersistentTargetUntouched(t *testing.T) {
 	environment = append(environment, "EDITOR="+editor, "EDITOR_MARKER="+marker)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined edit: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -967,22 +930,20 @@ func TestConfigEditChangedDeclineLeavesPersistentTargetUntouched(t *testing.T) {
 }
 
 func TestConfigEditInvalidDraftFailsBeforePrompt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, "model = \"before\"\n")
 	editor := writeConfigAuthoringEditor(t, "printf '%s\\n' 'password=secret' >\"$1\"\n")
 	environment = append(environment, "EDITOR="+editor)
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "edit", "AGENT_codex_CONFIG", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "secret material") {
 		t.Fatalf("invalid edit: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -995,20 +956,18 @@ func TestConfigEditInvalidDraftFailsBeforePrompt(t *testing.T) {
 }
 
 func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "set", "SSH_PORT", "2300", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("changed set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1022,20 +981,18 @@ func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
 }
 
 func TestConfigUnsetExistingEmptyTargetKeepsIt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "unset", "SSH_PORT", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("empty unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1048,22 +1005,20 @@ func TestConfigUnsetExistingEmptyTargetKeepsIt(t *testing.T) {
 }
 
 func TestConfigSetRejectsConcurrentTargetChangeAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t, target, "SSH_PORT='2400'\n# concurrent\n")
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "set", "SSH_PORT", "2300", "--scope", "host"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("stale set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1075,7 +1030,8 @@ func TestConfigSetRejectsConcurrentTargetChangeAfterConfirmation(t *testing.T) {
 }
 
 func TestConfigSetRejectsMissingTargetCreatedAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "shared", "config.env")
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
@@ -1084,15 +1040,12 @@ func TestConfigSetRejectsMissingTargetCreatedAfterConfirmation(t *testing.T) {
 		writeConfigCommandFile(t, target, "E2E_VM_CPU=6\n")
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "set", "E2E_VM_CPU", "3", "--scope", "shared"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("stale create: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1103,7 +1056,8 @@ func TestConfigSetRejectsMissingTargetCreatedAfterConfirmation(t *testing.T) {
 }
 
 func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, target, "model = \"before\"\n")
 	source := filepath.Join(t.TempDir(), "config.toml")
@@ -1114,7 +1068,7 @@ func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
 		}
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "import", "AGENT_codex_CONFIG", source, "--scope", "host",
@@ -1122,9 +1076,6 @@ func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("stale import: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1135,7 +1086,8 @@ func TestConfigImportRejectsTargetRemovedAfterConfirmation(t *testing.T) {
 }
 
 func TestConfigAuthoringNoOpWithAssumeYesStillSkipsWriterSafetyChecks(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "SSH_PORT='2299'\n")
 	linked := filepath.Join(t.TempDir(), "linked-config.env")
@@ -1143,22 +1095,20 @@ func TestConfigAuthoringNoOpWithAssumeYesStillSkipsWriterSafetyChecks(t *testing
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "set", "SSH_PORT", "2299", "--scope", "host", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("assume-yes no-op: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
 func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -1170,14 +1120,11 @@ func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
 	prompt := &testkit.Prompt{}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
 		Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("converged apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1187,7 +1134,8 @@ func TestConfigApplyConvergedSkipsPromptAndApplier(t *testing.T) {
 }
 
 func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=2299\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "stopped", "config.env"), "SSH_PORT=2300\n")
 	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
@@ -1212,14 +1160,11 @@ func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--all-local"},
 		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
 		Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("mixed apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1230,7 +1175,8 @@ func TestConfigApplyAssessesDriftBeforeOneDefaultYesPrompt(t *testing.T) {
 }
 
 func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -1241,14 +1187,11 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: prompt, Incus: fake, Executor: fake,
 		Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined apply: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1260,7 +1203,8 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 // Drift that changes after confirmation is not a stale plan: the guest compares
 // each file with the confirmed tokens when it writes.
 func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -1272,14 +1216,11 @@ func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
 	appendHashSteps(t, fake, loaded)
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{},
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("changed drift: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1290,7 +1231,8 @@ func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
 }
 
 func TestConfigApplyRejectsDesiredChangeAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	source := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	writeConfigCommandFile(t, source, "model = \"before\"\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
@@ -1310,14 +1252,11 @@ func TestConfigApplyRejectsDesiredChangeAfterConfirmation(t *testing.T) {
 	}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("stale desired state: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1328,7 +1267,8 @@ func TestConfigApplyRejectsDesiredChangeAfterConfirmation(t *testing.T) {
 }
 
 func TestConfigApplySkipsDriftThatConvergedAfterConfirmation(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -1339,14 +1279,11 @@ func TestConfigApplySkipsDriftThatConvergedAfterConfirmation(t *testing.T) {
 	appendHashSteps(t, fake, loaded)
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: &callbackPrompt{},
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("converged-after-consent: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1379,7 +1316,8 @@ func TestConfigApplySkipsDriftWhenTargetStopsOrDisappearsAfterConfirmation(t *te
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, _, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, environment := fixture.Root, fixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			key := loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
@@ -1395,15 +1333,12 @@ func TestConfigApplySkipsDriftWhenTargetStopsOrDisappearsAfterConfirmation(t *te
 			}}
 			applier := &recordingConfigApplier{}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Incus: fake, Executor: fake, Config: applier,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("%s after consent: code=%d stdout=%s stderr=%s",
 					test.name, code, stdout.String(), stderr.String())
@@ -1418,7 +1353,8 @@ func TestConfigApplySkipsDriftWhenTargetStopsOrDisappearsAfterConfirmation(t *te
 }
 
 func TestConfigApplyRejectsDesiredChangeForStoppedTargetInConfirmedSet(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	stoppedSource := filepath.Join(configHome, "overrides", "stopped-codex.toml")
 	writeConfigCommandFile(t, stoppedSource, "model = \"before\"\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "stopped", "config.env"),
@@ -1448,16 +1384,13 @@ func TestConfigApplyRejectsDesiredChangeForStoppedTargetInConfirmedSet(t *testin
 	}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "apply", "--all-local"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Incus: fake, Executor: fake, Config: applier,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) ||
 		!strings.Contains(stderr.String(), "yard stopped") {
@@ -1470,7 +1403,8 @@ func TestConfigApplyRejectsDesiredChangeForStoppedTargetInConfirmedSet(t *testin
 }
 
 func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	source := filepath.Join(configHome, "overrides", "host", "agents", "codex", "config.toml")
 	after := "model = \"after\"\n"
 	writeConfigCommandFile(t, source, "model = \"before\"\n")
@@ -1500,14 +1434,11 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 	}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("changed desired converged: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1518,7 +1449,8 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 }
 
 func TestConfigApplyRejectsExpandedAllLocalSelectionAfterConfirmation(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
@@ -1532,15 +1464,12 @@ func TestConfigApplyRejectsExpandedAllLocalSelectionAfterConfirmation(t *testing
 	}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "apply", "--all-local"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Incus: fake, Executor: fake, Config: applier, Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("expanded selection: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1559,7 +1488,8 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 		{name: "cancellation", err: context.Canceled},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, _, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, environment := fixture.Root, fixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			fake := &testkit.Incus{
 				Instances: map[string]ports.InstanceInfo{
@@ -1573,16 +1503,13 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 			prompt := &testkit.Prompt{}
 			applier := &recordingConfigApplier{}
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments:   []string{"config", "apply", "--yes"},
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Incus: fake, Executor: fake, Config: applier,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 1 ||
 				!strings.Contains(stderr.String(), test.err.Error()) {
 				t.Fatalf("exec error: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1595,7 +1522,8 @@ func TestConfigApplyExecErrorFailsPreflightWithAssumeYes(t *testing.T) {
 }
 
 func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	environment = append(environment, "CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG_DEST=.codex/config.txt")
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{
@@ -1612,15 +1540,12 @@ func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 	prompt := &testkit.Prompt{}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "apply", "--yes"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Incus: fake, Executor: fake, Config: applier,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("completed nonzero probe: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1630,7 +1555,8 @@ func TestConfigApplyCompletedNonzeroProbeRemainsDrift(t *testing.T) {
 }
 
 func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.MkdirAll(filepath.Join(source, "hosts", "owner-a"), 0o700); err != nil {
@@ -1648,15 +1574,12 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 
 	checkPrompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source, "--check", "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: checkPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "changes required") {
 		t.Fatalf("config sync check: code=%d stdout=%s stderr=%s",
@@ -1676,15 +1599,12 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	applyPrompt := &testkit.Prompt{Answers: []bool{true}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source, "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: applyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("config sync apply: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -1702,15 +1622,12 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	convergedPrompt := &testkit.Prompt{}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source},
 		Environment: environment, WorkingDir: root, Prompt: convergedPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "already converged") {
 		t.Fatalf("converged config sync: code=%d stdout=%s stderr=%s",
@@ -1730,15 +1647,12 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 	manifestOnlyPrompt := &testkit.Prompt{Answers: []bool{false}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source},
 		Environment: environment, WorkingDir: root, Prompt: manifestOnlyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("manifest-only decline: code=%d stdout=%s stderr=%s",
@@ -1759,7 +1673,8 @@ func TestConfigSyncCheckIsReadOnlyAndMutationPromptsOnce(t *testing.T) {
 }
 
 func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	transactionID := "1-dddddddddddddddd"
 	transactionRoot := filepath.Join(
@@ -1811,15 +1726,12 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 		"commit", "-q", "-m", "initial")
 
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "status", "--offline"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "recovery: required") ||
 		!strings.Contains(stdout.String(), "live: blocked") {
@@ -1832,15 +1744,12 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source, "--check", "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "interrupted transaction requires recovery") {
 		t.Fatalf("pending recovery check: code=%d stdout=%s stderr=%s",
@@ -1853,15 +1762,12 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", source, "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("recovery-first sync: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -1886,7 +1792,8 @@ func TestConfigSyncCheckLeavesRecoveryPendingAndMutationRecoversFirst(t *testing
 }
 
 func TestConfigSyncAssumeYesRejectsInvalidRecoveryJournalBeforePlanning(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "DEV_UID=2299\n")
 	transactionID := "1-eeeeeeeeeeeeeeee"
@@ -1906,15 +1813,12 @@ func TestConfigSyncAssumeYesRejectsInvalidRecoveryJournalBeforePlanning(t *testi
 	)
 	prompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", filepath.Join(t.TempDir(), "source"), "--yes"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "unknown config sync transaction phase") {
 		t.Fatalf("invalid recovery: code=%d stdout=%s stderr=%s",
@@ -1932,19 +1836,17 @@ func TestConfigSyncAssumeYesRejectsInvalidRecoveryJournalBeforePlanning(t *testi
 }
 
 func TestConfigSyncNamedStatusLeavesRecoveryPending(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target, transaction := seedConfigSyncRecoveryJournal(t, configHome)
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"-Y", "named", "config", "sync", "status", "--offline"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "recovery: required") {
 		t.Fatalf("named recovery status: code=%d stdout=%s stderr=%s",
@@ -1996,20 +1898,18 @@ func TestConfigSyncReadOnlyModesDoNotRecoverUnrelatedOwnerState(t *testing.T) {
 			},
 		} {
 			t.Run(recovery.name+"/"+invocation.name, func(t *testing.T) {
-				root, _, configHome, environment := configCommandFixture(t)
+				fixture := newFixture(t, withCheckoutConfig())
+				root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 				environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 				journalPath := recovery.path(configHome, environment)
 				journal := []byte("{invalid-owner-recovery\n")
 				writeConfigCommandFile(t, journalPath, string(journal))
 
 				var stdout, stderr bytes.Buffer
-				program, err := New(Options{
+				program := fixture.New(Options{
 					RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
 					Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
 				code := program.Run(context.Background())
 				output := stdout.String() + stderr.String()
 				if code != invocation.wantCode || !strings.Contains(output, invocation.wantText) {
@@ -2037,7 +1937,8 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 		{name: "status", arguments: []string{"sync", "status", "--offline"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, home, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 			target, transaction := seedConfigSyncRecoveryJournal(t, configHome)
 			writeConfigCommandFile(t,
 				filepath.Join(configHome, "yards", "remote", "config.env"),
@@ -2051,14 +1952,11 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 				"SUBYARD_TEST_SSH_LOG="+logPath)
 			arguments := append([]string{"-Y", "remote", "config"}, test.arguments...)
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: arguments,
 				Environment: environment, WorkingDir: root,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("remote %s: code=%d stdout=%s stderr=%s",
 					test.name, code, stdout.String(), stderr.String())
@@ -2078,12 +1976,13 @@ func TestConfigSyncRemoteRoutingIgnoresLocalRecoveryJournal(t *testing.T) {
 }
 
 func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	source := configSourceGitRepository(t, "owner-a", "DEV_UID=2292\n")
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source,
@@ -2092,9 +1991,6 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("source connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2135,15 +2031,12 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 	stdout.Reset()
 	stderr.Reset()
 	pathPrompt := &testkit.Prompt{}
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "path"},
 		Environment: environment, WorkingDir: root, Prompt: pathPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		strings.TrimSpace(stdout.String()) != checkout {
 		t.Fatalf("source path: code=%d stdout=%q stderr=%q",
@@ -2155,15 +2048,12 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "already converged") {
 		t.Fatalf("registered source sync: code=%d stdout=%s stderr=%s",
@@ -2173,7 +2063,7 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 	idempotentPrompt := &testkit.Prompt{}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source,
@@ -2182,9 +2072,6 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 		Environment: environment, WorkingDir: root, Prompt: idempotentPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "already converged") {
 		t.Fatalf("idempotent connect: code=%d stdout=%s stderr=%s",
@@ -2196,12 +2083,13 @@ func TestConfigSourceConnectClonesRegistersAndAppliesWithOnePrompt(t *testing.T)
 }
 
 func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	source := configSharedOnlyGitRepository(t)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source, "--host-id", "owner-a",
@@ -2209,9 +2097,6 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("shared-only source connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2255,15 +2140,12 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--check"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "config sync check: converged") {
 		t.Fatalf("shared-only repeated check: code=%d stdout=%s stderr=%s",
@@ -2272,11 +2154,12 @@ func TestConfigSourceConnectOnboardsSharedOnlySource(t *testing.T) {
 }
 
 func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	source := configSharedOnlyGitRepository(t)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source, "--host-id", "owner-a", "--yes",
@@ -2284,9 +2167,6 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("initial shared-only connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2314,15 +2194,12 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	checkPrompt := &testkit.Prompt{}
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--check", "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: checkPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "config sync check: changes required") ||
 		!strings.Contains(stdout.String(), "config.env") {
@@ -2336,15 +2213,12 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 	declinePrompt := &testkit.Prompt{Answers: []bool{false}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--adopt"},
 		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined host overlay: code=%d stdout=%s stderr=%s",
@@ -2357,16 +2231,13 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--adopt"},
 		Environment: environment, WorkingDir: root,
 		Prompt: &testkit.Prompt{Answers: []bool{true}},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("apply host overlay: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2383,15 +2254,12 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 	runConfigSyncGit(t, checkout, "pull", "--ff-only")
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--check"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "delete") ||
 		!strings.Contains(stdout.String(), "config.env") {
@@ -2401,15 +2269,12 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remove host overlay: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2422,15 +2287,12 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync"},
 		Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 ||
 		!strings.Contains(stdout.String(), "already converged") {
 		t.Fatalf("shared-only repeat sync: code=%d stdout=%s stderr=%s",
@@ -2439,13 +2301,14 @@ func TestConfigSyncTransitionsBetweenSharedOnlyAndHostOverlay(t *testing.T) {
 }
 
 func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	source := configSourceGitRepository(t, "owner-a", "DEV_UID=2293\n")
 	checkout := filepath.Join(home, "declined-source")
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source,
@@ -2455,9 +2318,6 @@ func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) 
 		Config: applier,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined source connect: code=%d stdout=%s stderr=%s",
@@ -2483,10 +2343,11 @@ func TestConfigSourceConnectDeclineLeavesNoCheckoutOrRegistration(t *testing.T) 
 }
 
 func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	preconditionPrompt := &testkit.Prompt{}
 	var stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect",
@@ -2495,9 +2356,6 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 		Environment: environment, WorkingDir: root, Prompt: preconditionPrompt,
 		Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "credentials must not be embedded") {
 		t.Fatalf("credential URL: code=%d stderr=%s", code, stderr.String())
@@ -2517,7 +2375,7 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 		"PATH="+os.Getenv("PATH"),
 		"SUBYARD_TEST_SSH_LOG="+logPath)
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"-Y", "remote", "config", "sync", "connect",
@@ -2527,9 +2385,6 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 		Environment: environment, WorkingDir: root,
 		Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote source forwarding: code=%d stderr=%s", code, stderr.String())
 	}
@@ -2561,15 +2416,12 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 	}
 	before := snapshotLocal()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"-Y", "remote", "config", "set", "DEV_UID", "2456", "--scope", "yard", "--git", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &bytes.Buffer{}, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote Git authoring: code=%d stderr=%s", code, stderr.String())
 	}
@@ -2590,18 +2442,16 @@ func TestConfigSourceConnectRejectsEmbeddedCredentialsAndRemoteForwards(t *testi
 }
 
 func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, environment := fixture.Root, fixture.Environment
 	readOnlyPrompt := &testkit.Prompt{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "status", "--offline"},
 		Environment: environment, WorkingDir: root, Prompt: readOnlyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 {
 		t.Fatalf("unconfigured status: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2622,15 +2472,12 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "source", "path"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 2 {
 		t.Fatalf("removed config source command: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2638,15 +2485,12 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "help"},
 		Environment: environment, WorkingDir: root, Prompt: readOnlyPrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("sync help: code=%d stderr=%s", code, stderr.String())
 	}
@@ -2671,7 +2515,8 @@ func TestConfigSyncStatusNotConfiguredAndOldSourceCommandsAreRemoved(t *testing.
 }
 
 func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
-	root, home, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.Home, fixture.Environment
 	remote := filepath.Join(t.TempDir(), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	environment = append(environment,
@@ -2681,7 +2526,7 @@ func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 		"GIT_COMMITTER_EMAIL=test@invalid",
 	)
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote,
@@ -2690,9 +2535,6 @@ func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("init connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2713,7 +2555,8 @@ func TestConfigSyncConnectInitCreatesInitialCommit(t *testing.T) {
 }
 
 func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote := filepath.Join(t.TempDir(), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	checkout := filepath.Join(home, "existing-empty")
@@ -2730,7 +2573,7 @@ func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) 
 	before := snapshotConfigCheckout(t, checkout)
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote, "--checkout", checkout,
@@ -2739,9 +2582,6 @@ func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) 
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined existing init: code=%d stdout=%s stderr=%s",
@@ -2756,7 +2596,8 @@ func TestConfigSyncConnectInitDeclineLeavesExistingCheckoutUnborn(t *testing.T) 
 }
 
 func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) {
-	root, home, _, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.Home, fixture.Environment
 	remote := filepath.Join(t.TempDir(), "empty.git")
 	runConfigSyncGit(t, filepath.Dir(remote), "init", "--bare", "-q", remote)
 	checkout := filepath.Join(home, "existing-empty")
@@ -2777,7 +2618,7 @@ func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) 
 		}
 	}}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote, "--checkout", checkout,
@@ -2786,9 +2627,6 @@ func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) 
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("accepted existing init: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2800,7 +2638,8 @@ func TestConfigSyncConnectInitChangesExistingCheckoutAfterConsent(t *testing.T) 
 }
 
 func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	source := filepath.Join(t.TempDir(), "source")
 	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"),
 		"{\n  \"schemaVersion\": 1\n}\n")
@@ -2829,7 +2668,7 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", source,
@@ -2839,9 +2678,6 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 		Incus: fake, Executor: fake, Config: applier,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("connect --apply: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2855,13 +2691,14 @@ func TestConfigSyncConnectApplyRefreshesAffectedRunningYardWithOnePrompt(t *test
 }
 
 func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2295\n",
 	)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote,
@@ -2870,9 +2707,6 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2890,15 +2724,12 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	declinePrompt := &testkit.Prompt{Answers: []bool{false}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "pull"},
 		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined pull: code=%d stdout=%s stderr=%s",
@@ -2923,15 +2754,12 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "status"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "relation: behind 1") {
 		t.Fatalf("behind status: code=%d stdout=%s stderr=%s",
@@ -2941,15 +2769,12 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	prompt := &testkit.Prompt{Answers: []bool{true}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "pull"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("pull: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -2984,15 +2809,12 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	manifestBefore := mustReadConfigFixture(t, configsync.ManifestPath(configHome))
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "pull", "--yes"},
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "hosts/owner-a/yards/demo/config.env:1: DEV_SUDO") ||
 		!strings.Contains(stderr.String(), "yards/demo/config.env:1: SSH_PORT") {
@@ -3007,13 +2829,14 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 }
 
 func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2296\n",
 	)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote,
@@ -3022,9 +2845,6 @@ func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -3046,15 +2866,12 @@ func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.
 	prompt := &testkit.Prompt{Answers: []bool{false}}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "pull"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("manifest-only pull decline: code=%d stdout=%s stderr=%s",
@@ -3075,7 +2892,8 @@ func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.
 }
 
 func TestConfigSyncPullAndPushNoOpsDoNotPromptOrMutate(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, _ := configBareSourceRepository(
 		t, "owner-a", "DEV_UID='2297'\n",
 	)
@@ -3087,7 +2905,7 @@ func TestConfigSyncPullAndPushNoOpsDoNotPromptOrMutate(t *testing.T) {
 	)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote,
@@ -3096,9 +2914,6 @@ func TestConfigSyncPullAndPushNoOpsDoNotPromptOrMutate(t *testing.T) {
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -3122,14 +2937,11 @@ func TestConfigSyncPullAndPushNoOpsDoNotPromptOrMutate(t *testing.T) {
 			prompt := &testkit.Prompt{}
 			stdout.Reset()
 			stderr.Reset()
-			program, err := New(Options{
+			program := mustNew(t, Options{
 				RepositoryRoot: root, Program: "yard", Arguments: test.arguments,
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 ||
 				!strings.Contains(stdout.String(), "already converged") {
 				t.Fatalf("no-op %s: code=%d stdout=%s stderr=%s",
@@ -3197,7 +3009,8 @@ func TestConfigSyncNoOpPreflightDoesNotRefreshRegisteredIndex(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("GIT_OPTIONAL_LOCKS", "1")
-			root, home, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 			remote, _ := configBareSourceRepository(
 				t, "owner-a", "DEV_UID='2297'\n",
 			)
@@ -3210,7 +3023,7 @@ func TestConfigSyncNoOpPreflightDoesNotRefreshRegisteredIndex(t *testing.T) {
 			)
 			checkout := filepath.Join(home, ".local", "share", "subyard-config")
 			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
+			program := fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments: []string{
 					"config", "sync", "connect", remote,
@@ -3219,9 +3032,6 @@ func TestConfigSyncNoOpPreflightDoesNotRefreshRegisteredIndex(t *testing.T) {
 				Environment: environment, WorkingDir: root,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("connect: code=%d stdout=%s stderr=%s",
 					code, stdout.String(), stderr.String())
@@ -3278,15 +3088,12 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 			prompt := &testkit.Prompt{}
 			stdout.Reset()
 			stderr.Reset()
-			program, err = New(Options{
+			program = fixture.New(Options{
 				RepositoryRoot: root, Program: "yard",
 				Arguments:   test.arguments(remote, checkout),
 				Environment: environment, WorkingDir: root, Prompt: prompt,
 				Stdout: &stdout, Stderr: &stderr,
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("no-op %s: code=%d stdout=%s stderr=%s",
 					test.name, code, stdout.String(), stderr.String())
@@ -3400,11 +3207,8 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 			}
 			f.stdout.Reset()
 			f.stderr.Reset()
-			program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,
+			program := mustNew(t, Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,
 				Environment: f.environment, WorkingDir: f.root, Stdout: &f.stdout, Stderr: &f.stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
 			ctx, cancel := context.WithTimeout(context.Background(), test.budget)
 			defer cancel()
 			started := time.Now()
@@ -3460,13 +3264,14 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 }
 
 func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2297\n",
 	)
 	checkout := filepath.Join(home, ".local", "share", "subyard-config")
 	var stdout, stderr bytes.Buffer
-	program, err := New(Options{
+	program := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
 			"config", "sync", "connect", remote,
@@ -3475,9 +3280,6 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 		Environment: environment, WorkingDir: root,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("connect: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
@@ -3506,15 +3308,12 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	prompt := &testkit.Prompt{}
 	stdout.Reset()
 	stderr.Reset()
-	program, err = New(Options{
+	program = fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "sync", "status"},
 		Environment: environment, WorkingDir: root, Prompt: prompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stdout.String(), "fetch: fresh") ||
 		!strings.Contains(stdout.String(), "relation: behind 1") {
@@ -3547,7 +3346,8 @@ func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
 		".sync/settings/overrides/shared/config.env", ".sync/settings/config.env", ".sync/settings/yards/neighbor/config.env",
 	} {
 		t.Run(relative, func(t *testing.T) {
-			root, _, home, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig())
+			root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			path := filepath.Join(home, relative)
 			const original = "# existing configuration\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
 			writeConfigCommandFile(t, path, original)
@@ -3586,7 +3386,8 @@ func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
 }
 
 func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	host := filepath.Join(home, "config.env")
 	neighbor := filepath.Join(home, "yards/neighbor/config.env")
 	const hostContent = "GIT_USER_EMAIL=$INVALID_HOST_REFERENCE\nDEV_SUDO=invalid\n"
@@ -3622,7 +3423,8 @@ func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
 
 // Argument refusals keep the command diagnostic when the selected yard load fails.
 func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.T) {
-	root, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	yardFile := filepath.Join(home, "yards/default/config.env")
 	const yardContent = "GIT_USER_NAME=$INVALID_YARD_REFERENCE\n"
 	writeConfigCommandFile(t, yardFile, yardContent)
@@ -3656,7 +3458,8 @@ func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.
 }
 
 func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
-	source, _, home, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	source, home, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	root := checkoutMirrorFixture(t, source)
 	flat := filepath.Join(home, "yards/neighbor.env")
 	overlay := filepath.Join(root, "private/yards/neighbor.env")
@@ -3694,7 +3497,8 @@ func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 }
 
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2297\nDEV_SUDO=yes\n",
 	)
@@ -3709,14 +3513,11 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 		t.Helper()
 		stdout.Reset()
 		stderr.Reset()
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard",
 			Arguments: arguments, Environment: environment, WorkingDir: root,
 			Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		return program.Run(context.Background())
 	}
 	if code := run(
@@ -3753,15 +3554,12 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	declinePrompt := &testkit.Prompt{Answers: []bool{false}}
 	stdout.Reset()
 	stderr.Reset()
-	declineProgram, err := New(Options{
+	declineProgram := fixture.New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments:   []string{"config", "set", "DEV_UID", "2298", "--scope", "host", "--git"},
 		Environment: environment, WorkingDir: root, Prompt: declinePrompt,
 		Stdout: &stdout, Stderr: &stderr,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if code := declineProgram.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("declined push: code=%d stdout=%s stderr=%s",
@@ -3934,7 +3732,8 @@ func TestConfigGitStatusParsingAndURLRedaction(t *testing.T) {
 }
 
 func TestConfigSyncPushRejectsConcurrentRemoteAdvanceWithoutForce(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2301\n",
 	)
@@ -4492,7 +4291,8 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 		{name: "TOML", agent: "codex", destination: ".codex/config.toml", payload: "model = \"gpt-5\"\n", formatted: "model=\"gpt-5\"\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, _, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, environment := fixture.Root, fixture.Environment
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			source := filepath.Join(t.TempDir(), "imported-without-extension")
 			writeConfigCommandFile(t, source, test.payload)
@@ -4503,10 +4303,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
 			}, GuestTokens: map[string]string{}}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
 			assess := func(converged bool, fingerprint string) configTargetAssessment {
 				t.Helper()
 				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
@@ -4554,16 +4351,14 @@ func TestConfigSelectionRejectsInvalidAndForbiddenRequestsBeforeConsent(t *testi
 		{"inherited host request", "codex", "host", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			yard := filepath.Join(configHome, "yards/lab/config.env")
 			original := "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n"
 			writeConfigCommandFile(t, yard, original)
 			prompt := &testkit.Prompt{Answers: []bool{true}}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: []string{"-Y", "lab", "config", "set", "CODING_TOOL_INTEGRATIONS", test.value, "--scope", test.scope}, Prompt: prompt, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: []string{"-Y", "lab", "config", "set", "CODING_TOOL_INTEGRATIONS", test.value, "--scope", test.scope}, Prompt: prompt, Stderr: &stderr})
 			code := program.Run(context.Background())
 			if test.allowed {
 				if code != 0 || len(prompt.Requests) != 1 {
@@ -4583,7 +4378,8 @@ func TestConfigSelectionRejectsInvalidAndForbiddenRequestsBeforeConsent(t *testi
 func TestConfigYardAuthoringWaitsForIntegrationLock(t *testing.T) {
 	for _, fileSetting := range []bool{false, true} {
 		t.Run(fmt.Sprint(fileSetting), func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			target := filepath.Join(configHome, "yards/default/config.env")
 			writeConfigCommandFile(t, target, "CODING_TOOL_INTEGRATIONS=''\n")
 			arguments := []string{"config", "set", "SSH_PORT", "2237", "--scope", "yard", "--yes"}
@@ -4593,10 +4389,7 @@ func TestConfigYardAuthoringWaitsForIntegrationLock(t *testing.T) {
 				target = filepath.Join(configHome, "yards/default/overrides/agents/codex/rules/repo.rules")
 				arguments = []string{"config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--yes"}
 			}
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: arguments})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: arguments})
 			loaded := loadConfigCommandContext(t, root, environment, "default")
 			unlock, err := lockIntegrationYard(context.Background(), loaded)
 			if err != nil {
@@ -4631,7 +4424,8 @@ func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T
 		{"unset releases policy", "YARD_TEMPLATE=test-vms\nCODING_TOOL_INTEGRATIONS=''\n", "unset", "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			fixture := newFixture(t, withCheckoutConfig(), withWorkingDir(""))
+			root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 			target := filepath.Join(configHome, "yards/ordinary/config.env")
 			writeConfigCommandFile(t, target, test.initial)
 			args := []string{"-Y", "ordinary", "config", test.action, "YARD_TEMPLATE"}
@@ -4641,10 +4435,7 @@ func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T
 			args = append(args, "--scope", "yard")
 			prompt := &testkit.Prompt{Answers: []bool{true}}
 			var stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: args, Prompt: prompt, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
+			program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Arguments: args, Prompt: prompt, Stderr: &stderr})
 			code := program.Run(context.Background())
 			if test.allowed {
 				if code != 0 || len(prompt.Requests) != 1 {
@@ -4668,7 +4459,8 @@ func TestConfigTemplateTransitionChecksDestinationRoleBeforeConsent(t *testing.T
 }
 
 func TestConfigUnsetRemovesIgnoredProfileOnlyAssignments(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	host := filepath.Join(configHome, "config.env")
 	settings, err := os.ReadFile(host)
 	if err != nil {
@@ -4677,14 +4469,11 @@ func TestConfigUnsetRemovesIgnoredProfileOnlyAssignments(t *testing.T) {
 	writeConfigCommandFile(t, host, string(settings)+"YARD_DEVICES=fuse\nYARD_CAPS=nesting\n")
 	run := func(arguments ...string) (int, string) {
 		var stdout, stderr bytes.Buffer
-		program, err := New(Options{
+		program := fixture.New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
 			Stdout: &stdout, Stderr: &stderr,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		return program.Run(context.Background()), stdout.String() + stderr.String()
 	}
 	if code, output := run("config", "show"); code != 0 || !strings.Contains(output, "YARD_CAPS in "+host+":") || !strings.Contains(output, "YARD_DEVICES in "+host+":") {

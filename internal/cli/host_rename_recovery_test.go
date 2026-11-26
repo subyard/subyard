@@ -23,7 +23,8 @@ import (
 )
 
 func TestQueuedHostRenameCannotRecreateRetiredConfiguration(t *testing.T) {
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	program := configExactProgram(t, root, environment, nil, nil)
 	authority, err := program.observeHostRenameAuthority(context.Background(), configHome)
 	if err != nil {
@@ -104,7 +105,8 @@ func pendingSourceRenameFixture(t *testing.T, sealed bool) (*CLI, config.Loaded,
 	testkit.UseHostTempDir(t)
 	t.Helper()
 
-	root, home, configHome, environment := configCommandFixture(t)
+	fixture := newFixture(t, withCheckoutConfig())
+	root, home, configHome, environment := fixture.Root, fixture.Home, fixture.ConfigHome, fixture.Environment
 	if sealed {
 		runtimeRoot := aliasRepairRuntimeFixture(t, home)
 		root = sourceAdmissionToolingFixture(t, runtimeRoot)
@@ -161,10 +163,7 @@ func pendingSourceRenameFixture(t *testing.T, sealed bool) (*CLI, config.Loaded,
 		t.Fatal(err)
 	}
 	writeConfigCommandFile(t, configsync.HostIDRenameTransactionPath(configHome), string(payload))
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	return program, loaded, configHome, source, environment
 }
 
@@ -173,10 +172,7 @@ func TestOrdinaryHostRenameRetryReportsRecoveredSuccess(t *testing.T) {
 	head := configSourceGitOutput(t, source, "rev-parse", "HEAD")
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{}
-	retry, err := New(Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	retry := mustNew(t, Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := retry.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "rename recovered") || len(prompt.Requests) != 0 {
 		t.Fatalf("retry code=%d stdout=%s stderr=%s prompts=%d", code, stdout.String(), stderr.String(), len(prompt.Requests))
 	}
@@ -286,10 +282,7 @@ func TestOrdinaryHostRenameRetryDoesNotReportRolledBackPairAsRecovered(t *testin
 	writeConfigCommandFile(t, filepath.Join(home, "config.env"), "YARD_IMAGE=images:ubuntu/24.04\n")
 	var stdout, stderr bytes.Buffer
 	prompt := &testkit.Prompt{}
-	retry, err := New(Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
-	if err != nil {
-		t.Fatal(err)
-	}
+	retry := mustNew(t, Options{RepositoryRoot: program.options.RepositoryRoot, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: program.options.RepositoryRoot, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
 	if code := retry.Run(context.Background()); code != 1 || strings.Contains(stdout.String(), "rename recovered") || len(prompt.Requests) != 0 {
 		t.Fatalf("retry code=%d stdout=%s stderr=%s prompts=%d", code, stdout.String(), stderr.String(), len(prompt.Requests))
 	}
