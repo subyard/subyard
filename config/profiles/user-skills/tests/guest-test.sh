@@ -108,4 +108,27 @@ links_are ''
 mkdir -p "$store/owner/ipv6/skills/v6" && printf 'v6\n' >"$store/owner/ipv6/skills/v6/SKILL.md"
 run apply 'git@[::1]:owner/ipv6.git'
 [ "$(readlink "$skills/v6")" = "$store/owner/ipv6/skills/v6" ] || fail 'bracketed SCP host misparsed'
+# GitHub sources rewritten to the GitHub broker transport clone; other helper transports stay refused.
+repo owner/brokered via-broker
+mkdir -p "$work/bin"
+cat >"$work/bin/git-remote-subyard-github" <<'HELPER'
+#!/bin/sh
+# Fake broker: serve https://github.com/OWNER/REPO from the fixture repository $FAKE_GITHUB/OWNER/REPO.
+while read -r command service; do
+  case "$command" in
+    capabilities) printf 'connect\n\n' ;;
+    connect) printf '\n'; exec git "${service#git-}" "$FAKE_GITHUB/${2#*://*/}" ;;
+    *) exit 1 ;;
+  esac
+done
+HELPER
+chmod +x "$work/bin/git-remote-subyard-github"
+ln -s git-remote-subyard-github "$work/bin/git-remote-other"
+printf '%s\n' '[protocol "subyard-github"]' 'allow = always' '[url "subyard-github::https://github.com/"]' \
+  'insteadOf = https://github.com/' '[protocol "other"]' 'allow = always' '[url "other::https://other.example/"]' \
+  'insteadOf = https://other.example/' >"$work/gitconfig"
+brokered() { PATH="$work/bin:$PATH" GIT_CONFIG_GLOBAL="$work/gitconfig" FAKE_GITHUB="$work" run "$@"; }
+brokered apply https://github.com/owner/brokered https://other.example/owner/more 2>"$work/stderr"
+[ "$(readlink "$skills/via-broker")" = "$store/owner/brokered/skills/via-broker" ] || fail 'broker transport refused'
+grep -q 'warning: could not clone owner/more;' "$work/stderr" || fail 'allowed an unlisted transport'
 printf 'ok: user-skills guest hook\n'
