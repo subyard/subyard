@@ -352,9 +352,13 @@ approval_file_present() {
 }
 
 check_approval_hash() {
+  local actual
   if approval_file_present "$1" "$2" "$3" "$4"; then
-    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
-      || refuse "$4 content drifted; run yard init"
+    if actual="$(sha256sum 2>/dev/null < "$1")"; then
+      [ "${actual%% *}" = "$2" ] || refuse "$4 content drifted; run yard init"
+    else
+      refuse "$4 could not be read; run yard init"
+    fi
   fi
 }
 

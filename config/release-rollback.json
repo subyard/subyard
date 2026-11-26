@@ -51,7 +51,7 @@
       "throughVersion": "0.32.0",
       "reason": "Managed Claude instructions added after 0.32.0 remain active after rollback.",
       "recovery": "After rollback, back up and remove the listed Subyard-managed file in each affected yard if its rule is unwanted, then restart Claude sessions. Account for custom installation paths.",
-      "sourceDigest": "eb4eb12897b9ce34017320821ef9260b94cdc32efb61f5eebbd97deaefbc04f3",
+      "sourceDigest": "f17f1163b7daa719210fe54c384539468d712587f9a6c2b06366a613df081768",
       "files": [
         "/etc/claude-code/CLAUDE.md"
       ]

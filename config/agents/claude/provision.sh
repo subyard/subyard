@@ -355,9 +355,13 @@ approval_file_present() {
 }
 
 check_approval_hash() {
+  local actual
   if approval_file_present "$1" "$2" "$3" "$4"; then
-    [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] \
-      || refuse "$4 content drifted; run yard init"
+    if actual="$(sha256sum 2>/dev/null < "$1")"; then
+      [ "${actual%% *}" = "$2" ] || refuse "$4 content drifted; run yard init"
+    else
+      refuse "$4 could not be read; run yard init"
+    fi
   fi
 }
 
@@ -412,8 +416,6 @@ instructions_md="$(printf '<!-- %s: yard init installs and checks this file. -->
 # Subyard rules
 
 - Delete by literal absolute path: no globs, relative paths, variables or `$(...)` in `rm` targets.
-  Claude Code asks before deleting a target it cannot resolve statically, even in bypass mode,
-  and no allow rule or hook can skip that prompt.
 INSTRUCTIONS
 )"
 if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
@@ -427,10 +429,10 @@ if [ "$GIT_APPROVAL" = prompt ] || [ "$DEV_SUDO" = prompt ]; then
 fi
 for path in "$update_policy" "$hook_policy" "$git_policy" "$sudo_policy" "$instructions" "$CHECK_PATH"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
-    die 'managed path is not a regular file'
+    die "managed path is not a regular file: $path"
   fi
   if [ -f "$path" ]; then
-    grep -Fq "$MARKER" "$path" || die 'existing file belongs to another policy'
+    grep -Fq "$MARKER" "$path" || die "existing file belongs to another policy: $path"
   fi
 done
 if [ -L "$BIN_LINK" ]; then

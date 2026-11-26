@@ -180,12 +180,12 @@ rm "$policy"
 cp "$instructions" "$tmp/instructions"
 printf '# operator rules\n' > "$instructions"
 if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'foreign instructions were overwritten'; fi
-grep -Fq 'existing file belongs to another policy' "$tmp/error" || fail 'foreign instructions refusal not named'
+grep -Fxq "Claude policy: existing file belongs to another policy: $instructions" "$tmp/error" || fail 'foreign instructions refusal not named'
 [ ! -e "$policy" ] && [ "$(cat "$instructions")" = '# operator rules' ] || fail 'foreign instructions refusal mutated'
 rm "$instructions"
 ln -s "$tmp/instructions" "$instructions"
 if run_hook "$root" >/dev/null 2>"$tmp/error"; then fail 'instructions symlink accepted'; fi
-grep -Fq 'managed path is not a regular file' "$tmp/error" || fail 'instructions symlink refusal not named'
+grep -Fxq "Claude policy: managed path is not a regular file: $instructions" "$tmp/error" || fail 'instructions symlink refusal not named'
 rm "$instructions"
 
 # The update lock and arbiter are independent of either approval policy.
@@ -213,12 +213,23 @@ CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
 cmp "$instructions" "$tmp/instructions" || fail 'off mode changed the instructions'
 jq -e '.env == {DISABLE_UPDATES: "1"}' "$update_policy" >/dev/null
 "$check" | grep -F >/dev/null 'managed Git prompts off'
+# The managed directory is checked without any approval hook as well.
+assert_claude_dir_drift() {
+  chmod 0775 "$(dirname "$policy_dir")"
+  if "$check" >/dev/null 2>"$tmp/dir-drift.err"; then fail "managed Claude directory drift passed readiness: $1"; fi
+  grep -Fxq 'claude-policy-check: managed Claude directory drifted; run yard init' "$tmp/dir-drift.err" \
+    || fail "managed Claude directory drift was not reported: $1"
+  chmod 0755 "$(dirname "$policy_dir")"
+  "$check" >/dev/null || fail "restored managed Claude directory failed readiness: $1"
+}
+assert_claude_dir_drift 'prompts off'
 cp "$tmp/git-policy" "$policy"
 if "$check" >/dev/null 2>&1; then fail 'off mode accepted a stale Git policy'; fi
 if CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
 run_hook "$root" >/dev/null
 cmp "$policy" "$tmp/git-policy"
 [ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
+assert_claude_dir_drift 'prompts on'
 
 # Migrate an old combined file. Both policies and the one arbiter survive reprovision.
 jq -s '.[0] * .[1] * .[2] | .permissions.ask += ["Bash(sudo)", "Bash(sudo:*)"] |
@@ -361,6 +372,15 @@ mv "$policy.saved" "$policy"
 mv "$instructions.saved" "$instructions"
 chmod 0644 "$policy" "$instructions"
 "$check" >/dev/null || fail 'restored policy did not restore readiness'
+# An unreadable file is reported as such, never as content drift.
+if [ "$(id -u)" != 0 ]; then
+  chmod 0200 "$instructions"
+  if "$check" >/dev/null 2>"$tmp/refusals.err"; then fail 'unreadable instructions passed readiness'; fi
+  printf '%s\n' 'claude-policy-check: managed Claude instructions permissions drifted; run yard init' \
+    'claude-policy-check: managed Claude instructions could not be read; run yard init' > "$tmp/unreadable.expected"
+  diff "$tmp/unreadable.expected" "$tmp/refusals.err" >&2 || fail 'unreadable instructions were misreported'
+  chmod 0644 "$instructions"
+fi
 # Hermetic callers without an explicit fixture home must never reach the caller's own home.
 mkdir -p "$tmp/home/.local/bin"
 ln -s "$dev_home/data/claude/versions/2.0.1" "$tmp/home/.local/bin/claude"
