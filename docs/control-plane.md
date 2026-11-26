@@ -458,6 +458,10 @@ independent. Boundary-owned fixed texts and sentinels enter as `PublicConfigDiag
 `config.KnownCause`; operation sentinels such as a stale plan keep their own text. The CLI renders
 only configuration validation and usage causes this way; other preparation failures keep their
 fixed diagnostics. An integration is named only when the shipped catalog contains it.
+RPC errors carry the typed refusals `config.Diagnose` collects, with each code's stable name
+from `ConfigRefusalCode.Name`, and every release-gate blocker with its typed action, in the
+error's `data` ([Yard RPC errors](../api/yard-rpc/v1/README.md#error-refusals)); other causes
+only mark that data incomplete.
 Independent load stages merge their causes into one stable collection.
 
 Configuration diagnostics guarantee that no setting value, secret or absolute path is printed,

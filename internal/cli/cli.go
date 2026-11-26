@@ -370,14 +370,6 @@ const (
 	rpcTransitionRequiredCode = rpc.CodeTransitionRequired
 )
 
-func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
-	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
-	if err != nil {
-		return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: outcome.Message}
-	}
-	return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: string(payload)}
-}
-
 func New(options Options) (*CLI, error) {
 	root, err := filepath.Abs(options.RepositoryRoot)
 	if err != nil {
@@ -4081,7 +4073,7 @@ func operationRPCError(fallback rpc.ErrorCode, err error) *rpc.Error {
 		domain.ActionPolicyErrorClass(err) == domain.ActionPolicyInvalid {
 		code = rpc.CodeActionPolicyInvalid
 	}
-	return &rpc.Error{Code: code, Message: err.Error()}
+	return rpc.RefusalError(code, err.Error(), configRefusalData(err))
 }
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {

@@ -100,7 +100,7 @@ impl Model {
             }
             Err(error) => {
                 // Retain the last authoritative view, visibly marked unavailable.
-                host.status = format!("{}: {}", error.code, error.message);
+                host.status = error.summary();
                 host.fresh = false;
                 host.failed = true;
             }
@@ -409,6 +409,30 @@ mod tests {
         assert_eq!(model.hosts.len(), 2);
         assert!(model.select(Some("remote".into()), None));
         assert!(model.host().status.contains("Refreshing"));
+    }
+
+    #[test]
+    fn owner_refusals_and_next_steps_reach_the_host_status() {
+        let mut model = Model::new(vec![remote()]);
+        let mut error = NativeError::new("owner_repair_required", "Repair the owner.");
+        error.refusals = Some(veranda_lib::refusals::Refusals {
+            items: vec![veranda_lib::refusals::Refusal {
+                source: "release-gate".into(),
+                code: "precondition-blocked".into(),
+                resource: None,
+                text: "yard default has a pending configuration change".into(),
+                next: None,
+                command: Some("yard migrate".into()),
+            }],
+            omitted: 0,
+            incomplete: false,
+        });
+        model.update(&Some("remote".into()), Err(error));
+        let status = &model.hosts[1].status;
+        assert_eq!(
+            status,
+            "owner_repair_required: Repair the owner.\n• yard default has a pending configuration change\n  Next: run yard migrate"
+        );
     }
 
     #[test]

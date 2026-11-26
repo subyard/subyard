@@ -20,6 +20,24 @@ Responses may arrive out of request order: correlate by ID. A typed error has
 [`vocabulary.json`](vocabulary.json) owns the protocol version, methods, capabilities,
 error codes and event names. Errors in its `release-gate` group require owner repair.
 
+## Error refusals
+
+An error may carry `data` (`frame.schema.json#/$defs/errorData`, capability
+`error-data-v1`): every independent typed refusal the owner determined, in the
+owner's stable order. Each refusal has a `source` (`config` or `release-gate`), a
+stable `code`, a value-free `text`, and optionally the refused `resource`, a `next`
+step and a typed `action` (`verb`, optional `yard` or `version`, and the rendered
+`command`). Configuration refusals name only validated profile, setting,
+integration or yard-kind names, never a setting value, secret or path. At most 32
+refusals are sent; `omitted` counts the rest. Texts are at most 512 bytes and
+contain no control characters. `incomplete` means the error also had causes that
+are not typed refusals; the owner's own diagnostics (`config validate`,
+`yard migrate --check`) report them. A release-gate refusal adds `gate`, the public
+gate outcome (status, code, releases, transaction, action and at most 32 redacted
+decisions), and its `message` is the outcome message. Other errors carry no `data`.
+`data` is optional: older clients ignore it, and older owners omit it, in which
+case clients keep their fixed text for the error `code`.
+
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,
 `protocolMax`, `engineVersion`, and `capabilities`. Product version compatibility

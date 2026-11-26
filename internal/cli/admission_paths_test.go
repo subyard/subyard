@@ -123,7 +123,7 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 	refused := func(t *testing.T, err error) {
 		t.Helper()
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "transition-required" || fault.Message != blockedGateRefusal {
+		if !ok || fault.Code != "transition-required" || fault.Message != "activation drift" || string(rpcGatePayload(fault)) != blockedGateRefusal {
 			t.Fatalf("gate refusal=%#v", err)
 		}
 	}
@@ -189,7 +189,7 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 	}
 	fault := func(err error) (string, string) {
 		if fault, ok := err.(*rpc.Error); ok {
-			return string(fault.Code), fault.Message
+			return string(fault.Code), string(rpcGatePayload(fault))
 		}
 		return "", ""
 	}

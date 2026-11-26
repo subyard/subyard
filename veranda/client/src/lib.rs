@@ -4,6 +4,7 @@ pub mod client;
 pub mod connections;
 pub mod local_fleet;
 pub mod observation;
+pub mod refusals;
 pub mod sessions;
 pub mod ssh;
 pub mod transport;

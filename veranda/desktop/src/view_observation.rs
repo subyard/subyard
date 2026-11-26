@@ -719,10 +719,7 @@ mod tests {
             generation,
             &None,
             true,
-            Err(NativeError {
-                code: "synthetic".into(),
-                message: "unavailable".into(),
-            }),
+            Err(NativeError::new("synthetic", "unavailable")),
         );
         assert_eq!(action, ReadAction::Applied);
         view.fleet(
@@ -748,10 +745,7 @@ mod tests {
             generation + 1,
             &None,
             true,
-            Err(NativeError {
-                code: "synthetic".into(),
-                message: "unavailable".into(),
-            }),
+            Err(NativeError::new("synthetic", "unavailable")),
         );
         assert_eq!(action, ReadAction::Ignored);
         view.fleet(
