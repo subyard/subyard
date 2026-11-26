@@ -63,6 +63,21 @@ fn unknown_fields_are_ignored_and_markers_are_rendered() {
 }
 
 #[test]
+fn a_refusal_from_an_unknown_source_is_skipped_and_marks_the_data_incomplete() {
+    let mut data = valid();
+    let known = data["refusals"][0].clone();
+    data["refusals"] = json!([{"source": "future-source", "shape": ["other"]}, known]);
+    let refusals = parse(&data).unwrap();
+    assert_eq!(refusals.items.len(), 1);
+    assert_eq!(refusals.items[0].source, "config");
+    assert!(refusals.incomplete);
+    assert_eq!(
+        refusals.lines().last().map(String::as_str),
+        Some("Other causes are reported only in the owner's diagnostics.")
+    );
+}
+
+#[test]
 fn data_outside_the_contract_is_rejected_whole() {
     type Mutation = Box<dyn Fn(&mut Value)>;
     let cases: Vec<(&str, Mutation, Rejected)> = vec![
@@ -90,9 +105,9 @@ fn data_outside_the_contract_is_rejected_whole() {
             Rejected::Bounds,
         ),
         (
-            "source",
-            Box::new(|v| v["refusals"][0]["source"] = json!("shell")),
-            Rejected::Text,
+            "source type",
+            Box::new(|v| v["refusals"][0]["source"] = json!(7)),
+            Rejected::Shape,
         ),
         (
             "code",

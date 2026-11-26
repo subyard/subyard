@@ -37,7 +37,7 @@ pub struct Refusals {
 #[serde(rename_all = "camelCase")]
 struct WireData {
     schema_version: u32,
-    refusals: Vec<WireRefusal>,
+    refusals: Vec<Value>,
     #[serde(default)]
     omitted: u32,
     #[serde(default)]
@@ -80,8 +80,11 @@ impl Rejected {
     }
 }
 
+const SOURCES: [&str; 2] = ["config", "release-gate"];
+
 /// Accepts the whole data object or nothing: a partially valid list could
-/// hide the refusal that matters.
+/// hide the refusal that matters. Only a refusal from a source this client
+/// does not know is skipped, and the result is then marked incomplete.
 pub fn parse(data: &Value) -> Result<Refusals, Rejected> {
     let wire = WireData::deserialize(data).map_err(|_| Rejected::Shape)?;
     if wire.schema_version != 1 {
@@ -91,9 +94,18 @@ pub fn parse(data: &Value) -> Result<Refusals, Rejected> {
         return Err(Rejected::Bounds);
     }
     let mut items = Vec::with_capacity(wire.refusals.len());
+    let mut incomplete = wire.incomplete;
     for refusal in wire.refusals {
-        if !matches!(refusal.source.as_str(), "config" | "release-gate")
-            || !name(&refusal.code)
+        match refusal.get("source").and_then(Value::as_str) {
+            Some(source) if SOURCES.contains(&source) => {}
+            Some(_) => {
+                incomplete = true;
+                continue;
+            }
+            None => return Err(Rejected::Shape),
+        }
+        let refusal = WireRefusal::deserialize(refusal).map_err(|_| Rejected::Shape)?;
+        if !name(&refusal.code)
             || !text(&refusal.text, MAX_TEXT)
             || !optional(&refusal.resource, MAX_NAME)
             || !optional(&refusal.next, MAX_TEXT)
@@ -124,7 +136,7 @@ pub fn parse(data: &Value) -> Result<Refusals, Rejected> {
     Ok(Refusals {
         items,
         omitted: wire.omitted,
-        incomplete: wire.incomplete,
+        incomplete,
     })
 }
 
