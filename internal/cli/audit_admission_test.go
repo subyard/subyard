@@ -58,6 +58,11 @@ func TestLateAuditWriterCannotRecreateOrEnterNewInstallation(t *testing.T) {
 			if err := audit.WriteInvocation(audit.Invocation{Home: home, Command: "late.finish", BeforeWrite: admission}); err != nil {
 				t.Fatal(err)
 			}
+			// A long-lived RPC session admits its error log the same way.
+			if err := (audit.RPCErrorLog{Home: home, BeforeWrite: admission}).Append(audit.RPCError{
+				Request: "late", Method: "operation.plan", Code: "internal", Error: "late failure"}); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := os.Stat(filepath.Join(home, "logs")); !os.IsNotExist(err) {
 				t.Fatal("late writer created audit root", err)
 			}

@@ -312,11 +312,8 @@ func (session Session) Serve(ctx context.Context, input io.Reader, output io.Wri
 			response := Response{Version: ProtocolVersion, Type: "response", ID: request.ID,
 				OperationID: operationID, Result: result}
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(context.Cause(operationContext), contextCanceled) {
-					err = contextCanceled
-				}
 				response.Result = nil
-				response.Error = asFault(err)
+				response.Error = FaultOf(operationContext, err)
 			}
 			// A response makes the operation observably complete. Release its ID before enqueueing
 			// that response so a client can immediately use the same ID for the next protocol phase.

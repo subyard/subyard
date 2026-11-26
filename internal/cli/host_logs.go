@@ -44,11 +44,12 @@ func (cli *CLI) runHostLogs(arguments []string) int {
 			return 1
 		}
 		for _, record := range records {
-			fmt.Fprintf(cli.options.Stdout, "%s request=%s", record.At.Format(time.RFC3339), record.Request)
+			fmt.Fprintf(cli.options.Stdout, "%s request=%s", record.At.Format(time.RFC3339), printable(record.Request))
 			if record.Operation != "" && record.Operation != record.Request {
-				fmt.Fprintf(cli.options.Stdout, " operation=%s", record.Operation)
+				fmt.Fprintf(cli.options.Stdout, " operation=%s", printable(record.Operation))
 			}
-			fmt.Fprintf(cli.options.Stdout, " method=%s code=%s -- %s\n", record.Method, record.Code, record.Error)
+			fmt.Fprintf(cli.options.Stdout, " method=%s code=%s -- %s\n",
+				printable(record.Method), printable(record.Code), printable(record.Error))
 		}
 		return 0
 	}
@@ -127,6 +128,13 @@ func parseHostLogOptions(arguments []string) (hostLogOptions, error) {
 		return hostLogOptions{}, errors.New("host log selector is required")
 	}
 	return result, nil
+}
+
+// printable escapes control and format characters, so a record stays one
+// terminal line that cannot carry escape sequences.
+func printable(value string) string {
+	quoted := strconv.Quote(value)
+	return quoted[1 : len(quoted)-1]
 }
 
 // hostDataHome is the absolute Subyard data home of this host, or empty.

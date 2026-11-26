@@ -35,15 +35,25 @@ type RPCError struct {
 
 // RPCErrorLog keeps failed RPC requests in logs/rpc-errors.log under the
 // Subyard data home, with one previous generation, each about Maximum bytes.
+// BeforeWrite admits each write like an Invocation's, so a late session
+// neither recreates a removed installation nor enters a new one.
 type RPCErrorLog struct {
-	Home    string
-	Maximum int64
+	Home        string
+	Maximum     int64
+	BeforeWrite func(context.Context) (func(), bool, error)
 }
 
 // Append adds one record, first rotating a log that reached its maximum.
 func (log RPCErrorLog) Append(record RPCError) error {
 	if log.Home == "" {
 		return nil
+	}
+	if log.BeforeWrite != nil {
+		release, write, err := log.BeforeWrite(context.Background())
+		if err != nil || !write {
+			return err
+		}
+		defer release()
 	}
 	directory := filepath.Join(log.Home, "logs")
 	if err := safefs.AdmitDir(directory, 0o700); err != nil {

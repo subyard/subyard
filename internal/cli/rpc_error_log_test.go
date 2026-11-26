@@ -21,7 +21,7 @@ func TestOwnerRPCFailuresAreKeptAndShownByLogsRPC(t *testing.T) {
 	fixture := newFixture(t)
 	home := environmentValue(fixture.Environment, "SUBYARD_HOME")
 	failures := map[string]error{
-		"operation.plan":    fmt.Errorf("prepare start: %w", errors.New("profile catalog at /owner/path is invalid")),
+		"operation.plan":    fmt.Errorf("prepare start: %w", errors.New("profile catalog at /owner/path is invalid\n\x1b[31m")),
 		"owner.inventory":   rpc.RefusalError(rpc.CodePlanFailed, "inventory refused", rpc.ErrorData{}),
 		"operation.execute": context.Canceled,
 	}
@@ -47,7 +47,7 @@ func TestOwnerRPCFailuresAreKeptAndShownByLogsRPC(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if len(lines) != 2 ||
-		!strings.HasSuffix(lines[0], " request=veranda-1 method=operation.plan code=internal -- prepare start: profile catalog at /owner/path is invalid") ||
+		!strings.HasSuffix(lines[0], " request=veranda-1 method=operation.plan code=internal -- prepare start: profile catalog at /owner/path is invalid\\n\\x1b[31m") ||
 		!strings.HasSuffix(lines[1], " request=veranda-2 method=owner.inventory code=plan_failed -- plan_failed: inventory refused") {
 		t.Fatalf("logs --rpc = %q", stdout.String())
 	}
