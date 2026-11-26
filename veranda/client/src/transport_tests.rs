@@ -119,6 +119,13 @@ while True:
                          stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
         reply(request, {'descendantStarted':True})
         sys.exit(0)
+    if method == 'synthetic.error-data':
+        value = fixture(request['params']['fixture'])
+        value.update(id=request['id'], operationId=operation)
+        if 'data' in request['params']:
+            value['error']['data'] = request['params']['data']
+        send(value)
+        continue
     if mode == 'manager-observation':
         if method == 'synthetic.correlation-invalid':
             value = fixture('snapshot-ready')
@@ -1121,6 +1128,42 @@ fn unknown_vocabulary_and_fields_keep_the_wire_session_usable() {
     let event = receive(&notifications);
     assert_eq!(event.event, "future.event");
     assert!(!event.stale);
+    let result = client
+        .call("system.ping", "op-ping", json!({}), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(result["pong"], true);
+    client.close();
+}
+
+#[test]
+fn owner_error_data_reaches_the_fault_and_invalid_data_keeps_the_fixed_text() {
+    let fixture = OwnerFixture::new();
+    let (client, _notifications) = fixture.open("future-vocabulary");
+    let call = |params: Value| {
+        client
+            .call(
+                "synthetic.error-data",
+                "op-error-data",
+                params,
+                Duration::from_secs(2),
+            )
+            .unwrap_err()
+    };
+    let gate = call(json!({"fixture": "error-gate-refusal"}));
+    assert_eq!(gate.code, "owner_repair_required");
+    let refusals = gate.refusals.as_ref().unwrap();
+    assert_eq!(refusals.items.len(), 2);
+    assert!(gate
+        .summary()
+        .contains("Next: start the yard, then run yard -Y default start"));
+    assert!(!gate.summary().contains("release activation is blocked"));
+    let invalid = call(
+        json!({"fixture": "error-config-refusal", "data": {"schemaVersion": 1,
+        "refusals": [{"source": "config", "code": "x", "text": "a\u{1b}[31m"}]}}),
+    );
+    assert_eq!(invalid.code, "owner_request_failed");
+    assert_eq!(invalid.refusals, None);
+    assert!(!invalid.summary().contains("plan init"));
     let result = client
         .call("system.ping", "op-ping", json!({}), Duration::from_secs(2))
         .unwrap();

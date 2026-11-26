@@ -347,6 +347,7 @@ pub enum Capability {
     OperationStepsV1,
     OwnerServicesV1,
     RpcV1,
+    ErrorDataV1,
 }
 impl Capability {
     pub const ALL: &'static [Self] = &[
@@ -376,6 +377,7 @@ impl Capability {
         Self::OperationStepsV1,
         Self::OwnerServicesV1,
         Self::RpcV1,
+        Self::ErrorDataV1,
     ];
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -405,6 +407,7 @@ impl Capability {
             Self::OperationStepsV1 => "operation-steps-v1",
             Self::OwnerServicesV1 => "owner-services-v1",
             Self::RpcV1 => "rpc-v1",
+            Self::ErrorDataV1 => "error-data-v1",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -435,6 +438,7 @@ impl Capability {
             "operation-steps-v1" => Some(Self::OperationStepsV1),
             "owner-services-v1" => Some(Self::OwnerServicesV1),
             "rpc-v1" => Some(Self::RpcV1),
+            "error-data-v1" => Some(Self::ErrorDataV1),
             _ => None,
         }
     }

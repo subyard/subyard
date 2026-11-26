@@ -222,8 +222,7 @@ impl View {
                 match self.state.borrow_mut().remember(self.scope(), field, value) {
                     Ok(()) => {}
                     Err(error) => {
-                        self.status
-                            .set_text(&format!("{}: {}", error.code, error.message));
+                        self.status.set_text(&error.summary());
                         return;
                     }
                 }
@@ -374,8 +373,7 @@ impl View {
         };
         let mut state = self.state.borrow().clone();
         if let Err(error) = state.intent(note) {
-            self.status
-                .set_text(&format!("{}: {}", error.code, error.message));
+            self.status.set_text(&error.summary());
             return;
         }
         // The review was decided executable above; main-thread callbacks cannot
@@ -1138,9 +1136,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                         }
                         Err(error) => {
                             view.pages.operation.set_visible(true);
-                            view.pages
-                                .operation_text
-                                .set_text(&format!("{}: {}", error.code, error.message));
+                            view.pages.operation_text.set_text(&error.summary());
                         }
                     }
                     let mut model = Model::new(connections);
@@ -1159,8 +1155,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                     view.render();
                     view.request_details();
                     if let Some(error) = preference_error {
-                        view.status
-                            .set_text(&format!("{}: {}", error.code, error.message));
+                        view.status.set_text(&error.summary());
                     }
                 }
                 Update::Fleet {
@@ -1213,8 +1208,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                 Update::Saved { selection, result } => {
                     if selection == view.model.borrow().selection {
                         if let Err(error) = result {
-                            view.status
-                                .set_text(&format!("{}: {}", error.code, error.message));
+                            view.status.set_text(&error.summary());
                         }
                     }
                 }
@@ -1260,8 +1254,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                             }
                         }
                         Err(error) => {
-                            view.remote_detail
-                                .set_text(&format!("{}: {}", error.code, error.message));
+                            view.remote_detail.set_text(&error.summary());
                             view.flow.borrow_mut().as_mut().unwrap().phase = Phase::Entry;
                             view.destination.set_sensitive(true);
                             view.assess.set_sensitive(true);
@@ -1297,8 +1290,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                             if view.flow.borrow().as_ref().unwrap().phase == Phase::Cancelling {
                                 continue;
                             }
-                            view.remote_detail
-                                .set_text(&format!("{}: {}", error.code, error.message));
+                            view.remote_detail.set_text(&error.summary());
                             view.flow.borrow_mut().as_mut().unwrap().phase = Phase::Entry;
                             view.destination.set_sensitive(true);
                             view.assess.set_sensitive(true);
@@ -1359,8 +1351,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                                 }
                                 *view.details.borrow_mut() = None;
                                 let details_rendered = view.render_details();
-                                view.status
-                                    .set_text(&format!("{}: {}", error.code, error.message));
+                                view.status.set_text(&error.summary());
                                 view.observation_rendered(details_rendered);
                             }
                         }
@@ -1376,8 +1367,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                         if !veranda_lib::client::retryable_not_submitted(&error) {
                             view.state_writable.set(false);
                         }
-                        view.status
-                            .set_text(&format!("{}: {}", error.code, error.message));
+                        view.status.set_text(&error.summary());
                         view.render_operation();
                     }
                 }
@@ -1392,7 +1382,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                             }
                             Err(error) => {
                                 operation.phase = OperationPhase::Finished;
-                                operation.text = format!("{}: {}", error.code, error.message);
+                                operation.text = error.summary();
                             }
                         }
                     }
@@ -1448,7 +1438,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                         operation.phase = OperationPhase::Finished;
                         operation.text = match result {
                             Ok(()) => "Plan discarded. Prepare a fresh plan to continue.".into(),
-                            Err(error) => format!("{}: {}", error.code, error.message),
+                            Err(error) => error.summary(),
                         };
                     }
                     view.render_operation();
@@ -1461,10 +1451,9 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                             Ok(()) => {
                                 "Cancellation requested. Waiting for the owner outcome…".into()
                             }
-                            Err(error) => format!(
-                                "{}: {} · Waiting for the owner outcome.",
-                                error.code, error.message
-                            ),
+                            Err(error) => {
+                                format!("{} · Waiting for the owner outcome.", error.summary())
+                            }
                         };
                     }
                     view.render_operation();
@@ -1482,9 +1471,7 @@ fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
                                 view.status.set_text("Shell command copied.");
                             }
                             Ok(_) => view.status.set_text("Session opened."),
-                            Err(error) => view
-                                .status
-                                .set_text(&format!("{}: {}", error.code, error.message)),
+                            Err(error) => view.status.set_text(&error.summary()),
                         }
                     }
                 }

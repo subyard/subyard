@@ -3370,12 +3370,19 @@ func TestV2MutationGateRedactsCandidateVerificationPathsForCLIAndRPC(t *testing.
 			Method: "operation.plan", OperationID: "rpc-redacted-gate", Params: params,
 		}, nil)
 		fault, ok := err.(*rpc.Error)
+		encoded, _ := json.Marshal(fault)
 		if !ok || fault.Code != "dependency-unavailable" ||
-			strings.Contains(fault.Message, runtimeRoot) || strings.Contains(fault.Message, configHome) {
-			t.Fatalf("redacted RPC gate error=%#v", err)
+			strings.Contains(string(encoded), runtimeRoot) || strings.Contains(string(encoded), configHome) {
+			t.Fatalf("redacted RPC gate error=%s", encoded)
 		}
-		var outcome mutationGateOutcome
-		if unmarshalErr := json.Unmarshal([]byte(fault.Message), &outcome); unmarshalErr != nil ||
+		var data struct {
+			Refusals []rpc.Refusal       `json:"refusals"`
+			Gate     mutationGateOutcome `json:"gate"`
+		}
+		unmarshalErr := json.Unmarshal(fault.Data, &data)
+		outcome := data.Gate
+		if unmarshalErr != nil || fault.Message != outcome.Message || len(data.Refusals) == 0 ||
+			data.Refusals[0].Source != rpc.RefusalSourceGate ||
 			outcome.Status != releasetransition.StatusOperatorActionRequired ||
 			outcome.Code != releasetransition.CodeDependencyUnavailable ||
 			outcome.Active != "release-a" || outcome.Target != "1.2.3-aaaaaaaaaaaa" ||

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "plan",
+  "operationId": "op-plan",
+  "error": {
+    "code": "plan_failed",
+    "message": "plan init: selected yard role forbids non-empty HOST_LINKS; profile \"route-client\" requires host access",
+    "data": {
+      "schemaVersion": 1,
+      "refusals": [
+        {
+          "source": "config",
+          "code": "profile-requires-host-access",
+          "text": "profile \"route-client\" requires host access; this yard role sets ALLOWS_HOST_ACCESS=false, so deselect the profile or use a yard that allows host access",
+          "next": "deselect the named profile or clear the named setting, or use a yard role that permits it"
+        },
+        {
+          "source": "config",
+          "code": "role-forbids-setting",
+          "text": "selected yard role forbids non-empty HOST_LINKS",
+          "next": "deselect the named profile or clear the named setting, or use a yard role that permits it"
+        }
+      ]
+    }
+  }
+}

@@ -64,6 +64,8 @@ struct Frame {
 #[derive(Deserialize)]
 struct Fault {
     code: String,
+    #[serde(default)]
+    data: Option<Value>,
 }
 
 struct Shared {
@@ -281,7 +283,7 @@ impl RpcClient {
                             break;
                         }
                         let response = match frame.error {
-                            Some(error) => Err(public_fault(&error.code)),
+                            Some(error) => Err(owner_fault(&error)),
                             None => Ok(frame.result.unwrap_or(Value::Null)),
                         };
                         let Ok(mut pending) = reader_shared.pending.lock() else {
@@ -743,6 +745,16 @@ fn disconnected() -> NativeError {
         "disconnected",
         "The Yard connection closed. Reconnect and refresh; an interrupted operation has no confirmed final result.",
     )
+}
+
+/// The fixed text for the code, plus the owner's typed refusals when its
+/// data is within the contract; other data is ignored.
+fn owner_fault(error: &Fault) -> NativeError {
+    let mut fault = public_fault(&error.code);
+    if let Some(data) = &error.data {
+        fault.refusals = crate::refusals::parse(data).ok();
+    }
+    fault
 }
 
 fn public_fault(code: &str) -> NativeError {

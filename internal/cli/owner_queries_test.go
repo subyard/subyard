@@ -733,6 +733,11 @@ func TestYardRPCGoldenFrames(t *testing.T) {
 			name := strings.TrimSuffix(filepath.Base(path), ".json")
 			if resultSchema, ok := results[name]; ok {
 				validate(t, resultSchema, schemaValue.(map[string]any)["result"])
+			} else if strings.HasPrefix(name, "error-") {
+				fault := schemaValue.(map[string]any)["error"].(map[string]any)
+				if _, ok := fault["data"]; !ok {
+					t.Fatalf("error fixture lacks data: %s", name)
+				}
 			} else if name != "snapshot-ready" {
 				t.Fatalf("fixture lacks result schema: %s", name)
 			}
