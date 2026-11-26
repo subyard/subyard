@@ -66,7 +66,6 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				t.Fatalf("refusal JSON=%q: %v", payload, err)
 			}
 			if refused.Status != releasetransition.StatusOperatorActionRequired || refused.Action != "restore fixture dependency" ||
-				len(refused.Decisions) != 1 || refused.Decisions[0].Resource != "activation.fixture-runtime" ||
 				len(refusals) != 1 || refusals[0].Text != "fixture dependency is unavailable" ||
 				refusals[0].Resource != "activation.fixture-runtime" || refusals[0].Next != "restore fixture dependency" {
 				t.Fatalf("lost same-inspection diagnostics: %#v", refused)
@@ -101,7 +100,7 @@ func TestMutationGateRetainsExactInspectionDiagnostics(t *testing.T) {
 				t.Fatalf("later readiness=%#v err=%v", later, err)
 			}
 			// The already emitted refusal must keep its original resource and reason.
-			if !bytes.Contains(payload, []byte("activation.fixture-runtime")) || !bytes.Contains(payload, []byte("fixture dependency is unavailable")) {
+			if refusals[0].Resource != "activation.fixture-runtime" || !bytes.Contains(payload, []byte("fixture dependency is unavailable")) {
 				t.Fatalf("later readiness erased refusal: %q", payload)
 			}
 		})

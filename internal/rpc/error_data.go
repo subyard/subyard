@@ -12,7 +12,6 @@ const (
 	MaxErrorRefusals    = 32
 	MaxRefusalText      = 512
 	MaxRefusalName      = 128
-	MaxGateDecisions    = 32
 	errorDataSchema     = 1
 	RefusalSourceConfig = "config"
 	RefusalSourceGate   = "release-gate"
@@ -35,25 +34,13 @@ type ErrorData struct {
 // GateOutcome is the public release-gate outcome of a gate refusal; its
 // blockers are the refusals.
 type GateOutcome struct {
-	Status      string         `json:"status"`
-	Code        string         `json:"code"`
-	Active      string         `json:"active"`
-	Previous    *string        `json:"previous"`
-	Target      string         `json:"target"`
-	Transaction *string        `json:"transaction"`
-	Message     string         `json:"message,omitempty"`
-	Action      string         `json:"action"`
-	Decisions   []GateDecision `json:"decisions,omitempty"`
-	// OmittedDecisions counts decisions beyond MaxGateDecisions.
-	OmittedDecisions int `json:"omittedDecisions,omitempty"`
-}
-
-// GateDecision is one redacted resource decision of a gate outcome.
-type GateDecision struct {
-	Resource string `json:"resource"`
-	Scope    string `json:"scope,omitempty"`
-	Decision string `json:"decision"`
-	Result   string `json:"result,omitempty"`
+	Status      string  `json:"status"`
+	Code        string  `json:"code"`
+	Active      string  `json:"active"`
+	Target      string  `json:"target"`
+	Transaction *string `json:"transaction"`
+	Message     string  `json:"message,omitempty"`
+	Action      string  `json:"action"`
 }
 
 // Refusal is one independent typed refusal and its next step.
@@ -69,8 +56,6 @@ type Refusal struct {
 // RefusalAction is a typed recovery command and its rendered form.
 type RefusalAction struct {
 	Verb    string `json:"verb"`
-	Yard    string `json:"yard,omitempty"`
-	Version string `json:"version,omitempty"`
 	Command string `json:"command"`
 }
 
@@ -78,10 +63,10 @@ type RefusalAction struct {
 // It returns the plain error when there is nothing typed to attach.
 func RefusalError(code ErrorCode, message string, data ErrorData) *Error {
 	fault := &Error{Code: code, Message: message}
+	data = data.bounded()
 	if len(data.Refusals) == 0 {
 		return fault
 	}
-	data = data.bounded()
 	data.SchemaVersion = errorDataSchema
 	encoded, err := json.Marshal(data)
 	if err != nil {
@@ -96,38 +81,48 @@ func RefusalError(code ErrorCode, message string, data ErrorData) *Error {
 func DecodeErrorData(fault *Error) (ErrorData, bool) {
 	var data ErrorData
 	if fault == nil || len(fault.Data) == 0 || json.Unmarshal(fault.Data, &data) != nil ||
-		data.SchemaVersion != errorDataSchema || len(data.Refusals) == 0 {
+		data.SchemaVersion != errorDataSchema {
 		return ErrorData{}, false
 	}
-	return data.bounded(), true
+	data = data.bounded()
+	return data, len(data.Refusals) != 0
 }
 
-// bounded caps the lists and cleans every text without mutating the caller's
-// slices; it is the single place the bounds are applied.
+// bounded caps the list, cleans every text and keeps only refusals every client
+// accepts, without mutating the caller's slices. It is the single place the
+// bounds and the client validation rules are applied: a refusal with an unknown
+// source, an invalid code or an empty text is dropped and marks the data
+// incomplete; an action whose verb or command is invalid becomes prose in Next.
 func (data ErrorData) bounded() ErrorData {
 	if data.Omitted < 0 {
 		data.Omitted = 0
 	}
-	if len(data.Refusals) > MaxErrorRefusals {
-		data.Omitted += len(data.Refusals) - MaxErrorRefusals
-		data.Refusals = data.Refusals[:MaxErrorRefusals]
-	}
-	refusals := make([]Refusal, len(data.Refusals))
-	for index, refusal := range data.Refusals {
-		refusal.Source = BoundText(refusal.Source, MaxRefusalName)
-		refusal.Code = BoundText(refusal.Code, MaxRefusalName)
+	refusals := []Refusal{}
+	for _, refusal := range data.Refusals {
+		if (refusal.Source != RefusalSourceConfig && refusal.Source != RefusalSourceGate) ||
+			!ValidRefusalName(refusal.Code) || refusal.Text == "" {
+			data.Incomplete = true
+			continue
+		}
+		if len(refusals) == MaxErrorRefusals {
+			data.Omitted++
+			continue
+		}
 		refusal.Resource = BoundText(refusal.Resource, MaxRefusalName)
 		refusal.Text = BoundText(refusal.Text, MaxRefusalText)
-		refusal.Next = BoundText(refusal.Next, MaxRefusalText)
 		if refusal.Action != nil {
-			action := *refusal.Action
-			action.Verb = BoundText(action.Verb, MaxRefusalName)
-			action.Yard = BoundText(action.Yard, MaxRefusalName)
-			action.Version = BoundText(action.Version, MaxRefusalName)
-			action.Command = BoundText(action.Command, MaxRefusalText)
-			refusal.Action = &action
+			action := RefusalAction{Verb: refusal.Action.Verb, Command: BoundText(refusal.Action.Command, MaxRefusalText)}
+			if ValidRefusalName(action.Verb) && strings.HasPrefix(action.Command, "yard ") {
+				refusal.Action = &action
+			} else {
+				refusal.Action = nil
+				if strings.TrimSpace(action.Command) != "" {
+					refusal.Next = strings.TrimPrefix(refusal.Next+", then run "+action.Command, ", then ")
+				}
+			}
 		}
-		refusals[index] = refusal
+		refusal.Next = BoundText(refusal.Next, MaxRefusalText)
+		refusals = append(refusals, refusal)
 	}
 	data.Refusals = refusals
 	if data.Gate != nil {
@@ -135,44 +130,35 @@ func (data ErrorData) bounded() ErrorData {
 		gate.Status = BoundText(gate.Status, MaxRefusalName)
 		gate.Code = BoundText(gate.Code, MaxRefusalName)
 		gate.Active = BoundText(gate.Active, MaxRefusalName)
-		gate.Previous = boundOptional(gate.Previous, MaxRefusalName)
 		gate.Target = BoundText(gate.Target, MaxRefusalName)
-		gate.Transaction = boundOptional(gate.Transaction, MaxRefusalName)
+		if gate.Transaction != nil {
+			transaction := BoundText(*gate.Transaction, MaxRefusalName)
+			gate.Transaction = &transaction
+		}
 		gate.Message = BoundText(gate.Message, MaxRefusalText)
 		gate.Action = BoundText(gate.Action, MaxRefusalText)
-		if gate.OmittedDecisions < 0 {
-			gate.OmittedDecisions = 0
-		}
-		if len(gate.Decisions) > MaxGateDecisions {
-			gate.OmittedDecisions += len(gate.Decisions) - MaxGateDecisions
-			gate.Decisions = gate.Decisions[:MaxGateDecisions]
-		}
-		decisions := make([]GateDecision, len(gate.Decisions))
-		for index, decision := range gate.Decisions {
-			decisions[index] = GateDecision{
-				Resource: BoundText(decision.Resource, MaxRefusalName), Scope: BoundText(decision.Scope, MaxRefusalName),
-				Decision: BoundText(decision.Decision, MaxRefusalName), Result: BoundText(decision.Result, MaxRefusalText),
-			}
-		}
-		if len(decisions) == 0 {
-			decisions = nil
-		}
-		gate.Decisions = decisions
 		data.Gate = &gate
 	}
 	return data
 }
 
-func boundOptional(text *string, limit int) *string {
-	if text == nil {
-		return nil
+// ValidRefusalName reports a refusal code or action verb every client accepts:
+// 1 to MaxRefusalName bytes of lowercase ASCII letters, digits, '-' and '_'.
+func ValidRefusalName(name string) bool {
+	if name == "" || len(name) > MaxRefusalName {
+		return false
 	}
-	bounded := BoundText(*text, limit)
-	return &bounded
+	for _, char := range []byte(name) {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
-// boundText replaces control characters and cuts text to limit bytes at a
-// UTF-8 boundary, marking the cut with an ellipsis.
+// BoundText replaces control and format characters (such as bidirectional
+// overrides) and cuts text to limit bytes at a UTF-8 boundary, marking the cut
+// with an ellipsis. Peer text passes through it before it reaches a terminal.
 func BoundText(text string, limit int) string {
 	text = strings.Map(func(char rune) rune {
 		if unicode.IsControl(char) || unicode.Is(unicode.Cf, char) || char == utf8.RuneError {

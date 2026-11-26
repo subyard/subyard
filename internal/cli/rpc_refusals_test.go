@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,11 +28,10 @@ type errorData struct {
 	Omitted       int           `json:"omitted"`
 	Incomplete    bool          `json:"incomplete"`
 	Gate          *struct {
-		Code      string                               `json:"code"`
-		Action    string                               `json:"action"`
-		Decisions []releasetransition.RedactedDecision `json:"decisions"`
-		Omitted   int                                  `json:"omittedDecisions"`
-		Blockers  []releasetransition.Blocker          `json:"blockers"`
+		Code     string                      `json:"code"`
+		Message  string                      `json:"message"`
+		Action   string                      `json:"action"`
+		Blockers []releasetransition.Blocker `json:"blockers"`
 	} `json:"gate"`
 }
 
@@ -105,12 +105,12 @@ func TestMutationGateRPCErrorCarriesEveryBlockerAndTypedAction(t *testing.T) {
 	want := []rpc.Refusal{
 		{Source: "release-gate", Code: "precondition-blocked", Resource: "activation.core.pending-configuration",
 			Text: "yard default has pending configuration", Next: "finish the pending change",
-			Action: &rpc.RefusalAction{Verb: "start", Yard: "default", Command: "yard -Y default start"}},
+			Action: &rpc.RefusalAction{Verb: "start", Command: "yard -Y default start"}},
 		{Source: "release-gate", Code: "dependency-unavailable", Resource: "activation.profile.route",
 			Text: "profile runtime is unavailable", Next: "restore the profile runtime"},
 	}
 	if !reflect.DeepEqual(data.Refusals, want) || data.Incomplete || data.Gate == nil ||
-		data.Gate.Code != "precondition-blocked" || len(data.Gate.Decisions) != 1 || data.Gate.Blockers != nil {
+		data.Gate.Code != "precondition-blocked" || data.Gate.Message != outcome.Message || data.Gate.Blockers != nil {
 		t.Fatalf("data = %s", fault.Data)
 	}
 }
@@ -138,21 +138,23 @@ func releaseRetryAction(t *testing.T, data errorData) *rpc.RefusalAction {
 	return data.Refusals[0].Action
 }
 
-func TestMutationGateRPCErrorBoundsDecisions(t *testing.T) {
+// Decisions and the previous release reach no client and are not sent.
+func TestMutationGateRPCErrorSendsOnlyRenderedGateFields(t *testing.T) {
+	previous := releasetransition.ReleaseID("release-old")
 	outcome := &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired,
-		Code: releasetransition.CodeResourceConflict, Message: "conflict"}
-	inspection := &releasetransition.Inspection{Outcome: outcome}
-	for index := 0; index < rpc.MaxGateDecisions+5; index++ {
-		inspection.Decisions = append(inspection.Decisions, releasetransition.RedactedDecision{Resource: fmt.Sprintf("r%d", index), Decision: "apply"})
+		Code: releasetransition.CodeResourceConflict, Message: "conflict", Previous: &previous}
+	inspection := &releasetransition.Inspection{Outcome: outcome,
+		Decisions: []releasetransition.RedactedDecision{{Resource: "r0", Decision: "apply"}}}
+	var data struct {
+		Gate map[string]json.RawMessage `json:"gate"`
 	}
 	fault := mutationGateRPCError(outcome, inspection)
-	data := decodeErrorData(t, fault)
-	// Cut decisions are counted on the gate; every refusal is still present.
-	if len(data.Gate.Decisions) != rpc.MaxGateDecisions || data.Gate.Omitted != 5 || data.Incomplete || data.Omitted != 0 {
-		t.Fatalf("data = %s", fault.Data)
+	if err := json.Unmarshal(fault.Data, &data); err != nil {
+		t.Fatal(err)
 	}
-	if lines := ownerRefusalLines(fault); slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, "other causes") }) {
-		t.Fatalf("cut decisions rendered as unreported causes: %q", lines)
+	keys := slices.Sorted(maps.Keys(data.Gate))
+	if !slices.Equal(keys, []string{"action", "active", "code", "message", "status", "target", "transaction"}) {
+		t.Fatalf("gate keys = %q", keys)
 	}
 }
 
@@ -168,7 +170,6 @@ func TestRPCErrorDataMatchesTheFrameSchemaAtItsBounds(t *testing.T) {
 	for index := 0; index < rpc.MaxErrorRefusals+4; index++ {
 		long.Blockers = append(long.Blockers, releasetransition.Blocker{Code: releasetransition.CodeVerificationFailed,
 			Resource: strings.Repeat("r", 200), Message: fmt.Sprintf("%d %s", index, strings.Repeat("é", 400)), Retry: strings.Repeat("x", 900)})
-		long.Decisions = append(long.Decisions, releasetransition.RedactedDecision{Resource: fmt.Sprintf("r%d", index), Decision: "apply"})
 	}
 	setting, _ := domain.ConfigSettingName("HOST_LINKS")
 	for _, fault := range []*rpc.Error{
@@ -242,7 +243,7 @@ while True:
  header=sys.stdin.buffer.read(4)
  if not header:break
  req=json.loads(sys.stdin.buffer.read(struct.unpack('>I',header)[0]))
- if req['method']=='rpc.negotiate':send(req,'result',{'capabilities':['operation-exact-plan-v1','operation-steps-v1','error-data-v1']})
+ if req['method']=='rpc.negotiate':send(req,'result',{'capabilities':['operation-exact-plan-v1','operation-steps-v1']})
  elif req['method']=='operation.plan':send(req,'error',fault)
  else:sys.exit(6)
 `, 0o600)
@@ -260,8 +261,10 @@ while True:
 	want := []string{
 		"yard: prepare start: transition-required: the owner's release gate refused this command\n",
 		"yard: owner release gate: release migration-required (transition-required): active release-a, target release-b\n",
-		"yard: cause: settings need migration [31m\nyard: Next: run yard migrate\n",
-		"yard: cause: yard inner has pending configuration\nyard: Next: finish the pending change, then run yard -Y inner start\n",
+		"yard: owner release gate: release migration is required\n",
+		"yard: cause: settings need migration [31m (transition-required, migration.settings)\nyard: Next: run yard migrate\n",
+		"yard: cause: yard inner has pending configuration (precondition-blocked, activation.core.pending-configuration)\n" +
+			"yard: Next: finish the pending change, then run yard -Y inner start\n",
 	}
 	output, at := stderr.String(), 0
 	for _, line := range want {
@@ -271,7 +274,8 @@ while True:
 		}
 		at += found + len(line)
 	}
-	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") || strings.Contains(output, outcome.Message) {
+	// The gate's own next step is already a blocker's and is not repeated.
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") || strings.Count(output, "Next: run yard migrate") != 1 {
 		t.Fatalf("stderr = %q", output)
 	}
 }
@@ -320,4 +324,64 @@ func TestOwnerErrorReportPrintsEachRefusalOnceAndCleansOwnerText(t *testing.T) {
 	if _, _, ok := ownerErrorReport(errors.New("local")); ok {
 		t.Fatal("a local error was treated as an owner error")
 	}
+}
+
+// The rendering conveys what the gate JSON used to: the outcome message once,
+// each blocker with its code, resource and retry, and the outcome's next step.
+func TestOwnerRefusalLinesConveyTheGateMessageBlockersAndRetries(t *testing.T) {
+	outcome := &releasetransition.Outcome{
+		Status: releasetransition.StatusMigrationRequired, Code: releasetransition.CodeTransitionRequired,
+		Active: "release-a", Target: "release-b", Message: "release migration is required", Retry: "run yard migrate",
+	}
+	want := []string{
+		"owner release gate: release migration-required (transition-required): active release-a, target release-b",
+		"cause: release migration is required (transition-required)",
+		"Next: run yard migrate",
+	}
+	if lines := ownerRefusalLines(mutationGateRPCError(outcome, nil)); !slices.Equal(lines, want) {
+		t.Fatalf("without blockers = %q", lines)
+	}
+	inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{
+		{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.profile.route",
+			Message: "profile runtime is unavailable", Retry: "restore the profile runtime"},
+	}}
+	want = []string{
+		want[0],
+		"owner release gate: release migration is required",
+		"cause: profile runtime is unavailable (dependency-unavailable, activation.profile.route)",
+		"Next: restore the profile runtime",
+		"Next: run yard migrate",
+	}
+	if lines := ownerRefusalLines(mutationGateRPCError(outcome, inspection)); !slices.Equal(lines, want) {
+		t.Fatalf("with blockers = %q", lines)
+	}
+}
+
+// A boundary label in error data is only a validated setting name, never a
+// value or path from the request.
+func TestConfigNamedRefusalLabelInErrorDataIsOnlyAValidatedName(t *testing.T) {
+	setting, _ := domain.ConfigSettingName("HOST_LINKS")
+	cause := domain.NewConfigRefusal(domain.ConfigSettingNumeric, setting)
+	for name, want := range map[string]string{
+		"HOST_LINKS":                        "HOST_LINKS: " + cause.Error(),
+		"HOST_LINKS=" + refusalSentinel:     cause.Error(),
+		"/home/operator/" + refusalSentinel: cause.Error(),
+	} {
+		if label := (configNamedRefusal{name, cause}).PublicConfigLabel(); label != "" && label != "HOST_LINKS" {
+			t.Fatalf("label for %q = %q", name, label)
+		}
+		data := decodeErrorData(t, operationRPCError(rpc.CodeInvalidParams, configNamedRefusal{name, cause}))
+		if len(data.Refusals) != 1 || data.Refusals[0].Text != want || strings.Contains(string(mustJSON(t, data)), refusalSentinel) {
+			t.Fatalf("%q: data = %+v", name, data)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

@@ -52,27 +52,17 @@ func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releas
 		rpc.ErrorData{Refusals: refusals, Gate: rpcGateOutcome(public)})
 }
 
-// rpcGateOutcome is the public outcome without its blockers, which are the
-// refusals; rpc.RefusalError bounds it.
+// rpcGateOutcome is the rendered part of the public outcome; its blockers are
+// the refusals. rpc.RefusalError bounds it.
 func rpcGateOutcome(public mutationGateOutcome) *rpc.GateOutcome {
 	gate := &rpc.GateOutcome{
 		Status: string(public.Status), Code: string(public.Code),
 		Active: string(public.Active), Target: string(public.Target),
 		Message: public.Message, Action: public.Action,
 	}
-	if public.Previous != nil {
-		previous := string(*public.Previous)
-		gate.Previous = &previous
-	}
 	if public.Transaction != nil {
 		transaction := string(*public.Transaction)
 		gate.Transaction = &transaction
-	}
-	for _, decision := range public.Decisions {
-		gate.Decisions = append(gate.Decisions, rpc.GateDecision{
-			Resource: decision.Resource, Scope: decision.Scope,
-			Decision: string(decision.Decision), Result: decision.Result,
-		})
 	}
 	return gate
 }
@@ -83,10 +73,7 @@ func gateRPCRefusal(code releasetransition.OutcomeCode, resource, text, retry st
 	refusal := rpc.Refusal{Source: rpc.RefusalSourceGate, Code: string(code), Resource: resource, Text: firstNonempty(text, string(code)), Next: retry}
 	if action, prose, ok := domain.ParseRetry(retry); ok {
 		refusal.Next = prose
-		refusal.Action = &rpc.RefusalAction{
-			Verb: domain.VerbName(action.Verb), Yard: action.Yard, Version: action.Version,
-			Command: domain.RenderAction(action),
-		}
+		refusal.Action = &rpc.RefusalAction{Verb: domain.VerbName(action.Verb), Command: domain.RenderAction(action)}
 	}
 	return refusal
 }
@@ -118,8 +105,9 @@ func ownerErrorReport(err error) (string, []string, bool) {
 }
 
 // ownerRefusalLines renders the error data of an owner RPC error: the gate
-// state, then every refusal with its next step in the owner's order, then what
-// the owner left out. rpc.DecodeErrorData bounds and cleans every text.
+// state and message, then every refusal with its code, resource and next step
+// in the owner's order, then the gate's own next step and what the owner left
+// out. rpc.DecodeErrorData bounds and cleans every text.
 func ownerRefusalLines(err error) []string {
 	var fault *rpc.Error
 	if !errors.As(err, &fault) {
@@ -129,7 +117,10 @@ func ownerRefusalLines(err error) []string {
 	if !ok {
 		return nil
 	}
-	lines := []string{}
+	lines, texts, nexts := []string{}, []string{}, []string{}
+	for _, refusal := range data.Refusals {
+		texts = append(texts, refusal.Text)
+	}
 	if gate := data.Gate; gate != nil {
 		transaction := ""
 		if gate.Transaction != nil {
@@ -137,11 +128,22 @@ func ownerRefusalLines(err error) []string {
 		}
 		lines = append(lines, fmt.Sprintf("owner release gate: release %s (%s): active %s, target %s%s",
 			gate.Status, gate.Code, firstNonempty(gate.Active, "unknown"), firstNonempty(gate.Target, "unknown"), transaction))
+		if gate.Message != "" && !slices.Contains(texts, gate.Message) {
+			lines = append(lines, "owner release gate: "+gate.Message)
+		}
 	}
 	for _, refusal := range data.Refusals {
-		lines = append(lines, "cause: "+firstNonempty(refusal.Text, refusal.Code))
+		cause := "cause: " + refusal.Text
+		if refusal.Source == rpc.RefusalSourceGate {
+			cause += " (" + refusal.Code
+			if refusal.Resource != "" {
+				cause += ", " + refusal.Resource
+			}
+			cause += ")"
+		}
+		lines = append(lines, cause)
 		next := refusal.Next
-		if refusal.Action != nil && refusal.Action.Command != "" {
+		if refusal.Action != nil {
 			if next != "" {
 				next += ", then "
 			}
@@ -149,7 +151,11 @@ func ownerRefusalLines(err error) []string {
 		}
 		if next != "" {
 			lines = append(lines, "Next: "+next)
+			nexts = append(nexts, next)
 		}
+	}
+	if gate := data.Gate; gate != nil && gate.Action != "" && !slices.Contains(nexts, gate.Action) {
+		lines = append(lines, "Next: "+gate.Action)
 	}
 	if data.Omitted != 0 {
 		lines = append(lines, fmt.Sprintf("%d more refusals; review the owner's diagnostics", data.Omitted))

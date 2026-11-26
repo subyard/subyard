@@ -22,25 +22,27 @@ error codes and event names. Errors in its `release-gate` group require owner re
 
 ## Error refusals
 
-An error may carry `data` (`frame.schema.json#/$defs/errorData`, capability
-`error-data-v1`): every independent typed refusal the owner determined, in the
-owner's stable order. Each refusal has a `source` (`config` or `release-gate`), a
-stable `code`, a value-free `text`, and optionally the refused `resource`, a `next`
-step and a typed `action` (`verb`, optional `yard` or `version`, and the rendered
-`command`). Configuration refusals name only validated profile, setting,
-integration or yard-kind names, never a setting value, secret or path. At most 32
-refusals are sent; `omitted` counts the rest. Texts are at most 512 bytes and
-contain no control or format characters. `incomplete` means the error also had causes that
-are not typed refusals; the owner's own diagnostics (`config validate`,
-`yard migrate --check`) report them. A release-gate refusal adds `gate`, the public
-gate outcome (status, code, releases, transaction, message, action and at most 32
-redacted decisions; `omittedDecisions` counts the rest), within the same text
-bounds, and its `message` is the outcome message. Other errors carry no `data`.
-A client skips a refusal whose `source` it does not know and treats the data as
-`incomplete`. `data` is optional: older clients ignore it, and older owners omit
-it, in which case clients keep their fixed text for the error `code`. A relay
-built before `error-data-v1` drops `data` from the errors it forwards, so a
-client behind it also falls back to that fixed text.
+An error may carry `data` (`frame.schema.json#/$defs/errorData`): every
+independent typed refusal the owner determined, in the owner's stable order. No
+capability announces it; a client detects support by the presence of `data`.
+Each refusal has a `source` (`config` or `release-gate`), a `code` of lowercase
+letters, digits, `-` and `_`, a non-empty value-free `text`, and optionally the
+refused `resource`, a `next` step and a typed `action` (a `verb` in the same
+charset and the rendered `command`, which starts with `yard `). Configuration
+refusals name only validated profile, setting, integration or yard-kind names,
+never a setting value, secret or path. At most 32 refusals are sent; `omitted`
+counts the rest. Texts are at most 512 bytes and contain no control or format
+characters. The owner leaves out a refusal outside these rules and marks the
+data `incomplete`, which also means the error had causes that are not typed
+refusals; the owner's own diagnostics (`config validate`, `yard migrate --check`)
+report them. A release-gate refusal adds `gate`, the public gate outcome
+(status, code, active and target releases, transaction, message and action)
+within the same text bounds, and its error `message` is the outcome message.
+Other errors carry no `data`. A client skips a refusal whose `source` it does
+not know and treats the data as `incomplete`. `data` is optional: older clients
+ignore it, and older owners omit it, in which case clients keep their fixed text
+for the error `code`. A relay built before error data existed drops `data` from
+the errors it forwards, so a client behind it also falls back to that fixed text.
 
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,

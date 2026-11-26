@@ -191,14 +191,6 @@
         "workspace",
         "owner-services"
       ]
-    },
-    "error-data-v1": {
-      "since": 1,
-      "stability": "stable",
-      "sessions": [
-        "workspace",
-        "owner-services"
-      ]
     }
   },
   "methods": {

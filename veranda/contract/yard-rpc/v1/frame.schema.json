@@ -248,13 +248,6 @@
               "type": "string",
               "maxLength": 128
             },
-            "previous": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "maxLength": 128
-            },
             "target": {
               "type": "string",
               "maxLength": 128
@@ -274,17 +267,6 @@
             "action": {
               "type": "string",
               "maxLength": 512
-            },
-            "decisions": {
-              "type": "array",
-              "maxItems": 32,
-              "items": {
-                "$ref": "#/$defs/gateDecision"
-              }
-            },
-            "omittedDecisions": {
-              "type": "integer",
-              "minimum": 1
             }
           },
           "required": [
@@ -302,34 +284,6 @@
         "refusals"
       ]
     },
-    "gateDecision": {
-      "type": "object",
-      "properties": {
-        "resource": {
-          "type": "string",
-          "maxLength": 128
-        },
-        "scope": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "decision": {
-          "type": "string",
-          "maxLength": 128
-        },
-        "result": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
-        }
-      },
-      "required": [
-        "resource",
-        "decision"
-      ],
-      "additionalProperties": false
-    },
     "refusal": {
       "type": "object",
       "properties": {
@@ -343,7 +297,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "^[a-z0-9]+([_-][a-z0-9]+)*$"
+          "pattern": "^[a-z0-9_-]+$"
         },
         "resource": {
           "type": "string",
@@ -367,22 +321,13 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128,
-              "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
-            },
-            "yard": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "version": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
+              "pattern": "^[a-z0-9_-]+$"
             },
             "command": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 512
+              "maxLength": 512,
+              "pattern": "^yard "
             }
           },
           "required": [

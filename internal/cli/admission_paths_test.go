@@ -18,7 +18,7 @@ import (
 
 // blockedGateRefusal is the public refusal of the completed-history gate fixture
 // that newConfigApplyRepairFixture installs.
-const blockedGateRefusal = `{"status":"migration-required","code":"transition-required","active":"1.2.3-aaaaaaaaaaaa","previous":"release-a","target":"1.2.3-aaaaaaaaaaaa","transaction":null,"message":"activation drift","action":"run yard migrate"}`
+const blockedGateRefusal = `{"status":"migration-required","code":"transition-required","active":"1.2.3-aaaaaaaaaaaa","target":"1.2.3-aaaaaaaaaaaa","transaction":null,"message":"activation drift","action":"run yard migrate"}`
 
 // blockedGateTextRefusal is the direct CLI's text rendering of the same gate.
 const blockedGateTextRefusal = "yard: release gate: release migration-required (transition-required): active 1.2.3-aaaaaaaaaaaa, target 1.2.3-aaaaaaaaaaaa; this command is not run\n" +

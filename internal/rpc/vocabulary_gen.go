@@ -42,7 +42,6 @@ const (
 	CapabilityOperationStepsV1              = "operation-steps-v1"
 	CapabilityOwnerServicesV1               = "owner-services-v1"
 	CapabilityRpcV1                         = "rpc-v1"
-	CapabilityErrorDataV1                   = "error-data-v1"
 )
 
 const (
@@ -192,9 +191,9 @@ func MethodCapabilities() map[string]string {
 func CapabilitiesForSession(session string) []string {
 	switch session {
 	case "owner-services":
-		return []string{CapabilityCancellation, CapabilityDeadlines, CapabilityOperationPlan, CapabilityOperationExecute, CapabilityOperationExactPlanV1, CapabilityOperationStepsV1, CapabilityOwnerServicesV1, CapabilityRpcV1, CapabilityErrorDataV1}
+		return []string{CapabilityCancellation, CapabilityDeadlines, CapabilityOperationPlan, CapabilityOperationExecute, CapabilityOperationExactPlanV1, CapabilityOperationStepsV1, CapabilityOwnerServicesV1, CapabilityRpcV1}
 	case "workspace":
-		return []string{CapabilitySnapshot, CapabilityOrderedEvents, CapabilityCancellation, CapabilityDeadlines, CapabilityCommands, CapabilityContext, CapabilityProjects, CapabilityYardStatus, CapabilityYardStatusProfileDashboardsV1, CapabilityCredentialMetadata, CapabilityCredentialStatus, CapabilityOperationPlan, CapabilityOperationExecute, CapabilityResync, CapabilityOwnerInventoryV1, CapabilityReleaseReadinessV1, CapabilityProfileListV1, CapabilitySettingsListV1, CapabilityHostSyncStatusV1, CapabilitySessionPrepareV1, CapabilityYardBootstrapV1, CapabilityCredentialPrepareV1, CapabilityOperationExactPlanV1, CapabilityOperationStepsV1, CapabilityOwnerServicesV1, CapabilityRpcV1, CapabilityErrorDataV1}
+		return []string{CapabilitySnapshot, CapabilityOrderedEvents, CapabilityCancellation, CapabilityDeadlines, CapabilityCommands, CapabilityContext, CapabilityProjects, CapabilityYardStatus, CapabilityYardStatusProfileDashboardsV1, CapabilityCredentialMetadata, CapabilityCredentialStatus, CapabilityOperationPlan, CapabilityOperationExecute, CapabilityResync, CapabilityOwnerInventoryV1, CapabilityReleaseReadinessV1, CapabilityProfileListV1, CapabilitySettingsListV1, CapabilityHostSyncStatusV1, CapabilitySessionPrepareV1, CapabilityYardBootstrapV1, CapabilityCredentialPrepareV1, CapabilityOperationExactPlanV1, CapabilityOperationStepsV1, CapabilityOwnerServicesV1, CapabilityRpcV1}
 	default:
 		return nil
 	}

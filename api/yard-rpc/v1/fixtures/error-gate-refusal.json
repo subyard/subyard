@@ -17,7 +17,6 @@
           "next": "start the yard",
           "action": {
             "verb": "start",
-            "yard": "default",
             "command": "yard -Y default start"
           }
         },
@@ -36,18 +35,10 @@
         "status": "operator-action-required",
         "code": "precondition-blocked",
         "active": "0.32.0-bbbbbbbbbbbb",
-        "previous": "0.31.0-aaaaaaaaaaaa",
         "target": "0.32.0-bbbbbbbbbbbb",
         "transaction": null,
         "message": "release activation is blocked",
-        "action": "run yard migrate",
-        "decisions": [
-          {
-            "resource": "core.guest",
-            "scope": "default",
-            "decision": "apply"
-          }
-        ]
+        "action": "run yard migrate"
       }
     }
   }
