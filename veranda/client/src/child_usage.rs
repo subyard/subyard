@@ -422,6 +422,9 @@ impl OwnedChild {
     pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
         self.child.stdout.take()
     }
+    pub(crate) fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
     pub(crate) fn kill(&mut self) -> io::Result<()> {
         self.child.kill()
     }

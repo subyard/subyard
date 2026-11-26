@@ -2,6 +2,7 @@
 pub mod child_usage;
 pub mod client;
 pub mod connections;
+pub mod diagnostics;
 pub mod local_fleet;
 pub mod observation;
 pub mod refusals;

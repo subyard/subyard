@@ -1,5 +1,6 @@
 //! Bounded Yard RPC sessions. Only the native shell owns process handles and frames.
 use crate::child_usage::{ChildKind, OwnedChild, UsageContext};
+use crate::diagnostics::{DiagnosticLog, StderrTail};
 use crate::local_fleet::{read_frame_captured, write_frame, NativeError};
 use crate::observation::{ReadProof, Source, Ticket, ValidatedEvent};
 use crate::vocabulary::{ErrorCode, PROTOCOL_VERSION};
@@ -27,6 +28,7 @@ struct ChildObservation {
     source: Option<Source>,
     usage: Option<UsageContext>,
     kind: ChildKind,
+    diagnostics: Option<Arc<DiagnosticLog>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +75,28 @@ struct Shared {
     closed: AtomicBool,
     stale: AtomicBool,
     sequence: AtomicU64,
+    stderr: Option<Arc<StderrTail>>,
+    diagnostics: Option<Arc<DiagnosticLog>>,
+}
+
+impl Shared {
+    /// Records a failure whose cause the operator does not see, with the
+    /// owner's scrubbed stderr tail.
+    fn record(&self, method: &str, error: &NativeError) {
+        if let Some(log) = self
+            .diagnostics
+            .as_ref()
+            .filter(|_| crate::diagnostics::recorded(error))
+        {
+            let settle = if error.code == "disconnected" { 250 } else { 0 };
+            let tail = self
+                .stderr
+                .as_ref()
+                .map(|tail| tail.lines(Duration::from_millis(settle)))
+                .unwrap_or_default();
+            log.record("owner-failure", method, &error.code, tail);
+        }
+    }
 }
 
 struct Pending {
@@ -82,6 +106,7 @@ struct Pending {
 pub struct Call {
     id: String,
     operation_id: String,
+    method: String,
     receiver: mpsc::Receiver<Result<Value, NativeError>>,
 }
 
@@ -197,6 +222,25 @@ impl RpcClient {
         attempt: Option<&Processes>,
         usage: Option<UsageContext>,
     ) -> Result<Self, NativeError> {
+        Self::open_attempt_logged(
+            command,
+            expected_version,
+            notify,
+            processes,
+            attempt,
+            usage,
+            None,
+        )
+    }
+    pub(crate) fn open_attempt_logged(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+        attempt: Option<&Processes>,
+        usage: Option<UsageContext>,
+        diagnostics: Option<Arc<DiagnosticLog>>,
+    ) -> Result<Self, NativeError> {
         Self::open_with_observation(
             command,
             expected_version,
@@ -207,15 +251,34 @@ impl RpcClient {
                 source: None,
                 usage,
                 kind: ChildKind::ProvisionalRpc,
+                diagnostics,
             },
         )
     }
+    #[cfg(test)]
     pub(crate) fn open_observed(
         command: Command,
         expected_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         observation: Option<Source>,
+    ) -> Result<Self, NativeError> {
+        Self::open_observed_logged(
+            command,
+            expected_version,
+            notify,
+            processes,
+            observation,
+            None,
+        )
+    }
+    pub(crate) fn open_observed_logged(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+        observation: Option<Source>,
+        diagnostics: Option<Arc<DiagnosticLog>>,
     ) -> Result<Self, NativeError> {
         let usage = observation.as_ref().and_then(Source::child_usage_context);
         Self::open_with_observation(
@@ -228,6 +291,7 @@ impl RpcClient {
                 source: observation,
                 usage,
                 kind: ChildKind::RpcSession,
+                diagnostics,
             },
         )
     }
@@ -243,6 +307,7 @@ impl RpcClient {
             source: observation,
             usage,
             kind: child_kind,
+            diagnostics,
         } = child_observation;
         #[cfg(unix)]
         {
@@ -252,7 +317,7 @@ impl RpcClient {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = OwnedChild::spawn(&mut command, usage.as_ref(), child_kind)
             .map_err(|_| NativeError::new("transport_unavailable", "Veranda could not start Yard or SSH. Check the installed tools and authentication reference."))?;
         let mut input = child.take_stdin().ok_or_else(disconnected)?;
@@ -262,6 +327,8 @@ impl RpcClient {
             closed: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
+            stderr: child.take_stderr().map(StderrTail::drain),
+            diagnostics,
         });
         let reader_observation = observation.clone();
         let reader_shared = shared.clone();
@@ -283,7 +350,7 @@ impl RpcClient {
                             break;
                         }
                         let response = match frame.error {
-                            Some(error) => Err(owner_fault(&error)),
+                            Some(error) => Err(owner_fault(&error, &reader_shared)),
                             None => Ok(frame.result.unwrap_or(Value::Null)),
                         };
                         let Ok(mut pending) = reader_shared.pending.lock() else {
@@ -387,7 +454,7 @@ impl RpcClient {
             attempt.track(&client.child)?;
         }
         let raw = client.call("rpc.negotiate", "", json!({}), Duration::from_secs(8))?;
-        let negotiation: Negotiation = serde_json::from_value(raw).map_err(|_| invalid())?;
+        let negotiation: Negotiation = client.decode("rpc.negotiate", raw)?;
         if negotiation.version != PROTOCOL_VERSION
             || negotiation.protocol_min > PROTOCOL_VERSION
             || negotiation.protocol_max < PROTOCOL_VERSION
@@ -448,6 +515,7 @@ impl RpcClient {
         Ok(Call {
             id,
             operation_id: operation_id.into(),
+            method: method.into(),
             receiver,
         })
     }
@@ -462,12 +530,34 @@ impl RpcClient {
                 id,
                 receiver,
                 operation_id: String::new(),
+                method: method.into(),
             },
             timeout,
         )?;
         Ok((value, proof))
     }
     pub fn wait(&self, call: Call, timeout: Duration) -> Result<Value, NativeError> {
+        let method = call.method.clone();
+        let result = self.wait_unrecorded(call, timeout);
+        if let Err(error) = &result {
+            self.shared.record(&method, error);
+        }
+        result
+    }
+    /// Decodes a result, recording a failure without the offending value.
+    pub(crate) fn decode<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        value: Value,
+    ) -> Result<T, NativeError> {
+        serde_json::from_value(value).map_err(|error| {
+            if let Some(log) = &self.shared.diagnostics {
+                log.decode_failed::<T>(method, &error);
+            }
+            invalid()
+        })
+    }
+    fn wait_unrecorded(&self, call: Call, timeout: Duration) -> Result<Value, NativeError> {
         #[cfg(target_os = "linux")]
         let received = receive_with_deadline(&call.receiver, timeout, boottime);
         #[cfg(not(target_os = "linux"))]
@@ -749,10 +839,28 @@ fn disconnected() -> NativeError {
 
 /// The fixed text for the code, plus the owner's typed refusals when its
 /// data is within the contract; other data is ignored.
-fn owner_fault(error: &Fault) -> NativeError {
+fn owner_fault(error: &Fault, shared: &Shared) -> NativeError {
     let mut fault = public_fault(&error.code);
     if let Some(data) = &error.data {
-        fault.refusals = crate::refusals::parse(data).ok();
+        match crate::refusals::parse(data) {
+            Ok(refusals) => fault.refusals = Some(refusals),
+            Err(rejected) => {
+                if let Some(log) = &shared.diagnostics {
+                    log.record(
+                        "error-data",
+                        "response",
+                        &fault.code,
+                        vec![format!("rejected {}", rejected.as_str())],
+                    );
+                }
+            }
+        }
+    }
+    // The generic text hides the owner's code; keep it locally.
+    if fault.code == "owner_request_failed" {
+        if let Some(log) = &shared.diagnostics {
+            log.record("owner-error", "response", &error.code, Vec::new());
+        }
     }
     fault
 }

@@ -119,6 +119,14 @@ while True:
                          stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
         reply(request, {'descendantStarted':True})
         sys.exit(0)
+    if method == 'synthetic.stderr-exit':
+        sys.stderr.write('yard: plan failed: SECRET_TOKEN=hunter2 at /home/operator/private\n')
+        sys.stderr.write('yard: profile "private-value" ghp_0123456789abcdefABCDEF\n')
+        sys.stderr.flush()
+        os._exit(3)
+    if method == 'synthetic.bad-result':
+        reply(request, {'count': 'SECRET-RESULT-VALUE'})
+        continue
     if method == 'synthetic.error-data':
         value = fixture(request['params']['fixture'])
         value.update(id=request['id'], operationId=operation)
@@ -1169,4 +1177,97 @@ fn owner_error_data_reaches_the_fault_and_invalid_data_keeps_the_fixed_text() {
         .unwrap();
     assert_eq!(result["pong"], true);
     client.close();
+}
+
+#[test]
+fn owner_failures_and_decode_errors_are_logged_without_values() {
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let open = |mode: &str| {
+        RpcClient::open_observed_logged(
+            fixture.command(mode),
+            PRODUCT_VERSION,
+            Arc::new(|_| {}),
+            None,
+            None,
+            Some(log.clone()),
+        )
+        .unwrap()
+    };
+    let client = open("future-vocabulary");
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Count {
+        count: u64,
+    }
+    let value = client
+        .call(
+            "synthetic.bad-result",
+            "op-bad",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let decoded: Result<Count, _> = client.decode("synthetic.bad-result", value);
+    assert_eq!(decoded.unwrap_err().code, "invalid_response");
+    let _ = client
+        .call(
+            "synthetic.error-data",
+            "op-error-data",
+            json!({"fixture": "error-config-refusal", "data": {"schemaVersion": 9, "refusals": []}}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    let failed = client
+        .call(
+            "synthetic.stderr-exit",
+            "op-exit",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    assert_eq!(failed.code, "disconnected");
+    client.close();
+    let records = log.records();
+    let kinds: Vec<_> = records
+        .iter()
+        .map(|r| (r.kind.as_str(), r.method.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("decode", "synthetic.bad-result"),
+            ("error-data", "response"),
+            ("owner-error", "response"),
+            ("owner-failure", "synthetic.stderr-exit"),
+        ]
+    );
+    assert_eq!(records[0].detail, vec!["type Count", "category data"]);
+    assert_eq!(records[1].detail, vec!["rejected schema-version"]);
+    assert_eq!(records[2].code, "plan_failed");
+    assert_eq!(
+        records[3].detail,
+        vec![
+            "yard: plan failed: SECRET_TOKEN=<redacted> at <path>",
+            "yard: profile <redacted> <redacted>",
+        ]
+    );
+    let raw = fs::read_to_string(log.path()).unwrap();
+    for secret in [
+        "hunter2",
+        "/home/operator",
+        "private-value",
+        "ghp_",
+        "SECRET-RESULT-VALUE",
+    ] {
+        assert!(!raw.contains(secret), "{secret} leaked: {raw}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(log.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

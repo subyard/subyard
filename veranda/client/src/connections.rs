@@ -1113,6 +1113,39 @@ fn safe_editor_id(id: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
+/// Replaces a file in the private store root, creating the root privately.
+pub(crate) fn replace_private_store_file(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), NativeError> {
+    ensure_private_root(root)?;
+    atomic_private_replace(&root.join(name), bytes)
+}
+/// Reads a private store file of at most `limit` bytes; missing reads as empty.
+pub(crate) fn read_private_store_file(
+    root: &Path,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<u8>, NativeError> {
+    let path = root.join(name);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(store_io()),
+        Ok(_) => {}
+    }
+    check_ancestors(root)?;
+    check_private_dir(root)?;
+    let mut bytes = Vec::new();
+    open_private_read(&path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| store_io())?;
+    if bytes.len() as u64 > limit {
+        return Err(store_io());
+    }
+    Ok(bytes)
+}
 fn atomic_private_replace(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
     let parent = path.parent().ok_or_else(invalid_bundle)?;
     check_ancestors(parent)?;
