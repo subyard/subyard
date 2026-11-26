@@ -19,7 +19,7 @@ type hostLogOptions struct {
 }
 
 func hostLogInvocation(arguments []string) bool {
-	return slices.Contains(arguments, "--updates") || slices.Contains(arguments, "--audit")
+	return slices.Contains(arguments, "--updates") || slices.Contains(arguments, "--audit") || slices.Contains(arguments, "--rpc")
 }
 
 func (cli *CLI) runHostLogs(arguments []string) int {
@@ -32,19 +32,25 @@ func (cli *CLI) runHostLogs(arguments []string) int {
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s logs <%s> [-n LINES]\n", cli.options.Program, options.mode)
 		return 0
 	}
-	home := cli.env["SUBYARD_HOME"]
+	home := cli.hostDataHome()
 	if home == "" {
-		operatorHome := cli.env["SUBYARD_OPERATOR_HOME"]
-		if operatorHome == "" {
-			operatorHome = cli.env["HOME"]
-		}
-		if operatorHome != "" {
-			home = filepath.Join(operatorHome, ".subyard")
-		}
-	}
-	if home == "" || !filepath.IsAbs(home) {
 		cli.errorf("logs: Subyard data home is unavailable")
 		return 1
+	}
+	if options.mode == "--rpc" {
+		records, err := (audit.RPCErrorLog{Home: home}).Read(options.lines)
+		if err != nil {
+			cli.errorf("logs: read RPC errors: %v", err)
+			return 1
+		}
+		for _, record := range records {
+			fmt.Fprintf(cli.options.Stdout, "%s request=%s", record.At.Format(time.RFC3339), record.Request)
+			if record.Operation != "" && record.Operation != record.Request {
+				fmt.Fprintf(cli.options.Stdout, " operation=%s", record.Operation)
+			}
+			fmt.Fprintf(cli.options.Stdout, " method=%s code=%s -- %s\n", record.Method, record.Code, record.Error)
+		}
+		return 0
 	}
 	if options.mode == "--audit" {
 		lines, err := audit.ReadAuditLines(home, options.lines)
@@ -90,9 +96,9 @@ func parseHostLogOptions(arguments []string) (hostLogOptions, error) {
 	result := hostLogOptions{lines: 20}
 	for index := 0; index < len(arguments); index++ {
 		switch argument := arguments[index]; argument {
-		case "--updates", "--audit":
+		case "--updates", "--audit", "--rpc":
 			if result.mode != "" && result.mode != argument {
-				return hostLogOptions{}, errors.New("choose exactly one of --updates or --audit")
+				return hostLogOptions{}, errors.New("choose exactly one of --updates, --audit or --rpc")
 			}
 			result.mode = argument
 		case "-n":
@@ -121,6 +127,21 @@ func parseHostLogOptions(arguments []string) (hostLogOptions, error) {
 		return hostLogOptions{}, errors.New("host log selector is required")
 	}
 	return result, nil
+}
+
+// hostDataHome is the absolute Subyard data home of this host, or empty.
+func (cli *CLI) hostDataHome() string {
+	home := cli.env["SUBYARD_HOME"]
+	if home == "" {
+		operatorHome := firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"])
+		if operatorHome != "" {
+			home = filepath.Join(operatorHome, ".subyard")
+		}
+	}
+	if !filepath.IsAbs(home) {
+		return ""
+	}
+	return home
 }
 
 func firstNonempty(values ...string) string {

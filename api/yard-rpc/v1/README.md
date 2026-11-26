@@ -47,6 +47,8 @@ ignore it, and older owners omit it, in which case clients keep their fixed text
 for the error `code`. A relay built before error data existed drops `data` from
 the errors it forwards, so a client behind it also falls back to that fixed text.
 
+The owner keeps each failed request's full local error text with its request
+ID, operation ID, method and code; `yard logs --rpc` on the owner shows them.
 Veranda records only value-free facts about the failures it shows generically
 in `rpc-errors.log` in its private store (0600, two 32 KiB generations): time,
 method, code, request ID, a class (`disconnected`, `ssh_failed`,

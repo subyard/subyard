@@ -3990,7 +3990,8 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
-	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: rpc.CapabilitiesForSession("workspace"), DrainOnEOF: true}
+	session := rpc.Session{Handler: rpcErrorRecorder{handler: handler, log: audit.RPCErrorLog{Home: cli.hostDataHome()}},
+		EngineVersion: Version, Capabilities: rpc.CapabilitiesForSession("workspace"), DrainOnEOF: true}
 	if ownerServicesOnly {
 		session.Capabilities = rpc.CapabilitiesForSession("owner-services")
 	}
@@ -4001,6 +4002,25 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		}
 	}
 	return 0
+}
+
+// rpcErrorRecorder keeps one owner-local record per failed request, with the
+// full error text that the session sends only in part. Recording is best
+// effort and never changes the response.
+type rpcErrorRecorder struct {
+	handler rpc.Handler
+	log     audit.RPCErrorLog
+}
+
+func (recorder rpcErrorRecorder) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
+	result, err := recorder.handler.Handle(ctx, call, emit)
+	if err != nil {
+		if fault := rpc.FaultOf(err); fault.Code != rpc.CodeCancelled {
+			_ = recorder.log.Append(audit.RPCError{Request: call.ID, Operation: call.OperationID,
+				Method: call.Method, Code: string(fault.Code), Error: err.Error()})
+		}
+	}
+	return result, err
 }
 
 type rpcHandler struct {

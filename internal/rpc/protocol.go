@@ -234,6 +234,9 @@ func normalizeKey(value string) string {
 	return string(result)
 }
 
+// FaultOf is the error a session sends for a handler error.
+func FaultOf(err error) *Error { return asFault(err) }
+
 func asFault(err error) *Error {
 	var fault *Error
 	if errors.As(err, &fault) {
