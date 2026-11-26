@@ -47,6 +47,13 @@ ignore it, and older owners omit it, in which case clients keep their fixed text
 for the error `code`. A relay built before error data existed drops `data` from
 the errors it forwards, so a client behind it also falls back to that fixed text.
 
+Veranda records only value-free facts about the failures it shows generically
+in `rpc-errors.log` in its private store (0600, two 32 KiB generations): time,
+method, code, request ID, a class (`disconnected`, `ssh_failed`,
+`transport_unavailable`, `invalid_response`, `rpc_timeout`,
+`incompatible_engine`, `owner_error`, `error_data_rejected`) and, for an
+undecodable result, the serde category and the decoded type and field name.
+
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,
 `protocolMax`, `engineVersion`, and `capabilities`. Product version compatibility

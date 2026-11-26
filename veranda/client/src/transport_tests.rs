@@ -119,6 +119,15 @@ while True:
                          stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
         reply(request, {'descendantStarted':True})
         sys.exit(0)
+    if method == 'synthetic.exit':
+        sys.stderr.write('SECRET_TOKEN=hunter2 /home/operator/private\n')
+        os._exit(3)
+    if method == 'synthetic.bad-result':
+        reply(request, {'count': 'SECRET-RESULT-VALUE'})
+        continue
+    if method == 'synthetic.hold':
+        held_requests[operation] = request
+        continue
     if method == 'synthetic.error-data':
         value = fixture(request['params']['fixture'])
         value.update(id=request['id'], operationId=operation)
@@ -1169,4 +1178,243 @@ fn owner_error_data_reaches_the_fault_and_invalid_data_keeps_the_fixed_text() {
         .unwrap();
     assert_eq!(result["pong"], true);
     client.close();
+}
+
+fn logged(
+    fixture: &OwnerFixture,
+    log: &Arc<crate::diagnostics::DiagnosticLog>,
+    mode: &str,
+) -> Result<RpcClient, NativeError> {
+    RpcClient::open_observed_logged(
+        fixture.command(mode),
+        PRODUCT_VERSION,
+        Arc::new(|_| {}),
+        None,
+        None,
+        Some(log.clone()),
+    )
+}
+
+#[test]
+fn rpc_failures_are_logged_as_closed_facts_without_values() {
+    use crate::diagnostics::{Class, Structure};
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let client = logged(&fixture, &log, "future-vocabulary").unwrap();
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Count {
+        count: u64,
+    }
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Total {
+        total: u64,
+    }
+    let value = client
+        .call(
+            "synthetic.bad-result",
+            "op-bad",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let invalid: Result<Count, _> = client.decode("synthetic.bad-result", value.clone());
+    assert_eq!(invalid.unwrap_err().code, "invalid_response");
+    let missing: Result<Total, _> = client.decode("synthetic.bad-result", value);
+    assert_eq!(missing.unwrap_err().code, "invalid_response");
+    let _ = client
+        .call(
+            "synthetic.error-data",
+            "op-error-data",
+            json!({"fixture": "error-config-refusal", "data": {"schemaVersion": 9, "refusals": []}}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    let failed = client
+        .call(
+            "synthetic.exit",
+            "op-exit",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    assert_eq!(failed.code, "disconnected");
+    client.close();
+    let facts: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| {
+            assert!(record.at > 0);
+            (
+                record.class,
+                record.method,
+                record.code,
+                record.request.is_empty(),
+                record.structure,
+                record.path,
+            )
+        })
+        .collect();
+    let fact = |class, method: &str, code: &str, request: bool, structure, path: &str| {
+        (
+            class,
+            method.to_string(),
+            code.to_string(),
+            request,
+            structure,
+            path.to_string(),
+        )
+    };
+    assert_eq!(
+        facts,
+        vec![
+            fact(
+                Class::InvalidResponse,
+                "synthetic.bad-result",
+                "invalid_response",
+                true,
+                Some(Structure::InvalidType),
+                "Count"
+            ),
+            fact(
+                Class::InvalidResponse,
+                "synthetic.bad-result",
+                "invalid_response",
+                true,
+                Some(Structure::MissingField),
+                "Total.total"
+            ),
+            fact(
+                Class::ErrorDataRejected,
+                "synthetic.error-data",
+                "plan_failed",
+                false,
+                None,
+                ""
+            ),
+            fact(
+                Class::OwnerError,
+                "synthetic.error-data",
+                "plan_failed",
+                false,
+                None,
+                ""
+            ),
+            fact(
+                Class::Disconnected,
+                "synthetic.exit",
+                "disconnected",
+                false,
+                None,
+                ""
+            ),
+        ]
+    );
+    let file = fixture.store_root().join(crate::diagnostics::FILE);
+    let raw = fs::read_to_string(&file).unwrap();
+    for secret in [
+        "SECRET",
+        "hunter2",
+        "/home/operator",
+        "plan init",
+        "HOST_LINKS",
+    ] {
+        assert!(!raw.contains(secret), "{secret} leaked: {raw}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn closing_the_session_and_negotiation_failures_are_logged_only_when_they_are_failures() {
+    use crate::diagnostics::Class;
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let client = logged(&fixture, &log, "future-vocabulary").unwrap();
+    let call = client
+        .begin("synthetic.hold", "op-hold", json!({}))
+        .unwrap();
+    client.close();
+    // Closing cancels the held request; its failure is not logged.
+    assert!(client.wait(call, Duration::from_secs(2)).is_err());
+    assert_eq!(
+        log.records(),
+        vec![],
+        "an intentional close is not a failure"
+    );
+    for mode in ["version-mismatch", "capability-missing"] {
+        assert!(logged(&fixture, &log, mode).is_err());
+    }
+    let missing = Command::new(fixture.store_root().join("missing-program"));
+    assert!(RpcClient::open_observed_logged(
+        missing,
+        PRODUCT_VERSION,
+        Arc::new(|_| {}),
+        None,
+        None,
+        Some(log.clone())
+    )
+    .is_err());
+    let facts: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| (record.class, record.code))
+        .collect();
+    assert_eq!(
+        facts,
+        vec![
+            (Class::IncompatibleEngine, "incompatible_engine".to_string()),
+            (Class::IncompatibleEngine, "capability_missing".to_string()),
+            (
+                Class::TransportUnavailable,
+                "transport_unavailable".to_string()
+            ),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_ssh_failure_is_told_apart_from_an_owner_disconnect() {
+    use crate::diagnostics::Class;
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let bin = fixture.store_root().with_file_name("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for (name, status) in [("ssh", 255), ("yard", 255)] {
+        let program = bin.join(name);
+        fs::write(&program, format!("#!/bin/sh\nexit {status}\n")).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = RpcClient::open_observed_logged(
+            Command::new(&program),
+            PRODUCT_VERSION,
+            Arc::new(|_| {}),
+            None,
+            None,
+            Some(log.clone()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "disconnected");
+    }
+    let classes: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| (record.class, record.method))
+        .collect();
+    assert_eq!(
+        classes,
+        vec![
+            (Class::SshFailed, "rpc.negotiate".to_string()),
+            (Class::Disconnected, "rpc.negotiate".to_string())
+        ]
+    );
 }
