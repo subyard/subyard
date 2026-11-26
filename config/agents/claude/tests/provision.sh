@@ -109,7 +109,7 @@ grep -Fq ' ready' "$tmp/first.out" && fail 'provisioning repeated the adapter re
 [ "$("$link" --version)" = '2.1.0 (Claude Code)' ] || fail 'wrong installed version'
 "$check" >/dev/null
 [ "$(stat -c '%a:%u:%g' "$instructions")" = "644:$(id -u):$(id -g)" ] || fail 'incorrect instructions mode or owner'
-head -n 1 "$instructions" | grep -Fxq '<!-- Subyard Claude permission policy: yard init installs and checks this file. -->' \
+[ "$(head -n 1 "$instructions")" = '<!-- Subyard Claude permission policy: yard init installs and checks this file. -->' ] \
   || fail 'instructions lack the ownership marker'
 grep -Fq '`$(...)` in `rm` targets' "$instructions" || fail 'instructions lack the deletion rule'
 run_hook "$root" >/dev/null
