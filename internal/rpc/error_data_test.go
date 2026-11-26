@@ -37,3 +37,40 @@ func TestRefusalErrorWithoutRefusalsHasNoData(t *testing.T) {
 		t.Fatalf("data = %s", fault.Data)
 	}
 }
+
+func TestRefusalErrorBoundsTheGateAndDecodeAppliesTheSameBounds(t *testing.T) {
+	previous := "release\x1b[0m-a"
+	gate := &GateOutcome{Status: "migration-required", Code: "transition-required",
+		Active: strings.Repeat("a", 300), Previous: &previous, Target: "b",
+		Message: strings.Repeat("m\n", 600), Action: "run yard migrate\r"}
+	for index := 0; index < MaxGateDecisions+2; index++ {
+		gate.Decisions = append(gate.Decisions, GateDecision{Resource: "r", Decision: "apply", Result: strings.Repeat("x", 900)})
+	}
+	fault := RefusalError(CodeInternal, "m", ErrorData{Refusals: []Refusal{{Source: RefusalSourceGate, Code: "c", Text: "t"}}, Gate: gate})
+	data, ok := DecodeErrorData(fault)
+	if !ok || data.Gate == nil {
+		t.Fatalf("data = %s", fault.Data)
+	}
+	bounded := data.Gate
+	if len(bounded.Message) > MaxRefusalText || strings.Contains(bounded.Message, "\n") ||
+		len(bounded.Active) > MaxRefusalName || *bounded.Previous != "release [0m-a" || bounded.Action != "run yard migrate " ||
+		len(bounded.Decisions) != MaxGateDecisions || bounded.OmittedDecisions != 2 ||
+		len(bounded.Decisions[0].Result) > MaxRefusalText || data.Incomplete || data.Omitted != 0 {
+		t.Fatalf("gate = %+v", bounded)
+	}
+	if len(gate.Decisions) != MaxGateDecisions+2 || gate.Message != strings.Repeat("m\n", 600) {
+		t.Fatal("caller gate was mutated")
+	}
+	// A peer's unbounded data is bounded the same way on decode.
+	raw, _ := json.Marshal(ErrorData{SchemaVersion: 1, Refusals: []Refusal{{Source: "config", Code: "c", Text: "t\x07" + strings.Repeat("é", 400)}}, Gate: gate})
+	data, ok = DecodeErrorData(&Error{Code: CodeInternal, Data: raw})
+	if !ok || len(data.Refusals[0].Text) > MaxRefusalText || strings.ContainsRune(data.Refusals[0].Text, 7) ||
+		len(data.Gate.Message) > MaxRefusalText || len(data.Gate.Decisions) != MaxGateDecisions {
+		t.Fatalf("decoded = %+v", data)
+	}
+	for _, invalid := range []string{``, `{}`, `{"schemaVersion":2,"refusals":[{"source":"config","code":"c","text":"t"}]}`, `{"schemaVersion":1,"refusals":[]}`, `[]`} {
+		if _, ok := DecodeErrorData(&Error{Data: json.RawMessage(invalid)}); ok {
+			t.Fatalf("accepted %q", invalid)
+		}
+	}
+}

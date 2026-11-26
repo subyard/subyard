@@ -12,6 +12,7 @@ const (
 	MaxErrorRefusals    = 32
 	MaxRefusalText      = 512
 	MaxRefusalName      = 128
+	MaxGateDecisions    = 32
 	errorDataSchema     = 1
 	RefusalSourceConfig = "config"
 	RefusalSourceGate   = "release-gate"
@@ -28,7 +29,31 @@ type ErrorData struct {
 	// diagnostics name them.
 	Incomplete bool `json:"incomplete,omitempty"`
 	// Gate is the public release-gate outcome of a gate refusal.
-	Gate any `json:"gate,omitempty"`
+	Gate *GateOutcome `json:"gate,omitempty"`
+}
+
+// GateOutcome is the public release-gate outcome of a gate refusal; its
+// blockers are the refusals.
+type GateOutcome struct {
+	Status      string         `json:"status"`
+	Code        string         `json:"code"`
+	Active      string         `json:"active"`
+	Previous    *string        `json:"previous"`
+	Target      string         `json:"target"`
+	Transaction *string        `json:"transaction"`
+	Message     string         `json:"message,omitempty"`
+	Action      string         `json:"action"`
+	Decisions   []GateDecision `json:"decisions,omitempty"`
+	// OmittedDecisions counts decisions beyond MaxGateDecisions.
+	OmittedDecisions int `json:"omittedDecisions,omitempty"`
+}
+
+// GateDecision is one redacted resource decision of a gate outcome.
+type GateDecision struct {
+	Resource string `json:"resource"`
+	Scope    string `json:"scope,omitempty"`
+	Decision string `json:"decision"`
+	Result   string `json:"result,omitempty"`
 }
 
 // Refusal is one independent typed refusal and its next step.
@@ -56,7 +81,33 @@ func RefusalError(code ErrorCode, message string, data ErrorData) *Error {
 	if len(data.Refusals) == 0 {
 		return fault
 	}
+	data = data.bounded()
 	data.SchemaVersion = errorDataSchema
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return fault
+	}
+	fault.Data = encoded
+	return fault
+}
+
+// DecodeErrorData reads the refusals of a peer's error within the same bounds
+// the owner applies. It reports false for absent, unknown or empty data.
+func DecodeErrorData(fault *Error) (ErrorData, bool) {
+	var data ErrorData
+	if fault == nil || len(fault.Data) == 0 || json.Unmarshal(fault.Data, &data) != nil ||
+		data.SchemaVersion != errorDataSchema || len(data.Refusals) == 0 {
+		return ErrorData{}, false
+	}
+	return data.bounded(), true
+}
+
+// bounded caps the lists and cleans every text without mutating the caller's
+// slices; it is the single place the bounds are applied.
+func (data ErrorData) bounded() ErrorData {
+	if data.Omitted < 0 {
+		data.Omitted = 0
+	}
 	if len(data.Refusals) > MaxErrorRefusals {
 		data.Omitted += len(data.Refusals) - MaxErrorRefusals
 		data.Refusals = data.Refusals[:MaxErrorRefusals]
@@ -79,12 +130,45 @@ func RefusalError(code ErrorCode, message string, data ErrorData) *Error {
 		refusals[index] = refusal
 	}
 	data.Refusals = refusals
-	encoded, err := json.Marshal(data)
-	if err != nil {
-		return fault
+	if data.Gate != nil {
+		gate := *data.Gate
+		gate.Status = boundText(gate.Status, MaxRefusalName)
+		gate.Code = boundText(gate.Code, MaxRefusalName)
+		gate.Active = boundText(gate.Active, MaxRefusalName)
+		gate.Previous = boundOptional(gate.Previous, MaxRefusalName)
+		gate.Target = boundText(gate.Target, MaxRefusalName)
+		gate.Transaction = boundOptional(gate.Transaction, MaxRefusalName)
+		gate.Message = boundText(gate.Message, MaxRefusalText)
+		gate.Action = boundText(gate.Action, MaxRefusalText)
+		if gate.OmittedDecisions < 0 {
+			gate.OmittedDecisions = 0
+		}
+		if len(gate.Decisions) > MaxGateDecisions {
+			gate.OmittedDecisions += len(gate.Decisions) - MaxGateDecisions
+			gate.Decisions = gate.Decisions[:MaxGateDecisions]
+		}
+		decisions := make([]GateDecision, len(gate.Decisions))
+		for index, decision := range gate.Decisions {
+			decisions[index] = GateDecision{
+				Resource: boundText(decision.Resource, MaxRefusalName), Scope: boundText(decision.Scope, MaxRefusalName),
+				Decision: boundText(decision.Decision, MaxRefusalName), Result: boundText(decision.Result, MaxRefusalText),
+			}
+		}
+		if len(decisions) == 0 {
+			decisions = nil
+		}
+		gate.Decisions = decisions
+		data.Gate = &gate
 	}
-	fault.Data = encoded
-	return fault
+	return data
+}
+
+func boundOptional(text *string, limit int) *string {
+	if text == nil {
+		return nil
+	}
+	bounded := boundText(*text, limit)
+	return &bounded
 }
 
 // boundText replaces control characters and cuts text to limit bytes at a

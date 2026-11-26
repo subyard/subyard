@@ -33,10 +33,14 @@ refusals are sent; `omitted` counts the rest. Texts are at most 512 bytes and
 contain no control characters. `incomplete` means the error also had causes that
 are not typed refusals; the owner's own diagnostics (`config validate`,
 `yard migrate --check`) report them. A release-gate refusal adds `gate`, the public
-gate outcome (status, code, releases, transaction, action and at most 32 redacted
-decisions), and its `message` is the outcome message. Other errors carry no `data`.
-`data` is optional: older clients ignore it, and older owners omit it, in which
-case clients keep their fixed text for the error `code`.
+gate outcome (status, code, releases, transaction, message, action and at most 32
+redacted decisions; `omittedDecisions` counts the rest), within the same text
+bounds, and its `message` is the outcome message. Other errors carry no `data`.
+A client skips a refusal whose `source` it does not know and treats the data as
+`incomplete`. `data` is optional: older clients ignore it, and older owners omit
+it, in which case clients keep their fixed text for the error `code`. A relay
+built before `error-data-v1` drops `data` from the errors it forwards, so a
+client behind it also falls back to that fixed text.
 
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,

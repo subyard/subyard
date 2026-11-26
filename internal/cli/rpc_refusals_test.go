@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +30,7 @@ type errorData struct {
 		Code      string                               `json:"code"`
 		Action    string                               `json:"action"`
 		Decisions []releasetransition.RedactedDecision `json:"decisions"`
+		Omitted   int                                  `json:"omittedDecisions"`
 		Blockers  []releasetransition.Blocker          `json:"blockers"`
 	} `json:"gate"`
 }
@@ -138,12 +142,17 @@ func TestMutationGateRPCErrorBoundsDecisions(t *testing.T) {
 	outcome := &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired,
 		Code: releasetransition.CodeResourceConflict, Message: "conflict"}
 	inspection := &releasetransition.Inspection{Outcome: outcome}
-	for index := 0; index < maxGateDecisions+5; index++ {
+	for index := 0; index < rpc.MaxGateDecisions+5; index++ {
 		inspection.Decisions = append(inspection.Decisions, releasetransition.RedactedDecision{Resource: fmt.Sprintf("r%d", index), Decision: "apply"})
 	}
-	data := decodeErrorData(t, mutationGateRPCError(outcome, inspection))
-	if len(data.Gate.Decisions) != maxGateDecisions || !data.Incomplete {
-		t.Fatalf("decisions = %d incomplete=%v", len(data.Gate.Decisions), data.Incomplete)
+	fault := mutationGateRPCError(outcome, inspection)
+	data := decodeErrorData(t, fault)
+	// Cut decisions are counted on the gate; every refusal is still present.
+	if len(data.Gate.Decisions) != rpc.MaxGateDecisions || data.Gate.Omitted != 5 || data.Incomplete || data.Omitted != 0 {
+		t.Fatalf("data = %s", fault.Data)
+	}
+	if lines := ownerRefusalLines(fault); slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, "other causes") }) {
+		t.Fatalf("cut decisions rendered as unreported causes: %q", lines)
 	}
 }
 
@@ -191,4 +200,98 @@ func rpcGatePayload(fault *rpc.Error) []byte {
 		return data.Gate
 	}
 	return []byte(fault.Message)
+}
+
+// A remote command refused by the owner's release gate shows every owner
+// refusal and next step, in the owner's order, after the summary message.
+func TestRemoteStartShowsEveryOwnerGateRefusalAndNextStep(t *testing.T) {
+	fixture := newFixture(t)
+	root, environment := fixture.Root, fixture.Environment
+	remoteDirectory := filepath.Join(root, "state", "yards", "remote")
+	if err := os.MkdirAll(remoteDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(remoteDirectory, "config.env"),
+		"YARD_TYPE=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
+	outcome := &releasetransition.Outcome{
+		Status: releasetransition.StatusMigrationRequired, Code: releasetransition.CodeTransitionRequired,
+		Active: "release-a", Target: "release-b", Message: "release migration is required", Retry: "run yard migrate",
+	}
+	inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{
+		{Code: releasetransition.CodeTransitionRequired, Resource: "migration.settings",
+			Message: "settings need migration\x1b[31m", Retry: "run yard migrate"},
+		{Code: releasetransition.CodePreconditionBlocked, Resource: "activation.core.pending-configuration",
+			Message: "yard inner has pending configuration", Retry: "finish the pending change, then run yard -Y inner start"},
+	}}
+	fault, err := json.Marshal(mutationGateRPCError(outcome, inspection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := filepath.Join(root, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(fakeBin, "owner-error.json"), string(fault), 0o600)
+	writeCLIFile(t, filepath.Join(fakeBin, "owner.py"), `import json,os,struct,sys
+root=os.path.dirname(sys.argv[0])
+with open(root+'/owner-error.json') as source: fault=json.load(source)
+def send(req,key,value):
+ data=json.dumps({'version':1,'type':'response','id':req['id'],'operationId':req.get('operationId',''),key:value}).encode()
+ sys.stdout.buffer.write(struct.pack('>I',len(data))+data);sys.stdout.buffer.flush()
+while True:
+ header=sys.stdin.buffer.read(4)
+ if not header:break
+ req=json.loads(sys.stdin.buffer.read(struct.unpack('>I',header)[0]))
+ if req['method']=='rpc.negotiate':send(req,'result',{'capabilities':['operation-exact-plan-v1','operation-steps-v1','error-data-v1']})
+ elif req['method']=='operation.plan':send(req,'error',fault)
+ else:sys.exit(6)
+`, 0o600)
+	writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"\nexec python3 '"+filepath.Join(fakeBin, "owner.py")+"' \"$@\"\n", 0o700)
+	path := fakeBin + ":" + os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	var stderr bytes.Buffer
+	program := fixture.New(Options{
+		Arguments:   []string{"-Y", "remote", "--yes", "start"},
+		Environment: append(environment, "PATH="+path), Stderr: &stderr,
+	})
+	if code := program.Run(context.Background()); code == 0 {
+		t.Fatalf("refused start succeeded: %s", stderr.String())
+	}
+	want := []string{
+		": release migration is required\n",
+		"yard: owner release gate: release migration-required (transition-required): active release-a, target release-b\n",
+		"yard: cause: settings need migration [31m\nyard: Next: run yard migrate\n",
+		"yard: cause: yard inner has pending configuration\nyard: Next: finish the pending change, then run yard -Y inner start\n",
+	}
+	output, at := stderr.String(), 0
+	for _, line := range want {
+		found := strings.Index(output[at:], line)
+		if found < 0 {
+			t.Fatalf("stderr lacks %q in order:\n%s", line, output)
+		}
+		at += found + len(line)
+	}
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "other causes") {
+		t.Fatalf("stderr = %q", output)
+	}
+}
+
+func TestOwnerRefusalLinesRenderConfigRefusalsAndWhatWasLeftOut(t *testing.T) {
+	setting, _ := domain.ConfigSettingName("HOST_LINKS")
+	refusals := []error{errors.New("unclassified " + refusalSentinel)}
+	for index := 0; index < rpc.MaxErrorRefusals+2; index++ {
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigSettingNumeric, setting))
+		setting, _ = domain.ConfigSettingName(fmt.Sprintf("SETTING_%d", index))
+	}
+	fault := operationRPCError(rpc.CodeInvalidParams, domain.CollectRefusals(refusals...))
+	lines := ownerRefusalLines(fmt.Errorf("prepare: %w", fault))
+	if len(lines) != 2*rpc.MaxErrorRefusals+2 || !strings.HasPrefix(lines[0], "cause: ") || !strings.HasPrefix(lines[1], "Next: ") ||
+		lines[len(lines)-2] != "2 more refusals; review the owner's diagnostics" ||
+		lines[len(lines)-1] != "other causes are reported only in the owner's diagnostics" ||
+		strings.Contains(strings.Join(lines, "\n"), refusalSentinel) {
+		t.Fatalf("lines = %q", lines)
+	}
+	if lines := ownerRefusalLines(&rpc.Error{Code: rpc.CodeInternal, Message: "m"}); lines != nil {
+		t.Fatalf("plain error lines = %q", lines)
+	}
 }

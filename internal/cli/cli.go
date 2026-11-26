@@ -3884,8 +3884,16 @@ func (cli *CLI) ensureOperationID() string {
 func (cli *CLI) errorf(format string, arguments ...any) {
 	// Only this local stderr boundary may expose trusted owner path metadata.
 	// The error itself remains safe for RPC and activation consumers.
+	var refusals []string
 	for index, argument := range arguments {
-		if cause, ok := argument.(error); ok && cli.localMetadataDiagnostics {
+		cause, ok := argument.(error)
+		if !ok {
+			continue
+		}
+		// An owner error's message is only its summary; its typed refusals and
+		// next steps follow it.
+		refusals = append(refusals, ownerRefusalLines(cause)...)
+		if cli.localMetadataDiagnostics {
 			if diagnostic, local := config.OwnerSourceDiagnostic(cause); local {
 				arguments[index] = diagnostic
 			}
@@ -3894,6 +3902,9 @@ func (cli *CLI) errorf(format string, arguments ...any) {
 	fmt.Fprintf(cli.options.Stderr, "%s: ", cli.options.Program)
 	fmt.Fprintf(cli.options.Stderr, format, arguments...)
 	fmt.Fprintln(cli.options.Stderr)
+	for _, line := range refusals {
+		fmt.Fprintf(cli.options.Stderr, "%s: %s\n", cli.options.Program, line)
+	}
 }
 
 func parseGlobals(arguments []string, inheritedYard string) (yard string, explicit, yes bool, remaining []string, err error) {

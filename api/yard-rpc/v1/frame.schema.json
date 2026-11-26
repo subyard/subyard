@@ -234,17 +234,101 @@
           "type": "object",
           "description": "Public release-gate outcome of a gate refusal; its blockers are the refusals.",
           "properties": {
+            "status": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "active": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "previous": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "target": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "transaction": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "action": {
+              "type": "string",
+              "maxLength": 512
+            },
             "decisions": {
               "type": "array",
-              "maxItems": 32
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/gateDecision"
+              }
+            },
+            "omittedDecisions": {
+              "type": "integer",
+              "minimum": 1
             }
-          }
+          },
+          "required": [
+            "status",
+            "code",
+            "active",
+            "target",
+            "action"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
         "schemaVersion",
         "refusals"
       ]
+    },
+    "gateDecision": {
+      "type": "object",
+      "properties": {
+        "resource": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "decision": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "result": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "resource",
+        "decision"
+      ],
+      "additionalProperties": false
     },
     "refusal": {
       "type": "object",
