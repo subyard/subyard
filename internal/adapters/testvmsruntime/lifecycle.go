@@ -310,10 +310,10 @@ func (runtime *Runtime) finishDrainingSlot(
 	started := runtime.Now()
 	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
 	if stopErr != nil {
-		stopErr = fmt.Errorf("drain step fence-and-stop: %w", stopErr)
+		stopErr = &drainStepError{step: "fence-and-stop", err: stopErr}
 	} else if slot.Environment != nil {
 		if deleteErr := child.deleteAllocation(ctx); deleteErr != nil {
-			stopErr = fmt.Errorf("drain step delete-allocation: %w", deleteErr)
+			stopErr = &drainStepError{step: "delete-allocation", err: deleteErr}
 		}
 	}
 	if evidence.duration = runtime.Now().Sub(started); evidence.duration < 0 {
@@ -347,6 +347,8 @@ func (runtime *Runtime) finishDrainingSlot(
 		ToState:            SlotQuarantined,
 		DurationMS:         evidence.duration.Milliseconds(),
 		Error:              stopErr.Error(),
+		Step:               failureStep(stopErr),
+		Outcome:            failureOutcome(stopErr),
 		Context:            leaseContextFromSlot(slot),
 		Allocation:         publicResourceAllocation(slot),
 		agentClientID:      slot.ClientID,
@@ -779,6 +781,7 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 	if stateErr == nil && strings.TrimSpace(state) == "STOPPED" {
 		return nil
 	}
+	timedOut := elapsed >= gracefulStopTimeout
 	if stateErr != nil {
 		stopErr = errors.Join(stopErr, stateErr)
 	} else {
@@ -816,7 +819,50 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 		}
 		stopErr = errors.Join(stopErr, fmt.Errorf("%s log tail for %s:\n%s", args[0], vm, value))
 	}
+	if timedOut {
+		return &stopTimeoutError{err: stopErr}
+	}
 	return stopErr
+}
+
+// The graceful stop budget passed to Incus.
+const gracefulStopTimeout = 60 * time.Second
+
+// stopTimeoutError marks a graceful stop that used its whole budget; the text is unchanged.
+type stopTimeoutError struct{ err error }
+
+func (err *stopTimeoutError) Error() string { return err.err.Error() }
+func (err *stopTimeoutError) Unwrap() error { return err.err }
+
+// drainStepError names the drain step that failed.
+type drainStepError struct {
+	step string
+	err  error
+}
+
+func (err *drainStepError) Error() string { return "drain step " + err.step + ": " + err.err.Error() }
+func (err *drainStepError) Unwrap() error { return err.err }
+
+// failureStep and failureOutcome classify a failure for the pool error journal
+// from its typed causes, never from its text.
+func failureStep(err error) string {
+	var step *drainStepError
+	var readiness *readinessFailure
+	switch {
+	case errors.As(err, &step):
+		return step.step
+	case errors.As(err, &readiness):
+		return "readiness"
+	}
+	return ""
+}
+
+func failureOutcome(err error) string {
+	var timeout *stopTimeoutError
+	if errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "error"
 }
 
 func (runtime *Runtime) useLeaseSlot(slot LeaseSlot) {

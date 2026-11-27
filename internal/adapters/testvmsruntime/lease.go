@@ -919,7 +919,9 @@ func (store LeaseStore) recoveryJournalPath() string {
 func (store LeaseStore) writePool(pool LeasePool) error {
 	journal := leaseRecoveryJournal{SchemaVersion: LeaseRecoverySchemaVersion}
 	for _, slot := range pool.Slots {
-		if !slotHasRecoveryMetadata(slot) {
+		// Only recovery states are journaled: a recovered slot keeps its last
+		// incident while a pool resize drains it for retirement.
+		if !slotHasRecoveryMetadata(slot) || !recoveryJournalState(slot.State) {
 			continue
 		}
 		journal.Slots = append(journal.Slots, leaseRecoverySlot{
@@ -969,9 +971,11 @@ func (store LeaseStore) mergeRecoveryJournal(pool *LeasePool) error {
 				!brokerRecordID.MatchString(recovery.IncidentID)) {
 			return fmt.Errorf("%w: invalid lease recovery metadata", ErrCorruptLeaseState)
 		}
-		switch recovery.State {
-		case SlotAvailable, SlotQuarantined, SlotRecovering:
-		default:
+		if recovery.State == SlotDraining {
+			// Older brokers journaled a recovered slot that a resize was retiring.
+			continue
+		}
+		if !recoveryJournalState(recovery.State) {
 			return fmt.Errorf("%w: invalid lease recovery state", ErrCorruptLeaseState)
 		}
 		seen[recovery.SlotID] = true
@@ -989,6 +993,10 @@ func (store LeaseStore) mergeRecoveryJournal(pool *LeasePool) error {
 		slot.RecoveryStartedAt = recovery.RecoveryStartedAt
 	}
 	return nil
+}
+
+func recoveryJournalState(state SlotState) bool {
+	return state == SlotAvailable || state == SlotQuarantined || state == SlotRecovering
 }
 
 func slotHasRecoveryMetadata(slot LeaseSlot) bool {
