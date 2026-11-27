@@ -50,6 +50,9 @@ Read by task; links are relative to this skill.
   non-blocking declaration of surviving yard files and manual cleanup, shown in plan/result
   output and release notes; accepted agent cleanup limitations never refuse rollback.
   See [rollback boundaries](../../../docs/control-plane.md#declared-rollback-boundaries).
+- A commit that passed before and fails after a dependency build changed (the Periodic summary
+  names the exact Incus packages) is an upstream break. Treat it as `bp0`: stop depending on the
+  broken path in Subyard. Never pin the dependency or quarantine the check.
 
 ## Choose checks by risk
 

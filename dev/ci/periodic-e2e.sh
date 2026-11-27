@@ -47,6 +47,22 @@ probe_after() {
   fi
 }
 
+# Upstream rebuilds keep one version string, so name the exact packages as the base manifest does.
+incus_packages() {
+  "$@" dpkg-query -W -f='${db:Status-Abbrev} ${Package}=${Version}\n' 'incus*' </dev/null 2>/dev/null \
+    | awk '$1 == "ii" {printf "%s%s", sep, $2; sep = " "}'
+}
+
+incus_builds() {
+  local host yard=''
+  host="$(incus_packages)" || true
+  # A broken daemon must not hold the probe; without runner Incus there is no test yard yet.
+  [ -z "$host" ] \
+    || yard="$(incus_packages timeout 20s sudo -n /usr/bin/incus exec yard-test-yard --project subyard-test-yard --)" \
+    || true
+  printf 'Incus on the runner: %s\nIncus in the test yard: %s\n' "${host:-not installed}" "${yard:-unavailable}"
+}
+
 write_summary() {
   local failed=0 name result seconds
   {
@@ -54,6 +70,9 @@ write_summary() {
     while IFS=$'\t' read -r name result seconds; do
       printf '| %s | %s | %s |\n' "$name" "$result" "$seconds"
     done < "$RESULTS"
+    printf '\n'
+    # Recorded once the pool exists, since a check may remove the test yard.
+    cat "$LOGS/incus-builds.log" 2>/dev/null || incus_builds
   } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
   grep -q $'\tfail(' "$RESULTS" && failed=1
   return "$failed"
@@ -75,6 +94,7 @@ facts() {
   systemctl is-active docker || true
   sudo -n iptables -S FORWARD 2>&1 | sed -n '1,5p' || true
   command -v incus lxc lxd 2>/dev/null || true
+  incus_builds
   stat -c '%a %U %n' "$HOME" || true
 }
 
@@ -179,6 +199,7 @@ CONFIG
   incus_root --version
   sg incus-admin -c '"$HOME/.local/bin/yard" service register test-vms --yard test-yard --yes </dev/null'
   sg incus-admin -c '"$HOME/.local/bin/yard" test-vms status </dev/null'
+  incus_builds | tee "$LOGS/incus-builds.log"
 }
 
 controller_env() {

@@ -443,16 +443,20 @@ cancelled = run_metadata(9, "schedule", f"Periodic E2E ({ubuntu})", conclusion="
 manual = run_metadata(8, "workflow_dispatch", f"Periodic E2E ({ubuntu})")
 probe = run_metadata(7, "push", f"Periodic E2E ({ubuntu})")  # Push titles are commit messages.
 legacy = run_metadata(6, "schedule", "Periodic E2E")
-assert exercise_step("changes", ubuntu, [debian_run, cancelled, manual, probe, legacy], {}) == (0, "run=true", [])
+assert exercise_step("changes", ubuntu, [debian_run, cancelled, manual, probe, legacy], {}) == (0, "matrix=true", [])
 pool_ok = job_result("pool", "success")
-assert exercise_step("changes", ubuntu, [ubuntu_run, debian_run], {"20": pool_ok}) == (0, "run=false", ["view 20"])
-assert exercise_step("changes", debian, [ubuntu_run, debian_run], {"10": pool_ok}) == (0, "run=false", ["view 10"])
-assert exercise_step("changes", ubuntu, [ubuntu_run], {"20": job_result("pool", "skipped")}) == (0, "run=true", ["view 20"])
+assert exercise_step("changes", ubuntu, [ubuntu_run, debian_run], {"20": pool_ok}) == (0, "matrix=false", ["view 20"])
+assert exercise_step("changes", debian, [ubuntu_run, debian_run], {"10": pool_ok}) == (0, "matrix=false", ["view 10"])
+assert exercise_step("changes", ubuntu, [ubuntu_run], {"20": job_result("pool", "skipped")}) == (0, "matrix=true", ["view 20"])
 assert exercise_step("changes", debian, [probe, legacy], {"6": job_result("pool", "failure"), "7": pool_ok}) == (
-    0, "run=false", ["view 6", "view 7"])
+    0, "matrix=false", ["view 6", "view 7"])
 for event in ("push", "workflow_dispatch"):
-    assert exercise_step("changes", ubuntu, [], {}, event=event, list_exit=93) == (0, "run=true", [])
+    assert exercise_step("changes", ubuntu, [], {}, event=event, list_exit=93) == (0, "matrix=true", [])
 assert exercise_step("changes", ubuntu, [], {}, list_exit=93) == (93, "", [])
+# A covered schedule still builds the candidate and leases through pool, but plans no checks.
+assert "if:" not in periodic_jobs["candidate"].split("    steps:", 1)[0], "candidate must run on covered commits"
+assert "needs.changes" not in periodic_jobs["pool"], "pool must run on covered commits"
+assert "needs.changes.outputs.matrix == 'true'" in periodic_jobs["supersede"], "a pool-only run must not supersede"
 
 retry_title = "Nested VM checks on Intel, attempt 1, for run 10"
 debian_retry = run_metadata(30, "workflow_dispatch", f"{retry_title} ({debian})", "in_progress")
@@ -568,12 +572,17 @@ for only in ("", "p0:init-settings", config_sync["id"],
              *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
-        env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
+        env=dict(os.environ, ONLY=only, MATRIX="true", GITHUB_STEP_SUMMARY="/dev/null", plan=json.dumps(plan))))
     expected = ({kind: {"include": [entry for entry in group["include"] if entry["id"] == only]}
                  for kind, group in plan.items()} if only else
                 {kind: {"include": [entry for entry in group["include"] if not entry.get("manual")]}
                  for kind, group in plan.items()})
     assert selected == expected
+# A covered schedule plans no checks, so only candidate and pool run.
+selected = json.loads(subprocess.check_output(
+    ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
+    env=dict(os.environ, ONLY="", MATRIX="false", GITHUB_STEP_SUMMARY="/dev/null", plan=json.dumps(plan))))
+assert selected == {kind: {"include": []} for kind in plan}, selected
 print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
 # Periodic-only profile lanes are planned for Periodic E2E but are never release checks.
 periodic_only = {"profile:" + name + "/" + lane["id"] for name, entry in a.profile_inventory(root).items()
