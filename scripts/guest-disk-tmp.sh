@@ -174,6 +174,9 @@ EOF
 #!/bin/sh
 # Subyard guest temporary ageing policy v1.
 set -eu
+# Names are bytes: tmpfiles matches globs byte by byte.
+LC_ALL=C
+export LC_ALL
 fail() { echo "guest temporary ageing refused: $*" >&2; exit 1; }
 directory() {
   [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g' "$1")" = 0:0 ] \
@@ -208,18 +211,47 @@ runtime=${RUNTIME_DIRECTORY:-}
   && [ "$(stat -c '%a:%u:%g' "$runtime")" = 700:0:0 ] || fail 'unsafe runtime directory'
 # tmpfiles ignores open files, working directories and mappings. Exclude each
 # top-level entry a live process references; without that view nothing ages.
+# Only a process that exits during the scan may fail to be read.
 readlink /proc/1/cwd >/dev/null || fail 'cannot inspect process references'
+scan=0
+find /proc/ -mindepth 1 -maxdepth 3 -ignore_readdir_race -regextype posix-extended \
+  -regex '/proc/[0-9]+/(cwd|root|exe|fd/[0-9]+)' -lname '/tmp/*' -printf '%l\0' \
+  -o -regex '/proc/[0-9]+(/fd)?' -o -prune >"$runtime/links" 2>"$runtime/errors" || scan=1
+find /proc/ -mindepth 1 -maxdepth 2 -ignore_readdir_race -regextype posix-extended \
+  -regex '/proc/[0-9]+/maps' -exec cat {} + \
+  -o -regex '/proc/[0-9]+' -o -prune >"$runtime/maps" 2>>"$runtime/errors" || scan=1
+# tmpfiles keeps only sockets bound in its own network namespace: read the
+# socket table of every namespace once.
+find /proc/ -mindepth 1 -maxdepth 3 -ignore_readdir_race -regextype posix-extended \
+  -regex '/proc/[0-9]+/ns/net' -printf '%l %h\n' \
+  -o -regex '/proc/[0-9]+(/ns)?' -o -prune >"$runtime/namespaces" 2>>"$runtime/errors" || scan=1
+sort -u -k1,1 -o "$runtime/namespaces" "$runtime/namespaces"
+: >"$runtime/sockets"
+while read -r _ directory; do
+  [ -n "$directory" ] || continue
+  cat "${directory%/ns}/net/unix" >>"$runtime/sockets" 2>>"$runtime/errors" || scan=1
+done <"$runtime/namespaces"
+if [ "$scan" != 0 ]; then
+  [ -s "$runtime/errors" ] || fail 'cannot inspect process references'
+  ! grep -v -e 'No such file or directory' -e 'No such process' "$runtime/errors" >/dev/null \
+    || fail 'cannot inspect process references'
+fi
 # Every byte outside the plain alphabet becomes "?", a glob matching a superset
 # of the name: glob characters, specifiers and newlines only protect more.
 # Mapping paths escape newlines, so an escape widens the rest of the name to "*".
-{
-  find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd \
-    /proc/[0-9]*/map_files -maxdepth 1 -lname '/tmp/*' -printf '%l\0' 2>/dev/null \
-    | sed -z -n 's|^/tmp/\([^/][^/]*\).*|\1|p' | sed -z 's/[^A-Za-z0-9._-]/?/g' | tr '\0' '\n'
-  cat /proc/[0-9]*/maps 2>/dev/null \
-    | sed -n 's|^[^ ]* [^ ]* [^ ]* [^ ]* [^ ]*  *\(/tmp/[^/][^/]*\).*|\1|p' \
-    | sed 's|^/tmp/||; s/\\.*/*/; s/[^A-Za-z0-9._*-]/?/g'
-} | sort -u | sed 's|^|x /tmp/|' > "$runtime/in-use.conf"
+sed -z -n 's|^/tmp/\([^/][^/]*\).*|\1|; T; s/[^A-Za-z0-9._-]/?/g; p' "$runtime/links" >"$runtime/names.z"
+tr '\0' '\n' <"$runtime/names.z" >"$runtime/names"
+sed -n 's|^[^ ]* [^ ]* [^ ]* [^ ]* [^ ]*  */tmp/\([^/][^/]*\).*|\1|; T; s/\\.*/*/; s/[^A-Za-z0-9._*-]/?/g; p' \
+  "$runtime/maps" >>"$runtime/names"
+# Socket paths are not escaped: a name may continue past a newline.
+sed -n 's|^[^ ]*: [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* /tmp/\([^/][^/]*\).*|\1|; T; s/[^A-Za-z0-9._-]/?/g; s/$/*/; p' \
+  "$runtime/sockets" >>"$runtime/names"
+sort -u -o "$runtime/names" "$runtime/names"
+sed 's|^|x /tmp/|' "$runtime/names" >"$runtime/in-use.conf"
+# Exclusions other packages declare for /tmp apply as well.
+systemd-tmpfiles --cat-config >"$runtime/vendor" || fail 'cannot read the tmpfiles configuration'
+sed -n 's|^\([xX]\)[[:space:]][[:space:]]*\(/tmp/[^[:space:]][^[:space:]]*\).*|\1 \2|p' \
+  "$runtime/vendor" >>"$runtime/in-use.conf"
 exec systemd-tmpfiles --clean "$config" "$runtime/in-use.conf"
 EOF
       ;;
@@ -311,7 +343,17 @@ policy_guard() {
   return "$guard_failed"
 }
 
+# A unit that is not loaded is reported once, without its settings.
+unit_loaded() {
+  case " $missing_units " in *" $1 "*) return 1 ;; esac
+  [ "$(systemctl show "$1" -p LoadState --value 2>/dev/null)" != not-found ] && return 0
+  missing_units="$missing_units $1"
+  refuse "guest temporary policy unit is not loaded: $1"
+  return 1
+}
+
 unit_command() {
+  unit_loaded "$1" || return 1
   value=$(systemctl show "$1" -p "$2" --value) \
     || { refuse "cannot inspect guest temporary policy unit: $1"; return 1; }
   executable=${3%% *}
@@ -326,13 +368,14 @@ unit_command() {
 }
 
 unit_setting() {
+  unit_loaded "$1" || return 1
   [ "$(systemctl show "$1" -p "$2" --value 2>/dev/null)" = "$3" ] \
     || { refuse "guest temporary policy unit setting differs: $1 $2"; return 1; }
 }
 
 # Reports every differing command and deadline; nothing here writes.
 check_units() {
-  units_failed=0
+  units_failed=0 missing_units=
   unit_command subyard-tmp-shutdown.service ExecStart /usr/bin/true || units_failed=1
   unit_command subyard-tmp-shutdown.service ExecStop '/usr/local/lib/subyard-guest-tmp shutdown' || units_failed=1
   unit_command subyard-tmp-boot.service ExecStart '/usr/local/lib/subyard-guest-tmp boot' || units_failed=1
@@ -430,7 +473,10 @@ case "${1:-}" in
     else
       refuse 'cannot read the /tmp filesystem'; findings=1
     fi
-    [ "$findings" = 0 ] || exit 1
+    if [ "$findings" != 0 ]; then
+      [ "$memory" = 0 ] || refuse 'the active /tmp is memory-backed and needs a yard restart'
+      exit 1
+    fi
     [ "$memory" = 0 ] || exit 10
     ;;
   apply)
@@ -476,7 +522,10 @@ case "${1:-}" in
     else
       refuse 'cannot read the /tmp filesystem'; findings=1
     fi
-    [ "$findings" = 0 ] || exit 1
+    if [ "$findings" != 0 ]; then
+      [ "$memory" = 0 ] || refuse 'the active /tmp is memory-backed and needs a yard restart'
+      exit 1
+    fi
     [ "$memory" = 0 ] || exit 10
     ;;
   *) exit 2 ;;

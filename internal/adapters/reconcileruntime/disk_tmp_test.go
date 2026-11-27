@@ -68,6 +68,7 @@ case "$1" in --create) mkdir -p "$FIXTURE_ROOT/tmp/subyard-disposable"; chmod 17
   show)
     case "$*" in
       *"-p Result"*) echo "${BOOT_RESULT:-success}" ;;
+      *"-p LoadState"*) if [ -e "$FIXTURE_ROOT/etc/systemd/system/$2" ]; then echo loaded; else echo not-found; fi ;;
       *"-p TimeoutStartUSec"*|*"-p TimeoutStopUSec"*)
         deadline=30s; [ "$2" != subyard-tmp-age.service ] || deadline=15min
         echo "${TIMEOUT_OVERRIDE:-$deadline}" ;;
@@ -344,8 +345,16 @@ func TestDiskTmpPolicyRollsBackToPublishedRelease(t *testing.T) {
 	if output, err := runPublished("apply"); err != nil {
 		t.Fatalf("published apply: %v: %s", err, output)
 	}
-	if output, err := run("check"); err == nil || !strings.Contains(string(output), "guest temporary policy file missing") {
+	// Units that are not installed are reported as such, not as overrides.
+	output, err := run("check")
+	findings := GuestDiskTmpFindings(output)
+	if err == nil || !slices.Contains(findings, "guest temporary policy unit is not loaded: subyard-tmp-age.service") ||
+		strings.Contains(string(output), "overridden") || strings.Contains(string(output), "setting differs") || len(findings) > 8 {
 		t.Fatalf("published policy satisfied the ageing policy: %v: %s", err, output)
+	}
+	// Fixture paths exceed the host filter's length, so read the guest output.
+	if strings.Count(string(output), "guest temporary policy file missing: ") != 4 {
+		t.Fatalf("missing ageing files not named: %s", output)
 	}
 	if output, err := run("apply"); err != nil {
 		t.Fatalf("upgrade apply: %v: %s", err, output)
@@ -389,8 +398,10 @@ func TestDiskTmpCheckReportsEveryIndependentFinding(t *testing.T) {
 		t.Fatalf("host filter kept %d of %d findings:\n%s", len(findings), reported, output)
 	}
 	// A memory-backed root with another finding is not merely a pending reboot.
-	if _, err := run("check", "FILESYSTEM=tmpfs", "INACTIVE=subyard-tmp-age.timer"); !errors.As(err, &failure) || failure.ExitCode() != 1 {
-		t.Fatalf("tmpfs with a finding: %v", err)
+	output, err = run("check", "FILESYSTEM=tmpfs", "INACTIVE=subyard-tmp-age.timer")
+	if !errors.As(err, &failure) || failure.ExitCode() != 1 ||
+		!strings.Contains(string(output), "tmp is memory-backed and needs a yard restart") {
+		t.Fatalf("tmpfs with a finding: %v %s", err, output)
 	}
 }
 
@@ -407,13 +418,20 @@ func TestDiskTmpAgeingKeepsReferencedEntries(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(root, "bin", "systemd-tmpfiles"), []byte(`#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FIXTURE_ROOT/calls"
+if [ "$1" = --cat-config ]; then cat "$FIXTURE_ROOT/vendor.conf"; exit; fi
 [ "$1" = --clean ] || exit 0
 shift
 for config do sed 's/ 2d$/ aAmM:2d/' "$config" > "$config.native"; set -- "$@" "$config.native"; shift; done
 exec /usr/bin/systemd-tmpfiles --clean "$@"
 `), 0o700)
-	weird := "we ird*\n%b"
-	entries := []string{"stale/file", "stale-file", "cwd/file", "open/file", "open/sibling", weird + "/file", "mapped\nlibrary/lib.so", "fresh/file", "subyard-disposable/old"}
+	// Packages may declare their own /tmp exclusions; tmpfiles skips the whole
+	// subtree of a path with its own line, so either type keeps its contents.
+	testkit.WriteFile(t, filepath.Join(root, "vendor.conf"), []byte("# vendor\nx "+tmp+"/podman-run-*\nX\t"+tmp+"/vendor  1777 - - -\n"+
+		"x /var/tmp/podman-run-*\nD! "+tmp+"/.X11-unix 1777 root root 10d\n"), 0o644)
+	// Names are bytes whatever the service locale; non-ASCII bytes widen to "?".
+	weird, accented, invalid := "we ird*\n%b", "caf\u00e9", "a\xffb"
+	entries := []string{"stale/file", "stale-file", "cwd/file", "open/file", "open/sibling", weird + "/file", accented + "/file", invalid + "/file",
+		"mapped\nlibrary/lib.so", "podman-run-1/file", "vendor/old", "sockets/listen", "fresh/file", "subyard-disposable/old"}
 	for _, entry := range entries {
 		path := filepath.Join(tmp, entry)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -437,7 +455,9 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 	for link, target := range map[string]string{
 		"proc/1/cwd": "/", "proc/1/root": "/",
 		"proc/20/cwd": filepath.Join(tmp, "cwd"), "proc/20/fd/3": filepath.Join(tmp, "open/file") + " (deleted)",
-		"proc/21/map_files/7f-80": filepath.Join(tmp, weird, "file"), "proc/22/exe": "/usr/bin/true",
+		"proc/21/fd/4": filepath.Join(tmp, weird, "file"), "proc/21/fd/5": filepath.Join(tmp, invalid, "file"),
+		"proc/22/exe": "/usr/bin/true", "proc/22/cwd": filepath.Join(tmp, accented), "proc/self": "22",
+		"proc/25/ns/net": "net:[2]", "proc/26/ns/net": "net:[2]",
 	} {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, link)), 0o755); err != nil {
 			t.Fatal(err)
@@ -453,13 +473,21 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 	testkit.WriteFile(t, filepath.Join(root, "proc/23/maps"), []byte(
 		"7f00-7f10 r-xp 00000000 08:01 1234                       "+filepath.Join(tmp, `mapped\012library`, "lib.so")+" (deleted)\n"+
 			"7f10-7f20 r--p 00000000 08:01 1235                       /usr/lib/libc.so.6\n"), 0o600)
+	// Each network namespace has its own socket table.
+	if err := os.MkdirAll(filepath.Join(root, "proc/25/net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "proc/25/net/unix"), []byte("Num       RefCount Protocol Flags    Type St Inode Path\n"+
+		"0000000000000000: 00000002 00000000 00010000 0001 01 1234 "+filepath.Join(tmp, "sockets/listen")+"\n"+
+		"0000000000000001: 00000002 00000000 00010000 0001 01 1235 @abstract\n"), 0o644)
 	runtimeDirectory := filepath.Join(root, "run")
 	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	age := func() ([]byte, error) {
 		command := exec.Command("sh", filepath.Join(root, "usr/local/lib/subyard-guest-tmp-age"))
-		command.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":/usr/bin:/bin", "FIXTURE_ROOT="+root, "RUNTIME_DIRECTORY="+runtimeDirectory)
+		command.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":/usr/bin:/bin", "FIXTURE_ROOT="+root, "RUNTIME_DIRECTORY="+runtimeDirectory,
+			"LC_ALL=", "LANG=C.UTF-8")
 		return command.CombinedOutput()
 	}
 	// Without the process view nothing ages.
@@ -475,6 +503,25 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 	if err := os.Rename(filepath.Join(root, "proc/hidden"), filepath.Join(root, "proc/1")); err != nil {
 		t.Fatal(err)
 	}
+	// A process whose references cannot be read stops ageing.
+	if os.Getuid() != 0 {
+		unreadable := filepath.Join(root, "proc/24/fd")
+		if err := os.MkdirAll(unreadable, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(unreadable, 0); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := age(); err == nil || !strings.Contains(string(output), "cannot inspect process references") {
+			t.Fatalf("ageing with an unreadable process: %v %s", err, output)
+		}
+		if err := os.Chmod(unreadable, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(tmp, "stale/file")); err != nil {
+			t.Fatalf("ageing removed data with an unreadable process: %v", err)
+		}
+	}
 	if output, err := age(); err != nil {
 		t.Fatalf("ageing: %v %s", err, output)
 	}
@@ -483,7 +530,8 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 			t.Errorf("unreferenced old entry retained: %s %v", entry, err)
 		}
 	}
-	for _, entry := range []string{"cwd/file", "open/file", "open/sibling", weird + "/file", "mapped\nlibrary/lib.so", "fresh/file", "subyard-disposable/old"} {
+	for _, entry := range []string{"cwd/file", "open/file", "open/sibling", weird + "/file", accented + "/file", invalid + "/file",
+		"mapped\nlibrary/lib.so", "podman-run-1/file", "vendor/old", "sockets/listen", "fresh/file", "subyard-disposable/old"} {
 		if _, err := os.Lstat(filepath.Join(tmp, entry)); err != nil {
 			t.Errorf("referenced, fresh or separately owned entry removed: %q %v", entry, err)
 		}
@@ -495,7 +543,9 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "x " + tmp + "/cwd\nx " + tmp + "/mapped*\nx " + tmp + "/open\nx " + tmp + "/we?ird???b\n"; string(exclusions) != want {
+	want := "x " + tmp + "/a?b\nx " + tmp + "/caf??\nx " + tmp + "/cwd\nx " + tmp + "/mapped*\nx " + tmp + "/open\nx " + tmp + "/sockets*\nx " + tmp + "/we?ird???b\n" +
+		"x " + tmp + "/podman-run-*\nX " + tmp + "/vendor\n"
+	if string(exclusions) != want {
 		t.Fatalf("exclusions:\n got %q\nwant %q", exclusions, want)
 	}
 	testkit.WriteFile(t, filepath.Join(root, "etc/subyard-guest-tmp-age.conf"), []byte("e /tmp - - - 0\n"), 0o644)
@@ -558,46 +608,27 @@ func TestDiskTmpNativeTmpfiles(t *testing.T) {
 	}
 }
 
-func TestDiskTmpReadinessDistinguishesReboot(t *testing.T) {
+func TestDiskTmpPendingDistinguishesReboot(t *testing.T) {
 	for _, kind := range []domain.YardKind{domain.YardContainer, domain.YardVM} {
 		for _, code := range []int{0, 1, 10} {
-			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true,
-				Instance: ports.InstanceInfo{Status: "Running"}}}
+			incus := &testkit.Incus{}
 			runtime := Runtime{RepositoryRoot: "../../..", Incus: incus, Executor: incus,
 				Yard: domain.Context{YardName: "minimal", YardKind: kind}, Profiles: []profile.Definition{}}
-			for _, diagnostic := range []bool{false, true} {
-				incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: code}}}
-				ready, err := runtime.diskTmpReadiness(context.Background(), diagnostic)
-				if ready != (code == 0) {
-					t.Fatalf("kind=%s code=%d ready=%v", kind, code, ready)
-				}
-				var reboot diskTmpRebootError
-				if errors.As(err, &reboot) != (code == 10 && diagnostic) {
-					t.Fatalf("kind=%s code=%d diagnostic=%v err=%v", kind, code, diagnostic, err)
-				}
-				if err != nil {
-					message, next := reboot.ActivationDiagnostic()
-					if !strings.Contains(message, "active /tmp is memory-backed") || !strings.Contains(next, "yard -Y minimal stop") {
-						t.Fatal(message, next)
-					}
+			incus.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: code}}}
+			pending, err := runtime.diskTmpPending(context.Background())
+			if err != nil || (pending == nil) != (code == 0) {
+				t.Fatalf("kind=%s code=%d pending=%v err=%v", kind, code, pending, err)
+			}
+			var reboot diskTmpRebootError
+			if errors.As(pending, &reboot) != (code == 10) {
+				t.Fatalf("kind=%s code=%d pending=%v", kind, code, pending)
+			}
+			if code == 10 {
+				message, next := reboot.ActivationDiagnostic()
+				if !strings.Contains(message, "active /tmp is memory-backed") || !strings.Contains(next, "yard -Y minimal stop") {
+					t.Fatal(message, next)
 				}
 			}
-		}
-	}
-}
-
-func TestDiskTmpStoppedPolicy(t *testing.T) {
-	incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}}
-	runtime := Runtime{RepositoryRoot: "../../..", Incus: incus, Executor: incus,
-		Yard: domain.Context{YardName: "minimal"}}
-	incus.Reconcile.Instance = ports.InstanceInfo{Status: "Stopped", Config: map[string]string{
-		"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped",
-	}}
-	for _, policy := range []string{"", "v1"} {
-		incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = policy
-		ready, err := runtime.diskTmpReadiness(context.Background(), false)
-		if err != nil || ready != (policy == "v1") {
-			t.Fatalf("stopped policy=%q ready=%v err=%v", policy, ready, err)
 		}
 	}
 }

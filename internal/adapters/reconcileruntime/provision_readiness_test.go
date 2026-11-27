@@ -138,4 +138,11 @@ func TestProvisionDiagnosticNamesStoppedConditions(t *testing.T) {
 	if ready || err == nil || err.Error() != want || len(incus.ExecCalls) != 0 {
 		t.Fatalf("stopped diagnostic: ready=%v calls=%d\n got %v\nwant %s", ready, len(incus.ExecCalls), err, want)
 	}
+	// An intentionally stopped yard keeps its deferred policy marker.
+	incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = "v1"
+	incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "stopped"
+	ready, err = runtime.VerifyStageWithDiagnostic(context.Background(), ports.ReconcileStageProvision)
+	if ready || err == nil || strings.Contains(err.Error(), "policy marker") || strings.Contains(err.Error(), "intentional stop") {
+		t.Fatalf("stopped with marker: ready=%v err=%v", ready, err)
+	}
 }

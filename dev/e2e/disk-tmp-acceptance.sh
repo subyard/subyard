@@ -271,6 +271,34 @@ runtime_ageing() {
   printf 'evidence: %s runtime_ageing_keeps_referenced_and_fresh=PASS\n' "$kind"
 }
 
+published_policy_transition() {
+  # The published release keeps working over the additive ageing policy, and the
+  # candidate upgrades a guest that holds only the published policy.
+  published="$ROOT/internal/adapters/reconcileruntime/testdata/v0.32.0-guest-disk-tmp.sh"
+  for mode in assess apply check; do
+    guest sh -s -- "$mode" < "$published" || die "published $mode refused the candidate policy"
+  done
+  guest systemctl is-active --quiet subyard-tmp-age.timer || die 'published apply stopped runtime ageing'
+  guest sh -eu -c '
+    systemctl disable --now subyard-tmp-age.timer
+    for file in /etc/systemd/system/subyard-tmp-age.service \
+      /etc/systemd/system/subyard-tmp-age.timer \
+      /etc/subyard-guest-tmp-age.conf /usr/local/lib/subyard-guest-tmp-age; do
+      grep -q "Subyard guest temporary ageing policy v1" "$file"
+      rm "$file"
+    done
+    systemctl daemon-reload
+  '
+  guest sh -s -- check < "$published" || die 'published policy alone is not ready'
+  rc=0
+  guest sh -s -- check < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || die 'candidate accepted a guest without runtime ageing'
+  yard init --yes
+  disk_ready
+  guest systemctl is-active --quiet subyard-tmp-age.timer || die 'upgrade did not start runtime ageing'
+  printf 'evidence: %s published_policy_transition=PASS\n' "$kind"
+}
+
 policy_refusals() {
   for fault in mode owner symlink; do
     guest sh -eu -c '
@@ -515,6 +543,7 @@ for kind in container vm; do
   disk_ready
   printf 'evidence: %s normal_minimal_creation=PASS\n' "$kind"
   policy_refusals
+  published_policy_transition
   periodic_cleanup
   runtime_ageing
   shutdown_cleanup

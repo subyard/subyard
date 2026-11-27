@@ -1118,14 +1118,18 @@ nothing. It invokes `systemd-tmpfiles --clean` with an explicit
 `/etc/subyard-guest-tmp-age.conf`: an entry is eligible when it is older than two
 days by its access, modification, change and birth times (directories: all but
 change time). Before each run it reads the working directory, root, executable,
-open descriptors and file mappings of every process and excludes each top-level
-`/tmp` entry they reference, with every byte outside `[A-Za-z0-9._-]` widened to a
-`?` glob; it refuses to run without that view. tmpfiles itself keeps flocked files
-and directories, bound sockets and mounts; the policy also keeps the opt-in
-disposable tree and the vendor exclusions: current-boot `systemd-private-*` service
-directories, SSH agent directories, X server locks and the X socket directories.
+open descriptors and file mappings of every process, and the socket table of every
+network namespace, and excludes each top-level `/tmp` entry they reference, comparing bytes in the C locale with every byte outside
+`[A-Za-z0-9._-]` widened to a `?` glob. It refuses to run without that view: when a
+process other than one exiting during the scan cannot be read. tmpfiles itself
+keeps flocked files and directories, bound sockets and mounts; the policy also keeps
+the opt-in disposable tree, every `x` and `X` path under `/tmp` the installed
+tmpfiles configuration declares, and the vendor exclusions: current-boot
+`systemd-private-*` service directories, SSH agent directories, X server locks and
+the X socket directories.
 A path another mount namespace maps from `/tmp` under a different name is not seen;
-it is kept only while it stays fresh. The run has a 15-minute deadline at idle I/O
+it is kept only while it stays fresh. On storage mounted `noatime`, reading a file
+does not keep it fresh. The run has a 15-minute deadline at idle I/O
 priority; an interrupted run resumes on the next hour. Service runtime directories
 should normally use systemd `RuntimeDirectory=` instead. Cleanup refuses symlink, foreign-owned,
 incorrect-mode or mounted traversal roots, including a bind mount at the opt-in

@@ -25,36 +25,6 @@ func (failure diskTmpRebootError) ActivationDiagnostic() (string, string) {
 		fmt.Sprintf("close active yard sessions, then run yard -Y %s stop and yard -Y %s start", failure.yard, failure.yard)
 }
 
-func (runtime Runtime) diskTmpReadiness(ctx context.Context, diagnostic bool) (bool, error) {
-	state, err := runtime.reconcileState(ctx)
-	if err != nil {
-		return false, err
-	}
-	if !state.InstanceFound {
-		return false, nil
-	}
-	return runtime.diskTmpInstanceReadiness(ctx, state.Instance, diagnostic)
-}
-
-func (runtime Runtime) diskTmpInstanceReadiness(ctx context.Context, instance ports.InstanceInfo, diagnostic bool) (bool, error) {
-	if strings.EqualFold(instance.Status, "stopped") {
-		policy, _ := instance.EffectiveConfig("user.subyard.disk_tmp")
-		return instanceIntentionallyStopped(instance) && policy == "v1", nil
-	}
-	if !strings.EqualFold(instance.Status, "running") {
-		return false, nil
-	}
-	pending, err := runtime.diskTmpPending(ctx)
-	if err != nil || pending == nil {
-		return err == nil, err
-	}
-	var reboot diskTmpRebootError
-	if diagnostic && errors.As(pending, &reboot) {
-		return false, reboot
-	}
-	return false, nil
-}
-
 // diskTmpPending runs the guest check of a running yard. Unmet conditions are
 // returned as pending: the memory-backed reboot state or the guest's findings.
 func (runtime Runtime) diskTmpPending(ctx context.Context) (pending error, err error) {
