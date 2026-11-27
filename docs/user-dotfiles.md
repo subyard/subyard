@@ -1,15 +1,20 @@
 # Agent instructions from a dotfiles repository
 
-The opt-in `user-dotfiles` profile clones one Git repository of yard dotfiles into the yard and
-links its shared agent instruction file for Claude, Codex and OpenCode. Subyard provides the
-file but does not own or update it. Instructions for autonomous agents in a yard usually differ
-from those used on the host, so the yard has its own repository; Subyard never copies host
-instruction files into a yard.
+The `user-dotfiles` profile clones one Git repository of dotfiles into the yard and links its
+shared agent instruction file for Claude, Codex and OpenCode. Subyard provides the file but does
+not own or update it, and never copies host instruction files into a yard. The repository is the
+host's dotfiles repository: its one shared instruction file is written for agents on the host and
+in the yard.
+
+The profile is selected by default in the yard named `default`; select it in another yard with
+`yard -Y NAME profile enable user-dotfiles`, and remove it with
+`yard -Y NAME profile disable user-dotfiles`. The shipped source is
+`https://github.com/Dmitry-Borodin/dotfiles`. To use another repository:
 
 ```sh
-yard [-Y NAME] config set USER_DOTFILES_SOURCE https://github.com/OWNER/yard-dotfiles --scope yard
+yard [-Y NAME] config set USER_DOTFILES_SOURCE https://github.com/OWNER/dotfiles --scope yard
 yard [-Y NAME] config set USER_DOTFILES_SUBDIR yard --scope yard   # optional
-yard [-Y NAME] profile enable user-dotfiles
+yard [-Y NAME] init
 ```
 
 ## Layout

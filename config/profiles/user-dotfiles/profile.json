@@ -8,7 +8,7 @@
       "application": "yard-init",
       "syncable": true,
       "optional": true,
-      "default": ""
+      "default": "https://github.com/Dmitry-Borodin/dotfiles"
     },
     {
       "name": "USER_DOTFILES_SUBDIR",
@@ -20,5 +20,6 @@
       "default": ""
     }
   ],
+  "default_yards": ["default"],
   "owner_service": "owner.sh"
 }
