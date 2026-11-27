@@ -443,6 +443,8 @@ CI_COUNTED_POLICIES = frozenset({
     "4796e78c8e1657f31f89a32a3f8e4f38dd6c0372",
     # actions/setup-go pinned to v7.1.0; commands unchanged.
     "4e5dd6d76dec4c405ebaaa8a6972925cabcdfce3",
+    # Test tools install through dev/ci/apt-install.sh; commands unchanged.
+    "dd4bdf5d464a4cbf830fd0aa136b757e178b3beb",
 })
 
 
