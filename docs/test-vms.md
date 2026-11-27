@@ -1496,6 +1496,17 @@ The manual command starts the same slot recovery workflow immediately:
 yard test-vms recover --slot "$slot"
 ```
 
+Loop protection holds a slot that keeps failing. A release or acquire quarantine counts; failed or
+interrupted recoveries do not. The fifth counted quarantine within a sliding hour starts a hold:
+recovery still cleans the slot at once, but the slot stays `quarantined` and unreserved until
+`hold_until`, then the reaper recovers it again and publishes it. The first hold lasts 2 hours and
+each consecutive hold doubles, up to 24 hours. The level returns to zero after 24 hours without a
+counted quarantine or hold. `yard test-vms recover --slot "$slot"` lifts a hold at once and keeps
+its level, so the next hold is longer. Status shows `hold_level`, `hold_started_at`, `hold_until`
+and `hold_reset_at`; the journal marks the quarantine that started a hold with `hold_until` and
+records `slot.hold_ended` with `hold_reason` `expired` or `manual`. A clock moved back never makes
+a hold longer than 24 hours from the current time.
+
 ## Broker diagnostics
 
 Agents can read their own lease diagnostics through the existing restricted SSH facade:
@@ -1537,7 +1548,9 @@ agent-e2e: tell the operator and ask them to run: yard test-vms logs --slot 3
 ```
 
 Another holder's quarantined slot names only the slot and incident. Without a readable journal the
-incident is `unavailable`.
+incident is `unavailable`. When the quarantine started a loop-protection hold, the machine line adds
+`hold_until=<time>` and the client prints when the slot returns and the operator's lift command,
+`yard test-vms recover --slot N`. `--status` prints the same line for every held slot.
 
 These reads never acquire, renew, release or recover a lease. The private random controller
 `client-id` is a diagnostic read capability; keep it private along with the controller identity.

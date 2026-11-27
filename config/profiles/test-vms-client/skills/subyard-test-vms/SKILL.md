@@ -32,3 +32,5 @@ release or expiry; copy results out with `exec` first. The outer yard remains op
 Diagnostics: `client.sh logs --slot N -n 50` (own leases), `client.sh errors` (pool failures).
 After any test-VM failure, an `E2E_QUARANTINE` line or slowness, read `client.sh errors`
 and report the records and the printed operator command (`yard test-vms logs --slot N`).
+A slot with `hold_until` is held after repeated failures: use another slot or wait; only the
+operator lifts the hold (`yard test-vms recover --slot N`).
