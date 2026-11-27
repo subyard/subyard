@@ -17,13 +17,21 @@ skipped() {
   case "$mode" in check) work=1 ;; apply) printf 'user-dotfiles: warning: %s\n' "$1" >&2 ;; esac
 }
 run_script() { # <clone> <relative script>: run it in the clone; on failure warn with its output
-  local log rc=0
+  local log rc=0 first='' interpreter argument
+  local run=("./$2")
   log="$(mktemp)"
-  if [ -x "$1/$2" ]; then
-    (cd "$1" && timeout -k 10 300 "./$2") </dev/null >"$log" 2>&1 || rc=$?
-  else
-    (cd "$1" && timeout -k 10 300 bash "./$2") </dev/null >"$log" 2>&1 || rc=$?
+  # A script that is not executable runs through its #! line as the kernel would, else bash;
+  # its mode in the clone is never changed.
+  if [ ! -x "$1/$2" ]; then
+    IFS= read -r first <"$1/$2" || :
+    if [[ "$first" = '#!'* ]]; then
+      read -r interpreter argument <<<"${first#'#!'}"
+      run=("$interpreter" ${argument:+"$argument"} "./$2")
+    else
+      run=(bash "./$2")
+    fi
   fi
+  (cd "$1" && timeout -k 10 300 "${run[@]}") </dev/null >"$log" 2>&1 || rc=$?
   if [ "$rc" != 0 ]; then
     printf 'user-dotfiles: warning: %s/%s exited with status %s; once fixed, run it again in %s. Its output:\n' \
       "${1#"$store/"}" "$2" "$rc" "$1" >&2
@@ -34,11 +42,7 @@ run_script() { # <clone> <relative script>: run it in the clone; on failure warn
 install_clone() { # <clone>: the configured command, else the first script, else link top-level dot entries
   local script entry
   if [ -n "$command" ]; then
-    if [[ "$command" =~ ^$segment(/$segment)*$ ]] && [ -f "$1/$command" ]; then
-      run_script "$1" "$command"
-    else
-      printf 'user-dotfiles: warning: USER_DOTFILES_INSTALL_COMMAND names no file in %s; nothing was installed\n' "${1#"$store/"}" >&2
-    fi
+    run_script "$1" "$command"
     return
   fi
   for script in "${scripts[@]}"; do
@@ -47,7 +51,9 @@ install_clone() { # <clone>: the configured command, else the first script, else
   for entry in "$1"/.[!.]* "$1"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     [ "${entry##*/}" != .git ] || continue
-    if [ -e "$HOME/${entry##*/}" ] || [ -L "$HOME/${entry##*/}" ]; then
+    if [ -L "$HOME/${entry##*/}" ] && [ "$(readlink -- "$HOME/${entry##*/}")" = "$entry" ]; then
+      continue
+    elif [ -e "$HOME/${entry##*/}" ] || [ -L "$HOME/${entry##*/}" ]; then
       printf 'user-dotfiles: warning: left ~/%s in place; move it away and link it to %s yourself\n' "${entry##*/}" "$entry" >&2
     else
       ln -sT -- "$entry" "$HOME/${entry##*/}"
@@ -109,7 +115,11 @@ if [ -n "$name" ] && { [ "$installed" != "$name" ] || [ -z "$(ls -A "$store/$nam
           skipped "could not clone $name; fix Git access or USER_DOTFILES_SOURCE, then retry yard profile enable user-dotfiles or yard init"
         fi
       fi
-      if [ -n "$(ls -A "$clone" 2>/dev/null)" ]; then
+      if [ -n "$command" ] && [ -n "$(ls -A "$clone" 2>/dev/null)" ] \
+        && ! { [[ "$command" =~ ^$segment(/$segment)*$ ]] && [ -f "$clone/$command" ]; }; then
+        # Not recorded: the next apply installs once the setting is fixed.
+        skipped "USER_DOTFILES_INSTALL_COMMAND names no file in $name; fix it, then retry yard profile enable user-dotfiles or yard init"
+      elif [ -n "$(ls -A "$clone" 2>/dev/null)" ]; then
         # Recorded before the install runs: a failed install is not retried.
         printf '%s\n' "$name" >"$state.tmp"
         mv -fT "$state.tmp" "$state"

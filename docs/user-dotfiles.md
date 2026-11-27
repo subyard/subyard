@@ -31,10 +31,12 @@ Right after the first clone, the profile runs, as the yard developer in the clon
 2. the first that exists of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`,
    `script/bootstrap`, `setup.sh`, `setup` and `script/setup`; or
 3. when none exists, it links each top-level entry of the clone whose name starts with `.`,
-   except `.git`, into `~`, leaving an existing path in place with a warning.
+   except `.git`, into `~`, leaving an existing path that is not that link in place with a
+   warning.
 
-An executable script runs directly, any other through `bash`, with no input and a 300-second
-limit. A failure is an init warning with the exit status and the last 50 lines of the script's
+An executable script runs directly; one that is not executable runs through the interpreter on
+its `#!` line, or `bash` without one, and its mode is never changed. It gets no input and a
+300-second limit. A failure is an init warning with the exit status and the last 50 lines of the script's
 output. The install runs once per enable: `yard init` never runs it again, also after a failure.
 Fix the script and run it in the clone yourself.
 
@@ -76,7 +78,8 @@ init retries. Apply prints a warning for each skipped item; check reports drift,
   `OWNER/REPO`. Apply writes it before the install runs and removes it after the uninstall; a
   missing record or clone is drift that the next apply installs again.
 - **Install command.** `USER_DOTFILES_INSTALL_COMMAND` is a relative path whose segments match
-  the name pattern. Another value, or a missing file, installs nothing, with a warning.
+  the name pattern. Another value, or a missing file, installs nothing and is not recorded:
+  apply warns and the profile is not ready until the setting is fixed.
 - **Earlier copies.** `yard init` first removes an unchanged instruction copy that a release
   through 0.32.0 made, so the same init can install a file at that path.
 

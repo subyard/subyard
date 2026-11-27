@@ -15,7 +15,8 @@ repo() { # <owner/repo> <file=content...>
 }
 # Each script appends its name to ~/runs and its output reaches a failure warning.
 script='printf "%s\n" "$0" >>"$HOME/runs"; echo "output of $0"; exit "${FAIL:-0}"'
-repo owner/scripts "install.sh=$script" "setup.sh=$script" "uninstall.sh=$script" "custom/run=$script"
+python=$'#!/usr/bin/env python3\nimport os\nopen(os.environ["HOME"] + "/runs", "a").write("python\\n")'
+repo owner/scripts "install.sh=$script" "setup.sh=$script" "uninstall.sh=$script" "custom/run=$script" "custom/py=$python"
 chmod +x "$work/owner/scripts/install.sh"
 git -C "$work/owner/scripts" -c user.name=t -c user.email=t@example.org commit -qam executable
 repo owner/plain "script/setup=$script" ".vimrc=vim" ".config/tool=tool" "README.md=readme"
@@ -60,14 +61,20 @@ run apply
 run apply "$scripts" custom/run
 runs_are ./custom/run
 run apply
+# A missing command is not recorded, so fixing the setting installs; #! lines are honoured.
 : >"$work/home/runs"
 for command in custom/missing ../outside; do
   run apply "$scripts" "$command" 2>"$work/stderr"
-  grep -qF 'warning: USER_DOTFILES_INSTALL_COMMAND names no file in owner/scripts' "$work/stderr" || fail "missing warning for $command"
-  run apply 2>/dev/null
+  grep -qF 'warning: USER_DOTFILES_INSTALL_COMMAND names no file in owner/scripts; fix it' "$work/stderr" \
+    || fail "missing warning for $command"
+  [ "$(run check "$scripts" "$command")" = work ] && [ -z "$(run verify "$scripts" "$command")" ] \
+    || fail "missing command $command handling"
 done
-runs_are $'./uninstall.sh\n./uninstall.sh'
-# A non-executable script runs through bash; without uninstall.sh disable keeps its files.
+[ ! -e "$store/.installed" ] || fail 'recorded an install for a missing command'
+run apply "$scripts" custom/py
+runs_are python
+run apply
+# A non-executable script without #! runs through bash; without uninstall.sh disable keeps its files.
 : >"$work/home/runs"
 run apply "$plain"
 runs_are ./script/setup
@@ -86,6 +93,10 @@ run apply "file://$work/owner/noscript" 2>"$work/stderr"
 [ -d "$work/home/.config" ] && [ ! -L "$work/home/.config" ] || fail 'replaced an existing ~/.config'
 grep -qF "warning: left ~/.config in place; move it away and link it to $plain_clone/.config yourself" "$work/stderr" \
   || fail 'missing occupied warning'
+# Re-enable leaves the fallback's own links alone.
+run apply 2>/dev/null
+run apply "file://$work/owner/noscript" 2>"$work/stderr"
+! grep -qF 'left ~/.vimrc' "$work/stderr" || fail 'warned about its own fallback link'
 # Moving the source uninstalls the old clone before installing the new one.
 : >"$work/home/runs"
 run apply "$scripts" 2>"$work/stderr"
