@@ -8,7 +8,7 @@
       "application": "yard-init",
       "syncable": true,
       "optional": true,
-      "default": "https://github.com/Dmitry-Borodin/yard-dotfiles"
+      "default": "https://github.com/subyard/yard-dotfiles"
     },
     {
       "name": "USER_DOTFILES_SUBDIR",
