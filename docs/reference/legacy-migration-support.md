@@ -1,7 +1,7 @@
 ---
 title: Legacy migration support and reinstall policy
 status: accepted policy
-updated: 2026-11-21
+updated: 2026-11-27
 ---
 
 # Legacy migration support and reinstall policy
@@ -147,6 +147,17 @@ v0.28.0 or newer; earlier source-upgrade/refusal and native legacy-uninstall sce
 are retired. The old-source matrix remains frozen in the v0.28.0 tag. Product admission,
 hop guidance, migration and recovery support is unchanged, with synthetic state and
 frozen format/ownership reader contracts retained in host-free tests.
+
+### Interrupted full uninstall from v0.30.0 or older
+
+Releases v0.28.0 to v0.30.0 save full-uninstall recovery plans as schema 1, whose artifact
+digests their Python helper produced. Approved support decision: the current engine no longer
+resumes schema 1. `yard _uninstall-resume` and the saved-plan detection of `teardown --full`
+refuse such a plan before any confirmation or change, including permission repair. The refusal
+names the store's retained launcher when it is an executable regular file, since it remains the
+plan's recovery owner, and always v0.32.0 as the fallback: the last release that resumes schema 1. Keep the complete v0.32.0 asset set published permanently,
+as for every release a documented recovery route names. Rollback to v0.30.0 stays supported;
+a plan v0.30.0 saves after rollback is resumed by its own retained launcher.
 
 ## Moving the update boundary
 

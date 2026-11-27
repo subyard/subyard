@@ -94,7 +94,6 @@ func (store RecoveryStore) validateDirectory() error {
 	if err := safePath(filepath.Join(store.Directory, "plan.json")); err != nil {
 		return err
 	}
-	_ = safefs.RepairPath(store.Directory, 0o077)
 	info, err := os.Lstat(store.Directory)
 	if err != nil {
 		return err
@@ -106,13 +105,77 @@ func (store RecoveryStore) validateDirectory() error {
 	return nil
 }
 
-// RecoverySchema is written by this engine; Validate also accepts schema 1.
+// RecoverySchema is the only schema this engine writes and resumes. Schema 2
+// marks plans whose retained runtime has only the native guard; engines before
+// it refuse them.
 const RecoverySchema = 2
 
+// LegacyRecoverySchemaError refuses a schema-1 plan saved by v0.30.0 or older.
+// Its retained release resumes it; v0.32.0 is the last release that also does.
+type LegacyRecoverySchemaError struct {
+	Directory string
+	Launcher  string
+}
+
+func (err LegacyRecoverySchemaError) Error() string {
+	fallback := fmt.Sprintf("install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume %s", err.Directory)
+	refusal := "full uninstall recovery plan schema 1 was saved by Subyard 0.30.0 or older; this release does not resume it. Retain " + err.Directory
+	if err.Launcher != "" {
+		return fmt.Sprintf("%s and resume it with its retained release:\n  %s _uninstall-resume %s\nIf that fails, %s", refusal, err.Launcher, err.Directory, fallback)
+	}
+	return refusal + ", " + fallback
+}
+
+// admit refuses a schema-1 plan and narrows a current store, each only on a
+// plan header decoded through descriptors that change nothing; an empty store
+// is narrowed for its cleanup. Any other state, including every failure here,
+// stays as found for the protected read, which repairs nothing, to report.
+// Reads may still update access times. A plan replaced after this decode is
+// caught by readPlan's own schema check.
+func (store RecoveryStore) admit() error {
+	if safePath(filepath.Join(store.Directory, "plan.json")) != nil {
+		return nil
+	}
+	parent, err := openParent(store.Directory)
+	if err != nil {
+		return nil
+	}
+	defer parent.Close()
+	directory, err := parent.Open(".")
+	if err != nil {
+		return nil
+	}
+	defer directory.Close()
+	for _, name := range []string{"plan.json", ".plan-next"} {
+		file, err := parent.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+		var header struct{ Schema int }
+		if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || json.NewDecoder(io.LimitReader(file, 64<<20)).Decode(&header) != nil {
+			return nil
+		}
+		switch header.Schema {
+		case 1:
+			return LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+		case RecoverySchema:
+			_ = safefs.RepairMode(directory, 0o077)
+			_ = safefs.RepairMode(file, 0o077)
+		}
+		return nil
+	}
+	if _, err := directory.Readdirnames(1); errors.Is(err, io.EOF) {
+		_ = safefs.RepairMode(directory, 0o077)
+	}
+	return nil
+}
+
 func (plan RecoveryPlan) Validate(uid uint32) error {
-	// Schema 2 marks plans whose retained runtime has only the native guard;
-	// engines before it refuse them, and schema 1 stores resume unchanged.
-	if plan.Schema != 1 && plan.Schema != RecoverySchema {
+	if plan.Schema != RecoverySchema {
 		return errors.New("unsupported full uninstall recovery schema")
 	}
 	if err := plan.Installation.Validate(plan.Installation.DataHome, uid); err != nil {
@@ -271,6 +334,9 @@ func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
 }
 
 func (store RecoveryStore) readBinding() (Tree, error) {
+	if err := store.admit(); err != nil {
+		return Tree{}, err
+	}
 	if err := store.validateDirectory(); err != nil {
 		return Tree{}, err
 	}
@@ -278,7 +344,6 @@ func (store RecoveryStore) readBinding() (Tree, error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		path = filepath.Join(store.Directory, ".plan-next")
 	}
-	_ = safefs.RepairPath(path, 0o077)
 	return Capture(path)
 }
 
@@ -301,7 +366,20 @@ func (store RecoveryStore) readPlan(binding Tree) (RecoveryPlan, error) {
 	if decoder.Decode(&extra) != io.EOF {
 		return plan, errors.New("uninstall recovery plan has trailing data")
 	}
+	if plan.Schema == 1 {
+		return plan, LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+	}
 	return plan, plan.Validate(store.UID)
+}
+
+// retainedLauncher is the store's retained engine: an executable regular file,
+// or empty once it is gone or unusable. It is never run here.
+func (store RecoveryStore) retainedLauncher() string {
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	if info, err := os.Lstat(launcher); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	return launcher
 }
 
 // ReadBody binds transport to the original publication, rather than hashing a
@@ -412,7 +490,8 @@ func (store RecoveryStore) Remove() error {
 
 // ResumeHint is the diagnostic of an incomplete removal with its exact retry.
 // Once the retained launcher is gone, any engine of this or a newer release
-// resumes the store; without one on PATH, the operator installs it first.
+// that reads this schema resumes the store; without one on PATH, the operator
+// installs it first.
 func (store RecoveryStore) ResumeHint() string {
 	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
 	if _, err := os.Lstat(launcher); err == nil {

@@ -9,6 +9,15 @@
 - **Rollback to 0.32.0 keeps the file.** It is listed in the rollback plan output and result.
   After rollback, back it up and remove it in each affected yard if you do not want the rule.
 
+### Full uninstall recovery
+
+- **A full uninstall interrupted on 0.30.0 or older is no longer resumed by this release.**
+  `yard _uninstall-resume` and `yard teardown --full` refuse its saved plan without changes.
+  Resume it with the launcher retained in the recovery directory:
+  `<data-root>.uninstall/runtime/bin/yard _uninstall-resume <data-root>.uninstall`. If that
+  launcher is gone or fails, install 0.32.0, the last release that resumes such a plan, and run
+  `yard _uninstall-resume <data-root>.uninstall`. The refusal prints the exact command.
+
 ## 0.32.0
 
 ### Before you update

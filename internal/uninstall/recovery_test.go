@@ -464,7 +464,7 @@ func CompletedRecoveryStoreFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
 	if err := os.Chmod(store.Directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	plan.Schema, plan.Stage, plan.AssetsReady = 1, RecoveryFilesRemoved, true
+	plan.Stage, plan.AssetsReady = RecoveryFilesRemoved, true
 	if err := os.Remove(plan.Trees[0].Path); err != nil {
 		t.Fatal(err)
 	}

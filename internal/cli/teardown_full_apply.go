@@ -42,6 +42,11 @@ func (cli *CLI) runFullTeardownRecovery(ctx context.Context, args []string) (cod
 			cli.errorf("could not remove empty full uninstall recovery directory %s: %v. Retry the same command.", store.Directory, cleanupErr)
 			return 1, false
 		}
+		var legacy uninstall.LegacyRecoverySchemaError
+		if errors.As(err, &legacy) {
+			cli.errorf("%v", err)
+			return 1, false
+		}
 		cli.errorf("full uninstall recovery at %s: %v; retain this protected store and restore its ORIGINAL approved inventory before continuing", store.Directory, err)
 		return 1, false
 	}
