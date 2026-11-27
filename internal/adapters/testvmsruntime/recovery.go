@@ -82,7 +82,11 @@ func (runtime *Runtime) handleQuarantineLocked(
 	if errors.As(cause, &readiness) && (readiness.Project == "" || readiness.Project == child.Config.Project) {
 		firstVM = readiness.VM
 	}
+	snapshot := child.guestSnapshot(ctx, firstVM)
 	diagnostics := child.recoveryDiagnostics(ctx, firstVM)
+	for name, value := range snapshot {
+		diagnostics[name] = value
+	}
 	if readiness != nil {
 		diagnostics["readiness"] = readinessEvidence(readiness)
 		if readiness.Project != "" && readiness.Project != child.Config.Project {
@@ -105,6 +109,8 @@ func (runtime *Runtime) handleQuarantineLocked(
 		FromState:          slot.State,
 		ToState:            SlotQuarantined,
 		Error:              errorString(cause),
+		Step:               failureStep(cause),
+		Outcome:            failureOutcome(cause),
 		IncidentID:         artifact.IncidentID,
 		Context:            leaseContextFromSlot(slot),
 		agentClientID:      slot.ClientID,
@@ -296,6 +302,8 @@ func (runtime *Runtime) completeRecovery(
 		RecoveryAttempt:    current.RecoveryAttempt,
 		DurationMS:         duration.Milliseconds(),
 		Error:              errorString(rebuildErr),
+		Step:               "recovery",
+		Outcome:            failureOutcome(rebuildErr),
 		IncidentID:         current.IncidentID,
 		Context:            leaseContextFromSlot(current),
 		agentClientID:      current.ClientID,
@@ -385,6 +393,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 		Kind: "vm.force_stop_planned", SlotID: slot.SlotID, ResourceGeneration: slot.ResourceGeneration,
 		LeaseEpoch: slot.LeaseEpoch, RecoveryAttempt: slot.RecoveryAttempt, IncidentID: artifact.IncidentID,
 		Error: errorString(gracefulErr), Context: leaseContextFromSlot(*slot), agentClientID: slot.ClientID,
+		Step: "recovery", Outcome: "timeout", Operation: "stop",
 	}
 	if artifact.Command != nil {
 		event.DurationMS = artifact.Command.DurationMS
@@ -432,6 +441,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 	event.Kind = "vm.force_stop_succeeded"
 	if result != nil {
 		event.Kind = "vm.force_stop_failed"
+		event.Outcome = failureOutcome(result)
 	}
 	event.DurationMS = time.Since(started).Milliseconds()
 	event.Error = errorStringOrEmpty(result)
@@ -475,6 +485,70 @@ func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
 		}
 	}
 	return result
+}
+
+const guestSnapshotBudget = 5 * time.Second
+
+// guestSnapshot asks each owned running guest, failed VM first, for its pending
+// systemd jobs and the tail of its boot journal through the guest agent. It
+// has one shared budget and never starts or changes a guest.
+func (runtime *Runtime) guestSnapshot(ctx context.Context, firstVM string) map[string]string {
+	ctx, cancel := context.WithTimeout(ctx, guestSnapshotBudget)
+	defer cancel()
+	cfg := runtime.Config
+	snapshot := map[string]string{}
+	selectors := []int{1}
+	if cfg.guestCount() == 2 {
+		selectors = append(selectors, 2)
+		if firstVM == cfg.vm(2) {
+			selectors[0], selectors[1] = selectors[1], selectors[0]
+		}
+	}
+	for _, selector := range selectors {
+		vm := cfg.vm(selector)
+		jobs, journal := fmt.Sprintf("vm_%d_guest_jobs", selector), fmt.Sprintf("vm_%d_guest_journal", selector)
+		unavailable := func(reason string) {
+			snapshot[jobs] = "unavailable: " + reason
+			snapshot[journal] = "unavailable: " + reason
+		}
+		switch {
+		case ctx.Err() != nil:
+			unavailable("guest snapshot budget exhausted")
+			continue
+		case !runtime.vmExists(ctx, vm):
+			unavailable("guest does not exist")
+			continue
+		case runtime.requireProjectMarker(ctx) != nil || runtime.requireAllocationMarker(ctx, vm) != nil:
+			unavailable("allocation ownership not verified")
+			continue
+		}
+		if state, err := instanceColumn(ctx, runtime.incus, cfg.Project, vm, "s"); err != nil || strings.TrimSpace(state) != "RUNNING" {
+			unavailable("guest is not running")
+			continue
+		}
+		for _, section := range []struct {
+			name    string
+			command []string
+		}{
+			{jobs, []string{"systemctl", "list-jobs", "--no-pager"}},
+			{journal, []string{"journalctl", "-b", "-n", "200", "--no-pager"}},
+		} {
+			if ctx.Err() != nil {
+				snapshot[section.name] = "unavailable: guest snapshot budget exhausted"
+				continue
+			}
+			value, err := runtime.guest(ctx, vm, nil, section.command...)
+			switch {
+			case err != nil:
+				snapshot[section.name] = "unavailable: guest agent not responding: " + readinessProbeMetadata(err)
+			case strings.TrimSpace(value) == "":
+				snapshot[section.name] = "empty native response (no measurement)"
+			default:
+				snapshot[section.name] = value
+			}
+		}
+	}
+	return snapshot
 }
 
 func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string) map[string]string {

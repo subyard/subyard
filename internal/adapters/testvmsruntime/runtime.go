@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/safefs"
@@ -54,6 +56,7 @@ type Runtime struct {
 	finishDrain       func(context.Context, LeaseStore, LeaseSlot) error
 	finishQuarantine  func(context.Context, LeaseStore, LeaseSlot, error) error
 	finishRecovery    func(context.Context, LeaseStore, LeaseSlot) error
+	slowIncusAfter    func(time.Duration, func()) func() bool
 }
 
 func LoadRuntime(path string, stdout, stderr io.Writer) (*Runtime, error) {
@@ -861,8 +864,107 @@ func instanceColumn(ctx context.Context, incus func(context.Context, ...string) 
 }
 
 func (runtime *Runtime) incus(ctx context.Context, arguments ...string) (string, error) {
+	operation, threshold := slowIncusClass(arguments)
+	if operation == "" || runtime.Events == nil {
+		stdout, _, err := runtime.Runner.Run(ctx, runtime.Config.Incus, arguments, nil, nil)
+		return string(stdout), err
+	}
+	// A hung call is recorded while it still runs; a recorded or slow call
+	// is recorded again when it returns. Recording never changes the call.
+	var flagged atomic.Bool
+	var fired sync.WaitGroup
+	fired.Add(1)
+	after := runtime.slowIncusAfter
+	if after == nil {
+		after = func(delay time.Duration, callback func()) func() bool {
+			return time.AfterFunc(delay, callback).Stop
+		}
+	}
+	started := time.Now()
+	stop := after(threshold, func() {
+		defer fired.Done()
+		flagged.Store(runtime.recordSlowIncus(operation, threshold, "", true))
+	})
 	stdout, _, err := runtime.Runner.Run(ctx, runtime.Config.Incus, arguments, nil, nil)
+	if stop() {
+		fired.Done()
+	} else {
+		fired.Wait()
+	}
+	elapsed := time.Since(started)
+	outcome := "slow"
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		outcome = "timeout"
+	} else if err != nil {
+		outcome = "error"
+	}
+	if flagged.Load() || elapsed >= threshold || outcome == "timeout" {
+		runtime.recordSlowIncus(operation, elapsed, outcome, flagged.Load())
+	}
 	return string(stdout), err
+}
+
+const (
+	slowIncusLifecycle      = 30 * time.Second
+	slowIncusRead           = 10 * time.Second
+	slowIncusRecordInterval = time.Minute
+)
+
+// slowIncusClass names the watched Incus operation and its threshold. Calls
+// with their own long phase budgets (exec, file, publish, image, copy) are not watched.
+func slowIncusClass(arguments []string) (string, time.Duration) {
+	if len(arguments) == 0 {
+		return "", 0
+	}
+	switch verb := arguments[0]; verb {
+	case "start", "stop", "delete", "restart":
+		return verb, slowIncusLifecycle
+	case "project", "network":
+		if len(arguments) > 1 && (arguments[1] == "create" || arguments[1] == "delete") {
+			return verb, slowIncusLifecycle
+		}
+		return verb, slowIncusRead
+	case "list", "query", "info", "config", "profile", "operation", "console", "storage":
+		return verb, slowIncusRead
+	}
+	return "", 0
+}
+
+// recordSlowIncus records one incus.slow event: while running (outcome empty)
+// at most once a minute per operation, and the completion of a call whose
+// running record was written unconditionally. It reports whether it recorded.
+func (runtime *Runtime) recordSlowIncus(operation string, duration time.Duration, outcome string, follow bool) bool {
+	event := BrokerEvent{Kind: "incus.slow", Operation: operation, Outcome: "slow", DurationMS: duration.Milliseconds()}
+	if outcome != "" {
+		event.Outcome = outcome
+	}
+	if slot := slotIDFromProject(runtime.Config.Project); slot != "" {
+		event.SlotID = slot
+		if runtime.allocation != nil && runtime.allocation.SlotID == slot {
+			event.ResourceGeneration = runtime.allocation.ResourceGeneration
+			event.LeaseEpoch = runtime.allocation.LeaseEpoch
+		}
+	}
+	recorder := runtime.eventRecorder()
+	if outcome != "" && follow {
+		_, err := recorder.Record(event)
+		return err == nil
+	}
+	recorded, err := recorder.recordLimited("incus-slow-"+operation, slowIncusRecordInterval, event)
+	return err == nil && recorded
+}
+
+// slotIDFromProject maps a slot runtime's inner project to its slot ID.
+func slotIDFromProject(project string) string {
+	index := strings.LastIndex(project, "-slot-")
+	if index < 0 {
+		return ""
+	}
+	number, err := strconv.Atoi(project[index+len("-slot-"):])
+	if err != nil || number < 1 || number > 999 {
+		return ""
+	}
+	return fmt.Sprintf("slot-%03d", number)
 }
 
 func (runtime *Runtime) guest(
