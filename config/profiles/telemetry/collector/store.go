@@ -87,8 +87,12 @@ type Store struct {
 	pruneDone     sync.WaitGroup
 }
 
-// budgetPruneFault is a test-only interruption hook between budget prune batches.
-var budgetPruneFault func() error
+// budgetPruneFault is a test-only interruption hook after each committed
+// budget prune batch and before the over-budget verdict.
+var budgetPruneFault func(string) error
+
+// budgetBatchRows bounds the records one budget prune transaction removes.
+var budgetBatchRows = 1000
 
 // fileFault is a test-only interruption hook for safefs publications.
 var fileFault func(safefs.Point) error
@@ -658,60 +662,103 @@ func (s *Store) startBudgetPrune() {
 }
 
 // pruneToBudget removes the oldest raw records received before cutoff, in
-// the bounded transactions of Prune, until the database pages fit the
-// budget. It reports whether the store is still above the budget.
+// bounded transactions, until the store fits its budget. It publishes the
+// over-budget marker only when nothing older than cutoff is left, and reports
+// whether the store is still above the budget.
 func (s *Store) pruneToBudget(cutoff time.Time) (bool, error) {
 	limit := cutoff.UTC().Format(timestampLayout)
-	for !s.isClosed() {
-		var pages int64
-		if err := s.db.QueryRow("SELECT (page_count-freelist_count)*page_size FROM pragma_page_count(),pragma_freelist_count(),pragma_page_size()").Scan(&pages); err != nil {
+	for {
+		if s.isClosed() {
+			return true, ErrStorage
+		}
+		// The trigger, this loop and the verdict share one measure.
+		if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 			return true, err
 		}
-		if pages <= s.limits.DiskBytes {
-			break
-		}
-		n, err := s.pruneBatch(limit, false)
+		used, err := s.usedBytes()
 		if err != nil {
 			return true, err
 		}
-		if n == 0 {
-			break
-		}
-		if budgetPruneFault != nil {
-			if err = budgetPruneFault(); err != nil {
+		over := used > s.limits.DiskBytes
+		var n int64
+		if over {
+			if n, err = s.budgetBatch(limit); err != nil {
 				return true, err
 			}
 		}
+		if n > 0 {
+			if budgetPruneFault != nil {
+				if err = budgetPruneFault("batch"); err != nil {
+					return true, err
+				}
+			}
+			continue
+		}
+		if budgetPruneFault != nil {
+			if err = budgetPruneFault("verdict"); err != nil {
+				return true, err
+			}
+		}
+		s.markOverBudget(over)
+		return over, nil
 	}
-	if s.isClosed() {
-		return true, ErrStorage
+}
+
+// budgetBatch removes the oldest raw OTLP, samples and per-request
+// correlations received before cutoff, with their sample and relation
+// projections. It never removes run, resource or attribution records, so
+// unlike pruneBatch it leaves no projection to sweep.
+func (s *Store) budgetBatch(cutoff string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
 	}
-	return s.settleMarkers()
+	defer tx.Rollback()
+	for _, statement := range []string{
+		"CREATE TEMP TABLE IF NOT EXISTS budget_expired(sequence INTEGER PRIMARY KEY,origin_id TEXT NOT NULL,event_id TEXT NOT NULL)",
+		"DELETE FROM temp.budget_expired",
+	} {
+		if _, err = tx.Exec(statement); err != nil {
+			return 0, err
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM filtered_events WHERE expires_at<?", cutoff); err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(`INSERT INTO temp.budget_expired SELECT sequence,origin_id,event_id FROM records WHERE received_time<?
+		AND (kind='sample' OR kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation')
+		ORDER BY received_time,sequence LIMIT ?`, cutoff, budgetBatchRows); err != nil {
+		return 0, err
+	}
+	// Correlations are keyed ORIGINAL_EVENT_ID:SUFFIX and go with their request.
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO temp.budget_expired SELECT r.sequence,r.origin_id,r.event_id
+		FROM temp.budget_expired x JOIN records r ON r.origin_id=x.origin_id AND r.event_id>x.event_id||':' AND r.event_id<x.event_id||';'
+		WHERE r.source_id='collector:otlp-correlation'`); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec("DELETE FROM records WHERE sequence IN (SELECT sequence FROM temp.budget_expired)")
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	for _, table := range []string{"samples", "relations"} {
+		if _, err = tx.Exec("DELETE FROM " + table + " WHERE (origin_id,event_id) IN (SELECT origin_id,event_id FROM temp.budget_expired)"); err != nil {
+			return 0, err
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM temp.budget_expired"); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }
 
 func (s *Store) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
-}
-
-// settleMarkers truncates the WAL after a prune and publishes both space
-// markers; it reports whether the store is still above its budget.
-func (s *Store) settleMarkers() (bool, error) {
-	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return true, err
-	}
-	fits, used, err := s.rawCapacity()
-	if err != nil {
-		return true, err
-	}
-	over := used > s.limits.DiskBytes
-	s.markOverBudget(over)
-	// A prune that freed enough space clears the warning at once.
-	if fits {
-		s.markRawRefused(false)
-	}
-	return over, nil
 }
 
 func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
@@ -770,7 +817,11 @@ func (s *Store) Prune(cutoff time.Time, includeUsage bool) (int64, error) {
 		total += n
 		if err != nil || n == 0 {
 			if err == nil {
-				_, err = s.settleMarkers()
+				_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			}
+			// A prune that freed enough space clears the warning at once.
+			if fits, _, capacityErr := s.rawCapacity(); err == nil && capacityErr == nil && fits {
+				s.markRawRefused(false)
 			}
 			return total, err
 		}
@@ -791,7 +842,7 @@ func (s *Store) pruneBatch(cutoff string, includeUsage bool) (int64, error) {
 	res, err := tx.Exec(`WITH expired AS MATERIALIZED (
 		SELECT sequence,origin_id,event_id FROM records WHERE received_time<?
 			AND (kind='sample' OR kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation' OR (? AND source_id=?))
-			ORDER BY received_time,sequence LIMIT 1000
+			ORDER BY sequence LIMIT 1000
 	) DELETE FROM records WHERE sequence IN (SELECT sequence FROM expired)
 		OR (source_id='collector:otlp-correlation' AND (origin_id,substr(event_id,1,instr(event_id,':')-1))
 			IN (SELECT origin_id,event_id FROM expired))`, cutoff, includeUsage, usageSource)

@@ -181,22 +181,22 @@ func runPrune(ctx context.Context, out io.Writer, dir, olderThan string, include
 // addStorageWarning reports the collector's space markers; the cleanup
 // command names this binary and data directory, so it runs as printed.
 func addStorageWarning(stats map[string]any, dir string) {
+	binary, err := os.Executable()
+	if err != nil {
+		binary = "subyard-telemetry"
+	}
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	prune := shellWord(binary) + " prune --data-dir " + shellWord(dir) + " --older-than "
 	var warnings []string
 	if since, found := readSpaceMarker(dir, OverBudgetMarker, "over_budget_since="); found {
 		stats["over_budget_since"] = since
-		warnings = append(warnings, "store above its disk budget since "+since+" with only records younger than 30 days; it keeps growing. Raise TELEMETRY_DISK_BUDGET or remove recent data with prune --older-than")
+		warnings = append(warnings, "store above its disk budget since "+since+" with only raw records younger than 30 days; it keeps growing. Raise TELEMETRY_DISK_BUDGET or remove recent data with: "+prune+"14d")
 	}
 	if since, found := readSpaceMarker(dir, RawRefusedMarker, "raw_otlp_refused_since="); found {
 		stats["raw_otlp_refused_since"] = since
-		binary, err := os.Executable()
-		if err != nil {
-			binary = "subyard-telemetry"
-		}
-		if absolute, err := filepath.Abs(dir); err == nil {
-			dir = absolute
-		}
-		warnings = append(warnings, "raw OTLP refused since "+since+": data partition reserve reached; usage is still recorded. Free space with: "+
-			shellWord(binary)+" prune --data-dir "+shellWord(dir)+" --older-than 60d")
+		warnings = append(warnings, "raw OTLP refused since "+since+": data partition reserve reached; usage is still recorded. Free space with: "+prune+"60d")
 	}
 	if warnings != nil {
 		stats["warnings"] = warnings
