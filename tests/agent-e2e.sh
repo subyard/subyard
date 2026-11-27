@@ -3199,6 +3199,12 @@ mkdir -p "$fixture/dev" "$fixture/scripts/lib" "$fixture/config/profiles/test-vm
 cp "$ROOT/dev/agent-e2e.sh" "$RUNNER_UNDER_TEST"
 cp -R "$ROOT/config/profiles/test-vms-client/skills/subyard-test-vms" "$fixture/config/profiles/test-vms-client/skills/"
 cp "$ROOT/scripts/lib/runtime.sh" "$fixture/scripts/lib/runtime.sh"
+# A fixture prefix keeps the runner's own run roots apart from real host-free runs.
+run_temp_prefix="subyard-agent-e2e-root-$(id -u)-$$-"
+sed "s/^PREFIX = \"syr.\"$/PREFIX = \"$run_temp_prefix\"/" "$ROOT/dev/test-run-temp.py" \
+  > "$fixture/dev/test-run-temp.py"
+grep -Fxq "PREFIX = \"$run_temp_prefix\"" "$fixture/dev/test-run-temp.py" \
+  || fail 'runner fixture kept the real run root prefix'
 
 new_runner_fixture() {
   local name="$1" key
@@ -3251,6 +3257,8 @@ case "$command" in
     ;;
   acquire-v3\ *|acquire\ *)
     printf '%s\n' "$command" >> "$FAKE_FACADE_LOG"
+    printf '%s\n' "${TMPDIR:-}" > "${FAKE_FACADE_LOG%/*}/acquire-tmpdir"
+    [ "$FAKE_SCENARIO" != hang ] || exec sleep 600
     read -r _ request_type _ _ request_yard request_project request_run request_purpose _ _ _ request_count request_disk <<<"$command"
     grant="$(jq -c --arg yard "$request_yard" --arg project "$request_project" \
       --arg run "$request_run" --arg purpose "$request_purpose" \
@@ -3439,6 +3447,28 @@ status_json="$(run_runner_fixture busy --status --json)"
 grep -Fq '"status":"ok"' <<<"$status_json" \
   && [ "$(cat "$RUNNER_FIXTURE/facade.log")" = status ] \
   || fail "slotless informational mode acquired a lease or failed"
+
+# A run keeps local scratch in its own locked root and removes it; the next run removes a root
+# that a killed run left behind.
+run_temp_roots() { find /tmp -maxdepth 1 -name "$run_temp_prefix*" | sort; }
+new_runner_fixture run-temp
+run_runner_fixture busy --slot 2 -- true >/dev/null 2>&1 || :
+run_root="$(cat "$RUNNER_FIXTURE/acquire-tmpdir")"
+case "$run_root" in "/tmp/$run_temp_prefix"*) ;; *) fail "runner scratch outside its run root: $run_root" ;; esac
+[ ! -e "$run_root" ] || fail 'a finished runner left its run root'
+: > "$RUNNER_FIXTURE/acquire-tmpdir"
+RUNNER_FIXTURE="$RUNNER_FIXTURE" RUNNER_UNDER_TEST="$RUNNER_UNDER_TEST" candidate_hash="$candidate_hash" \
+  setsid bash -c "$(declare -f run_runner_fixture); run_runner_fixture hang --slot 2 -- true" >/dev/null 2>&1 &
+hung_runner=$!
+for _ in $(seq 100); do [ ! -s "$RUNNER_FIXTURE/acquire-tmpdir" ] || break; sleep 0.1; done
+killed_root="$(cat "$RUNNER_FIXTURE/acquire-tmpdir")"
+kill -KILL -- "-$hung_runner"
+wait "$hung_runner" 2>/dev/null || :
+# Exited group members release the lock; wait until none remains.
+for _ in $(seq 100); do pgrep -g "$hung_runner" >/dev/null || break; sleep 0.1; done
+[ -n "$killed_root" ] && [ -d "$killed_root" ] || fail "a killed runner left no recoverable run root: $killed_root"
+run_runner_fixture busy --help >/dev/null
+[ -z "$(run_temp_roots)" ] || fail "the next runner kept run roots: $(run_temp_roots)"
 
 # Exact unavailable and invalid responses are reported immediately with their redacted contract fields.
 new_runner_fixture attribution-v2-required

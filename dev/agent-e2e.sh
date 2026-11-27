@@ -220,6 +220,15 @@ cleanup_guest() {
   unset 'GUEST_DIRS[$vm]'
 }
 
+# A direct run keeps local scratch in its own locked root under /tmp (dev/test-run-temp.py);
+# the next run or host-free runner removes a root that a killed run left behind.
+release_run_temp() {
+  [ "${SUBYARD_RUN_TEMP_OWNER:-}" = "$$" ] && [ -n "${SUBYARD_RUN_TEMP_FD:-}" ] || return 0
+  exec {SUBYARD_RUN_TEMP_FD}<&-
+  SUBYARD_RUN_TEMP_FD=''
+  python3 "$REPO_ROOT/dev/test-run-temp.py" clean
+}
+
 cleanup_on_exit() {
   local rc=${2:-$?} vm cleanup_failed=0 started=$SECONDS
   trap - EXIT
@@ -244,6 +253,7 @@ cleanup_on_exit() {
       ;;
     esac
   fi
+  release_run_temp || cleanup_failed=1
   # Keep the workload/signal outcome; cleanup has its own terminal phase.
   [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
   phase_marker cleanup/release end "$((SECONDS - started))" "$((cleanup_failed * 3))"
@@ -583,4 +593,9 @@ main() {
   ok "selected VM checks passed; run-specific worktrees removed"
 }
 
-[ "${BASH_SOURCE[0]}" != "$0" ] || main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  python3 "$REPO_ROOT/dev/test-run-temp.py" check \
+    || exec python3 "$REPO_ROOT/dev/test-run-temp.py" enter bash "$0" "$@"
+  trap 'release_run_temp' EXIT
+  main "$@"
+fi
