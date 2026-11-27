@@ -81,3 +81,48 @@ func TestSystemContainerPool(t *testing.T) {
 		t.Fatalf("release: %s", r.Code)
 	}
 }
+
+// An unrenewed container lease expires on the broker clock: one reap deletes its container
+// without quarantine, and the next request gets a fresh one.
+func TestSystemContainerLeaseExpiry(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	acquire := func() LeaseGrant {
+		var result facadeResponse
+		f.request(fmt.Sprintf("acquire-v3 system-container client-1 SHA256:controller test-yard Broker-Tests 00000001 nested %s slot-001 1", fixturePublicKey(t)), &result)
+		if result.Status != "ok" || result.Grant == nil {
+			t.Fatalf("container acquire: %s %s", result.Code, result.Message)
+		}
+		return *result.Grant
+	}
+	grant := acquire()
+	project := f.incus.projects[f.rt.slotRuntime(1, "").Config.withEnvironment(*grant.Environment).Project]
+	f.now = grant.ExpiresAt.Add(-time.Minute)
+	if result := f.leaseAction("renew", grant); result.Status != "ok" {
+		t.Fatalf("renew: %s %s", result.Code, result.Message)
+	}
+	f.now = grant.ExpiresAt.Add(time.Second)
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	if f.slot(1).State != SlotHeld || len(project.instances) != 1 {
+		t.Fatal("a renewed container lease expired at its original deadline")
+	}
+	f.now = f.now.Add(LeaseTTL)
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	if slot := f.slot(1); slot.State != SlotAvailable || slot.FailureReason != "" || !slot.NextRecoveryAt.IsZero() ||
+		len(project.instances)+len(project.volumes) != 0 {
+		t.Fatalf("expired container lease was not deleted cleanly: %+v", slot)
+	}
+	events, err := f.rt.eventRecorder().Export()
+	brokerMust(t, err)
+	if !slices.ContainsFunc(events.Events, func(event BrokerEvent) bool {
+		return event.Kind == "lease.expired" && event.SlotID == grant.SlotID && event.LeaseEpoch == grant.LeaseEpoch
+	}) || slices.ContainsFunc(events.Events, func(event BrokerEvent) bool { return strings.Contains(event.Kind, "quarantine") }) {
+		t.Fatal("container expiry was not recorded as a plain expiry")
+	}
+	if result := f.leaseAction("renew", grant); result.Code != "lease_lost" {
+		t.Fatalf("expired lease renewed: %s", result.Code)
+	}
+	next := acquire()
+	if next.LeaseEpoch == grant.LeaseEpoch || len(project.instances) != 1 {
+		t.Fatal("next container lease reused the expired allocation")
+	}
+}
