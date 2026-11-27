@@ -379,16 +379,36 @@ disable_inner_firewall() {
   fi
 }
 
+remove_stale_inner_pool() {
+  # A /srv volume kept by `teardown --keep-data` can still hold the inner pool from before it moved
+  # to the default path. Remove that directory only while no inner pool uses it.
+  local pools pool source
+  [ -d /srv/incus-e2e ] && [ ! -L /srv/incus-e2e ] || return 0
+  pools="$(inner_incus storage list --format csv -c n)"
+  [ -n "$pools" ] || return 0
+  for pool in $pools; do
+    source="$(inner_incus storage get "$pool" source)"
+    case "$source" in
+      /srv/incus-e2e | /srv/incus-e2e/*) return 0 ;;
+    esac
+  done
+  rm -rf --one-file-system -- /srv/incus-e2e
+  printf '  [ ok ] removed the stale inner pool under /srv/incus-e2e\n'
+}
+
 reconcile_inner_incus() {
   local output
 
   # Build the three bootstrap resources independently so a network failure never strands the
   # daemon halfway through one monolithic `incus admin init`. Nested AppArmor can deny dnsmasq's
   # syslog socket; retry that one resource with a log inside Incus' own allowed state directory.
-  install -d -m 0711 /srv/incus-e2e/storage
+
+  # Keep the pool at Incus' default path on the yard root: newer Incus builds cannot remount
+  # instance disks read-only below the nosuid /srv device of a nested container.
   if ! inner_incus storage show default --project default >/dev/null 2>&1; then
-    inner_incus storage create default dir source=/srv/incus-e2e/storage --project default
+    inner_incus storage create default dir --project default
   fi
+  remove_stale_inner_pool
 
   if ! inner_incus network show incusbr0 --project default >/dev/null 2>&1; then
     if ! output="$(inner_incus network create incusbr0 ipv4.address=auto ipv6.address=none \

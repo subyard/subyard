@@ -322,7 +322,7 @@ verify_broker_installation() {
 
 sample_cold_capacity() {
   local phase="$1" disk total used extra broker_known=0
-  disk="$(outer_exec df -B1 --output=size,used,avail /srv/incus-e2e/storage | awk 'NR==2 {print $1,$2,$3}')" || disk=''
+  disk="$(outer_exec df -B1 --output=size,used,avail /var/lib/incus/storage-pools/default | awk 'NR==2 {print $1,$2,$3}')" || disk=''
   before="$(status)" || before=''
   if jq -e 'type=="object" and (.resources | type=="object")' <<<"$before" >/dev/null 2>&1; then
     broker_known=1
@@ -802,8 +802,6 @@ paths={'usr':'/usr','usr_lib':'/usr/lib','usr_share':'/usr/share','usr_local':'/
     'incus_default_pool':'/var/lib/incus/storage-pools/default'}
 if scope=='outer_vm':
     paths.update(source=sys.argv[2],platform=sys.argv[3],owner_state=sys.argv[4])
-else:
-    paths.update(nested_storage='/srv/incus-e2e/storage')
 result={'phase':'after_reclaim','scope':scope}
 for key,name in paths.items():
     path=pathlib.Path(name); value=None
@@ -1450,7 +1448,7 @@ def sample(project,name):
 filesystem_minimum,filesystem_errors=None,0
 def filesystem_sample():
     global filesystem_minimum,filesystem_errors
-    try: fs=os.statvfs('/srv/incus-e2e/storage')
+    try: fs=os.statvfs('/var/lib/incus/storage-pools/default')
     except OSError:
         filesystem_errors+=1
         return {'unavailable':True,'minimum_available_bytes':filesystem_minimum,'unavailable_samples':filesystem_errors}
