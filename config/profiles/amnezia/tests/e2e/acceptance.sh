@@ -8,6 +8,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 VM_COUNT_REQUESTED=2
 VM_COUNT=2
 
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 lane=full
 usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|maintenance|reboot|recovery|startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
@@ -28,6 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
 
+enter_lane_run_temp "${LANE_ARGS[@]}"
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=amnezia-acceptance
 # The enclosing runner keeps its fixed work deadline and 300-second TERM grace.

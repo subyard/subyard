@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 controller_main() {
+  local -a lane_args=("$@")
   slot=''
   target_vm=1
   target_alias=''
@@ -65,6 +66,7 @@ controller_main() {
   # Consumed dynamically by the sourced lease client.
   # shellcheck disable=SC2034
   LEASE_PURPOSE='yard-network-policy'
+  enter_lane_run_temp "${lane_args[@]}"
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 
   controller_cleanup() {

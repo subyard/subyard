@@ -1429,6 +1429,7 @@ full_final_verify() {
   || die '--lane full needs a frozen candidate: run python3 dev/release-acceptance.py prepare and export SUBYARD_E2E_CANDIDATE_BUNDLE and SUBYARD_E2E_CANDIDATE_SHA256'
 [ "${P0_SPLIT_COVERED:-0}" = 0 ] || split_covered_by_collector \
   || die '--split-covered runs only under the release collector, whose receipt for this candidate bundle declares the split lane checks'
+enter_lane_run_temp "$@"
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test

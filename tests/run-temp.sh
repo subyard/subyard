@@ -351,3 +351,72 @@ sys.exit(23)
         run('true')
 print('ok: test run cleanup, crash recovery, inherited ownership and log retention')
 PY
+
+# Lane controllers that source dev/agent-e2e.sh keep their scratch in an owned run root.
+python3 -B - "$ROOT" <<'PY'
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+root = Path(sys.argv[1])
+# Every core controller that allocates local lease scratch in /tmp enters a run root first;
+# profile controllers are covered by their owning profile lanes.
+for path in sorted((root / 'dev/e2e').glob('*.sh')):
+    text = path.read_text()
+    if re.search(r'LOCAL_TEMP="\$\(mktemp -d "?(\$\{TMPDIR:-/tmp\}|/tmp)/', text):
+        assert 'enter_lane_run_temp "' in text, f'{path} allocates scratch outside a run root'
+
+environment = {k: v for k, v in os.environ.items() if not k.startswith('SUBYARD_RUN_TEMP')}
+# A controller started by any process of a run reuses its root instead of entering another.
+inside = ['python3', str(root / 'dev/test-run-temp.py'), 'inside']
+assert subprocess.run(inside, env={**environment, 'TMPDIR': '/tmp'}).returncode == 1
+subprocess.run(['bash', str(root / 'dev/with-test-temp.sh'), 'bash', '-c', '"$@" || exit; :', '_', *inside],
+               env=environment, check=True, timeout=60)
+with tempfile.TemporaryDirectory(prefix='subyard-controller-run-root-', dir='/tmp') as temporary:
+    fixture = Path(temporary)
+    marker, hook = fixture / 'scratch', fixture / 'bash-env'
+    # Stop P0 just before it contacts the broker, after it has allocated its local scratch.
+    hook.write_text('''trap 'if [[ "$BASH_COMMAND" == acquire_lease ]]; then
+  printf "%s\\n" "$LOCAL_TEMP" > "$CONTROLLER_MARKER"; kill -"$CONTROLLER_SIGNAL" "$$"; fi' DEBUG
+''')
+    environment.update(TMPDIR='/tmp', BASH_ENV=str(hook), CONTROLLER_MARKER=str(marker),
+                       SUBYARD_E2E_STATE_DIR=str(fixture / 'state'))
+    command = ['bash', 'dev/e2e/p0-acceptance.sh', '--slot', '1', '--lane', 'release-smoke']
+
+    def scratch():
+        path = Path(marker.read_text().strip())
+        assert path.parent.name.startswith('syr.') and path.parent.parent == Path('/tmp'), path
+        return path
+
+    # A killed process group leaves its root unlocked and in place.
+    process = subprocess.Popen(command, cwd=root, env={**environment, 'CONTROLLER_SIGNAL': 'STOP'},
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 120
+        while not marker.exists() or not marker.read_text().endswith('\n'):
+            assert process.poll() is None and time.monotonic() < deadline, 'controller did not reach allocation'
+            time.sleep(.05)
+        left = scratch()
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+    deadline = time.monotonic() + 10
+    while subprocess.run(['pgrep', '-g', str(process.pid)], capture_output=True).returncode == 0:
+        assert time.monotonic() < deadline, 'killed controller group did not exit'
+        time.sleep(.05)
+    assert left.is_dir() and (left.parent / '.test-run.json').is_file(), left
+
+    # The next controller run removes it, and its wrapper removes the root of a controller killed alone.
+    marker.unlink()
+    result = subprocess.run(command, cwd=root, env={**environment, 'CONTROLLER_SIGNAL': 'KILL'},
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 137, (result.returncode, result.stderr)
+    assert not left.parent.exists(), 'next controller run kept an abandoned run root'
+    assert not scratch().parent.exists(), 'wrapper kept a killed controller run root'
+print('ok: sourced lane controllers keep scratch in owned run roots')
+PY

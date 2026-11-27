@@ -91,6 +91,7 @@ printf 'ok: image capability negotiation, legacy broker compatibility and wrong-
 mkdir -p "$fixture/dev"
 cat > "$fixture/dev/agent-e2e.sh" <<'STUB'
 . "$NM_IMAGE_CLIENT"
+enter_lane_run_temp() { :; }
 build_bundle() { : > "$2"; }
 cleanup_on_exit() { :; }
 acquire_lease() {

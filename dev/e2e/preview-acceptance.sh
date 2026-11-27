@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "$ROOT/dev/agent-e2e.sh"
 
 usage() { printf 'Usage: dev/e2e/preview-acceptance.sh --slot N [--codex-export] [--remote-only] [--tailnet] [--canonical] [--kind container|vm]\n'; }
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 slot_seen=0
 remote_only=0
 tailnet=0
@@ -39,6 +41,7 @@ done
 if [ "$codex_export" = 1 ]; then
   [ "$remote_only:$tailnet:$canonical" = 0:0:0 ] || die '--codex-export cannot be combined with preview-only flags'
 fi
+enter_lane_run_temp "${LANE_ARGS[@]}"
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 # Used by the sourced lease helpers.
 # shellcheck disable=SC2034

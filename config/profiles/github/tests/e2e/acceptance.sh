@@ -44,6 +44,7 @@ info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
 
 controller_main() {
+  local -a lane_args=("$@")
   # EXIT also runs after errexit has unwound this function's local scope.
   slot='' target_alias=e2e-vm-1 bundle='' bundle_hash='' before_boot='' after_boot=''
   boot_down=0 boot_ready=0 prepared=0 cleanup_failed=0 rc=0 system_rc=0
@@ -86,6 +87,7 @@ controller_main() {
     esac
     [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || die '--wait must be seconds or end in s/m'
   fi
+  enter_lane_run_temp "${lane_args[@]}"
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-github-e2e.XXXXXX")"
   trap broker_controller_cleanup EXIT
   trap 'broker_controller_cleanup 130' INT

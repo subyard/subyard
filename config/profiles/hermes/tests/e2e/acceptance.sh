@@ -2,6 +2,8 @@
 # Controller for Hermes' single-VM disposable acceptance.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 slot=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -19,6 +21,7 @@ VM_COUNT_REQUESTED=1
 VM_COUNT=1
 LEASE_PURPOSE=hermes-profile
 set_requested_slot "$slot" --slot
+enter_lane_run_temp "${LANE_ARGS[@]}"
 install -d -m 0700 "$ROOT/.build/test-runs"
 OUTPUT="$(mktemp -d "$ROOT/.build/test-runs/hermes.XXXXXX")"
 chmod 0700 "$OUTPUT"

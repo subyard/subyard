@@ -6,6 +6,8 @@ if [ "${1:-}" = --help ]; then
   printf 'Usage: dev/e2e/disabled-components-release.sh --slot N [--payload PATH]\nRequires a frozen packaged candidate transport bundle.\n'
   exit 0
 fi
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 payload=config/profiles/hermes/tests/e2e/disabled-components-release.sh
 if [ "$#" = 4 ] && [ "${3:-}" = --payload ]; then payload="$4"; set -- "$1" "$2"; fi
 [ "$#" = 2 ] && [ "$1" = --slot ] || { printf 'expected --slot N [--payload PATH]\n' >&2; exit 2; }
@@ -17,7 +19,8 @@ set_requested_slot "$2" --slot
 VM_COUNT_REQUESTED=1 LEASE_PURPOSE=disabled-components-release
 [ -n "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ] && [ -n "${SUBYARD_E2E_CANDIDATE_SHA256:-}" ] \
   || die 'frozen candidate bundle and checksum are required'
-LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXXXX)"
+enter_lane_run_temp "${LANE_ARGS[@]}"
+LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXXXX")"
 install -d -m 0755 "$ROOT/.build/disabled-components-release"
 evidence="$(mktemp -d "$ROOT/.build/disabled-components-release/run.XXXXXXXX")"
 prepared=0

@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 usage() {
   printf 'Usage: dev/e2e/config-sync-acceptance.sh --slot N\n'
 }
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -26,6 +28,7 @@ for command in git rg tar sha256sum ssh ssh-keygen jq; do
   command -v "$command" >/dev/null || die "$command is required"
 done
 
+enter_lane_run_temp "${LANE_ARGS[@]}"
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=config-sync-acceptance
 STATE=/var/lib/subyard-config-sync-e2e

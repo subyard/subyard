@@ -46,6 +46,7 @@ controller_reboot() {
 }
 
 controller_main() {
+  local -a lane_args=("$@")
   local slot='' lane='' phase
   { [ "$#" = 4 ] || [ "$#" = 6 ]; } && [ "$1" = --slot ] && [ "$3" = --lane ] || usage
   slot="$2" lane="$4"
@@ -60,6 +61,7 @@ controller_main() {
   # Consumed by the sourced lease client.
   # shellcheck disable=SC2034
   VM_COUNT_REQUESTED=1 LEASE_PURPOSE="nm-guard-$lane"
+  enter_lane_run_temp "${lane_args[@]}"
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
   NM_LANE_BUNDLE="$LOCAL_TEMP/worktree.tar.gz"
   trap 'cleanup_on_exit "" "$?"' EXIT

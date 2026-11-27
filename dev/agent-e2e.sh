@@ -220,6 +220,15 @@ cleanup_guest() {
   unset 'GUEST_DIRS[$vm]'
 }
 
+# A lane controller that sources this file calls it with its original arguments after validating
+# them and before its first local state. A direct run then re-executes once inside an owned run root
+# (dev/test-run-temp.py), so a killed controller leaves scratch only where the next run removes it.
+enter_lane_run_temp() {
+  [ "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" = "$0" ] || return 0
+  python3 "$REPO_ROOT/dev/test-run-temp.py" inside && return 0
+  exec bash "$REPO_ROOT/dev/with-test-temp.sh" bash "$0" "$@"
+}
+
 # A direct run keeps local scratch in its own locked root under /tmp (dev/test-run-temp.py);
 # the next run or host-free runner removes a root that a killed run left behind.
 release_run_temp() {

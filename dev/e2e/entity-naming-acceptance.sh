@@ -28,6 +28,7 @@ parse_arguments() {
 }
 parse_arguments "$@"
 
+enter_lane_run_temp "$@"
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=entity-naming-lifecycle
 cleanup_acceptance() {

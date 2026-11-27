@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 VM_COUNT_REQUESTED=2
 LEASE_PURPOSE=github-connection-sync
 usage() { printf 'Usage: config/profiles/github/tests/e2e/connection-sync.sh --slot N\n'; }
+# The original arguments, for enter_lane_run_temp.
+LANE_ARGS=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -19,6 +21,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
+enter_lane_run_temp "${LANE_ARGS[@]}"
 # These process/fixture and production filesystem checks never acquire a lease.
 bash "$ROOT/config/profiles/github/tests/run.sh" --preflight
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"

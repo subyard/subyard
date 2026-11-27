@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 controller_main() {
+  local -a lane_args=("$@")
   local slot='' before_boot='' after_boot=''
   local down=0 up=0
   # EXIT can run after errexit has unwound this function's local scope.
@@ -20,6 +21,7 @@ controller_main() {
   # Consumed by the sourced lease client.
   # shellcheck disable=SC2034
   VM_COUNT_REQUESTED=1 LEASE_PURPOSE=proxy-address-boot
+  enter_lane_run_temp "${lane_args[@]}"
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
   controller_cleanup() {
     local rc=$? failed=0

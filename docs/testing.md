@@ -745,10 +745,12 @@ The two top-level host-free runners (`tests/run.sh`, `dev/test-profiles.sh`) and
 Makefile entrypoints give each invocation a private root under `/tmp`, with `TMPDIR`
 and `GOTMPDIR` pointing into it. Nested runners reuse that root. The runner holds an
 exclusive flock on the directory itself, inherited by children; the owner removes its root
-only once unlocked, otherwise the next run does. `dev/agent-e2e.sh` keeps its local lane
-scratch in the same kind of root, so a killed lane controller leaves only a root that the
-next lane controller or host-free run removes. In a `subyard-dev` yard a daily timer also
-removes such roots once they are older than seven days.
+only once unlocked, otherwise the next run does. `dev/agent-e2e.sh` and the lane
+controllers that source it (P0 and the core and profile `tests/e2e` controllers, through
+`enter_lane_run_temp` after argument validation) keep their local lane scratch in the same
+kind of root, so a killed lane controller leaves only a root that the next lane controller or
+host-free run removes. In a `subyard-dev` yard a daily timer also removes such roots once
+they are older than seven days.
 The next invocation removes abandoned sibling roots only after taking their lock and
 validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
 mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks

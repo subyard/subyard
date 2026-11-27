@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ "$#" = 2 ] || die 'usage: slot-disk-isolation.sh SLOT NEW_OUTPUT_DIRECTORY'
 set_requested_slot "$1" slot
 output="$2"
+enter_lane_run_temp "$@"
 mkdir -- "$output"
 output="$(cd "$output" && pwd)"
 LEASE_PURPOSE='slot-disk-isolation'

@@ -7,6 +7,7 @@ trap 'find "$TMP" -depth -delete' EXIT
 mkdir -p "$TMP/dev/e2e"
 cp "$ROOT/dev/e2e/proxy-address-boot.sh" "$TMP/dev/e2e/proxy-address-boot.sh"
 cat > "$TMP/dev/agent-e2e.sh" <<'CLIENT'
+enter_lane_run_temp() { :; }
 set_requested_slot() { :; }
 build_bundle() { printf fixture > "$2"; }
 acquire_lease() { LEASE_GENERATION=1; printf 'acquire\n' >> "$FIXTURE_LOG"; }

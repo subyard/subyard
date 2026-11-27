@@ -159,10 +159,12 @@ def retain(path):
 
 
 def main():
-    if sys.argv[1] == "check":
+    if sys.argv[1] in ("check", "inside"):
+        # check: the caller is the runner that entered the root; inside: any process of the run.
         try:
             _, path = inherited()
-            return_code = not (os.environ.get("SUBYARD_RUN_TEMP_ENTERED") == str(os.getppid())
+            return_code = not ((sys.argv[1] == "inside"
+                                or os.environ.get("SUBYARD_RUN_TEMP_ENTERED") == str(os.getppid()))
                                and os.environ.get("TMPDIR") == str(path)
                                and os.environ.get("GOTMPDIR") == str(path))
         except (KeyError, OSError, ValueError):
@@ -214,7 +216,7 @@ def main():
                 os.close(parent)
         return
     if sys.argv[1] != "enter":
-        raise ValueError("expected check, enter, clean, retain or sweep")
+        raise ValueError("expected check, inside, enter, clean, retain or sweep")
     try:
         fd, path = inherited()
     except (KeyError, OSError, ValueError):
