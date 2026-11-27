@@ -467,7 +467,7 @@ disable_user_dotfiles() {
   operator_yard -Y default profile disable user-dotfiles --yes >"$STATE_ROOT/user-dotfiles-disable.log" 2>&1 \
     || die 'profile disable user-dotfiles failed'
   for path in /home/dev/.claude/CLAUDE.md /home/dev/.codex/AGENTS.md /home/dev/.config/opencode/AGENTS.md; do
-    guest_dev sh -c '! readlink "$1" | grep -q "^/home/dev/.local/share/subyard-user-dotfiles/"' _ "$path" \
+    guest_dev sh -c 'case "$(readlink "$1")" in /home/dev/.local/share/subyard-user-dotfiles/*) exit 1 ;; esac' _ "$path" \
       || die "disable kept the user-dotfiles link $path"
   done
 }
