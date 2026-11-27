@@ -13,9 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -36,25 +34,21 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 	environment := []string{
 		"CODING_TOOL_INTEGRATIONS=opencode",
-		"HOST_CLAUDE_MD=" + source("CLAUDE.md", "claude\n"),
-		"HOST_CODEX_AGENTS_MD=" + source("CODEX.md", "codex\n"),
-		"HOST_OPENCODE_AGENTS_MD=" + source("OPENCODE.md", "opencode\n"),
 		"AGENT_opencode_CONFIG=" + source("opencode.jsonc", "{}\n"),
 		"AGENT_opencode_CONFIG_DEST=.config/opencode/opencode.jsonc",
 		"AGENT_opencode_RULES=" + source("repo.rules", "rule\n"),
 		"AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 	}
-	incus := runningIncus(12)
+	incus := runningIncus(10)
 	wantDestinations := []string{
-		"/home/dev/.config/opencode/AGENTS.md",
 		"/home/dev/.config/opencode/opencode.jsonc",
 		"/home/dev/.config/opencode/repo.rules",
 	}
 	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
-	incus.ExecSteps[6].Result.Stdout = []byte(`{}`)
+	incus.ExecSteps[5].Result.Stdout = []byte(`{}`)
 	var output bytes.Buffer
 	runtime := Runtime{
-		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}, {ID: "rules", Kind: "config", Destination: ".config/opencode/repo.rules", Format: "raw"}}}},
+		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}, {ID: "rules", Kind: "config", Destination: ".config/opencode/repo.rules", Format: "raw"}}}},
 		Environment:  environment, Incus: incus, Executor: incus, Stdout: &output,
 		Yard: domain.Context{
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001,
@@ -67,15 +61,15 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 12 || len(incus.TokenObservations) != 2 {
-		t.Fatalf("config refresh calls = %d, want 6 writes and 6 inventory operations after 2 observations", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 10 || len(incus.TokenObservations) != 2 {
+		t.Fatalf("config refresh calls = %d, want 4 writes and 6 inventory operations after 2 observations", len(incus.ExecCalls))
 	}
-	for index, mode := range map[int]string{0: "settings", 1: "configs-prepare", 5: "configs-commit", 6: "settings", 7: "configs-prepare", 11: "configs-commit"} {
+	for index, mode := range map[int]string{0: "settings", 1: "configs-prepare", 4: "configs-commit", 5: "settings", 6: "configs-prepare", 9: "configs-commit"} {
 		if command := incus.ExecCalls[index].Request.Command; len(command) != 5 || command[4] != mode {
 			t.Fatalf("inventory operation %d: %v", index, command)
 		}
 	}
-	writes := append(incus.ExecCalls[2:5:5], incus.ExecCalls[8:11]...)
+	writes := append(incus.ExecCalls[2:4:4], incus.ExecCalls[7:9]...)
 	for index, call := range writes {
 		if call.Project != "subyard" || call.Name != "yard" ||
 			len(call.Request.Command) != 10 ||
@@ -91,15 +85,15 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 		if !slices.Contains(wantDestinations, destination) {
 			t.Fatalf("unselected agent config destination %q", destination)
 		}
-		if index >= 3 {
-			first := writes[index-3].Request
+		if index >= 2 {
+			first := writes[index-2].Request
 			if !slices.Equal(first.Command, call.Request.Command) ||
 				!bytes.Equal(first.Stdin, call.Request.Stdin) {
-				t.Fatalf("config refresh %d is not idempotent", index-3)
+				t.Fatalf("config refresh %d is not idempotent", index-2)
 			}
 		}
 	}
-	if !strings.Contains(output.String(), "Agent instructions and configs refreshed") {
+	if !strings.Contains(output.String(), "Agent configs refreshed") {
 		t.Fatalf("refresh output changed: %q", output.String())
 	}
 }
@@ -134,15 +128,16 @@ func TestRefreshConfigsWritesOverConsentOrItsOwnObservation(t *testing.T) {
 	}
 	environment := []string{
 		"CODING_TOOL_INTEGRATIONS=opencode",
-		"HOST_OPENCODE_AGENTS_MD=" + source("OPENCODE.md", "opencode\n"),
 		"AGENT_opencode_CONFIG=" + source("opencode.jsonc", "{}\n"),
 		"AGENT_opencode_CONFIG_DEST=.config/opencode/opencode.jsonc",
+		"AGENT_opencode_RULES=" + source("repo.rules", "rule\n"),
+		"AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 	}
 	stale := "sha256:" + strings.Repeat("a", 64)
 	newRuntime := func(incus *testkit.Incus) Runtime {
 		incus.Reconcile.Instance.Config = map[string]string{"volatile.uuid": "instance-a"}
 		runtime := Runtime{
-			Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}}}},
+			Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}, {ID: "rules", Kind: "config", Destination: ".config/opencode/repo.rules", Format: "raw"}}}},
 			Environment:  environment, Incus: incus, Executor: staleGuest{incus, stale}, Stdout: io.Discard,
 			Yard: domain.Context{YardName: "named", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
 		}
@@ -173,20 +168,18 @@ func TestRefreshConfigsWritesOverConsentOrItsOwnObservation(t *testing.T) {
 			written[command[6]] = command[8]
 		}
 	}
-	if written["/home/dev/.config/opencode/AGENTS.md"] != configmaterial.TokenAbsent || written["/home/dev/.config/opencode/opencode.jsonc"] != stale ||
-		len(incus.TokenObservations) != 1 || !slices.Equal(incus.TokenObservations[0].Request.Command[6:], []string{"/home/dev/.config/opencode/AGENTS.md"}) {
+	if written["/home/dev/.config/opencode/repo.rules"] != configmaterial.TokenAbsent || written["/home/dev/.config/opencode/opencode.jsonc"] != stale ||
+		len(incus.TokenObservations) != 1 || !slices.Equal(incus.TokenObservations[0].Request.Command[6:], []string{"/home/dev/.config/opencode/repo.rules"}) {
 		t.Fatalf("writes %v, observations %v", written, incus.TokenObservations)
 	}
-	// An unreadable instruction file is outside the config set that config
-	// apply refreshes: its step is init --configs, the config file's stays
-	// config apply.
+	// Every refused file is reported with its own step.
 	incus = runningIncus(8)
 	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
-	incus.GuestTokens["/home/dev/.config/opencode/AGENTS.md"] = configmaterial.TokenUnreadable
+	incus.GuestTokens["/home/dev/.config/opencode/repo.rules"] = configmaterial.TokenUnreadable
 	err = newRuntime(incus).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-a", Files: []ports.ConfigFileConsent{
 		{Destination: "/home/dev/.config/opencode/opencode.jsonc", Token: stale},
 	}})
-	if err == nil || !strings.Contains(err.Error(), "/home/dev/.config/opencode/AGENTS.md is not a readable regular file; it was kept; next: replace it with a regular file or remove it, then run yard -Y named init --configs") ||
+	if err == nil || !strings.Contains(err.Error(), "/home/dev/.config/opencode/repo.rules is not a readable regular file; it was kept; next: replace it with a regular file or remove it, then run yard -Y named config apply") ||
 		!strings.Contains(err.Error(), "opencode.jsonc changed after its refresh was planned; the guest's file was kept; next: run yard -Y named config apply") {
 		t.Fatalf("refusal steps per file class: %v", err)
 	}
@@ -313,8 +306,8 @@ func TestPrepareConfigsReportsEveryInvalidSourceBeforeMutation(t *testing.T) {
 // release readiness use: an unreadable file is not converged.
 func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 	root := t.TempDir()
-	source := filepath.Join(root, "AGENTS.md")
-	payload := []byte("current instructions\n")
+	source := filepath.Join(root, "repo.rules")
+	payload := []byte("current rules\n")
 	if err := os.WriteFile(source, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +316,7 @@ func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation := func(token string) string {
-		payload, _ := json.Marshal(map[string]any{"files": []map[string]string{{"destination": "/home/dev/.codex/AGENTS.md", "token": token}}})
+		payload, _ := json.Marshal(map[string]any{"files": []map[string]string{{"destination": "/home/dev/.codex/rules/repo.rules", "token": token}}})
 		return string(payload)
 	}
 	for _, test := range []struct {
@@ -340,16 +333,16 @@ func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 			incus.GuestTokens = nil
 			incus.ExecSteps[0].Result.Stdout = []byte(test.stdout)
 			runtime := Runtime{
-				Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source},
+				Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + source, "AGENT_codex_RULES_DEST=.codex/rules/repo.rules"},
 				Incus:       incus, Executor: incus,
 				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 			}
-			bindInstructionTestPackage(t, &runtime, root, "codex")
+			bindAgentTestPackage(t, &runtime, root, "codex")
 			got, err := runtime.ConfigsConverged(context.Background())
 			if err != nil || got != test.want {
 				t.Fatalf("converged=%t err=%v", got, err)
 			}
-			if command := incus.ExecCalls[0].Request.Command; len(incus.ExecCalls) != 1 || !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.codex/AGENTS.md"}) {
+			if command := incus.ExecCalls[0].Request.Command; len(incus.ExecCalls) != 1 || !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.codex/rules/repo.rules"}) {
 				t.Fatalf("token probe=%#v", incus.ExecCalls)
 			}
 		})
@@ -405,87 +398,13 @@ func TestRefreshConfigsRejectsSymlinkSourceBeforeGuestMutation(t *testing.T) {
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	if err := runtime.RefreshConfigs(context.Background(), nil); err == nil ||
 		!strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("symlink source error = %v", err)
 	}
 	if len(incus.ExecCalls) != 0 {
 		t.Fatalf("symlink source caused guest execution: %#v", incus.ExecCalls)
-	}
-}
-
-func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
-	root := t.TempDir()
-	claudeDirectory := filepath.Join(root, ".claude")
-	dotfilesDirectory := filepath.Join(root, "dotfiles", "agents")
-	for _, directory := range []string{claudeDirectory, dotfilesDirectory} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	payload := []byte("operator instructions\n")
-	target := filepath.Join(dotfilesDirectory, "AGENTS.md")
-	if err := os.WriteFile(target, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(claudeDirectory, "CLAUDE.md")
-	if err := os.Symlink("../dotfiles/agents/AGENTS.md", source); err != nil {
-		t.Fatal(err)
-	}
-	incus := runningIncus(3)
-	runtime := Runtime{
-		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude", "HOST_CLAUDE_MD=" + source},
-		Incus:       incus, Executor: incus,
-		Yard: domain.Context{
-			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
-		},
-	}
-	bindInstructionTestPackage(t, &runtime, root, "claude")
-	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if len(incus.ExecCalls) != 3 ||
-		incus.ExecCalls[1].Request.Command[6] != "/home/dev/.claude/CLAUDE.md" ||
-		!bytes.HasPrefix(incus.ExecCalls[1].Request.Stdin, payload) ||
-		bytes.Contains(incus.ExecCalls[1].Request.Stdin, []byte(previewInstructions)) {
-		t.Fatalf("symlinked Claude instructions were not copied: %#v", incus.ExecCalls)
-	}
-}
-
-func TestHostInstructionSourceRejectsDanglingSymlink(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "CLAUDE.md")
-	if err := os.Symlink("missing.md", source); err != nil {
-		t.Fatal(err)
-	}
-	_, err := (guestConfigFile{label: "Claude instructions", source: source, followSymlinks: true}).readSource()
-	if err == nil || os.IsNotExist(err) || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("dangling symlink error = %v", err)
-	}
-}
-
-func TestHostInstructionSourceRejectsFIFOWithoutBlocking(t *testing.T) {
-	root := t.TempDir()
-	target := filepath.Join(root, "instructions.fifo")
-	if err := syscall.Mkfifo(target, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(root, "CLAUDE.md")
-	if err := os.Symlink("instructions.fifo", source); err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan error, 1)
-	go func() {
-		_, err := (guestConfigFile{label: "Claude instructions", source: source, followSymlinks: true}).readSource()
-		result <- err
-	}()
-	select {
-	case err := <-result:
-		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-			t.Fatalf("FIFO error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("opening the FIFO source blocked")
 	}
 }
 
@@ -582,7 +501,7 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 		Incus:       incus, Executor: incus,
 		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 	}
-	bindInstructionTestPackage(t, &runtime, filepath.Dir(source), "codex")
+	bindAgentTestPackage(t, &runtime, filepath.Dir(source), "codex")
 	converged, err := runtime.ConfigsConverged(context.Background())
 	if err != nil || !converged {
 		t.Fatalf("owned TOML observation rejected: converged=%v err=%v", converged, err)
@@ -590,144 +509,6 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 	request := incus.ExecCalls[0].Request
 	if len(request.Command) == 0 || request.Command[0] != "python3" || len(request.Stdin) == 0 {
 		t.Fatal("TOML observation did not use the guest ownership adapter")
-	}
-}
-
-func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
-	root := testkit.TempDir(t)
-	source := filepath.Join(root, "instructions.md")
-	host := []byte("Host instructions stay byte-for-byte intact.")
-	testkit.WriteFile(t, source, host, 0o600)
-	for _, agent := range []string{"claude", "codex", "opencode"} {
-		t.Run(agent, func(t *testing.T) {
-			key := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[agent]
-			runtime := Runtime{legacyPreviewInstructions: true, Environment: []string{
-				"CODING_TOOL_INTEGRATIONS=" + agent, key + "=" + source,
-				"AGENT_" + agent + "_RULES=" + source, "AGENT_" + agent + "_RULES_DEST=rules",
-			}}
-			if agent == "opencode" {
-				runtime.Integrations = []profile.IntegrationDefinition{{Name: agent, Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: key, Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "rules", Kind: "config", Destination: "rules", Format: "raw"}}}}
-			}
-			if agent != "opencode" {
-				bindInstructionTestPackage(t, &runtime, root, agent)
-			} else {
-				bindArtifactTestPackages(t, &runtime, root)
-			}
-			files, err := runtime.guestConfigFiles()
-			if err != nil || len(files) != 2 || files[0].integration != agent {
-				t.Fatalf("selected files=%#v err=%v", files, err)
-			}
-			effective, err := files[0].readSource()
-			if err != nil || !bytes.HasPrefix(effective, host) || bytes.Count(effective, []byte("<!-- subyard-preview -->")) != 1 {
-				t.Fatalf("effective instruction=%q err=%v", effective, err)
-			}
-			asset, err := files[1].readSource()
-			if err != nil || !bytes.Equal(asset, host) {
-				t.Fatalf("rules asset changed: %v", err)
-			}
-			legacy, err := files[0].legacySourceHash()
-			if err != nil || legacy != fmt.Sprintf("%x", sha256.Sum256(host)) {
-				t.Fatalf("legacy source hash=%q err=%v", legacy, err)
-			}
-			assetLegacy, err := files[1].legacySourceHash()
-			if err != nil || assetLegacy != "" {
-				t.Fatalf("config asset has legacy instruction evidence: %q %v", assetLegacy, err)
-			}
-			original, err := os.ReadFile(source)
-			if err != nil || !bytes.Equal(original, host) {
-				t.Fatal("host instructions changed")
-			}
-
-		})
-	}
-}
-
-func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
-	root := testkit.TempDir(t)
-	source := filepath.Join(root, "AGENTS.md")
-	host := []byte("Host instructions.\n")
-	testkit.WriteFile(t, source, host, 0o600)
-	fileForRuntime := func(repository string) guestConfigFile {
-		t.Helper()
-		runtime := Runtime{legacyPreviewInstructions: true, RepositoryRoot: repository, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}}
-		bindInstructionTestPackage(t, &runtime, root, "codex")
-		files, err := runtime.guestConfigFiles()
-		if err != nil || len(files) != 1 {
-			t.Fatalf("runtime instruction files=%#v err=%v", files, err)
-		}
-		return files[0]
-	}
-	assertPayload := func(file guestConfigFile, want []byte) string {
-		t.Helper()
-		got, err := file.readSource()
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("runtime instruction payload=%q want=%q err=%v", got, want, err)
-		}
-		return fmt.Sprintf("%x", sha256.Sum256(got))
-	}
-	currentRoot := filepath.Join("..", "..", "..")
-	current, err := os.ReadFile(filepath.Join(currentRoot, "config", "preview", "instructions.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentFile := fileForRuntime(currentRoot)
-	wantCurrent := append(append([]byte(nil), host...), append([]byte("\n\n"), current...)...)
-	currentHash := assertPayload(currentFile, wantCurrent)
-
-	// A host copy cannot override the instruction asset of the selected runtime.
-	testkit.WriteFile(t, source, []byte("Before.\n"+previewInstructions+"After.\n"), 0o600)
-	assertPayload(currentFile, []byte("Before.\n"+string(current)+"After.\n"))
-	testkit.WriteFile(t, source, host, 0o600)
-
-	versionedRoot := filepath.Join(root, "versioned-runtime")
-	asset := filepath.Join(versionedRoot, "config", "preview", "instructions.md")
-	if err := os.MkdirAll(filepath.Dir(asset), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, asset, current, 0o644)
-	versionedFile := fileForRuntime(versionedRoot)
-	if assertPayload(versionedFile, wantCurrent) != currentHash {
-		t.Fatal("identical runtime assets changed the desired hash")
-	}
-	changed := []byte("<!-- subyard-preview -->\nFixture runtime preview instructions.\n<!-- /subyard-preview -->\n")
-	testkit.WriteFile(t, asset, changed, 0o644)
-	wantChanged := append(append([]byte(nil), host...), append([]byte("\n\n"), changed...)...)
-	if assertPayload(versionedFile, wantChanged) == currentHash {
-		t.Fatal("changed runtime asset did not change the desired hash")
-	}
-	assertPayload(currentFile, wantCurrent)
-
-	// Freeze the published v0.17.3 bytes independently of the compiled fallback.
-	legacy := "<!-- subyard-preview -->\nFor a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.\n<!-- /subyard-preview -->\n"
-	wantLegacy := []byte(string(host) + "\n\n" + legacy)
-	assertPayload(fileForRuntime(filepath.Join(root, "old-runtime")), wantLegacy)
-}
-
-func TestPreviewInstructionAssetRejectsNonregularSources(t *testing.T) {
-	for _, kind := range []string{"directory", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			root := testkit.TempDir(t)
-			asset := filepath.Join(root, "config", "preview", "instructions.md")
-			if err := os.MkdirAll(filepath.Dir(asset), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if kind == "directory" {
-				if err := os.Mkdir(asset, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			} else if err := os.Symlink("missing.md", asset); err != nil {
-				t.Fatal(err)
-			}
-			runtime := Runtime{legacyPreviewInstructions: true, RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}
-			bindInstructionTestPackage(t, &runtime, root, "codex")
-			files, err := runtime.guestConfigFiles()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := files[0].readSource(); err == nil || os.IsNotExist(err) {
-				t.Fatalf("invalid runtime instruction asset silently fell back: %v", err)
-			}
-		})
 	}
 }
 
@@ -757,13 +538,10 @@ func bindArtifactTestPackages(t *testing.T, runtime *Runtime, root string) {
 	}
 }
 
-// Instruction fixtures are real immutable packages, including across child
+// Agent fixtures are real immutable packages, including across child
 // processes. Reopening a fixture must not rewrite its source identities.
-func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent string) {
+func bindAgentTestPackage(t *testing.T, runtime *Runtime, root, agent string) {
 	t.Helper()
-	setting := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[agent]
-	destination := map[string]string{"claude": ".claude/CLAUDE.md", "codex": ".codex/AGENTS.md", "opencode": ".config/opencode/AGENTS.md"}[agent]
-	label := map[string]string{"claude": "Claude instructions", "codex": "Codex instructions", "opencode": "OpenCode instructions"}[agent]
 	directory := filepath.Join(root, "config/agents", agent)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
@@ -776,10 +554,10 @@ func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent stri
 			return
 		}
 		if err != nil || !bytes.Equal(old, data) {
-			t.Fatal("instruction fixture package changed", path, err)
+			t.Fatal("agent fixture package changed", path, err)
 		}
 	}
-	definition := profile.IntegrationDefinition{SchemaVersion: 2, Name: agent, Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", Label: label, SourceSetting: setting, Destination: destination, Format: "raw"}}}
+	definition := profile.IntegrationDefinition{SchemaVersion: 2, Name: agent}
 	for _, kind := range []string{"CONFIG", "RULES"} {
 		key := "AGENT_" + agent + "_" + kind
 		if runtime.environmentValue(key) == "" || runtime.environmentValue(key+"_DEST") == "" {
@@ -806,35 +584,6 @@ func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent stri
 		runtime.RepositoryRoot = root
 	}
 	runtime.Integrations = loaded
-}
-
-func TestCurrentPreviewDeliveryLeavesInstructionsWithoutInjection(t *testing.T) {
-	root := testkit.TempDir(t)
-	source := filepath.Join(root, "instructions")
-	host := []byte("Keep this.\n" + previewInstructions + "And this.\n")
-	testkit.WriteFile(t, source, host, 0o600)
-	for _, client := range []string{"claude", "codex", "opencode"} {
-		key := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[client]
-		runtime := Runtime{Environment: []string{"CODING_TOOL_INTEGRATIONS=" + client, key + "=" + source}}
-		bindInstructionTestPackage(t, &runtime, filepath.Join(root, client), client)
-		files, err := runtime.guestConfigFiles()
-		if err != nil {
-			t.Fatal(err)
-		}
-		files[0].label = "Package-owned guide label"
-		data, err := files[0].readSource()
-		if err != nil || string(data) != "Keep this.\n\nAnd this.\n" || files[0].previewInstructions {
-			t.Fatalf("%s: %q %v", client, data, err)
-		}
-	}
-	original, err := os.ReadFile(source)
-	if err != nil || !bytes.Equal(original, host) {
-		t.Fatal("host source changed")
-	}
-	ambiguous := append(append([]byte(nil), host...), []byte("<!-- subyard-preview -->")...)
-	if !bytes.Equal(stripLegacyPreviewBlock(ambiguous), ambiguous) {
-		t.Fatal("ambiguous markers changed")
-	}
 }
 
 type localGitIdentityExecutor struct{ home string }

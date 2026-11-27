@@ -271,12 +271,12 @@ func applyDiagnosticFixture(t *testing.T, cut string) (Runtime, *applyDiagnostic
 	case "structured observe", "structured apply":
 		runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex",
 			"AGENT_codex_CONFIG=" + filepath.Join(root, "config/agents/codex/config"), "AGENT_codex_CONFIG_DEST=.codex/settings.json"}
-		bindInstructionTestPackage(t, &runtime, root, "codex")
+		bindAgentTestPackage(t, &runtime, root, "codex")
 	case "configs":
-		path := filepath.Join(root, "instructions.md")
-		testkit.WriteFile(t, path, []byte("instructions\n"), 0600)
-		runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + path}
-		bindInstructionTestPackage(t, &runtime, root, "codex")
+		path := filepath.Join(root, "repo.rules")
+		testkit.WriteFile(t, path, []byte("rules\n"), 0600)
+		runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + path, "AGENT_codex_RULES_DEST=.codex/rules/repo.rules"}
+		bindAgentTestPackage(t, &runtime, root, "codex")
 	case "hooks capture", "hooks run":
 		if cut == "hooks capture" {
 			runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION=" + provision, "AGENT_sample_COMMAND=true",
@@ -415,12 +415,12 @@ func TestIntegrationPackageSourcesReportEveryUnreadableProvision(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
-		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex first second", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex.md"),
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex first second", "AGENT_codex_RULES=" + filepath.Join(root, "codex.rules"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 			"AGENT_first_PROVISION=" + filepath.Join(root, "first.sh"), "AGENT_second_PROVISION=" + filepath.Join(root, "second.sh")}}
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	reads := 0
 	_, err := runtime.integrationArtifactsWithSourceReader("apply", func(asset config.MaterializedAsset) ([]byte, error) {
-		if base := filepath.Base(asset.Source); base == "first.sh" || base == "second.sh" || base == "codex.md" {
+		if base := filepath.Base(asset.Source); base == "first.sh" || base == "second.sh" || base == "codex.rules" {
 			reads++
 			return nil, errors.New("private unreadable " + base)
 		}
@@ -476,12 +476,13 @@ func TestIntegrationArtifactsReportEveryUnreadableSource(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude codex",
-			"HOST_CLAUDE_MD=" + filepath.Join(root, "claude.md"), "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex.md")}}
-	bindInstructionTestPackage(t, &runtime, root, "claude")
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+			"AGENT_claude_RULES=" + filepath.Join(root, "claude.rules"), "AGENT_claude_RULES_DEST=.claude/rules/repo.rules",
+			"AGENT_codex_RULES=" + filepath.Join(root, "codex.rules"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules"}}
+	bindAgentTestPackage(t, &runtime, root, "claude")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	reads := 0
 	_, err := runtime.integrationArtifactsWithSourceReader("apply", func(asset config.MaterializedAsset) ([]byte, error) {
-		if strings.HasSuffix(asset.Source, ".md") {
+		if strings.HasSuffix(asset.Source, ".rules") {
 			reads++
 			return nil, errors.New("private unreadable " + filepath.Base(asset.Source))
 		}
@@ -566,12 +567,13 @@ func TestIntegrationLinkRefusalKeepsFileSourceRefusals(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude codex",
-			"HOST_CLAUDE_MD=" + filepath.Join(root, "claude.md"), "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex.md"),
+			"AGENT_claude_RULES=" + filepath.Join(root, "claude.rules"), "AGENT_claude_RULES_DEST=.claude/rules/repo.rules",
+			"AGENT_codex_RULES=" + filepath.Join(root, "codex.rules"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 			"INTEGRATION_HOST_LINKS=.foo:/srv/foo"}}
-	bindInstructionTestPackage(t, &runtime, root, "claude")
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	bindAgentTestPackage(t, &runtime, root, "claude")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	_, err := runtime.integrationArtifactsWithSourceReader("apply", func(asset config.MaterializedAsset) ([]byte, error) {
-		if strings.HasSuffix(asset.Source, ".md") {
+		if strings.HasSuffix(asset.Source, ".rules") {
 			return nil, errors.New("private unreadable " + filepath.Base(asset.Source))
 		}
 		return asset.ReadSource()

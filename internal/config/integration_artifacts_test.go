@@ -11,15 +11,14 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-const artifactDeclaration = `{"schema_version":2,"provision":"lifecycle.sh","command":"sample","check":"sample-check","persist":".sample/sessions:/mnt/host/agent-sessions/sample/sessions","settings":[{"name":"SAMPLE_INSTRUCTIONS","type":"absolute-path","optional":true,"scopes":["host","yard","command"],"application":"yard-init"}],"artifacts":[{"id":"config","kind":"config","source":"settings.jsonc","destination":".sample/settings.jsonc","format":"raw"},{"id":"instructions","kind":"instructions","source_setting":"SAMPLE_INSTRUCTIONS","destination":".sample/AGENTS.md","format":"raw"}]}`
+const artifactDeclaration = `{"schema_version":2,"provision":"lifecycle.sh","command":"sample","check":"sample-check","persist":".sample/sessions:/mnt/host/agent-sessions/sample/sessions","artifacts":[{"id":"config","kind":"config","source":"settings.jsonc","destination":".sample/settings.jsonc","format":"raw"},{"id":"rules","kind":"config","source":"repo.rules","destination":".sample/AGENTS.md","format":"raw"}]}`
 
 func TestIntegrationArtifactsPackageLocalResolution(t *testing.T) {
 	root := integrationCatalogFixture(t, artifactDeclaration)
 	source := filepath.Join(root, "config/agents/sample/settings.jsonc")
 	testkit.WriteFile(t, source, []byte("// raw JSONC\n{}\n"), 0644)
-	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
-	testkit.WriteFile(t, instructions, []byte("operator instructions\n"), 0600)
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "SAMPLE_INSTRUCTIONS": instructions}})
+	testkit.WriteFile(t, filepath.Join(root, "config/agents/sample/repo.rules"), []byte("rules\n"), 0644)
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,32 +30,18 @@ func TestIntegrationArtifactsPackageLocalResolution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := 1
-		if scope == MaterializationRuntime {
-			want = 2
-		}
-		if len(sources) != want {
+		if len(sources) != 2 {
 			t.Fatalf("%s: got %d sources", scope, len(sources))
 		}
 		for _, source := range sources {
 			if source.Asset.OwnedFormat != "" {
 				t.Fatal("raw JSONC became structured")
 			}
-			if source.PreviewInstructions && (!source.Asset.FollowSymlinks || source.Asset.Source != instructions) {
-				t.Fatal("instructions lost typed source policy")
-			}
-		}
-	}
-	testkit.WriteFile(t, filepath.Join(root, "config/host.env"), []byte("ALLOWS_HOST_ACCESS=false\n"), 0600)
-	for _, selection := range []string{"sample", ""} {
-		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": selection, "SAMPLE_INSTRUCTIONS": instructions}})
-		if err == nil || !strings.Contains(err.Error(), "SAMPLE_INSTRUCTIONS") {
-			t.Fatal("role allowed declared operator instructions", err)
 		}
 	}
 	loaded.Environment["AGENT_sample_CONFIG"] = ""
 	sources, err := SelectMaterializationSources(loaded.Environment, "dev", MaterializationConfigAssets, loaded.Catalog.Integrations()...)
-	if err != nil || len(sources) != 0 {
+	if err != nil || len(sources) != 1 {
 		t.Fatal("explicit empty source materialized", err)
 	}
 	loaded.Environment["AGENT_sample_CONFIG"] = source
@@ -80,11 +65,13 @@ func TestIntegrationArtifactsRejectInvalidContracts(t *testing.T) {
 		strings.Replace(artifactDeclaration, `"schema_version":2`, `"schema_version":1`, 1),
 		strings.Replace(artifactDeclaration, `"format":"raw"`, `"format":"yaml"`, 1),
 		strings.Replace(artifactDeclaration, `"source":"settings.jsonc"`, `"source":"../settings.jsonc"`, 1),
-		strings.Replace(artifactDeclaration, `"id":"instructions"`, `"id":"config"`, 1),
+		strings.Replace(artifactDeclaration, `"id":"rules"`, `"id":"config"`, 1),
 		strings.Replace(artifactDeclaration, `"destination":".sample/AGENTS.md"`, `"destination":".sample/settings.jsonc"`, 1),
-		strings.Replace(artifactDeclaration, `"source_setting":"SAMPLE_INSTRUCTIONS"`, `"source_setting":"UNKNOWN_SOURCE"`, 1),
-		strings.Replace(artifactDeclaration, `"type":"absolute-path"`, `"type":"string"`, 1),
+		strings.Replace(artifactDeclaration, `"source":"repo.rules"`, `"source":"repo.rules","source_setting":"SAMPLE_SOURCE"`, 1),
 		strings.Replace(artifactDeclaration, `"source":"settings.jsonc"`, `"unknown":"settings.jsonc"`, 1),
+		// The removed instruction kind is refused, except the exact retired shape.
+		strings.Replace(artifactDeclaration, `"id":"rules","kind":"config","source":"repo.rules"`, `"id":"rules","kind":"instructions","source_setting":"SAMPLE_SOURCE"`, 1),
+		strings.Replace(artifactDeclaration, `"id":"rules","kind":"config"`, `"id":"instructions","kind":"instructions"`, 1),
 	} {
 		metadata, err := profile.DecodeIntegration("sample", []byte(declaration))
 		if err == nil {
@@ -140,9 +127,9 @@ func TestDeclaredArtifactsRejectOverlappingFiles(t *testing.T) {
 		if _, err := BuildCatalog(nil, []profile.IntegrationMetadata{first, second}); err == nil {
 			t.Fatal("cross-package overlapping files accepted", pair)
 		}
-		definition := profile.IntegrationDefinition{Name: "sample", Root: "/immutable/package", Artifacts: []profile.IntegrationArtifact{{ID: "config", Kind: "config", Source: "config", Destination: ".sample/default", Format: "raw"}, {ID: "instructions", Kind: "instructions", SourceSetting: "SAMPLE_INSTRUCTIONS", Destination: pair[1], Format: "raw"}}}
+		definition := profile.IntegrationDefinition{Name: "sample", Root: "/immutable/package", Artifacts: []profile.IntegrationArtifact{{ID: "config", Kind: "config", Source: "config", Destination: ".sample/default", Format: "raw"}, {ID: "rules", Kind: "config", Source: "rules", Destination: pair[1], Format: "raw"}}}
 		if _, err := SelectMaterializationSources(map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "AGENT_sample_CONFIG_DEST": pair[0]}, "dev", MaterializationRuntime, definition); err == nil {
-			t.Fatal("effective instruction/config overlap accepted", pair)
+			t.Fatal("effective rules/config overlap accepted", pair)
 		}
 		if _, err := MaterializedAssets(map[string]string{"CODING_TOOL_INTEGRATIONS": "first second", "AGENT_first_CONFIG": "/first", "AGENT_second_CONFIG": "/second", "AGENT_first_CONFIG_DEST": pair[0], "AGENT_second_CONFIG_DEST": pair[1]}, "dev"); err == nil {
 			t.Fatal("effective cross-package config overlap accepted", pair)
@@ -175,6 +162,7 @@ func TestDeclaredArtifactsRejectManagedLinkCollisions(t *testing.T) {
 	}
 
 	root := integrationCatalogFixture(t, artifactDeclaration)
+	testkit.WriteFile(t, filepath.Join(root, "config/agents/sample/repo.rules"), []byte("rules\n"), 0644)
 	testkit.WriteFile(t, filepath.Join(root, "config/agents.env"), []byte("HOST_LINKS=\"\"\n"), 0644)
 	testkit.WriteFile(t, filepath.Join(root, "config/agents/sample/settings.jsonc"), []byte("{}"), 0644)
 	for _, overrides := range []map[string]string{
@@ -213,7 +201,7 @@ func TestDeclaredArtifactsRejectManagedLinkCollisions(t *testing.T) {
 }
 
 func TestDeclaredDefaultKeepsFileOverridesThroughConfigAlias(t *testing.T) {
-	root := integrationCatalogFixture(t, artifactDeclaration)
+	root := integrationCatalogFixture(t, strings.Replace(artifactDeclaration, `,{"id":"rules","kind":"config","source":"repo.rules","destination":".sample/AGENTS.md","format":"raw"}`, "", 1))
 	profileDir := filepath.Join(root, "config/profiles/selected")
 	if err := os.MkdirAll(profileDir, 0o700); err != nil {
 		t.Fatal(err)

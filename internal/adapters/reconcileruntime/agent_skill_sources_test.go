@@ -23,7 +23,7 @@ func writeAgentSkillFixture(t *testing.T, root string) []string {
 		"config/profiles/synthetic/skills.json":           []byte(`{"declared":{"SKILL.md":"payload.txt","duplicate":"payload.txt"}}`),
 		"config/profiles/synthetic/payload.txt":           []byte("declared skill\n"),
 	}
-	for _, name := range []string{"scripts/refresh-agent-skills.sh", "config/skills/package.py", "config/skills/refresh.sh", "config/skills/deliver.py", "config/skills/probe.py", "config/skills/migrate-preview.py"} {
+	for _, name := range []string{"scripts/refresh-agent-skills.sh", "config/skills/package.py", "config/skills/refresh.sh", "config/skills/deliver.py", "config/skills/probe.py"} {
 		payload, err := os.ReadFile(filepath.Join("../../..", name))
 		if err != nil {
 			t.Fatal(err)

@@ -1355,7 +1355,7 @@ func materializationDesired(target configTarget, check bool, reader func(config.
 				findings = append(findings, fmt.Errorf("%s: %w", asset.Name, sourceErr))
 				continue
 			}
-			payload, _, err := config.PrepareMaterializationContent(config.MaterializationConfigAssets, false, config.MaterializationContent{Present: sourceErr == nil, Payload: payload}, nil)
+			payload, _, err := config.PrepareMaterializationContent(config.MaterializationConfigAssets, config.MaterializationContent{Present: sourceErr == nil, Payload: payload})
 			if err != nil {
 				if sourceErr != nil {
 					err = sourceErr

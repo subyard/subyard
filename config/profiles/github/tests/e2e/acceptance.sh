@@ -325,7 +325,6 @@ write_config() {
   {
     printf '# %s\nSSH_PORT=%s\nCODING_TOOL_INTEGRATIONS=\n' "$MARKER" "$SSH_PORT"
     printf 'HOST_MOUNTS=\nHOST_LINKS=\nFORWARD_SSH_AGENT=0\n'
-    printf 'HOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n'
     printf 'STORAGE_PATH=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
       "$STORAGE_PATH" "$SUBYARD_KEYS_CONSUMER_ROOT"
   } > "$SUBYARD_CONFIG_HOME/config.env.tmp"
@@ -499,7 +498,6 @@ export STORAGE_PATH
 STORAGE_PATH="$(incus storage get default source 2>/dev/null || true)"
 [ -n "$STORAGE_PATH" ] || STORAGE_PATH="$HOME/.cache/subyard-github-e2e-platform/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
-export HOST_CLAUDE_MD='' HOST_CODEX_AGENTS_MD='' HOST_OPENCODE_AGENTS_MD=''
 unset ENVIRONMENT_PROFILES
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 export YARD_RUNTIME_ROOT="$STATE/runtime"

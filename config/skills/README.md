@@ -65,23 +65,10 @@ them through static refresh, so they need no coding-tool integration. Recognized
 links to the same canonical directory are removed to avoid duplicate Codex discovery.
 Foreign links or skill directories are preserved and diagnosed.
 
-Current prepared materialized owners bind preview cutover explicitly and preflight
-owned blocks before retiring services or writing configurations. Their inventory apply
-performs the same preview-only migration before file retirement, so missing host sources
-and deselected clients preserve unmarked guest text even when materialization precedes
-core runtime refresh. An optional intent field distinguishes new recipes from historical
-recipes, including historical empty instruction selections; absent historical intent
-keeps the original mutation and retirement semantics without rewriting frozen bytes.
-
-`migrate-preview.py` also removes only either exact shipped preview block from an
-inventory-owned global instruction file with matching digest and metadata. It preserves
-all other bytes and publishes retry identities before replacement. The inventory retains
-unmarked text when the host instruction source disappears or the client is disabled,
-and records released ownership. Missing ownership evidence, changed guest text, unknown
-block bodies and ambiguous markers are preserved; conflicts require inspection rather
-than automatic adoption. Host source files are never edited. New instruction payloads
-omit recognized preview blocks; frozen historical materialization recipes retain their
-original preview composition and source guards for recovery.
+Subyard no longer copies host instruction files: the inventory removes an instruction copy it
+owns when the copy is unchanged and releases its ownership; a changed copy is kept and refused
+until it is moved away. Agent instructions
+come from the [user-dotfiles](../../docs/user-dotfiles.md) profile.
 
 Run shared contracts with `bash tests/agent-skills.sh`. Owning profile test runners
 cover Android content and GitHub's existing canonical source/discovery migration.

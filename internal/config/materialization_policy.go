@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,7 @@ import (
 )
 
 // MaterializationScope preserves the different consumers of status and runtime
-// reconciliation. Runtime additionally owns selected instruction files.
+// reconciliation: a missing source fails status and is skipped at runtime.
 type MaterializationScope string
 
 const (
@@ -25,10 +24,9 @@ const (
 )
 
 type MaterializationSource struct {
-	Asset               MaterializedAsset
-	Integration         string
-	Label               string
-	PreviewInstructions bool
+	Asset       MaterializedAsset
+	Integration string
+	Label       string
 }
 
 // SelectMaterializationSources resolves operation-local artifact declarations.
@@ -36,35 +34,9 @@ func SelectMaterializationSources(values map[string]string, developer string, sc
 	if scope != MaterializationConfigAssets && scope != MaterializationRuntime {
 		return nil, errors.New("invalid materialization scope")
 	}
-	if values["ALLOWS_HOST_ACCESS"] == "false" {
-		for _, definition := range definitions {
-			for _, artifact := range definition.Artifacts {
-				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					return nil, domain.SettingRefusal(domain.ConfigRoleForbidsSetting, artifact.SourceSetting)
-				}
-			}
-		}
-	}
 	assets, err := MaterializedAssets(values, developer, definitions...)
 	if err != nil {
 		return nil, err
-	}
-	var instructions []MaterializationSource
-	for _, definition := range definitions {
-		for _, artifact := range definition.Artifacts {
-			if artifact.Kind != "instructions" {
-				continue
-			}
-			path, err := artifactDestination(developer, artifact.Destination)
-			if err != nil {
-				return nil, err
-			}
-			label := artifact.Label
-			if label == "" {
-				label = definition.Name + " instructions"
-			}
-			instructions = append(instructions, MaterializationSource{Integration: definition.Name, Label: label, PreviewInstructions: true, Asset: MaterializedAsset{Name: definition.Name + "." + artifact.ID, Setting: artifact.SourceSetting, Source: values[artifact.SourceSetting], Destination: path, FollowSymlinks: true}})
-		}
 	}
 	result := []MaterializationSource{}
 	if scope == MaterializationConfigAssets {
@@ -76,13 +48,6 @@ func SelectMaterializationSources(values map[string]string, developer string, sc
 	}
 
 	for _, integration := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
-		if scope == MaterializationRuntime && values["ALLOWS_CODING_TOOLS"] != "false" {
-			for _, instruction := range instructions {
-				if instruction.Integration == integration {
-					result = append(result, instruction)
-				}
-			}
-		}
 		for _, asset := range assets {
 			if strings.HasPrefix(asset.Name, integration+".") {
 				result = append(result, MaterializationSource{Asset: asset, Integration: integration, Label: strings.Replace(asset.Name, ".", " ", 1)})
@@ -106,43 +71,19 @@ type MaterializationContent struct {
 
 var ErrMaterializationSourceMissing = errors.New("materialization source is missing")
 
-// PrepareMaterializationContent consumes safely acquired bytes, preserving absent
-// source policy and exact generated instruction bytes without reading sources.
-func PrepareMaterializationContent(scope MaterializationScope, instructions bool, source MaterializationContent, preview []byte) ([]byte, bool, error) {
+// PrepareMaterializationContent consumes safely acquired bytes, preserving the
+// absent source policy of each scope without reading sources.
+func PrepareMaterializationContent(scope MaterializationScope, source MaterializationContent) ([]byte, bool, error) {
 	if scope != MaterializationConfigAssets && scope != MaterializationRuntime {
 		return nil, false, errors.New("invalid materialization scope")
 	}
-	if instructions && scope != MaterializationRuntime {
-		return nil, false, errors.New("instruction materialization requires runtime scope")
-	}
-	if !source.Present && !instructions {
+	if !source.Present {
 		if scope == MaterializationConfigAssets {
 			return nil, false, ErrMaterializationSourceMissing
 		}
 		return nil, false, nil
 	}
-	payload := slices.Clone(source.Payload)
-	if !source.Present {
-		payload = nil
-	}
-	if !instructions {
-		return payload, true, nil
-	}
-	start, end := []byte("<!-- subyard-preview -->"), []byte("<!-- /subyard-preview -->")
-	if begin := bytes.Index(payload, start); begin >= 0 {
-		finish := bytes.Index(payload[begin:], end)
-		if finish < 0 || bytes.Count(payload, start) != 1 || bytes.Count(payload, end) != 1 {
-			return nil, false, errors.New("ambiguous static preview instruction block")
-		}
-		finish += begin + len(end)
-		updated := append([]byte(nil), payload[:begin]...)
-		updated = append(updated, bytes.TrimSuffix(preview, []byte("\n"))...)
-		return append(updated, payload[finish:]...), true, nil
-	}
-	if len(payload) != 0 {
-		payload = append(payload, '\n', '\n')
-	}
-	return append(payload, preview...), true, nil
+	return slices.Clone(source.Payload), true, nil
 }
 
 // DesiredMaterializedArtifact contains logical consumer identity and a digest

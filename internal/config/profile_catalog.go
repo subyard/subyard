@@ -166,12 +166,6 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 		links.WriteByte(' ')
 		for _, artifact := range owner.Artifacts {
 			destinations = append(destinations, artifact.Destination)
-			if artifact.SourceSetting != "" {
-				field, ok := result.LookupSetting(artifact.SourceSetting)
-				if !ok || field.Kind != SettingScalar || field.Type != SettingAbsolutePath || !field.Optional || (field.Owner != "integration:"+owner.Name && field.Owner != "host-files") {
-					return Catalog{}, fmt.Errorf("integration artifact requires its optional absolute-path source setting")
-				}
-			}
 		}
 		if owner.Dashboard != nil {
 			field, ok := result.LookupSetting(owner.Dashboard.PortSetting)

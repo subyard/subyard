@@ -317,11 +317,11 @@ exit "${EXIT:-1}"
 // testFileRefusals are the refusals of each relayed state of yard named.
 func testFileRefusals() map[string]error {
 	return map[string]error{
-		"unreadable":      configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/CLAUDE.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		"unreadable":      configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Token: configmaterial.TokenUnreadable}},
 		"changed":         configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemChanged}},
 		"unowned-invalid": configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnownedInvalid}},
 		"unassessed": domain.CollectRefusals(
-			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.codex/AGENTS.md", Problem: configmaterial.ProblemUnassessed, InitOnly: true}},
+			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.codex/config.toml", Problem: configmaterial.ProblemUnassessed}},
 			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnassessed}}),
 	}
 }
@@ -406,7 +406,7 @@ func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
 		return lines[len(lines)-1], lastNext(lines[len(lines)-1])
 	}
 	for state, step := range map[string]string{
-		"unreadable":      "replace it with a regular file or remove it, then run yard -Y named init --configs",
+		"unreadable":      "replace it with a regular file or remove it, then run yard -Y named config apply",
 		"changed":         "run yard -Y named config apply",
 		"unowned-invalid": "correct or remove it in the yard, then run yard -Y named config apply",
 		"unassessed":      "run yard -Y named config apply",

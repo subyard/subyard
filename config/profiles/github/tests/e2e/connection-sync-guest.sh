@@ -36,7 +36,6 @@ context() {
   export SUBYARD_KEYS_ROOT="$STATE/config/keys" SUBYARD_KEYS_TOOLS_DIR="$STATE/config/tools"
   export SUBYARD_KEYS_CONSUMER_ROOT="$STATE/config/generated" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
   export SUBYARD_NO_AUDIT=1 MIN_DISK_GIB=1 TMPDIR=/tmp
-  export HOST_CLAUDE_MD='' HOST_CODEX_AGENTS_MD='' HOST_OPENCODE_AGENTS_MD=''
   export STORAGE_PATH
   STORAGE_PATH="$(incus storage get default source 2>/dev/null || true)"
   [ -n "$STORAGE_PATH" ] || STORAGE_PATH="$PLATFORM/incus/storage"

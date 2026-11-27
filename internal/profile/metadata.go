@@ -159,6 +159,7 @@ func DecodeIntegration(name string, content []byte) (IntegrationMetadata, error)
 		return IntegrationMetadata{}, errors.New("integration declaration has trailing data")
 	}
 	declaration.Name = name
+	declaration.Artifacts = slices.DeleteFunc(declaration.Artifacts, retiredInstructionArtifact)
 	return declaration.Metadata()
 }
 func (declaration IntegrationDefinition) Metadata() (IntegrationMetadata, error) {

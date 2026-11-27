@@ -68,15 +68,12 @@ token of its exact bytes. The file's one state is `converged`, `drift`, `unreada
 Subyard baseline) or, after a refused write, `changed`; guest text never selects or fills a state.
 `configmaterial.Refusals` renders the last four with their next step: replace or remove an
 unreadable file, correct or remove an unowned invalid one, or just rerun for an unassessed or a
-changed one. The step runs
-`config apply`, or `init --configs` for a file outside the config set that `config status` and
-`config apply` cover, such as an instruction file. `init`, `config status`, `config apply` and release readiness use
-this observation and these refusals.
+changed one. The step runs `config apply`. `init`, `config status`, `config apply` and release
+readiness use this observation and these refusals.
 
 `config apply` takes the tokens it shows at confirmation and its writes compare with exactly those
-tokens. A file the confirmation did not cover, such as an instruction file that the runtime writes
-but `config status` does not compare, is written over the writer's own observation made right
-before it writes. Each refused file is reported, the yard's other files are written, and the
+tokens. A file the confirmation did not cover is written over the writer's own observation made
+right before it writes. Each refused file is reported, the yard's other files are written, and the
 inventory commit runs only when nothing was refused. The plan rechecks the target set, desired
 configuration and instance identity; drift itself may change, because each write rechecks its own
 file. An `init --configs` child receives the tokens through `--config-consent-fd N`, an inherited
@@ -89,8 +86,8 @@ plan is still refreshed, and the plan lists the refused yard instead of reportin
 
 Only the writer renders a refused file's step. An `init --configs` child of `config apply` (also
 under `config sync --apply`) reports the files it refused on an unlinked inherited file named by
-`SUBYARD_CONFIG_REFUSALS_FD`, which an older release ignores: per file only its destination, state
-and whether only `init --configs` refreshes it, never text. The parent renders those refusals for
+`SUBYARD_CONFIG_REFUSALS_FD`, which an older release ignores: per file only its destination and
+state, never text. The parent renders those refusals for
 its own yard exactly as an in-process refresh does, in place of the child's exit status. A missing,
 empty, oversized or malformed report, or a state outside that vocabulary, relays nothing, and the
 next step reruns the child: `init --configs`.
@@ -99,8 +96,8 @@ Integration selection uses the shared prepared-command boundary, the protected p
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
 by full initialization after core substrate provisioning. `scripts/reconcile-integrations.sh` is a
 bounded package/proxy/project-hook leaf. A per-yard lock serializes confirmed desired publication
-and reconciliation. Guest ownership evidence covers structured fields, plain files, instruction
-files, derived session links and known service receipts; evidence conflicts preserve artifacts.
+and reconciliation. Guest ownership evidence covers structured fields, plain files, derived
+session links and known service receipts; evidence conflicts preserve artifacts.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
 The project-hook pass verdict comes from its exit status. With approved paths, the
@@ -1264,7 +1261,7 @@ Each entry has:
 - `reason` and `recovery`: single-line explanations, at most 512 bytes each. Recovery describes
   the manual next step; it grants no automatic cleanup authority.
 - For `agents`, `sourceDigest` binds the reviewed integration sources and `files` lists the
-  surviving yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
+  affected yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
 
 Sort entries by numeric semantic `throughVersion`, then `component`. Retain a boundary while
 incompatible releases remain possible targets. For `registry` and `profile:ACTIVATION_ID`, an older target at or below the
@@ -1280,7 +1277,9 @@ Newer targets and same-release repair are unaffected.
 
 An `agents` entry is a **non-blocking accepted limitation**. Rollback and profile preparation
 proceed through their existing compatibility checks. The operator-facing plan output and result
-show the surviving yard files and manual cleanup instructions, also documented in release notes.
+show the affected yard paths and manual cleanup instructions, also documented in release notes.
+When the retained release cannot plan the rollback, the refusal names these paths and recovery
+instead of the generic next step, because a file it refuses there is the likely cause.
 Agent declarations neither authorize automatic removal nor add integration rollback hooks. Stop
 agent sessions before rollback and complete the documented cleanup before restarting them.
 
@@ -1567,10 +1566,8 @@ migration and original-owner recovery matrix is frozen in the v0.28.0 tag. Curre
 retain accepted V2 history and recovery contracts; installed direct upgrade, rollback and the
 one-time hop chains belong to the published-upgrade and P0 VM lanes.
 
-Historical frozen materialization recipes retain preview composition from the bound runtime's
-`config/preview/instructions.md` asset, or the exact legacy fallback for older runtimes. Recovery
-restores those descriptor flags and source guards without rewriting authorized bytes. Current
-materialization stops composing preview instructions; guest capability skills own new delivery.
+Materialization no longer composes preview instructions or copies host instruction files;
+guest capability skills own preview guidance.
 The Release workflow retains the compatibility check's output with its other failure diagnostics.
 
 ### Legacy upgrades
@@ -2048,11 +2045,11 @@ source-checkout loopback URL. Direct access requires network reachability and, f
 Tailnet policy access. Private-network endpoints are visible to reachable devices on that network.
 
 The `subyard-preview` capability skill delivers preview guidance to Codex, Claude Code and OpenCode
-at user scope. Current instruction adapters preserve host text and omit recognized old managed
-preview blocks. Runtime refresh migrates inventory-owned guest blocks only with matching content
-and metadata evidence; it preserves unmarked text, refuses ambiguous/drifted content, and releases
-retained text when its host source disappears. Host instruction sources remain unchanged. Historical
-frozen operations keep their original materialization recipe for recovery.
+at user scope. Runtime refresh migrates inventory-owned guest blocks of old instruction copies only
+with matching content and metadata evidence and refuses ambiguous or drifted content. Subyard no
+longer copies host instruction files: an unchanged inventory-owned copy is removed and its
+ownership released; a changed one is refused by path and kept. Agent instructions come from the
+[user-dotfiles](user-dotfiles.md) profile.
 
 Agents share the helper's printed URL and provide the operator-machine tunnel recipe from
 `subyard-preview --help` only on request. The operator supplies their SSH alias; it cannot be inferred
@@ -2419,7 +2416,7 @@ profile provisioning and selected-resource probing; discovering a descriptor nev
 
 Shipped yard roles may declare `REQUIRED_YARD_KIND=vm`, `ALLOWS_CODING_TOOLS=false`,
 `ALLOWS_HOST_ACCESS=false` and `ALLOWS_PROJECTS=false`. Host-access exclusion rejects mounts,
-links, host instruction files, arbitrary device/capability declarations, SSH agent forwarding and
+links, arbitrary device/capability declarations, SSH agent forwarding and
 nested E2E access. A profile whose runtime needs an owner-host route, such as the test-VM broker
 route mount, declares `REQUIRES_HOST_ACCESS=1` in `profile.conf`; selecting it in such a role is
 refused. These constraints are validated after configuration precedence is resolved and report

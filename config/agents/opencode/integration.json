@@ -14,14 +14,6 @@
       },
       "destination": ".config/opencode/opencode.jsonc",
       "format": "destination"
-    },
-    {
-      "id": "instructions",
-      "label": "OpenCode instructions",
-      "kind": "instructions",
-      "source_setting": "HOST_OPENCODE_AGENTS_MD",
-      "destination": ".config/opencode/AGENTS.md",
-      "format": "raw"
     }
   ]
 }

@@ -361,9 +361,6 @@ RESTRICTED_DISK_PATHS=$STATE/host-$name
 CODING_TOOL_INTEGRATIONS=''
 ENVIRONMENT_PROFILES=
 FORWARD_SSH_AGENT=0
-HOST_CLAUDE_MD=
-HOST_CODEX_AGENTS_MD=
-HOST_OPENCODE_AGENTS_MD=
 EOF
   if [ "$KIND" = vm ]; then
     # Match the existing VM fixture: avoid hot-adding Incus 6.0 virtiofs mounts.

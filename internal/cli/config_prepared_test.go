@@ -912,7 +912,7 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/route/profile.conf"), "REQUIRES_HOST_ACCESS=1\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/valid/config.env"), "YARD_TEMPLATE=restricted\nYARD_KIND=vm\nENVIRONMENT_PROFILES=service\n")
-	writeConfigCommandFile(t, filepath.Join(configHome, "yards/broken/config.env"), "YARD_TEMPLATE=restricted\nENVIRONMENT_PROFILES='service route'\nHOST_CLAUDE_MD=/srv/SENTINEL.md\n")
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/broken/config.env"), "YARD_TEMPLATE=restricted\nENVIRONMENT_PROFILES='service route'\nHOST_LINKS=.sentinel:/srv/SENTINEL\n")
 	permits, route, kind := `selected yard role permits only environment profile "service"`, `profile "route" requires host access`, "selected yard role requires YARD_KIND=vm"
 	run := func(extra []string, arguments ...string) (int, string) {
 		var stdout, stderr bytes.Buffer
@@ -925,7 +925,7 @@ func TestConfigCommandsReportEveryRoleRefusalWithoutValues(t *testing.T) {
 		want      []string
 		extra     []string
 	}{
-		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_CLAUDE_MD", "yard: Next: deselect"}, nil},
+		{2, []string{"-Y", "broken", "config", "show"}, []string{"yard broken, config inspection: ", permits, route, kind, "selected yard role forbids non-empty HOST_LINKS", "yard: Next: deselect"}, nil},
 		{1, []string{"-Y", "broken", "config", "validate"}, []string{"yard broken: prospective configuration: ", permits, route, kind, "\nRetry: deselect"}, nil},
 		{1, []string{"-Y", "broken", "config", "validate", "--json"}, []string{`"diagnostic":"prospective configuration: profile \"route\" requires host access`, kind, `"retry":"deselect`}, nil},
 		{1, []string{"-Y", "valid", "config", "set", "ENVIRONMENT_PROFILES", "service route", "--scope", "yard", "--yes"}, []string{"prospective configuration: ", permits, route, "yard: Next: deselect"}, nil},

@@ -227,16 +227,10 @@ func TestIntegrationMetadataOwnsApprovalSources(t *testing.T) {
 func TestIntegrationApprovalSourcesValidation(t *testing.T) {
 	for _, gates := range []string{"git", "sudo", "git sudo"} {
 		for _, source := range []string{"policy.json", "../policy.json", "/policy.json", "", "policy\n.json"} {
-			for _, kind := range []string{"config", "instructions"} {
-				artifact := IntegrationArtifact{ID: "config", Kind: kind, Source: "base.json", Destination: ".sample/config", Format: "destination", ApprovalSources: map[string]string{gates: source}}
-				if kind == "instructions" {
-					artifact.ID, artifact.Source, artifact.SourceSetting, artifact.Format = "instructions", "", "SAMPLE_INSTRUCTIONS", "raw"
-				}
-				_, err := (IntegrationDefinition{SchemaVersion: 2, Name: "sample", Artifacts: []IntegrationArtifact{artifact}}).Metadata()
-				valid := kind == "config" && source == "policy.json"
-				if (err == nil) != valid {
-					t.Fatalf("kind=%q gates=%q source=%q: valid=%v, err=%v", kind, gates, source, valid, err)
-				}
+			artifact := IntegrationArtifact{ID: "config", Kind: "config", Source: "base.json", Destination: ".sample/config", Format: "destination", ApprovalSources: map[string]string{gates: source}}
+			_, err := (IntegrationDefinition{SchemaVersion: 2, Name: "sample", Artifacts: []IntegrationArtifact{artifact}}).Metadata()
+			if valid := source == "policy.json"; (err == nil) != valid {
+				t.Fatalf("gates=%q source=%q: valid=%v, err=%v", gates, source, valid, err)
 			}
 		}
 	}
@@ -244,6 +238,36 @@ func TestIntegrationApprovalSourcesValidation(t *testing.T) {
 		_, err := DecodeIntegration("sample", []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"base.json","approval_sources":{`+strconv.Quote(gates)+`:"policy.json"},"destination":".sample/config","format":"destination"}]}`))
 		if err == nil {
 			t.Fatalf("unsupported approval gates accepted: %q", gates)
+		}
+	}
+}
+
+// Published releases through 0.32.0 declare host instruction copies. Rollback
+// preparation decodes those target declarations: exactly their three retired
+// shapes are dropped, and the kind is otherwise unsupported.
+func TestDecodeIntegrationDropsRetiredInstructionArtifacts(t *testing.T) {
+	declaration := func(instructions string) []byte {
+		return []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"base.json","destination":".sample/config","format":"raw"},` + instructions + `]}`)
+	}
+	for setting, destination := range map[string]string{"HOST_CLAUDE_MD": ".claude/CLAUDE.md", "HOST_CODEX_AGENTS_MD": ".codex/AGENTS.md", "HOST_OPENCODE_AGENTS_MD": ".config/opencode/AGENTS.md"} {
+		metadata, err := DecodeIntegration("sample", declaration(`{"id":"instructions","label":"Sample instructions","kind":"instructions","source_setting":"`+setting+`","destination":"`+destination+`","format":"raw"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := metadata.Data()
+		if err != nil || len(data.Artifacts) != 1 || data.Artifacts[0].ID != "config" {
+			t.Fatalf("retired instruction artifact kept: %#v %v", data.Artifacts, err)
+		}
+	}
+	for _, instructions := range []string{
+		`{"id":"instructions","kind":"instructions","source":"AGENTS.md","destination":".codex/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_CODEX_AGENTS_MD","destination":".codex/AGENTS.md","format":"destination"}`,
+		`{"id":"notes","kind":"instructions","source_setting":"HOST_CODEX_AGENTS_MD","destination":".codex/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_SAMPLE_MD","destination":".sample/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_CLAUDE_MD","destination":".codex/AGENTS.md","format":"raw"}`,
+	} {
+		if _, err := DecodeIntegration("sample", declaration(instructions)); err == nil {
+			t.Fatalf("instruction artifact accepted: %s", instructions)
 		}
 	}
 }

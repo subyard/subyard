@@ -353,7 +353,7 @@ func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
 	for _, test := range []struct{ path, detail, want, command string }{
 		{path: "/etc/subyard/agent-project-hooks", want: "unowned selected artifact", command: "namei"},
-		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "mv"},
+		{path: "/home/dev/.claude/rules/repo.rules", want: "unowned selected artifact", command: "mv"},
 		{path: "/untrusted-secret", detail: "unrecognized core content"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unrecognized core content", want: "contents do not match", command: "sha256sum"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core metadata", want: "owned by root:root", command: "namei"},
@@ -381,7 +381,7 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 					{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: conflict}},
 				},
 			}
-			declareCLIInstructionFixture(t, root, "claude", "HOST_CLAUDE_MD", ".claude/CLAUDE.md", "Claude instructions")
+			declareCLIRulesFixture(t, root, "claude", ".claude/rules/repo.rules")
 			var stdout, stderr bytes.Buffer
 			program := cliFixture.New(Options{RepositoryRoot: root, Environment: environment,
 				Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})

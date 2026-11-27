@@ -461,9 +461,6 @@ exec env -i \\
   SUBYARD_REPOSITORY_ROOT='$real_repo' \\
   STORAGE_PATH='$real_storage_path' \\
   MIN_DISK_GIB=1 \\
-  HOST_CLAUDE_MD= \\
-  HOST_CODEX_AGENTS_MD= \\
-  HOST_OPENCODE_AGENTS_MD= \\
   SHIFT_MODE=shift \\
   FORWARD_SSH_AGENT=0 \\
   DEV_SUDO=no \\

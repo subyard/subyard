@@ -12,9 +12,12 @@ yard [-Y NAME] config set USER_SKILL_SOURCES 'https://github.com/OWNER/skills gi
 yard [-Y NAME] init
 ```
 
-Update clones with plain Git. Subyard never updates or deletes a clone; it clones a configured
-source only when its directory is missing or empty, so a deleted clone or store comes back on
-the next apply while that source is configured and reachable.
+Subyard provides the skills but does not own or update them. To update, ask an agent in the
+yard to run `git pull` in the clone under `~/.local/share/subyard-user-skills/OWNER/REPO`; agents
+see the new skills from their next session, and `yard init` is not needed. Subyard never updates
+or deletes a clone; it clones a configured source only when its directory is missing or empty,
+so a deleted clone or store comes back on the next apply while that source is configured and
+reachable.
 
 ## Rules
 

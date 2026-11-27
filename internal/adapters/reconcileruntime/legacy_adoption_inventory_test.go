@@ -14,15 +14,17 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestPreviewInstructionAdoptionAndUnownedRefresh(t *testing.T) {
+// Initial adoption accepts a legacy config holding the released template bytes
+// (its source digest) and converges on the desired bytes; the digest is input only.
+func TestLegacyConfigAdoptionAndUnownedRefresh(t *testing.T) {
 	root := testkit.TempDir(t)
 	home, state := filepath.Join(root, "home"), filepath.Join(root, "inventory")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(home, "AGENTS.md")
-	raw := []byte("Keep the host instructions.\n")
-	payload := append(append([]byte(nil), raw...), []byte("\n\n"+previewInstructions)...)
+	path := filepath.Join(home, "config")
+	raw := []byte("Released template.\n")
+	payload := append(append([]byte(nil), raw...), []byte("Desired addition.\n")...)
 	hash := func(value []byte) string { return fmt.Sprintf("%x", sha256.Sum256(value)) }
 	entry := integrationArtifact{ID: "synthetic", Kind: "file", Path: path,
 		Digest: hash(payload), SourceDigest: hash(raw), Content: base64.StdEncoding.EncodeToString(payload)}
@@ -55,7 +57,7 @@ func TestPreviewInstructionAdoptionAndUnownedRefresh(t *testing.T) {
 	run("observe", false, true)
 	observed := run("observe", true, false)
 	if len(observed.Adopted) != 1 || !observed.Changed {
-		t.Fatalf("exact raw instructions were not offered for adoption: %#v", observed)
+		t.Fatalf("exact released bytes were not offered for adoption: %#v", observed)
 	}
 	testkit.WriteFile(t, path, []byte("unmanaged drift"), 0o644)
 	run("observe", true, true)
@@ -64,14 +66,14 @@ func TestPreviewInstructionAdoptionAndUnownedRefresh(t *testing.T) {
 	run("commit", true, false)
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != string(payload) {
-		t.Fatalf("adoption did not preserve raw text and add preview: %q err=%v", got, err)
+		t.Fatalf("adoption did not write the desired bytes: %q err=%v", got, err)
 	}
 	inventory, err := os.ReadFile(filepath.Join(state, "inventory.json"))
 	if err != nil || strings.Contains(string(inventory), "source_digest") {
 		t.Fatalf("input-only adoption evidence entered persistent schema: %s err=%v", inventory, err)
 	}
 	if run("observe", false, false).Changed {
-		t.Fatal("adopted instructions did not converge")
+		t.Fatal("adopted config did not converge")
 	}
 	run("configs-prepare", false, false)
 	run("configs-commit", false, false)

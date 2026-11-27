@@ -31,9 +31,6 @@ func (runtime Runtime) IntegrationAssetSources() ([]string, error) {
 		if file.source != "" {
 			sources = append(sources, file.source)
 		}
-		if file.previewInstructions {
-			sources = append(sources, file.previewSource)
-		}
 	}
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if source := runtime.environmentValue("AGENT_" + id + "_PROVISION"); source != "" {

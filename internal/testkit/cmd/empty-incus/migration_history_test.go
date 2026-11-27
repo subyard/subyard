@@ -223,7 +223,7 @@ func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *test
 	respond := historyResponder(control, filepath.Join(root, "control"))
 	for _, scenario := range []string{"valid", "valid-files", "wrong-file-path", "wrong-file-digest", "foreign-file", "extra-file-field", "unknown-field", "unknown-diagnostic", "wrong-expected", "bad-key", "unverified", "released", "pending-intent", "persist-projected", "intent-false"} {
 		t.Run(scenario, func(t *testing.T) {
-			input := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64), "preview_skill_cutover": false, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}, "persist": map[string]string{}, "entries": []map[string]string{
+			input := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64), "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}, "persist": map[string]string{}, "entries": []map[string]string{
 				{"id": "fixture", "kind": "file", "path": control.Destination, "digest": fmt.Sprintf("%x", sha256.Sum256([]byte("desired")))},
 				{"id": "fixture", "kind": "package"}, {"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"},
 			}}
@@ -276,7 +276,7 @@ func TestHistorySettingsCaptureRequiresVerifiedBoundaryAndClosedEvidence(t *test
 				t.Fatalf("%s: exit=%d", scenario, code)
 			}
 			if valid {
-				readPayload, _ := json.Marshal(map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "preview_skill_cutover": false})
+				readPayload, _ := json.Marshal(map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false})
 				read := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", program, "settings"}, Stdin: readPayload}
 				observed := respond(read)
 				var value struct {

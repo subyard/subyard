@@ -81,9 +81,6 @@ operator_env() {
       SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
       SUBYARD_POWER_LIBEXEC_DIR="$STATE/power" \
       MIN_DISK_GIB=1 \
-      HOST_CLAUDE_MD= \
-      HOST_CODEX_AGENTS_MD= \
-      HOST_OPENCODE_AGENTS_MD= \
       "$@"
 }
 

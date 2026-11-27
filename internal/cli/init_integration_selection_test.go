@@ -79,9 +79,9 @@ func (fixture *initAdoptionExecutor) Exec(_ context.Context, _, _ string, reques
 		}
 		fixture.observed = true
 		if fixture.conflict {
-			return ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"Reason":"unowned selected artifact","Path":"/home/dev/.codex/AGENTS.md"}`)}, nil
+			return ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"Reason":"unowned selected artifact","Path":"/home/dev/.codex/rules/repo.rules"}`)}, nil
 		}
-		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"fingerprint":%q,"changed":true,"initial":true,"adopted":[{"id":"codex","kind":"file","path":"/home/dev/.codex/AGENTS.md"}]}`, fixture.fingerprint))}, nil
+		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"fingerprint":%q,"changed":true,"initial":true,"adopted":[{"id":"codex","kind":"file","path":"/home/dev/.codex/rules/repo.rules"}]}`, fixture.fingerprint))}, nil
 	}
 	if len(request.Command) > 0 && (request.Command[0] == "sh" || request.Command[0] == "test") {
 		return ports.InstanceExecResult{}, nil
@@ -99,9 +99,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	}
 	writeCLIFile(t, path, "AGENTS=codex\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "config/projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
-	instructions := filepath.Join(root, "instructions.md")
-	writeCLIFile(t, instructions, "Selected instructions\n", 0o644)
-	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
+	declareCLIRulesFixture(t, root, "codex", ".codex/rules/repo.rules")
 	var output bytes.Buffer
 	program := fixture.New(Options{Stdout: &output})
 	loaded, err := program.loadContext("default")
@@ -122,7 +120,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	executor := &initAdoptionExecutor{fingerprint: strings.Repeat("a", 64), conflict: true}
 	incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
 	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Yard: proposed.Context, Incus: incus, Executor: executor,
-		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + instructions}}
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}
 	program.options.InitPlatform = runtime
 	// Stop at the ownership check so the test proves that public preparation
 	// assesses legacy artifacts before proceeding to host reconciliation.
@@ -141,7 +139,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	execution := &initExecution{loaded: proposed, platform: platform, integrationBaseline: baseline,
 		integrationSelection: selection, integrationAdoption: adoption}
 	program.printInitPlan(execution)
-	want := "yard default: take matching legacy path under integration management: /home/dev/.codex/AGENTS.md"
+	want := "yard default: take matching legacy path under integration management: /home/dev/.codex/rules/repo.rules"
 	if !strings.Contains(output.String(), want) || !strings.Contains(strings.Join(execution.consequences(), "\n"), want) {
 		t.Fatal("ownership adoption was omitted from the preview or consent consequences")
 	}
@@ -767,9 +765,11 @@ func TestInitIntegrationBaselineBindsInstalledPackageDefaultsAndAssets(t *testin
 	}
 }
 
-func declareCLIInstructionFixture(t *testing.T, root, agent, setting, destination, label string) {
+// declareCLIRulesFixture declares one raw config artifact whose source is the
+// package's own rules file.
+func declareCLIRulesFixture(t *testing.T, root, agent, destination string) {
 	t.Helper()
-	data, err := json.Marshal(map[string]any{"schema_version": 2, "artifacts": []map[string]string{{"id": "instructions", "kind": "instructions", "source_setting": setting, "destination": destination, "label": label, "format": "raw"}}})
+	data, err := json.Marshal(map[string]any{"schema_version": 2, "artifacts": []map[string]string{{"id": "rules", "kind": "config", "source": "rules", "destination": destination, "format": "raw"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,4 +778,5 @@ func declareCLIInstructionFixture(t *testing.T, root, agent, setting, destinatio
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(directory, "integration.json"), string(data)+"\n", 0600)
+	writeCLIFile(t, filepath.Join(directory, "rules"), "Selected rules\n", 0644)
 }

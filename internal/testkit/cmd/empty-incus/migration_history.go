@@ -359,11 +359,11 @@ func inventoryReadStep(output []byte, reject func() testkit.IncusServerExecStep)
 	return testkit.IncusServerExecStep{Stdout: output, AfterInput: func(actual testkit.IncusServerExecCall) int {
 		var input settingsCapture
 		var fields map[string]json.RawMessage
-		if json.Unmarshal(actual.Stdin, &input) != nil || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 8+len(historyCandidateReadFields(fields)) || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 0 || input.Expected != "" || input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil {
+		if json.Unmarshal(actual.Stdin, &input) != nil || json.Unmarshal(actual.Stdin, &fields) != nil || len(fields) != 7+len(historyCandidateReadFields(fields)) || input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || len(input.Entries) != 0 || input.Expected != "" || input.Legacy == nil || input.Adopt == nil || *input.Adopt {
 			reject()
 			return 99
 		}
-		for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover"} {
+		for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected"} {
 			if _, ok := fields[key]; !ok {
 				reject()
 				return 99
@@ -412,7 +412,6 @@ type settingsCapture struct {
 	Expected        string   `json:"expected"`
 	Legacy          []string `json:"legacy"`
 	Adopt           *bool    `json:"adopt"`
-	Preview         *bool    `json:"preview_skill_cutover"`
 	Entries         []struct{ ID, Kind, Path, Digest string }
 	AppliedSettings map[string]string `json:"applied_settings"`
 	Diagnostics     struct {
@@ -426,15 +425,15 @@ type settingsCapture struct {
 func settingsCaptureRequest(payload []byte) (settingsCapture, bool) {
 	var input settingsCapture
 	var fields, diagnostics map[string]json.RawMessage
-	if json.Unmarshal(payload, &input) != nil || json.Unmarshal(payload, &fields) != nil || len(fields) != 10+len(historyCandidateReadFields(fields)) ||
+	if json.Unmarshal(payload, &input) != nil || json.Unmarshal(payload, &fields) != nil || len(fields) != 9+len(historyCandidateReadFields(fields)) ||
 		input.Home != "/home/dev" || input.Developer != "dev" || input.UID != 1000 || input.Expected != strings.Repeat("a", 64) ||
-		input.Legacy == nil || input.Adopt == nil || *input.Adopt || input.Preview == nil ||
+		input.Legacy == nil || input.Adopt == nil || *input.Adopt ||
 		input.AppliedSettings == nil || (config.Catalog{}).ValidateIntegrationInitSettings(input.AppliedSettings) != nil ||
 		json.Unmarshal(fields["diagnostics"], &diagnostics) != nil || len(diagnostics) < 2 || len(diagnostics) > 3 || input.Diagnostics.Digests == nil ||
 		!(config.Catalog{}).ValidIntegrationDiagnosticEvidence(input.Diagnostics.Key, input.Diagnostics.Digests) {
 		return settingsCapture{}, false
 	}
-	for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "preview_skill_cutover", "applied_settings", "diagnostics"} {
+	for _, key := range []string{"home", "uid", "developer", "entries", "legacy", "adopt", "expected", "applied_settings", "diagnostics"} {
 		if _, ok := fields[key]; !ok {
 			return settingsCapture{}, false
 		}

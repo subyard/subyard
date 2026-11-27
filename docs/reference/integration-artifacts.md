@@ -12,7 +12,7 @@ Absent artifact fields retain their previous JSON omission and source binding by
 Adding a declaration intentionally changes approved package source identity, even
 when delivered bytes match; old journals retain their frozen runtime authority.
 
-Each artifact has a package-local stable `id`, `kind` (`config` or `instructions`),
+Each artifact has a package-local stable `id`, `kind` (`config`),
 an optional diagnostic `label`, a developer-home-relative `destination`, and explicit `format` (`raw`, `json`, `toml`, `destination`).
 The `destination` policy retains legacy CONFIG behavior: effective `.json` and
 `.toml` destinations use structured ownership; all other extensions remain raw.
@@ -24,20 +24,15 @@ the lowest precedence default. Explicit empty sources disable config materializa
 normal host/yard/file/command precedence remains unchanged. Config destination overrides
 are validated again by the common resolver. Config sources never follow symlinks.
 
-Instructions reference a typed `absolute-path` scalar `source_setting`. New integrations
-declare that optional scalar themselves. Claude, Codex and OpenCode retain `HOST_CLAUDE_MD`, `HOST_CODEX_AGENTS_MD` and
-`HOST_OPENCODE_AGENTS_MD` respectively as compatibility ingress, referencing the
-existing core path settings without
-redeclaring or shadowing it. There is no new alias or second source authority. Other
-core settings cannot be referenced: a compatibility reference is restricted to a core
-optional absolute-path setting owned by host-files. Instructions use raw bytes and permit
-explicit operator symlinks to regular files. Current delivery omits managed preview
-guidance, which is supplied by the installed capability skill, and skips missing host
-instruction sources. Historical frozen recipes retain their original preview composition,
-including missing or empty sources. Instructions remain outside config-status scope. Raw config
-is optional when missing at runtime and strict in config status. Files retain existing
-raw-file mode 0644 and developer ownership. Structured writers retain their existing
+Raw config is optional when missing at runtime and strict in config status. Files retain
+existing raw-file mode 0644 and developer ownership. Structured writers retain their existing
 ownership/baseline policy; declarations cannot choose different permissions.
+
+The `instructions` kind, which copied host instruction files named by a `source_setting`, is
+retired. The decoder drops only the exact retired shape that releases through 0.32.0 shipped
+(`id` and `kind` `instructions`, a `source_setting`, raw format, no `source`), so a rollback
+can still read their packages; any other use is refused. Agent instruction files come from
+the [user-dotfiles](../user-dotfiles.md) profile, which Subyard provides but does not own.
 
 The operation-local catalog validates references and collisions among files and managed
 persistence links, including equal and ancestor/descendant paths. The resolver repeats
@@ -48,12 +43,12 @@ source binding and validation inputs. Package paths stay canonical, bounded, reg
 non-symlink and singly linked. Immutable declarations and default sources are rechecked
 through existing plan/package guards before effects. Captured config handles also
 retain native package source identities, rejecting even equal-byte replacements. Operator sources use the existing
-protected/captured source reader and instruction link policy. The resolver only selects
+protected/captured source reader. The resolver only selects
 source identities and policy; it never reads payloads or bypasses prospective readers.
 
 One resolver serves config status, runtime, integration inventory and prepared/release
-consumers. Converted declarations suppress matching legacy CONFIG/RULES defaults and
-instruction mappings for their owning integration. Explicit operator file settings
+consumers. Converted declarations suppress matching legacy CONFIG/RULES defaults for their owning
+integration. Explicit operator file settings
 for undeclared CONFIG/RULES kinds retain their existing compatibility ingress;
 they do not add shipped defaults. Undeclared integrations retain the existing ingress. Shipped defaults for Claude,
 Codex, OpenCode and pi live entirely outside agents.env; provision/command/persist use the
@@ -70,7 +65,6 @@ to materialization planning. Independent observation still verifies resulting st
 | --- | --- |
 | Config status/apply and runtime delivery | Package artifacts through the same materialization resolver |
 | CONFIG/RULES import/edit, sync, rename and overrides | Existing file-setting contract; shared mappings derive declared logical paths from artifacts, with trace fallback only for undeclared kinds |
-| Host instruction paths | Existing typed core compatibility settings or an integration-owned absolute-path scalar |
 | Legacy adoption file paths and session IDs | Package declarations; selected inventory still verifies native ownership |
 | Selected session links and explicit HOST_LINKS | Existing selection/persistence normalizer; package persist declarations own defaults |
 | Prepared config and integration execution | Existing captured-source maps, package bindings and recipes |

@@ -59,8 +59,8 @@ type IncusReader interface {
 }
 
 type Runtime struct {
-	// Retained only when restoring frozen materialization recipes.
-	legacyPreviewInstructions    bool
+	// appliedIntegrationInspection inspects committed consumers for passive
+	// release admission (AppliedIntegrationPlan, WithInstalledConfiguration).
 	appliedIntegrationInspection bool
 	profileDiagnostics           bool
 	persistProjection            map[string]string
@@ -2172,15 +2172,13 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	}
 	// The stage refreshes static skills, so their drift is its work: a provider
 	// deselected back to the recorded selection leaves the facts check below clean.
-	if !runtime.legacyPreviewInstructions {
-		skillPaths, err := runtime.agentSkillSources()
-		if err != nil {
+	skillPaths, err := runtime.agentSkillSources()
+	if err != nil {
+		return false, err
+	}
+	if len(skillPaths) != 0 {
+		if ok, err := runtime.agentSkillsConverged(ctx, skillPaths); err != nil || !ok {
 			return false, err
-		}
-		if len(skillPaths) != 0 {
-			if ok, err := runtime.agentSkillsConverged(ctx, skillPaths); err != nil || !ok {
-				return false, err
-			}
 		}
 	}
 

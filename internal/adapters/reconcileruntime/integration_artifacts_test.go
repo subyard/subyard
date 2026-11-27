@@ -19,21 +19,22 @@ func TestDeclaredArtifactsCaptureProspectiveSourcesAndRejectStalePackages(t *tes
 	if err := os.MkdirAll(packageRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manifest := []byte(`{"schema_version":2,"settings":[{"name":"FIXTURE_INSTRUCTIONS","type":"absolute-path","optional":true,"scopes":["host","yard","command"],"application":"yard-init"}],"artifacts":[{"id":"config","kind":"config","source":"config.jsonc","destination":".fixture/config.jsonc","format":"raw"},{"id":"instructions","kind":"instructions","source_setting":"FIXTURE_INSTRUCTIONS","destination":".fixture/AGENTS.md","format":"raw"}]}`)
+	manifest := []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"config.jsonc","destination":".fixture/config.jsonc","format":"raw"},{"id":"rules","kind":"config","source":"rules","destination":".fixture/repo.rules","format":"raw"}]}`)
 	declaration := filepath.Join(packageRoot, "integration.json")
 	raw := []byte("// JSONC comments survive\n{\"permission\":\"allow\",}\n")
 	source := filepath.Join(packageRoot, "config.jsonc")
 	testkit.WriteFile(t, declaration, manifest, 0644)
 	testkit.WriteFile(t, source, raw, 0644)
-	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
-	imported := []byte("approved prospective instructions\n")
+	testkit.WriteFile(t, filepath.Join(packageRoot, "rules"), []byte("shipped rules\n"), 0644)
+	rules := filepath.Join(testkit.TempDir(t), "repo.rules")
+	imported := []byte("approved prospective rules\n")
 	definitions, err := profile.LoadIntegrations(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	incus := runningIncus(0)
-	runtime := Runtime{RepositoryRoot: root, Integrations: definitions, Incus: incus, Executor: incus, Yard: domain.Context{DevUser: "dev", DevUID: 1001, IncusProject: "fixture", YardInstanceName: "yard"}, Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture-tool", "FIXTURE_INSTRUCTIONS=" + instructions}, SourceReader: func(asset config.MaterializedAsset) ([]byte, error) {
-		if asset.Source == instructions {
+	runtime := Runtime{RepositoryRoot: root, Integrations: definitions, Incus: incus, Executor: incus, Yard: domain.Context{DevUser: "dev", DevUID: 1001, IncusProject: "fixture", YardInstanceName: "yard"}, Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture-tool", "AGENT_fixture-tool_RULES=" + rules}, SourceReader: func(asset config.MaterializedAsset) ([]byte, error) {
+		if asset.Source == rules {
 			return imported, nil
 		}
 		return asset.ReadSource()
@@ -67,11 +68,11 @@ func TestDeclaredArtifactsCaptureProspectiveSourcesAndRejectStalePackages(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(prepared.payloads["/home/dev/.fixture/config.jsonc"], raw) || !bytes.HasPrefix(prepared.payloads["/home/dev/.fixture/AGENTS.md"], imported) {
-		t.Fatal("raw config or prospective instructions were replaced")
+	if !bytes.Equal(prepared.payloads["/home/dev/.fixture/config.jsonc"], raw) || !bytes.Equal(prepared.payloads["/home/dev/.fixture/repo.rules"], imported) {
+		t.Fatal("raw config or prospective rules were replaced")
 	}
-	// The ordinary reader cannot see instructions yet; planning must use capture.
-	if _, err := os.Stat(instructions); !os.IsNotExist(err) {
+	// The ordinary reader cannot see the rules yet; planning must use capture.
+	if _, err := os.Stat(rules); !os.IsNotExist(err) {
 		t.Fatal("prospective source unexpectedly exists")
 	}
 }

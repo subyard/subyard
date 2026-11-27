@@ -175,7 +175,8 @@ GUEST_MARKER=/var/tmp/subyard-published-upgrade-data
 HOST_RULES_OVERRIDE="$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/rules/repo.rules"
 HOST_RULES_DIGEST=''
 # The 0.31.0 Codex lane also owns retained local configuration, offline activation
-# repair and a symlinked instruction file across rollback; older releases lack its refusal.
+# repair and the retired host instruction copy across update and rollback; older releases
+# lack its symlink refusal.
 LOCAL_CONFIG_CHECKS=0
 if [ "$OLD_VERSION" = 0.31.0 ] && [[ " $PUBLISHED_AGENTS " = *" codex "* ]]; then LOCAL_CONFIG_CHECKS=1; fi
 CACHED_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-container}"
@@ -453,38 +454,56 @@ verify_offline_activation_repair() {
   ok 'activation repair without any release source restored the removed artifact'
 }
 
-# A guest instruction file that only the runtime refreshes, replaced by a symlink in the
-# yard: the rollback, or init after it, refuses it by name with the operator's step, keeps
-# the link and its target, and converges once the operator removes it.
-verify_symlinked_instruction_file() { # <rollback command...>
-  local link=/home/dev/.codex/AGENTS.md output rc=0
-  local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
-  local preserve="'mv' '-T' '--backup=numbered' '--' '$link'"
+# Published releases copy the host Codex instructions into the yard; the candidate no longer
+# copies them and removes the unchanged copy it inherits.
+INSTRUCTION_COPY=/home/dev/.codex/AGENTS.md
+seed_host_instruction_copy() {
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'published-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
-  operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init did not refresh the instruction file'
-  guest_dev test -f "$link" -a ! -L "$link" || die 'the instruction file was not refreshed as a regular file'
-  guest_dev sh -c 'mv "$1" "$1.real" && ln -s AGENTS.md.real "$1"' _ "$link"
+  operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init did not copy the instruction file'
+  guest_dev test -f "$INSTRUCTION_COPY" -a ! -L "$INSTRUCTION_COPY" \
+    || die 'the published release did not copy the instruction file'
+}
+
+# A symlink at the instruction path in the yard, such as a user-dotfiles link: the rollback,
+# or init after it, refuses it, keeps the link and its target, and succeeds and copies the
+# file again once the operator removes it. The candidate's inventory no longer records the
+# path, so the retained release's rollback inspection refuses it without its detail; the
+# candidate then names the declared agent boundary's paths and recovery.
+verify_symlinked_instruction_file() { # <rollback command...>
+  local link="$INSTRUCTION_COPY" output rc=0
+  local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
+  local preserve="'mv' '-T' '--backup=numbered' '--' '$link'"
+  guest_dev test ! -e "$link" || die 'the candidate kept the unchanged instruction copy'
+  guest_dev sh -c 'printf "%s\n" "published-upgrade instructions" > "$1.real" && ln -s AGENTS.md.real "$1"' _ "$link"
   output="$("$@" 2>&1)" || rc=$?
   printf '%s\n' "$output" > "$STATE_ROOT/published-rollback.log"
   if [ "$rc" -eq 0 ]; then
     output="$(operator_yard init --yes 2>&1)" && die 'init replaced the symlinked instruction file'
     printf '%s\n' "$output" >> "$STATE_ROOT/published-rollback.log"
+    { grep -Fq "$link is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output"; } \
+      || grep -Fq "$preserve" <<<"$output" \
+      || die 'init refused the symlinked instruction file without its path and step'
+  else
+    for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
+      'profile disable user-dotfiles in each yard that uses it (its clone is kept) or move any other file at these paths away'; do
+      grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
+    done
   fi
-  { grep -Fq "$link is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output"; } \
-    || grep -Fq "$preserve" <<<"$output" \
-    || die 'the symlinked instruction file was refused without its path and step'
   guest_dev test -L "$link" && [ "$(guest_dev cat "$link.real")" = 'published-upgrade instructions' ] \
     || die 'the refusal changed the symlinked instruction file or its target'
   guest_dev rm "$link" "$link.real"
-  # A refused rollback first repairs the current release, then runs again.
-  [ "$rc" -eq 0 ] || operator_yard migrate --yes >"$STATE_ROOT/instructions-migrate.log" 2>&1 \
-    || die 'migrate after the refused rollback failed'
-  operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init after removing the link failed'
+  if [ "$rc" -eq 0 ]; then
+    operator_yard init --yes >"$STATE_ROOT/instructions-init.log" 2>&1 || die 'init after removing the link failed'
+  else
+    # A refused rollback first repairs the current release, then runs again.
+    operator_yard migrate --yes >"$STATE_ROOT/instructions-migrate.log" 2>&1 \
+      || die 'migrate after the refused rollback failed'
+    "$@" >"$STATE_ROOT/published-rollback.log" 2>&1 || die 'rollback after removing the link failed'
+  fi
   guest_dev test -f "$link" -a ! -L "$link" && guest_dev grep -Fqx 'published-upgrade instructions' "$link" \
-    || die 'the replaced instruction file did not converge'
-  [ "$rc" -eq 0 ] || "$@" >"$STATE_ROOT/published-rollback.log" 2>&1 || die 'rollback after removing the link failed'
-  ok "symlinked instruction file refused by name and kept (rollback exit $rc), then converged"
+    || die 'the published release did not copy the instruction file again'
+  ok "symlinked instruction file refused and kept (rollback exit $rc), then copied again after its removal"
 }
 
 # Cleanup removes the journal, so a failed update reports its stopping point first.
@@ -535,6 +554,7 @@ assert_published_agent_configs
 ok 'published runtime created a running yard'
 if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
   seed_host_config_override
+  seed_host_instruction_copy
   verify_config_workflow 'published release'
 fi
 prepare_retained_git_settings
@@ -570,6 +590,7 @@ esac
 if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
   verify_combined_codex_policy_migration
   assert_ready
+  guest_dev test ! -e "$INSTRUCTION_COPY" || die 'the candidate kept the unchanged instruction copy'
   verify_config_workflow 'candidate update'
   verify_offline_activation_repair
 fi
@@ -614,6 +635,9 @@ if [ "$registry_relation" = 0 ]; then
   [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
     || die 'update after rollback did not reactivate the candidate'
   assert_ready
-  [ "$LOCAL_CONFIG_CHECKS" = 0 ] || verify_config_workflow 'update after rollback'
+  if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
+    guest_dev test ! -e "$INSTRUCTION_COPY" || die 'the update after rollback kept the unchanged instruction copy'
+    verify_config_workflow 'update after rollback'
+  fi
   ok 'update after rollback reached Ready again'
 fi

@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-skills-transport-', dir='/tmp')
         'config/profiles/synthetic/payload.txt': b'declared content\n',
         'config/profiles/synthetic/skills.json': json.dumps({'declared': {'SKILL.md': 'payload.txt', 'copy.txt': 'payload.txt'}}).encode(),
     }
-    for name in ('package.py', 'refresh.sh', 'deliver.py', 'probe.py', 'migrate-preview.py'):
+    for name in ('package.py', 'refresh.sh', 'deliver.py', 'probe.py'):
         payloads['config/skills/'+name] = (root / 'config/skills' / name).read_bytes()
     for name, payload in payloads.items():
         path = source / name

@@ -619,7 +619,7 @@ func TestInitCaptureSkipsNonFileConfigEvidence(t *testing.T) {
 	if err := os.MkdirAll(root+"/config/agents/fixture", 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, root+"/config/agents/fixture/integration.json", []byte(`{"schema_version":2,"settings":[{"name":"FIXTURE_INSTRUCTIONS","type":"absolute-path","optional":true,"scopes":["host","yard","command"],"application":"config-apply"}],"artifacts":[{"id":"instructions","kind":"instructions","source_setting":"FIXTURE_INSTRUCTIONS","destination":"instructions","format":"raw"}]}`), 0644)
+	testkit.WriteFile(t, root+"/config/agents/fixture/integration.json", []byte(`{"schema_version":2}`), 0644)
 	definitions, err := profile.LoadIntegrations(root)
 	if err != nil {
 		t.Fatal(err)
@@ -627,7 +627,7 @@ func TestInitCaptureSkipsNonFileConfigEvidence(t *testing.T) {
 	source := f.home + "/source"
 	testkit.WriteFile(t, source, []byte("original source"), 0600)
 	runtime := Runtime{RepositoryRoot: root, Integrations: definitions, Executor: f,
-		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "FIXTURE_INSTRUCTIONS=" + source, "AGENT_fixture_PROVISION=" + source},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_PROVISION=" + source},
 		Yard:        domain.Context{DevUser: "dev", DevUID: os.Getuid()}}
 	observed, err := runtime.integrationInventory(context.Background(), "observe", nil, "")
 	if err != nil {

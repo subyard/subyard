@@ -8,7 +8,7 @@ set -Eeuo pipefail
 
 stage 'checking ordinary commands and typed rollback after a refused Claude init'
 yard version
-printf 'claude-recovery: fresh installed candidate; codex -> codex claude; foreign instructions force pre-apply refusal\n'
+printf 'claude-recovery: fresh installed candidate; codex -> codex claude; unsafe Claude memory data forces pre-apply refusal\n'
 jq -c '{checkpoint, releases, migration_steps:(.steps | length)}' \
   "$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json"
 recovery_selection="$SUBYARD_CONFIG_HOME/yards/default/config.env"
@@ -44,14 +44,15 @@ with open(path + '.fixture-new', 'w') as stream:
 os.replace(path + '.fixture-new', path)
 PY_LEGACY_APPLIED
 fi
-guest_root runuser -u dev -- sh -eu -c 'printf "Foreign instructions retained.\n" > /home/dev/.claude/CLAUDE.md; chmod 0644 /home/dev/.claude/CLAUDE.md'
+# Persist adoption refuses group- or world-writable data before any apply and names it.
+guest_root runuser -u dev -- chmod 0777 /home/dev/.claude-memory
 yard config set CODING_TOOL_INTEGRATIONS 'codex claude' --scope yard --local --yes \
   >"$STATE/claude-recovery-select.out" 2>"$STATE/claude-recovery-select.err" \
   || recovery_failure 'could not author Claude selection before the refused init'
 if yard init --yes >"$STATE/claude-recovery-init.out" 2>"$STATE/claude-recovery-init.err"; then
-  recovery_failure 'init unexpectedly replaced foreign Claude instructions'
+  recovery_failure 'init unexpectedly adopted unsafe Claude memory data'
 fi
-grep -Fq '/home/dev/.claude/CLAUDE.md' "$STATE/claude-recovery-init.err" \
+grep -Fq '/home/dev/.claude-memory' "$STATE/claude-recovery-init.err" \
   || recovery_failure 'init refused for an unrelated reason'
 inspect_status=0
 yard migrate --check --json >"$STATE/claude-recovery-inspect.json" 2>"$STATE/claude-recovery-inspect.err" || inspect_status=$?
@@ -94,7 +95,7 @@ yard migrate --check --json >"$STATE/claude-recovery-restored.json" \
   || recovery_failure 'readiness query failed after typed rollback'
 jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE/claude-recovery-restored.json" >/dev/null \
   || recovery_failure 'typed rollback did not restore ready'
-guest_root runuser -u dev -- mv /home/dev/.claude/CLAUDE.md "/home/dev/.claude/CLAUDE.md.foreign-preserved-$recovery_shape"
+guest_root runuser -u dev -- chmod 0700 /home/dev/.claude-memory
 if [ "$recovery_shape" = legacy ]; then
   guest_root python3 - <<'PY_RESTORE_APPLIED'
 import json, os

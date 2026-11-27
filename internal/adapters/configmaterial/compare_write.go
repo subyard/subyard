@@ -63,10 +63,6 @@ func PayloadToken(payload []byte) string {
 type Desired struct {
 	Label, Destination, Format string
 	Payload                    []byte
-	// InitOnly is a file outside the config set that config status and
-	// config apply cover, such as an instruction file: only init --configs
-	// refreshes it.
-	InitOnly bool
 }
 
 // File is the one observation of a guest config file, and after a refused
@@ -80,8 +76,6 @@ type File struct {
 	Fingerprint string
 	// Problem is why a refresh cannot assess or write the file, if it cannot.
 	Problem Problem
-	// InitOnly is the desired file's: its refusals name init --configs.
-	InitOnly bool
 }
 
 // State is the file's one state: converged, drift, unreadable, or its Problem.
@@ -140,7 +134,7 @@ func Observe(ctx context.Context, executor ports.InstanceExecutor, yard domain.C
 	command := []string{"python3", "-B", "-c", CompareWriteProgram(), "observe", "/home/" + yard.DevUser}
 	var raw []int
 	for index, item := range desired {
-		files[index] = File{Label: item.Label, Destination: item.Destination, InitOnly: item.InitOnly}
+		files[index] = File{Label: item.Label, Destination: item.Destination}
 		if err := validDestination(yard.DevUser, item.Destination); err != nil {
 			return nil, err
 		}
@@ -280,16 +274,12 @@ func (refusal FileRefusal) ActivationDiagnostic() (string, string) {
 	return "yard " + refusal.Yard + ": " + message, next
 }
 
-// describe renders only the yard, the destination, the state and InitOnly, so
-// a refusal relayed from a child renders as the writer's own.
+// describe renders only the yard, the destination and the state, so a refusal
+// relayed from a child renders as the writer's own.
 func (refusal FileRefusal) describe() (string, string) {
 	file := refusal.File
-	// The step is the command that refreshes this file: config apply for the
-	// config set, init --configs for a file only the runtime refreshes.
+	// The step is the command that refreshes the config set.
 	step := domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: refusal.Yard})
-	if file.InitOnly {
-		step = domain.RenderAction(domain.Action{Verb: domain.VerbInit, Yard: refusal.Yard}) + " --configs"
-	}
 	switch file.State() {
 	case "unreadable":
 		return file.Destination + " is not a readable regular file; it was kept",
@@ -315,11 +305,10 @@ type refusalReport struct {
 type reportedFile struct {
 	Destination string `json:"destination"`
 	State       string `json:"state"`
-	InitOnly    bool   `json:"init_only"`
 }
 
 // EncodeRefusals is the report of a refresh that failed only with file
-// refusals: each file's destination, state and InitOnly, and no text. Any
+// refusals: each file's destination and state, and no text. Any
 // other failure has no report.
 func EncodeRefusals(err error) []byte {
 	refusals, ok := FileRefusals(err)
@@ -328,7 +317,7 @@ func EncodeRefusals(err error) []byte {
 	}
 	report := refusalReport{Files: make([]reportedFile, len(refusals))}
 	for index, refusal := range refusals {
-		report.Files[index] = reportedFile{refusal.File.Destination, refusal.File.State(), refusal.File.InitOnly}
+		report.Files[index] = reportedFile{refusal.File.Destination, refusal.File.State()}
 	}
 	payload, err := json.Marshal(report)
 	if err != nil || len(payload) > MaxRefusalReport {
@@ -373,7 +362,7 @@ func DecodeRefusals(yard string, payload []byte) []error {
 	}
 	refusals := make([]error, 0, len(report.Files))
 	for _, reported := range report.Files {
-		file := File{Destination: reported.Destination, InitOnly: reported.InitOnly}
+		file := File{Destination: reported.Destination}
 		switch reported.State {
 		case TokenUnreadable:
 			file.Token = TokenUnreadable

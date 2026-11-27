@@ -18,6 +18,23 @@
   launcher is gone or fails, install 0.32.0, the last release that resumes such a plan, and run
   `yard _uninstall-resume <data-root>.uninstall`. The refusal prints the exact command.
 
+### Agent instructions from a dotfiles repository
+
+- **Host instruction files are no longer copied into yards.** `HOST_CLAUDE_MD`,
+  `HOST_CODEX_AGENTS_MD` and `HOST_OPENCODE_AGENTS_MD` are retired and ignored; `yard check`
+  names each line to remove. The next
+  init removes an unchanged copy that an earlier release made; an edited copy is kept and its
+  path is refused until you move it away.
+- The new opt-in [`user-dotfiles`](user-dotfiles.md) profile clones one Git repository
+  (`USER_DOTFILES_SOURCE`, optional `USER_DOTFILES_SUBDIR`) and links its `agents/AGENTS.md`
+  to `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md`. Subyard
+  never updates the clone; ask an agent in the yard to run `git pull` in it. The same applies to
+  [user skills](user-skills.md): no `yard init` is needed after a pull.
+- **Before rolling back to 0.32.0,** run `yard -Y NAME profile disable user-dotfiles` in each
+  yard that uses the profile, or move any other file at an instruction path away. While a file
+  or link remains there, the rollback is refused with "the retained release cannot provide a
+  safe rollback plan", the paths and this recovery. The rollback plan lists these paths.
+
 ## 0.32.0
 
 ### Before you update

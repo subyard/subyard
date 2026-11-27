@@ -21,9 +21,10 @@ type IntegrationArtifact struct {
 	Kind            string            `json:"kind"`
 	Source          string            `json:"source,omitempty"`
 	ApprovalSources map[string]string `json:"approval_sources,omitempty"`
-	SourceSetting   string            `json:"source_setting,omitempty"`
-	Destination     string            `json:"destination"`
-	Format          string            `json:"format"`
+	// SourceSetting exists only to decode retired instruction artifacts.
+	SourceSetting string `json:"source_setting,omitempty"`
+	Destination   string `json:"destination"`
+	Format        string `json:"format"`
 }
 
 // PackageSources lists the shipped variants that must be validated and bound.
@@ -69,15 +70,40 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 			if (artifact.ID != "config" && artifact.ID != "rules") || (!textSafe(artifact.Source) || !relative(artifact.Source)) || artifact.SourceSetting != "" {
 				return errors.New("invalid config artifact source")
 			}
-		case "instructions":
-			if artifact.ID != "instructions" || artifact.Source != "" || !settingNamePattern.MatchString(artifact.SourceSetting) || artifact.Format != "raw" {
-				return errors.New("invalid instruction artifact source")
-			}
 		default:
 			return errors.New("unsupported integration artifact kind")
 		}
 	}
 	return nil
+}
+
+// retiredInstructionCopies maps each setting that named a host instruction file
+// in releases through 0.32.0 to the yard path, relative to the developer's home,
+// that its copy was written to.
+var retiredInstructionCopies = map[string]string{
+	"HOST_CLAUDE_MD":          ".claude/CLAUDE.md",
+	"HOST_CODEX_AGENTS_MD":    ".codex/AGENTS.md",
+	"HOST_OPENCODE_AGENTS_MD": ".config/opencode/AGENTS.md",
+}
+
+// RetiredInstructionCopies are the sorted yard paths of retired host instruction copies.
+func RetiredInstructionCopies() []string {
+	return slices.Sorted(maps.Values(retiredInstructionCopies))
+}
+
+// RetiredInstructionSetting reports a setting that named a retired host instruction file.
+func RetiredInstructionSetting(name string) bool {
+	_, retired := retiredInstructionCopies[name]
+	return retired
+}
+
+// retiredInstructionArtifact is a host instruction copy that published releases
+// through 0.32.0 declare. Rollback preparation reads those target declarations,
+// so decoding drops exactly those three shapes instead of refusing them.
+func retiredInstructionArtifact(artifact IntegrationArtifact) bool {
+	destination, retired := retiredInstructionCopies[artifact.SourceSetting]
+	return retired && artifact.Kind == "instructions" && artifact.ID == "instructions" && artifact.Source == "" &&
+		len(artifact.ApprovalSources) == 0 && artifact.Destination == destination && artifact.Format == "raw"
 }
 
 // ArtifactSourcePath rechecks the physical package boundary before source use.
