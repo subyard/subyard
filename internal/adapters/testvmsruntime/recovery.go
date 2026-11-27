@@ -515,6 +515,10 @@ func (runtime *Runtime) guestSnapshot(ctx context.Context, firstVM string) map[s
 		case ctx.Err() != nil:
 			unavailable("guest snapshot budget exhausted")
 			continue
+		case runtime.allocation == nil:
+			// Legacy and corrupt-state slots have no allocation to prove.
+			unavailable("allocation ownership not verified")
+			continue
 		case !runtime.vmExists(ctx, vm):
 			unavailable("guest does not exist")
 			continue
