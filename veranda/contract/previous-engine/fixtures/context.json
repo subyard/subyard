@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "context",
+  "result": {
+    "yardName": "default",
+    "accessKind": "local",
+    "yardKind": "container",
+    "yardInstanceName": "yard",
+    "incusProject": "subyard",
+    "incusBridge": "incusbr0",
+    "sshHost": "yard",
+    "devUser": "dev",
+    "sshPort": 2222,
+    "shiftMode": "shift",
+    "forwardSshAgent": false,
+    "devSudo": false,
+    "nestedE2EVMs": false,
+    "devUid": 1000,
+    "paths": {
+      "repositoryRoot": "/example/repositoryRoot",
+      "configDir": "/example/configDir",
+      "operatorHome": "/example/operatorHome",
+      "configHome": "/example/configHome",
+      "dataHome": "/example/dataHome",
+      "storagePath": "/example/storagePath",
+      "hostBase": "/example/hostBase",
+      "stateDir": "/example/stateDir"
+    }
+  }
+}

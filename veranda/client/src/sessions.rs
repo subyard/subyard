@@ -400,6 +400,15 @@ mod tests {
                 include_str!("../../contract/yard-rpc/v1/fixtures/session-vscode.json"),
                 "vscode",
             ),
+            // The previous engine line's published descriptors.
+            (
+                include_str!("../../contract/previous-engine/fixtures/session-shell.json"),
+                "shell",
+            ),
+            (
+                include_str!("../../contract/previous-engine/fixtures/session-vscode.json"),
+                "vscode",
+            ),
         ] {
             let value: serde_json::Value = serde_json::from_str(fixture).unwrap();
             let descriptor: Descriptor = serde_json::from_value(value["result"].clone()).unwrap();

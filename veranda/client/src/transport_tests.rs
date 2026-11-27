@@ -11,6 +11,11 @@ const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../contract/yard-rpc/v1/fixtures"
 );
+/// The previous engine line's published fixtures; `release.json` beside them names its version.
+const PREVIOUS_FIXTURE_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../contract/previous-engine/fixtures"
+);
 const OWNER: &str = r#"
 import datetime, json, os, struct, subprocess, sys, time
 mode, pid_file, fixtures = sys.argv[1:]
@@ -399,7 +404,7 @@ fn event_bursts_keep_order_and_do_not_starve_the_method_response() {
 }
 #[test]
 fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
-    for name in [
+    for (dir, name) in [
         "negotiate",
         "owner-inventory",
         "yard-status",
@@ -411,11 +416,13 @@ fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
         "snapshot-ready",
         "session-shell",
         "session-vscode",
-    ] {
-        let bytes = fs::read(format!("{FIXTURE_DIR}/{name}.frame")).unwrap();
+    ]
+    .into_iter()
+    .flat_map(|name| [(FIXTURE_DIR, name), (PREVIOUS_FIXTURE_DIR, name)])
+    {
+        let bytes = fs::read(format!("{dir}/{name}.frame")).unwrap();
         let expected: Value =
-            serde_json::from_slice(&fs::read(format!("{FIXTURE_DIR}/{name}.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&fs::read(format!("{dir}/{name}.json")).unwrap()).unwrap();
         let mut input = Cursor::new(&bytes);
         let decoded: Value = read_frame(&mut input).unwrap();
         assert_eq!(decoded, expected, "golden {name}");
