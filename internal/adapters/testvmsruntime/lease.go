@@ -719,7 +719,7 @@ func (store LeaseStore) BeginScheduledRecovery(
 			return fmt.Errorf("slot %s is %s, not quarantined", slotID, slot.State)
 		}
 		now := store.now()
-		if !force && !slot.NextRecoveryAt.IsZero() && now.Before(slot.NextRecoveryAt) {
+		if !force && recoveryDeferred(*slot, now) {
 			snapshot = *slot
 			return nil
 		}
@@ -915,12 +915,23 @@ func activeHoldUntil(slot LeaseSlot, now time.Time) time.Time {
 	return slot.HoldUntil
 }
 
-// liftHold ends an active hold early and keeps its level.
+// liftHold ends an active hold early and keeps its level, which now resets
+// 24 hours after this early end.
 func liftHold(slot *LeaseSlot, now time.Time) bool {
 	active := !activeHoldUntil(*slot, now).IsZero()
+	if active {
+		slot.HoldResetAt = now.Add(holdResetAfter)
+	}
 	slot.HoldStartedAt = time.Time{}
 	slot.HoldUntil = time.Time{}
 	return active
+}
+
+// recoveryDeferred says a quarantined slot waits for its next recovery time.
+// A clock moved back never defers recovery longer than the hold cap.
+func recoveryDeferred(slot LeaseSlot, now time.Time) bool {
+	return !slot.NextRecoveryAt.IsZero() && now.Before(slot.NextRecoveryAt) &&
+		slot.NextRecoveryAt.Sub(now) <= holdCap
 }
 
 func recoveryDelay(attempt uint64) time.Duration {

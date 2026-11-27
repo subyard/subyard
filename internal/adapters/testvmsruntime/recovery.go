@@ -179,10 +179,12 @@ func (runtime *Runtime) RecoverExpectedSlot(
 					_, finishErr := store.FinishRecovery(startedSlot.SlotID, err, "", "")
 					return errors.Join(err, finishErr)
 				}
+				lifted := startedSlot.holdLifted
 				startedSlot, err = storeSlot(store, startedSlot.SlotID)
 				if err != nil {
 					return err
 				}
+				startedSlot.holdLifted = lifted
 			}
 			return runtime.completeRecovery(ctx, store, startedSlot)
 		},
@@ -701,11 +703,8 @@ func storeSlot(store LeaseStore, slotID string) (LeaseSlot, error) {
 }
 
 func dueForRecovery(slot LeaseSlot, now time.Time) bool {
-	// A clock moved back never defers recovery longer than the hold cap.
 	return slot.State == SlotRecovering ||
-		(slot.State == SlotQuarantined &&
-			(slot.NextRecoveryAt.IsZero() || !now.Before(slot.NextRecoveryAt) ||
-				slot.NextRecoveryAt.Sub(now) > holdCap))
+		(slot.State == SlotQuarantined && !recoveryDeferred(slot, now))
 }
 
 // withHold adds slot's active hold to a slot event.

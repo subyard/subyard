@@ -123,6 +123,19 @@ func (recorder EventRecorder) journalDirectory() string {
 	return filepath.Join(recorder.archiveRoot(), "pool", "errors")
 }
 
+// Records without an outcome live apart: a rolled-back broker reads
+// pool/errors only and rejects them.
+func (recorder EventRecorder) holdJournalDirectory() string {
+	return filepath.Join(recorder.archiveRoot(), "pool", "holds")
+}
+
+func (recorder EventRecorder) journalDirectoryFor(record JournalRecord) string {
+	if record.Outcome == "" {
+		return recorder.holdJournalDirectory()
+	}
+	return recorder.journalDirectory()
+}
+
 // Called by Record after the spool write, under the same archive lock and
 // retention as the controllers' own records.
 func (recorder EventRecorder) archiveJournalRecord(record JournalRecord) error {
@@ -137,17 +150,18 @@ func (recorder EventRecorder) archiveJournalRecord(record JournalRecord) error {
 		return errors.New("error journal record exceeds the size limit")
 	}
 	return withFileLock(filepath.Join(recorder.archiveRoot(), ".lock"), func() error {
-		if err := writeImmutableDurable(filepath.Join(recorder.journalDirectory(), record.EventID+".json"), append(payload, '\n'), 0o600); err != nil {
+		directory := recorder.journalDirectoryFor(record)
+		if err := writeImmutableDurable(filepath.Join(directory, record.EventID+".json"), append(payload, '\n'), 0o600); err != nil {
 			return err
 		}
-		return recorder.trimJournal()
+		return trimJournal(directory)
 	})
 }
 
 // trimJournal bounds the journal on every write; host-sink acknowledgement
 // prunes it only by the archive's age and size limits.
-func (recorder EventRecorder) trimJournal() error {
-	entries, err := os.ReadDir(recorder.journalDirectory())
+func trimJournal(directory string) error {
+	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
 	}
@@ -160,7 +174,7 @@ func (recorder EventRecorder) trimJournal() error {
 	// Record IDs begin with the zero-padded creation time.
 	sort.Strings(names)
 	for len(names) > maxJournalRecords {
-		if err := os.Remove(filepath.Join(recorder.journalDirectory(), names[0])); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(directory, names[0])); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		names = names[1:]
@@ -177,37 +191,39 @@ func (recorder EventRecorder) readJournal(clientID, slot string, count int) ([]J
 		return nil, errors.New("invalid error journal selection")
 	}
 	records := make([]JournalRecord, 0)
-	entries, err := os.ReadDir(recorder.journalDirectory())
-	if os.IsNotExist(err) {
-		return records, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		id := strings.TrimSuffix(entry.Name(), ".json")
-		if entry.Name() != id+".json" || !brokerRecordID.MatchString(id) {
-			continue
-		}
-		payload, err := readAgentLogRecord(filepath.Join(recorder.journalDirectory(), entry.Name()), maxJournalRecordBytes+1)
+	for _, directory := range []string{recorder.journalDirectory(), recorder.holdJournalDirectory()} {
+		entries, err := os.ReadDir(directory)
 		if os.IsNotExist(err) {
-			continue // Concurrent acknowledgement can prune expired records.
+			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		var record JournalRecord
-		if err := json.Unmarshal(payload, &record); err != nil {
-			return nil, err
+		for _, entry := range entries {
+			id := strings.TrimSuffix(entry.Name(), ".json")
+			if entry.Name() != id+".json" || !brokerRecordID.MatchString(id) {
+				continue
+			}
+			payload, err := readAgentLogRecord(filepath.Join(directory, entry.Name()), maxJournalRecordBytes+1)
+			if os.IsNotExist(err) {
+				continue // Concurrent acknowledgement can prune expired records.
+			}
+			if err != nil {
+				return nil, err
+			}
+			var record JournalRecord
+			if err := json.Unmarshal(payload, &record); err != nil {
+				return nil, err
+			}
+			if err := validateJournalRecord(record); err != nil || recorder.journalDirectoryFor(record) != directory {
+				return nil, errors.Join(err, errors.New("invalid error journal record"))
+			}
+			if record.EventID != id || (slot != "-" && slot != record.SlotID) ||
+				recorder.now().Sub(record.Timestamp) >= agentLogRetention {
+				continue
+			}
+			records = append(records, record)
 		}
-		if err := validateJournalRecord(record); err != nil {
-			return nil, err
-		}
-		if record.EventID != id || (slot != "-" && slot != record.SlotID) ||
-			recorder.now().Sub(record.Timestamp) >= agentLogRetention {
-			continue
-		}
-		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool {
 		if !records[i].Timestamp.Equal(records[j].Timestamp) {

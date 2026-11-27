@@ -1,7 +1,9 @@
 package testvmsruntime
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -184,5 +186,84 @@ func TestLoopProtectionHoldSurvivesInTheRecoveryJournal(t *testing.T) {
 	brokerMust(t, err)
 	if slot.HoldLevel != 3 || !slot.HoldUntil.Equal(now.Add(8*time.Hour)) || len(slot.RecentQuarantines) != 1 {
 		t.Fatalf("journaled hold lost: %+v", slot)
+	}
+}
+
+func (f *brokerPoolFixture) holdUntilLoop() LeaseSlot {
+	f.t.Helper()
+	for range holdThreshold {
+		f.quarantineCycle()
+	}
+	return f.slot(1)
+}
+
+// A clock moved back never leaves the reaper waiting longer than the cap.
+func TestLoopProtectionReaperBoundsAClockMovedBack(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	f.holdUntilLoop()
+	f.now = f.now.Add(-30 * 24 * time.Hour)
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	if slot := f.slot(1); slot.State != SlotQuarantined || slot.NextRecoveryAt.After(f.now.Add(holdCap)) ||
+		slot.HoldUntil.After(f.now.Add(holdCap)) {
+		t.Fatalf("recovery deferred for %s: %+v", slot.NextRecoveryAt.Sub(f.now), slot)
+	}
+}
+
+// An early lift ends the hold: 24 quiet hours after it reset the level.
+func TestLoopProtectionQuietPeriodFollowsAManualLift(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	held := f.holdUntilLoop()
+	brokerMust(t, f.rt.RecoverExpectedSlot(f.ctx, f.store, LeaseIdentity{
+		SlotID: held.SlotID, ResourceGeneration: held.ResourceGeneration, LeaseEpoch: held.LeaseEpoch,
+	}))
+	f.now = f.now.Add(holdResetAfter + time.Minute)
+	if next := f.holdUntilLoop(); next.HoldLevel != 1 || next.HoldUntil.Sub(next.HoldStartedAt) != holdBase {
+		t.Fatalf("hold after a quiet day: %+v", next)
+	}
+}
+
+// A lift is recorded even when the quarantine's incident was still missing.
+func TestLoopProtectionManualLiftWithoutIncidentIsRecorded(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	for range holdThreshold - 1 {
+		f.quarantineCycle()
+	}
+	brokerMust(t, f.store.Quarantine(f.acquire(1, "loop"), errors.New("interrupted before incident capture")))
+	held := f.slot(1)
+	if held.IncidentID != "" || held.HoldUntil.IsZero() {
+		t.Fatalf("fixture: %+v", held)
+	}
+	brokerMust(t, f.rt.RecoverExpectedSlot(f.ctx, f.store, LeaseIdentity{
+		SlotID: held.SlotID, ResourceGeneration: held.ResourceGeneration, LeaseEpoch: held.LeaseEpoch,
+	}))
+	records := f.holdRecords()
+	if f.slot(1).State != SlotAvailable || len(records) == 0 || records[len(records)-1].HoldReason != "manual" {
+		t.Fatalf("slot=%+v records=%+v", f.slot(1), records)
+	}
+}
+
+// pool/errors keeps the record form an older broker reads; hold ends live apart.
+func TestLoopProtectionHoldEndsStayReadableAfterRollback(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	held := f.holdUntilLoop()
+	f.now = held.HoldUntil
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	if records := f.holdRecords(); records[len(records)-1].Kind != "slot.hold_ended" {
+		t.Fatalf("records = %+v", records)
+	}
+	for directory, wantOutcome := range map[string]bool{
+		f.rt.Events.journalDirectory(): true, f.rt.Events.holdJournalDirectory(): false,
+	} {
+		entries, err := os.ReadDir(directory)
+		brokerMust(t, err)
+		for _, entry := range entries {
+			payload, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+			brokerMust(t, err)
+			var record JournalRecord
+			brokerMust(t, json.Unmarshal(payload, &record))
+			if (record.Outcome != "") != wantOutcome {
+				t.Errorf("%s holds %+v", directory, record)
+			}
+		}
 	}
 }

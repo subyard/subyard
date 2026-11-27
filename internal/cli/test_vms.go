@@ -507,10 +507,8 @@ func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDe
 			"save incident evidence, then stop and delete exact allocation-owned VM disks and snapshots",
 			"verify empty working storage before publishing the slot as available",
 		}
-		if execution.snapshot != nil && execution.snapshot.HoldUntil.After(time.Now()) {
-			consequences = append(consequences, fmt.Sprintf(
-				"lift the loop-protection hold that keeps slot %d until %s; further quarantines start a longer hold",
-				execution.slot, execution.snapshot.HoldUntil.UTC().Format(time.RFC3339)))
+		if hold := execution.holdConsequence(); hold != "" {
+			consequences = append(consequences, hold)
 		}
 		return "test-vms.recover", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	default:
@@ -696,7 +694,20 @@ func (execution *testVMExecution) steps() []domain.OperationStep {
 	if execution.legacyRetained && execution.action == "revoke" {
 		desired = "available; legacy retained disks preserved"
 	}
-	return []domain.OperationStep{{ID: "slot", Target: fmt.Sprintf("test-vms/slot-%03d", execution.slot), Observed: observed, Desired: desired, Decision: decision, Preconditions: []string{"captured resource generation and lease epoch match native CAS"}, Verify: "native stop/empty-storage verification and available pool status", Consequence: "apply the captured test VM slot transition"}}
+	consequence := "apply the captured test VM slot transition"
+	if hold := execution.holdConsequence(); hold != "" {
+		consequence += "; " + hold
+	}
+	return []domain.OperationStep{{ID: "slot", Target: fmt.Sprintf("test-vms/slot-%03d", execution.slot), Observed: observed, Desired: desired, Decision: decision, Preconditions: []string{"captured resource generation and lease epoch match native CAS"}, Verify: "native stop/empty-storage verification and available pool status", Consequence: consequence}}
+}
+
+// holdConsequence warns that a recovery lifts the slot's loop-protection hold.
+func (execution *testVMExecution) holdConsequence() string {
+	if execution.action != "recover" || execution.snapshot == nil || !execution.snapshot.HoldUntil.After(time.Now()) {
+		return ""
+	}
+	return fmt.Sprintf("lift the loop-protection hold that keeps slot %d until %s; further quarantines start a longer hold",
+		execution.slot, execution.snapshot.HoldUntil.UTC().Format(time.RFC3339))
 }
 
 func testVMImage(image string) string {
