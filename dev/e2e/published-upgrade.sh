@@ -457,6 +457,39 @@ verify_offline_activation_repair() {
 # Published releases copy the host Codex instructions into the yard; the candidate no longer
 # copies them and removes the unchanged copy it inherits.
 INSTRUCTION_COPY=/home/dev/.codex/AGENTS.md
+# On update the default yard gains the default-selected user-dotfiles profile. Once the shipped
+# dotfiles repository has an install script, its links occupy the instruction paths that the
+# instruction-copy checks and every rollback to 0.32.0 and older refuse, so the lane disables
+# the profile as the rollback recovery says. Without an install script nothing is installed
+# and disable only warns. Either way no instruction path is left behind.
+disable_user_dotfiles() {
+  local path
+  operator_yard -Y default profile disable user-dotfiles --yes >"$STATE_ROOT/user-dotfiles-disable.log" 2>&1 \
+    || die 'profile disable user-dotfiles failed'
+  for path in /home/dev/.claude/CLAUDE.md /home/dev/.codex/AGENTS.md /home/dev/.config/opencode/AGENTS.md; do
+    guest_dev sh -c '! readlink "$1" | grep -q "^/home/dev/.local/share/subyard-user-dotfiles/"' _ "$path" \
+      || die "disable kept the user-dotfiles link $path"
+  done
+}
+
+# Disable wrote the remaining selection explicitly; a rollback target that does not ship one of
+# those profiles could not load it, so the selection keeps only the target's profiles.
+keep_rollback_target_profiles() {
+  local enabled kept=() name
+  enabled="$(operator_yard -Y default profile list --json | jq -r '.profiles[] | select(.effective) | .name')" \
+    || die 'cannot list the selected profiles'
+  for name in $enabled; do
+    if operator_env test -d "$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/profiles/$name"; then
+      kept+=("$name")
+    fi
+  done
+  [ "${kept[*]}" != "$(printf '%s\n' $enabled | paste -sd ' ')" ] || return 0
+  operator_yard -Y default config set ENVIRONMENT_PROFILES "${kept[*]}" --scope yard --yes \
+    >"$STATE_ROOT/rollback-profiles.log" 2>&1 || die 'cannot keep only the rollback target profiles'
+  operator_yard -Y default init --yes >>"$STATE_ROOT/rollback-profiles.log" 2>&1 \
+    || die 'init after keeping only the rollback target profiles failed'
+}
+
 seed_host_instruction_copy() {
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'published-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
@@ -577,6 +610,7 @@ CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runti
 write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
 assert_ready
 migrate_retained_git_settings
+disable_user_dotfiles
 case " $PUBLISHED_AGENTS " in *" claude "*)
   [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
     || die 'updated Claude login-shell environment is missing'
@@ -610,6 +644,7 @@ if [ "$registry_relation" = 0 ]; then
     # shellcheck disable=SC1090
     . "$ROOT/$ROLLBACK_SCENARIO"
   fi
+  keep_rollback_target_profiles
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
   if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
