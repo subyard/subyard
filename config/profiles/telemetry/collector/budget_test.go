@@ -31,13 +31,18 @@ func waitBudgetPrune(t *testing.T, s *Store) {
 // rawBatch stores count raw OTLP rows of 4 KiB received age ago.
 func rawBatch(t *testing.T, s *Store, label string, age time.Duration, count int) {
 	t.Helper()
+	rawRows(t, s, label, age, count, 4096)
+}
+
+func rawRows(t *testing.T, s *Store, label string, age time.Duration, count, size int) {
+	t.Helper()
 	tx, err := s.db.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
 	received := time.Now().Add(-age).UTC().Format(timestampLayout)
-	payload := make([]byte, 4096)
+	payload := make([]byte, size)
 	for i := range count {
 		rand.Read(payload)
 		if _, err = tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,kind,encoding,policy_version,redactions,protobuf)
@@ -67,9 +72,6 @@ func smallBatches(t *testing.T) {
 
 func usedNow(t *testing.T, s *Store) int64 {
 	t.Helper()
-	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		t.Fatal(err)
-	}
 	used, err := s.usedBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +186,76 @@ func TestCommitAboveBudgetPrunesInBackground(t *testing.T) {
 	}
 }
 
+// pinReader holds a read snapshot from another connection, as the stats,
+// query and export commands do, so no checkpoint can reset the WAL.
+func pinReader(t *testing.T, s *Store) {
+	t.Helper()
+	db, err := OpenReadOnly(s.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err = tx.QueryRow("SELECT count(*) FROM records").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tx.Rollback(); db.Close() })
+}
+
+// A reader that blocks WAL checkpoints changes neither how much the budget
+// prune removes nor its verdict.
+func TestBudgetPruneIgnoresSnapshotReader(t *testing.T) {
+	ctx := context.Background()
+	smallBatches(t)
+	s := fixtureStore(t)
+	// Small rows: each deleting batch rewrites more WAL than it frees pages.
+	// The reader's snapshot ends inside the WAL, so the WAL cannot restart.
+	if _, err := s.db.Exec("PRAGMA wal_autocheckpoint=0"); err != nil {
+		t.Fatal(err)
+	}
+	rawRows(t, s, "oldest", 60*24*time.Hour, 20000, 64)
+	pinReader(t, s)
+	if _, err := s.db.Exec("PRAGMA wal_autocheckpoint=128"); err != nil {
+		t.Fatal(err)
+	}
+	s.limits.DiskBytes = usedNow(t, s) - 64<<10
+	if over, err := s.pruneToBudget(time.Now().Add(-MinRetention)); err != nil || over {
+		t.Fatalf("budget prune with a reader: over=%v err=%v", over, err)
+	}
+	if left := countRows(t, s, "event_id LIKE 'oldest-%'"); left < 19000 {
+		t.Fatalf("a reader made the budget prune remove %d records", 20000-left)
+	}
+	if _, err := os.Lstat(filepath.Join(s.dir, OverBudgetMarker)); !os.IsNotExist(err) {
+		t.Fatalf("false over-budget verdict: %v", err)
+	}
+	// The WAL the reader keeps is outside the budget: a commit within it
+	// starts no prune.
+	rawBatch(t, s, "late", 60*24*time.Hour, 10)
+	s.limits.DiskBytes = usedNow(t, s) + 1<<20
+	if err := s.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "within"})}); err != nil {
+		t.Fatal(err)
+	}
+	waitBudgetPrune(t, s)
+	if countRows(t, s, "event_id LIKE 'late-%'") != 10 {
+		t.Fatal("a store within its budget was pruned")
+	}
+	// Recent records above the budget still give the warning.
+	rawBatch(t, s, "recent", time.Hour, 300)
+	s.limits.DiskBytes = 1 << 20
+	if _, err := s.db.Exec("DELETE FROM records WHERE event_id LIKE 'oldest-%' OR event_id LIKE 'late-%'"); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := s.pruneToBudget(time.Now().Add(-MinRetention)); err != nil || !over {
+		t.Fatalf("recent store above budget with a reader: over=%v err=%v", over, err)
+	}
+	if _, err := os.Lstat(filepath.Join(s.dir, OverBudgetMarker)); err != nil {
+		t.Fatalf("over-budget verdict suppressed by a reader: %v", err)
+	}
+}
+
 // budgetSweepState is the fixture of one interrupted budget prune.
 type budgetSweepState struct{ store *Store }
 
@@ -245,9 +317,21 @@ func TestCloseWaitsForBudgetPrune(t *testing.T) {
 	rawBatch(t, s, "oldest", 60*24*time.Hour, 1000)
 	rawBatch(t, s, "recent", time.Hour, 300)
 	s.limits.DiskBytes = 1 << 20
-	budgetPruneFault = func(string) error { time.Sleep(20 * time.Millisecond); return nil }
+	started := make(chan struct{})
+	budgetPruneFault = func(string) error {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		for !s.isClosed() {
+			time.Sleep(time.Millisecond)
+		}
+		return nil
+	}
 	t.Cleanup(func() { budgetPruneFault = nil })
 	s.startBudgetPrune()
+	<-started
 	dir := s.dir
 	if err := s.Close(); err != nil {
 		t.Fatal(err)

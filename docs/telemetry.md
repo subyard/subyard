@@ -566,8 +566,9 @@ The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
 and limit queued sanitized data to 16 MiB/128 requests. The profile setting
 `TELEMETRY_DISK_BUDGET` (default `30GiB`) sets the collector's soft
-`--disk-bytes` budget, measured as allocated database pages plus the WAL. Below
-it nothing is pruned. When a commit finds the store above it, the collector
+`--disk-bytes` budget, measured as allocated database pages. The WAL is outside
+the budget, because readers can hold back its checkpoints; the partition reserve
+covers it. Below the budget nothing is pruned. When a commit finds the store above it, the collector
 prunes in the background in bounded transactions: oldest first, it removes raw
 OTLP, per-request session correlations, samples and filtered-event markers
 received more than 30 days ago, until the store fits. Records younger than 30

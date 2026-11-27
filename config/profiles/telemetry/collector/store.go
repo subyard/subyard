@@ -539,22 +539,14 @@ func (s *Store) publishMarker(name, prefix string, present, current bool) bool {
 	return err == nil
 }
 
-// usedBytes counts allocated database pages, so space freed by Prune is
-// reused, plus the WAL and its index.
+// usedBytes counts allocated database pages, the budget's measure; space
+// freed by a prune is reused. The WAL stays outside it: its size follows
+// checkpoints that readers can hold back, not the stored records, and the
+// partition reserve covers it.
 func (s *Store) usedBytes() (int64, error) {
 	var used int64
 	if err := s.db.QueryRow("SELECT (page_count-freelist_count)*page_size FROM pragma_page_count(),pragma_freelist_count(),pragma_page_size()").Scan(&used); err != nil {
 		return 0, err
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		st, err := os.Stat(filepath.Join(s.dir, databaseName) + suffix)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return 0, err
-		}
-		used += st.Size()
 	}
 	return used, nil
 }
@@ -593,10 +585,6 @@ func raw(e Envelope) bool {
 // capacity it stores everything except raw OTLP and its correlations.
 func (s *Store) commit(batch []writeRequest) ([]error, error) {
 	// ponytail: one writer serializes bounded batches; shard only if measured throughput requires it.
-	var incoming int64
-	for _, r := range batch {
-		incoming += r.bytes
-	}
 	fits, used, err := s.rawCapacity()
 	if err != nil {
 		return nil, ErrStorage
@@ -631,7 +619,7 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 		return nil, ErrStorage
 	}
 	s.markRawRefused(!fits)
-	if used+incoming > s.limits.DiskBytes {
+	if used > s.limits.DiskBytes {
 		s.startBudgetPrune()
 	} else {
 		s.markOverBudget(false)
@@ -672,9 +660,6 @@ func (s *Store) pruneToBudget(cutoff time.Time) (bool, error) {
 			return true, ErrStorage
 		}
 		// The trigger, this loop and the verdict share one measure.
-		if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			return true, err
-		}
 		used, err := s.usedBytes()
 		if err != nil {
 			return true, err
