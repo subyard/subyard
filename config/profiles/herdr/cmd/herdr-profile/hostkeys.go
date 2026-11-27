@@ -89,20 +89,27 @@ func credentialShaped(label string) bool {
 	return webToken.MatchString(label)
 }
 
-// classifyHostKeys lists one entry per fingerprint in first-seen order. The first
-// bare line of a fingerprint wins over its lines with options.
-func classifyHostKeys(host, guest []byte, guestKnown bool, owner string) ([]hostKey, []int) {
-	granted := map[string]keyLine{}
-	if guestKnown {
-		for _, line := range bytes.SplitAfter(guest, []byte{'\n'}) {
-			if info := parseKeyLine(line); info.fingerprint != "" {
-				// Like the guest key operation, the first line of a fingerprint decides.
-				if _, seen := granted[info.fingerprint]; !seen {
-					granted[info.fingerprint] = info
-				}
-			}
+// parseGuestGrants reads the guest helper's bounded "keys apply list" output. The first
+// line of a fingerprint decides, as in the guest key operation. A Herdr grant labeled
+// "unmanaged" reads as unmanaged, which only refuses a key the guest would keep.
+func parseGuestGrants(list []byte) map[string]keyLine {
+	grants := map[string]keyLine{}
+	for _, line := range strings.Split(string(list), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || !publicFingerprint.MatchString(fields[1]) {
+			continue
+		}
+		if _, seen := grants[fields[1]]; !seen {
+			grants[fields[1]] = keyLine{fields[1], fields[2], fields[2] != "unmanaged"}
 		}
 	}
+	return grants
+}
+
+// classifyHostKeys lists one entry per fingerprint in first-seen order. The first
+// bare line of a fingerprint wins over its lines with options. Nil grants mean the
+// guest state is unknown.
+func classifyHostKeys(host []byte, grants map[string]keyLine, owner string) ([]hostKey, []int) {
 	var keys []hostKey
 	var unrecognized []int
 	index := map[string]int{}
@@ -112,7 +119,8 @@ func classifyHostKeys(host, guest []byte, guestKnown bool, owner string) ([]host
 			continue
 		}
 		key, comment, options, rest, err := ssh.ParseAuthorizedKey(line)
-		if err != nil || len(rest) != 0 {
+		// sshd rejects an empty options field such as a lone comma before the key type.
+		if err != nil || len(rest) != 0 || len(options) == 0 && !bytes.HasPrefix(trimmed, []byte(key.Type()+" ")) {
 			unrecognized = append(unrecognized, number+1)
 			continue
 		}
@@ -123,9 +131,9 @@ func classifyHostKeys(host, guest []byte, guestKnown bool, owner string) ([]host
 			entry.Status = "skipped:" + reason
 		} else {
 			entry.Key = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
-			grant, present := granted[entry.Fingerprint]
+			grant, present := grants[entry.Fingerprint]
 			switch {
-			case !guestKnown:
+			case grants == nil:
 				entry.Status = "unknown"
 			case !present:
 				entry.Status = "new"
@@ -214,50 +222,60 @@ func selectHostKeys(keys []hostKey, mode string, fingerprints []string) ([]hostK
 	return selected, domain.CollectRefusals(refusals...)
 }
 
-// hostKeys implements: host-keys HOME OWNER known|unknown list|all|select [FINGERPRINT...].
-// A known guest authorized_keys arrives on stdin; it only refines the preview,
-// because the guest key operation remains authoritative when it applies a grant.
+// hostKeys implements:
+//
+//	host-keys [--refusal TEXT]... HOME OWNER known|unknown list|all|select [FINGERPRINT...]
+//
+// The caller passes refusals it determined itself, so the boundary check reports
+// them with the host findings. OWNER is empty when the managed owner key is unreadable.
+// A known guest grant list arrives on stdin; it only refines the preview, because the
+// guest key operation remains authoritative when it applies a grant.
 func hostKeys(args []string) error {
-	if len(args) < 4 || !publicFingerprint.MatchString(args[1]) || (args[2] != "known" && args[2] != "unknown") ||
+	var refusals []error
+	for len(args) >= 2 && args[0] == "--refusal" {
+		refusals = append(refusals, errors.New(args[1]))
+		args = args[2:]
+	}
+	if len(args) < 4 || (args[1] != "" && !publicFingerprint.MatchString(args[1])) || (args[2] != "known" && args[2] != "unknown") ||
 		!slices.Contains([]string{"list", "all", "select"}, args[3]) || (args[3] == "select") != (len(args) > 4) {
 		return errors.New("invalid host key arguments")
 	}
-	home, owner, guestKnown, mode := args[0], args[1], args[2] == "known", args[3]
-	var guest []byte
-	if guestKnown {
-		var err error
-		if guest, err = io.ReadAll(io.LimitReader(os.Stdin, authorizedKeysLimit+1)); err != nil {
+	home, owner, mode := args[0], args[1], args[3]
+	if owner == "" {
+		refusals = append(refusals, errors.New("could not read the managed owner public key fingerprint"))
+	}
+	var grants map[string]keyLine
+	if args[2] == "known" {
+		list, err := io.ReadAll(io.LimitReader(os.Stdin, authorizedKeysLimit+1))
+		if err != nil {
 			return err
 		}
-		if len(guest) > authorizedKeysLimit {
-			guestKnown, guest = false, nil
+		if len(list) <= authorizedKeysLimit {
+			grants = parseGuestGrants(list)
 		}
 	}
 	report := hostKeyReport{Keys: []hostKey{}, Unrecognized: []int{}, Selected: []hostKey{}}
-	var readErr error
-	if home == "" {
-		readErr = errors.New("the owner account home is unavailable")
-	}
 	var contents []byte
-	if readErr == nil {
-		_, contents, readErr = readAuthorizedKeys(home)
-		if readErr != nil {
-			readErr = fmt.Errorf("could not read the owner account's authorized_keys: %w", readErr)
-		}
+	var err error
+	if home == "" {
+		err = errors.New("the owner account home is unavailable")
+	} else if _, contents, err = readAuthorizedKeys(home, "owner account"); err != nil {
+		err = fmt.Errorf("could not read the owner account's authorized_keys: %w", err)
 	}
-	if readErr != nil {
-		report.Refusal = readErr.Error()
+	if err != nil {
+		refusals = append(refusals, err)
 	} else {
-		keys, unrecognized := classifyHostKeys(contents, guest, guestKnown, owner)
+		keys, unrecognized := classifyHostKeys(contents, grants, owner)
 		report.Keys = append(report.Keys, keys...)
 		report.Unrecognized = append(report.Unrecognized, unrecognized...)
 		if mode != "list" {
 			selected, err := selectHostKeys(keys, mode, args[4:])
 			report.Selected = append(report.Selected, selected...)
-			if err != nil {
-				report.Refusal = err.Error()
-			}
+			refusals = append(refusals, err)
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		report.Refusal = err.Error()
 	}
 	return json.NewEncoder(os.Stdout).Encode(report)
 }

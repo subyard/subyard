@@ -64,25 +64,10 @@ with_pair_lock() (
 
 write_key() { with_pair_lock key_operation apply "$1"; }
 
-# host_keys classifies the owner account's authorized_keys against the guest grants.
-host_keys() {
-  local owner guest state=unknown
-  owner=$(owner_fingerprint) || die 'could not read the managed owner public key fingerprint'
-  [ -x "${native:?}" ] || die 'Herdr profile helper is missing from the built runtime'
-  # The guest read only refines the preview; the guest key operation decides at apply.
-  if yard_running && guest=$(as_dev sh -c 'cat -- "$HOME/.ssh/authorized_keys"' 2>/dev/null); then
-    state=known
-  fi
-  if [ "$state" = known ]; then
-    printf '%s\n' "$guest" | "$native" host-keys "${SUBYARD_OPERATOR_HOME:-}" "$owner" known "$@"
-  else
-    "$native" host-keys "${SUBYARD_OPERATOR_HOME:-}" "$owner" unknown "$@" < /dev/null
-  fi
-}
-
-# host_pair_report collects every independent refusal before it returns the key report.
+# host_pair_report runs the boundary check: the host helper collects the refusals found
+# here with its own findings and returns the key report.
 host_pair_report() {
-  local report refusal
+  local owner='' list state=unknown report='' refusal=''
   local -a refusals=()
   mapfile -t refusals < <(allowed_refusals)
   if [ "$YARD_KIND" = container ] && [ "$NESTED_E2E_VMS" != 1 ]; then
@@ -92,10 +77,28 @@ host_pair_report() {
       refusals+=('Herdr SSH ingress is not ready. Run yard herdr up.')
     fi
   fi
-  report=$(host_keys "${pair_selection[@]}") || die 'could not classify the owner account authorized_keys'
-  refusal=$(jq -er .refusal <<< "$report") || die 'invalid Herdr host key report'
-  [ -z "$refusal" ] || refusals+=("$refusal")
-  [ "${#refusals[@]}" -eq 0 ] || die "$(printf '%s\n' "${refusals[@]}")"
+  owner=$(owner_fingerprint 2>/dev/null) || owner=''
+  # The guest helper's bounded list only refines the preview; its key operation decides at apply.
+  if [ -n "$owner" ] && yard_running && yexec test -x "${helper:?}" &&
+    list=$(as_dev "$helper" keys apply list "$owner" 2>/dev/null); then
+    state=known
+  fi
+  local -a arguments=()
+  for refusal in "${refusals[@]}"; do arguments+=(--refusal "$refusal"); done
+  arguments+=("${SUBYARD_OPERATOR_HOME:-}" "$owner" "$state" "${pair_selection[@]}")
+  if [ ! -x "${native:?}" ]; then
+    refusals+=('Herdr profile helper is missing from the built runtime')
+  elif [ "$state" = known ]; then
+    report=$(printf '%s\n' "$list" | "$native" host-keys "${arguments[@]}") || report=''
+  else
+    report=$("$native" host-keys "${arguments[@]}" < /dev/null) || report=''
+  fi
+  if [ -x "$native" ] && ! refusal=$(jq -er .refusal <<< "$report" 2>/dev/null); then
+    refusals+=('could not classify the owner account authorized_keys')
+    report=''
+  fi
+  if [ -z "$report" ]; then die "$(printf '%s\n' "${refusals[@]}")"; fi
+  [ -z "$refusal" ] || die "$refusal"
   printf '%s\n' "$report"
 }
 
@@ -121,6 +124,9 @@ host_pair_list() {
   fi
 }
 
+# host_pair_grant re-reads the selection. The engine refreshes the assessment after
+# confirmation and refuses changed consequences, so only the owner account itself can
+# change the host file in the remaining window, and that account administers Incus.
 host_pair_grant() {
   local report operation=add key label fingerprint status
   report=$(host_pair_report)

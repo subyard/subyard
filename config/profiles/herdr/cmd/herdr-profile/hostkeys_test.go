@@ -50,6 +50,25 @@ func rsaKey(t *testing.T) ssh.PublicKey {
 	return key
 }
 
+// guestGrants returns what host-keys parses from the guest helper's list output.
+func guestGrants(contents []byte, owner string) map[string]keyLine {
+	var list bytes.Buffer
+	listKeys(&list, contents, owner)
+	return parseGuestGrants(list.Bytes())
+}
+
+func securityKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	wire := ssh.Marshal(struct {
+		Name, Key, Application string
+	}{"sk-ssh-ed25519@openssh.com", string(bytes.Repeat([]byte{9}, ed25519.PublicKeySize)), "ssh:"})
+	key, err := ssh.ParsePublicKey(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 func statuses(keys []hostKey) string {
 	var out []string
 	for _, entry := range keys {
@@ -72,28 +91,31 @@ func TestHostKeysClassifyOnlyBareNonOwnerKeys(t *testing.T) {
 		authorizedLine(publicKey(t, 7), "cert-authority ", "ca") +
 		certificateLine(t, publicKey(t, 8)) +
 		"garbage line\n" +
+		", " + authorizedLine(publicKey(t, 10), "", "comma") +
 		authorizedLine(duplicate, "restrict ", "first") +
 		authorizedLine(duplicate, "", "second") +
-		authorizedLine(duplicate, "", "third")
+		authorizedLine(duplicate, "", "third") +
+		authorizedLine(securityKey(t), "", "yubikey") +
+		authorizedLine(securityKey(t), "no-touch-required ", "yubikey")
 	ownerFP := ssh.FingerprintSHA256(owner)
 	guest, _, err := planKeyChange([]byte(authorizedLine(owner, "", "owner")+authorizedLine(unmanaged, "", "manual")),
 		ssh.MarshalAuthorizedKey(granted), ownerFP, "add", "desk")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, unrecognized := classifyHostKeys([]byte(host), guest, true, ownerFP)
+	keys, unrecognized := classifyHostKeys([]byte(host), guestGrants(guest, ownerFP), ownerFP)
 	want := "subyard-owner=skipped:owner user-laptop=new desk=granted manual=unmanaged office=skipped:options " +
-		"ca=skipped:options cert=skipped:certificate second=new"
+		"ca=skipped:options cert=skipped:certificate second=new yubikey=new"
 	if got := statuses(keys); got != want {
 		t.Fatalf("statuses:\n got %s\nwant %s", got, want)
 	}
-	if fmt.Sprint(unrecognized) != "[11]" {
+	if fmt.Sprint(unrecognized) != "[11 12]" {
 		t.Fatalf("unrecognized lines: %v", unrecognized)
 	}
 	if keys[1].Key != strings.TrimSpace(string(ssh.MarshalAuthorizedKey(fresh))) || keys[4].Key != "" {
 		t.Fatalf("offered key text: %+v", keys)
 	}
-	unknown, _ := classifyHostKeys([]byte(host), nil, false, ownerFP)
+	unknown, _ := classifyHostKeys([]byte(host), nil, ownerFP)
 	if unknown[1].Status != "unknown" || unknown[2].Status != "unknown" || unknown[0].Status != "skipped:owner" {
 		t.Fatalf("unreadable guest: %s", statuses(unknown))
 	}
@@ -126,7 +148,7 @@ func TestHostKeySelectionCollectsEveryRefusal(t *testing.T) {
 	ownerFP := ssh.FingerprintSHA256(owner)
 	host := authorizedLine(owner, "", "owner") + authorizedLine(fresh, "", "laptop") +
 		authorizedLine(unmanaged, "", "manual") + authorizedLine(restricted, "restrict ", "office")
-	keys, _ := classifyHostKeys([]byte(host), []byte(authorizedLine(unmanaged, "", "manual")), true, ownerFP)
+	keys, _ := classifyHostKeys([]byte(host), guestGrants([]byte(authorizedLine(unmanaged, "", "manual")), ownerFP), ownerFP)
 	missing := ssh.FingerprintSHA256(publicKey(t, 9))
 	selected, err := selectHostKeys(keys, "select", []string{
 		ssh.FingerprintSHA256(fresh), missing, ownerFP, ssh.FingerprintSHA256(unmanaged),
@@ -167,7 +189,7 @@ func TestHostKeyGrantRoundTripsThroughGuestKeys(t *testing.T) {
 	ownerFP := ssh.FingerprintSHA256(owner)
 	host := []byte(authorizedLine(owner, "", "owner") + authorizedLine(fresh, "", "user@laptop"))
 	guest := []byte(authorizedLine(owner, "", "owner"))
-	keys, _ := classifyHostKeys(host, guest, true, ownerFP)
+	keys, _ := classifyHostKeys(host, guestGrants(guest, ownerFP), ownerFP)
 	selected, err := selectHostKeys(keys, "all", nil)
 	if err != nil || len(selected) != 1 {
 		t.Fatalf("select: %+v, %v", selected, err)
@@ -177,7 +199,7 @@ func TestHostKeyGrantRoundTripsThroughGuestKeys(t *testing.T) {
 		!bytes.HasSuffix(next, []byte(" subyard-herdr:user-laptop\n")) {
 		t.Fatalf("add: %+v, %v, %q", change, err, next)
 	}
-	again, _ := classifyHostKeys(host, next, true, ownerFP)
+	again, _ := classifyHostKeys(host, guestGrants(next, ownerFP), ownerFP)
 	if again[1].Status != "granted" {
 		t.Fatalf("after grant: %s", statuses(again))
 	}
@@ -190,18 +212,18 @@ func TestReadAuthorizedKeysFollowsStrictModes(t *testing.T) {
 	home := testkit.TempDir(t)
 	dir := filepath.Join(home, ".ssh")
 	path := filepath.Join(dir, "authorized_keys")
-	if _, _, err := readAuthorizedKeys(home); err == nil {
+	if _, _, err := readAuthorizedKeys(home, "owner account"); err == nil {
 		t.Fatal("missing SSH directory accepted")
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, path, []byte("ssh-ed25519 AAAA\n"), 0o620)
-	if _, _, err := readAuthorizedKeys(home); err == nil {
+	if _, _, err := readAuthorizedKeys(home, "owner account"); err == nil {
 		t.Fatal("group-writable authorized_keys accepted")
 	}
 	testkit.WriteFile(t, path, []byte("ssh-ed25519 AAAA\n"), 0o644)
-	if _, contents, err := readAuthorizedKeys(home); err != nil || string(contents) != "ssh-ed25519 AAAA\n" {
+	if _, contents, err := readAuthorizedKeys(home, "owner account"); err != nil || string(contents) != "ssh-ed25519 AAAA\n" {
 		t.Fatalf("readable authorized_keys: %q, %v", contents, err)
 	}
 }

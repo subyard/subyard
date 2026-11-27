@@ -117,10 +117,10 @@ func planKeyChange(contents, input []byte, owner, operation, argument string) ([
 const authorizedKeysLimit = 1 << 20
 
 // readAuthorizedKeys reads the account's authorized_keys with sshd's StrictModes rules.
-func readAuthorizedKeys(home string) (string, []byte, error) {
+func readAuthorizedKeys(home, account string) (string, []byte, error) {
 	dir := filepath.Join(home, ".ssh")
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
-		return "", nil, errors.New("unsafe or missing account SSH directory")
+		return "", nil, fmt.Errorf("unsafe or missing %s SSH directory", account)
 	}
 	path := filepath.Join(dir, "authorized_keys")
 	uid := uint32(os.Getuid())
@@ -135,6 +135,28 @@ func fingerprintDigest(fingerprint string) string {
 	return hex.EncodeToString(digest)
 }
 
+// listKeys prints the non-owner grants; host-keys parses this output as the guest state.
+func listKeys(w io.Writer, contents []byte, owner string) {
+	for i, line := range bytes.Split(contents, []byte{10}) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 || trimmed[0] == '#' {
+			continue
+		}
+		info := parseKeyLine(line)
+		if info.fingerprint == owner {
+			continue
+		}
+		switch {
+		case info.marked:
+			fmt.Fprintf(w, "%d  %s  %s\n", i+1, info.fingerprint, info.label)
+		case info.fingerprint != "":
+			fmt.Fprintf(w, "%d  %s  unmanaged\n", i+1, info.fingerprint)
+		default:
+			fmt.Fprintf(w, "%d  unrecognized line\n", i+1)
+		}
+	}
+}
+
 func manageKeys(args []string) error {
 	if len(args) < 3 || !publicFingerprint.MatchString(args[2]) {
 		return errors.New("managed owner SSH fingerprint is unavailable")
@@ -144,29 +166,12 @@ func manageKeys(args []string) error {
 	if err != nil {
 		return err
 	}
-	path, contents, err := readAuthorizedKeys(home)
+	path, contents, err := readAuthorizedKeys(home, "development user")
 	if err != nil {
 		return err
 	}
 	if operation == "list" && len(args) == 3 && phase == "apply" {
-		for i, line := range bytes.Split(contents, []byte{10}) {
-			trimmed := bytes.TrimSpace(line)
-			if len(trimmed) == 0 || trimmed[0] == '#' {
-				continue
-			}
-			info := parseKeyLine(line)
-			if info.fingerprint == owner {
-				continue
-			}
-			switch {
-			case info.marked:
-				fmt.Printf("%d  %s  %s\n", i+1, info.fingerprint, info.label)
-			case info.fingerprint != "":
-				fmt.Printf("%d  %s  unmanaged\n", i+1, info.fingerprint)
-			default:
-				fmt.Printf("%d  unrecognized line\n", i+1)
-			}
-		}
+		listKeys(os.Stdout, contents, owner)
 		return nil
 	}
 	if len(args) != 4 || (phase != "prepare" && phase != "apply") {

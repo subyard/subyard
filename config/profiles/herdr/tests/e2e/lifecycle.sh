@@ -232,6 +232,36 @@ fingerprint="$(ssh-keygen -E sha256 -lf "$state/b.pub" | awk '{print $2}')"
 yard herdr pair --revoke "$fingerprint" --yes > "$state/revoke.log" 2>&1
 reject_key b
 
+stage 'verify pairing from the host account authorized_keys'
+# The VM account stands in for the owner host account; its file is restored afterwards.
+host_keys="$HOME/.ssh/authorized_keys"
+[ -d "$HOME/.ssh" ] || mkdir -m 0700 "$HOME/.ssh"
+[ -e "$host_keys" ] || install -m 0600 /dev/null "$host_keys"
+cp -p "$host_keys" "$state/host-authorized-keys"
+ssh-keygen -q -t ed25519 -N '' -C host-c -f "$state/c"
+ssh-keygen -q -t ed25519 -N '' -C host-d -f "$state/d"
+ssh-keygen -q -t rsa -b 3072 -N '' -C laptop-rsa -f "$state/e"
+{ cat "$state/a.pub" "$state/c.pub" "$state/e.pub"; printf 'restrict %s' "$(cat "$state/d.pub")"; printf '\n'; } >> "$host_keys"
+guest runuser -u dev -- sh -c 'cat >> "$HOME/.ssh/authorized_keys"' < "$state/e.pub"
+key_fp() { ssh-keygen -E sha256 -lf "$state/$1.pub" | awk '{print $2}'; }
+yard herdr pair --from-host > "$state/from-host.log" 2>&1
+for expected in "$(key_fp a)  a  granted" "$(key_fp c)  host-c  new" "$(key_fp e)  laptop-rsa  unmanaged" \
+  "$(key_fp d)  host-d  skipped:options"; do
+  grep -Fxq "$expected" "$state/from-host.log" || fail "host key preview is missing: $expected"
+done
+if yard herdr pair --from-host "$(key_fp e)" "$(key_fp d)" --yes > "$state/from-host-refused.log" 2>&1; then
+  fail 'an unmanaged or restricted host key was paired'
+fi
+grep -Fq 'already authorized in the yard outside Herdr' "$state/from-host-refused.log"
+grep -Fq 'has authorization options' "$state/from-host-refused.log"
+reject_key c
+yard herdr pair --from-host "$(key_fp c)" --yes > "$state/from-host-pair.log" 2>&1
+grep -Fxq "Paired $(key_fp c)  host-c" "$state/from-host-pair.log"
+key_login c
+yard herdr pair --revoke "$(key_fp c)" --yes > "$state/from-host-revoke.log" 2>&1
+reject_key c
+cat "$state/host-authorized-keys" > "$host_keys"
+
 stage 'verify up and update hand an older Core over to the pin with a live terminal'
 terminal_pid="$(cat "$state/terminal-pid")"
 core_pid() { yard herdr status | sed -nE 's/^Core: .*\(PID ([0-9]+), .*/\1/p'; }

@@ -30,19 +30,29 @@ while the yard is running. Connected sessions can persist.
 
 To reuse keys that may already log in to the owner host account, run
 `yard herdr pair --from-host`. It lists each key in that account's
-`~/.ssh/authorized_keys` as `new`, `granted`, `unmanaged` or `skipped`, with a
-label derived from the key comment. `unmanaged` marks a key the yard already
-accepts through a line outside Herdr; pairing leaves that line unchanged, and
-`--list` shows it the same way. `yard herdr pair --from-host --all` pairs
-every new key after one confirmation, and `--from-host SHA256:...` pairs only
-the listed fingerprints. Only bare public-key lines are offered. Lines with
-options such as `from=`, `command=` or `restrict`, certificate authorities,
-certificates and the Subyard owner key are skipped, because Herdr bypasses the
-host's SSH policy. To pair a skipped client key, review it and use `--key`,
-which also sets a custom label. Removing a key
-from the host file does not revoke its Herdr grant; use `--revoke`. Keys from
-`AuthorizedKeysCommand`, other `AuthorizedKeysFile` paths or Tailscale SSH are
-not read.
+`~/.ssh/authorized_keys` with a label derived from the key comment and one
+status:
+
+- `new`: the key can be paired.
+- `granted`: the key already has a Herdr grant; the label is the grant's.
+- `unmanaged`: the yard already accepts the key through a line outside Herdr.
+  Pairing refuses it and leaves that line unchanged; `--list` shows it the same
+  way.
+- `unknown`: the guest grants could not be read, for example before `up`
+  installed the helper. Pairing still checks the guest when it applies.
+- `skipped:owner`, `skipped:options` or `skipped:certificate`: the key is never
+  offered.
+
+Lines that are not public keys are reported as `line N  unrecognized`.
+`yard herdr pair --from-host --all` pairs every new key after one
+confirmation, and `--from-host SHA256:...` pairs only the listed fingerprints.
+Only bare public-key lines are offered. Lines with options such as `from=`,
+`command=`, `restrict` or `cert-authority`, certificates and the Subyard owner
+key are skipped, because Herdr bypasses the host's SSH policy. To pair a skipped
+client key, review it and use `--key`, which also sets a custom label. Removing
+a key from the host file does not revoke its Herdr grant; use `--revoke`. Keys
+from `AuthorizedKeysCommand`, other `AuthorizedKeysFile` paths or Tailscale SSH
+are not read.
 
 The preferred owner port is `6768`. The allocator can choose a different port.
 Use `yard herdr status` to find the endpoint and grant TCP access to that port in
