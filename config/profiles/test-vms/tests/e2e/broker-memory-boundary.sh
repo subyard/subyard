@@ -1140,11 +1140,6 @@ OWNER_BASELINE_CAPTURED=1
 ensure_owner_base_image
 # shellcheck disable=SC2034
 OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
-# Telemetry needs two observed guests whose combined RAM exceeds the broker's
-# 2GiB process ceiling, with startup headroom inside its 8GiB controller.
-if [ "$TELEMETRY_ONLY" = 1 ] && [ "$LEASE_EXPIRY" = 0 ]; then
-  OWNER_DIAGNOSTIC_VM_MEMORY=1536MiB
-fi
 install_owner_runtime
 [ -x "$SUBYARD_HOME/runtime/current/config/profiles/github/bin/broker" ] \
   || die 'installed owner runtime lacks its required native GitHub helper'
@@ -1335,9 +1330,9 @@ if [ "$TELEMETRY_ONLY" = 0 ]; then
   assert_guests_outside_broker_budget
   assert_launch_memory_bound
 fi
-runtime_yard -Y test-yard test-vms status --json | jq -e --arg memory "$OWNER_DIAGNOSTIC_VM_MEMORY" '
+runtime_yard -Y test-yard test-vms status --json | jq -e '
   .pool.slots[] | select(.slot_id == "slot-001") |
-    .environment.vm_count == 2 and .environment.memory_per_vm == $memory' >/dev/null \
+    .environment.vm_count == 2 and .environment.memory_per_vm == "2GiB"' >/dev/null \
   || die 'guest allocation exceeding the broker process budget was not held'
 printf '  [ ok ] ready guests release startup RAM promises to host accounting\n'
 if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
