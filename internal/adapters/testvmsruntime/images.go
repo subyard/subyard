@@ -531,12 +531,13 @@ test "$(systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer | tr '\n' '
 	if validationErr == nil {
 		validationErr = validationCtx.Err()
 	}
+	expired := validationCtx.Err() != nil
 	cancelValidation()
 	if ctx.Err() != nil {
 		return result, context.Cause(ctx)
 	}
 	if validationErr != nil {
-		return result, &readinessFailure{Label: "post-upgrade base tool validation", VM: vm, Phase: "base-tools", Budget: cfg.BootTimeout, StartedAt: validationStarted, ObservedAt: builder.Now(), LastProbe: readinessProbeMetadata(validationErr)}
+		return result, &readinessFailure{Label: "post-upgrade base tool validation", VM: vm, Phase: "base-tools", Budget: cfg.BootTimeout, StartedAt: validationStarted, ObservedAt: builder.Now(), LastProbe: readinessProbeMetadata(validationErr), Expired: expired}
 	}
 	manifest, err := builder.guest(ctx, vm, nil, "cat", "/var/lib/subyard/base-manifest.sha256")
 	if err != nil || !imageFingerprint.MatchString(strings.TrimSpace(manifest)) {
