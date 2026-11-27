@@ -37,7 +37,7 @@ if [ "$CHECK_ONLY" = 0 ]; then
 import fcntl,hashlib,os,pathlib,stat,sys,time
 home,runtime,script=sys.argv[1:4];uid=os.getuid()
 lock_root=os.environ.get("SUBYARD_OWNER_LOCK_ROOT","") or "/tmp"
-if not lock_root.startswith("/") or os.path.normpath(lock_root)!=lock_root:
+if not lock_root.startswith("/") or lock_root.startswith("//") or os.path.normpath(lock_root)!=lock_root:
  print("install-runtime-release: SUBYARD_OWNER_LOCK_ROOT must be a clean absolute path",file=sys.stderr);raise SystemExit(2)
 directory=pathlib.Path(lock_root)/("subyard-owner-locks-"+str(uid))
 path=directory/(hashlib.sha256(os.path.normpath(home).encode()).hexdigest()+".lock")

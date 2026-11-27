@@ -759,8 +759,10 @@ the run root instead of accumulating in `/tmp/subyard-owner-locks-<uid>`. A Go t
 refuses owner coordination without that variable; a package whose tests reach it runs
 them through `testkit.RunWithOwnerLockRoot` in its `TestMain`, which provides and removes
 a private root when no runner did; the next test binary removes a root whose binary was
-killed once no process holds it. Handlers that re-enter `yard` inherit the variable.
-Other programs run outside a runner coordinate in `/tmp`, as an installation does.
+killed once no process holds it. Handlers that re-enter `yard` inherit the variable, and a
+shell test run directly gets a root below its own temporary root from `setup_test_context`.
+A test that starts a process with a hand-built environment passes the variable on; the cli
+fixtures fail a test whose data home still coordinated in the shared directory.
 
 A descendant that closes inherited fds and outlives its runner cannot retain the lock;
 it may lose its scratch at the next run. SIGKILL before receipt publication leaves an

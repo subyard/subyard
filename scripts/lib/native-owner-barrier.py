@@ -17,7 +17,7 @@ def inherited_owner_descriptors():
     uid = os.getuid()
     # Test runs relocate owner coordination into their private root.
     root = os.environ.get('SUBYARD_OWNER_LOCK_ROOT', '') or '/tmp'
-    if not root.startswith('/') or os.path.normpath(root) != root:
+    if not root.startswith('/') or root.startswith('//') or os.path.normpath(root) != root:
         raise ValueError('invalid owner lock root')
     parent = Path(root)/('subyard-owner-locks-'+str(uid))
     parent_info = parent.lstat()

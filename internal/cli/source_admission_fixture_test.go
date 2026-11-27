@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
 )
 
@@ -351,7 +352,9 @@ esac
 	writeProfileTestFile(t, filepath.Join(fixtureBin, "systemctl"), []byte(`#!/bin/sh
 case " $* " in *" --user show subyard-github-"*) printf 'LoadState=not-found\nActiveState=inactive\nMainPID=0\nUnitFileState=\n' ;; *) exit 64 ;; esac
 `), 0700)
-	processEnvironment := []string{"HOME=" + environmentValue(environment, "HOME"), "PATH=" + fixtureBin + ":/usr/bin:/bin", "SUBYARD_OPERATOR_HOME=" + environmentValue(environment, "HOME"), "SUBYARD_CONFIG_HOME=" + home, "SUBYARD_HOME=" + data, "YARD_RUNTIME_ROOT=" + runtimeRoot, "SUBYARD_REPOSITORY_ROOT=" + root, "SUBYARD_CONFIG_DIR=" + filepath.Join(root, "config"), "SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath, "SUBYARD_POWER_RECONCILER_PATH=" + filepath.Join(original, "absent-power"), "SUBYARD_POWER_UNIT_PATH=" + filepath.Join(original, "absent-unit")}
+	processEnvironment := []string{"HOME=" + environmentValue(environment, "HOME"), "PATH=" + fixtureBin + ":/usr/bin:/bin", "SUBYARD_OPERATOR_HOME=" + environmentValue(environment, "HOME"), "SUBYARD_CONFIG_HOME=" + home, "SUBYARD_HOME=" + data, "YARD_RUNTIME_ROOT=" + runtimeRoot, "SUBYARD_REPOSITORY_ROOT=" + root, "SUBYARD_CONFIG_DIR=" + filepath.Join(root, "config"), "SUBYARD_NO_AUDIT=1", "SUBYARD_INCUS_SOCKET=" + server.SocketPath, "SUBYARD_POWER_RECONCILER_PATH=" + filepath.Join(original, "absent-power"), "SUBYARD_POWER_UNIT_PATH=" + filepath.Join(original, "absent-unit"),
+		uninstall.OwnerLockRootEnvironment + "=" + os.Getenv(uninstall.OwnerLockRootEnvironment)}
+	t.Cleanup(func() { testkit.AssertNoSharedOwnerLock(t, data) })
 	invoke := func(request releasetransition.ProcessRequest, grant string) releasetransition.ProcessResponse {
 		t.Helper()
 		raw, err := json.Marshal(request)

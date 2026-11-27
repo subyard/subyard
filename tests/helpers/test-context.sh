@@ -23,6 +23,11 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export SUBYARD_CONFIG_DIR="$root/public-config"
   export SUBYARD_CONFIG_HOME="$root/config"
   export SUBYARD_HOME="$root/subyard"
+  # A direct run coordinates its temporary data home under its own root.
+  if [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ]; then
+    install -d -m 0700 "$root/owner-locks"
+    export SUBYARD_OWNER_LOCK_ROOT="$root/owner-locks"
+  fi
   export SUBYARD_STATE_DIR="$SUBYARD_HOME/state"
   export SUBYARD_ENGINE_CONTEXT=1
   export SUBYARD_ENGINE_CONTEXT_SCHEMA=1

@@ -61,3 +61,43 @@ func TestOwnerLockRootSweepsAbandonedRoots(t *testing.T) {
 		}
 	}
 }
+
+// A sweep that runs while other binaries take their roots never removes one:
+// a holder appears under its swept name only once it is locked.
+func TestOwnerLockRootSweepSparesStartingRoots(t *testing.T) {
+	parent := TempDir(t)
+	done := make(chan struct{})
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				sweepOwnerLockRoots(parent)
+			}
+		}
+	}()
+	var holders []*os.File
+	var roots []string
+	for index := 0; index < 200; index++ {
+		root, err := os.MkdirTemp(parent, ownerLockRootPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		holder, err := holdOwnerLockRoot(root)
+		if err != nil {
+			t.Fatalf("start %d: %v", index, err)
+		}
+		holders, roots = append(holders, holder), append(roots, root)
+	}
+	close(done)
+	<-swept
+	for index, root := range roots {
+		if _, err := os.Stat(filepath.Join(root, ownerLockRootHolder)); err != nil {
+			t.Errorf("live root %d removed: %v", index, err)
+		}
+		_ = holders[index].Close()
+	}
+}

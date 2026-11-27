@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestProfileDefaultsAndExplicitSelection(t *testing.T) {
@@ -243,6 +244,7 @@ peer_clean
 		"SUBYARD_REPOSITORY_ROOT=" + repository, "SUBYARD_NO_AUDIT=1", "PEER_NATIVE_ENGINE=" + engine, "PEER_CONFIG_STATE=" + filepath.Join(peer, "ssh-config-state"), "PEER_CONFIG_BACKUP=" + filepath.Join(peer, "ssh-config-backup"),
 		"SUBYARD_E2E_VM=2", "PEER_ROOT=" + peer, "PEER_REAL_YARD_MARKER=" + filepath.Join(peer, "marker"), "MARKER=peer-fixture", "OWNER_BASE_IMAGE=fixture", "PEER_YARD_ENTRY=" + entry, "PEER_KEYS_CONSUMER_ROOT=" + consumer, "CALLS=" + calls,
 		"PEER_DATA_ROOT=" + filepath.Join(root, "data"), "PEER_HOST_BASE=" + filepath.Join(root, "host"), "PEER_KEYS_ROOT=" + filepath.Join(root, "keys"), "PEER_KEYS_TOOLS=" + filepath.Join(root, "tools"), "PEER_KEYS_SYSTEMD_DIR=" + filepath.Join(root, "key units"),
+		uninstall.OwnerLockRootEnvironment + "=" + os.Getenv(uninstall.OwnerLockRootEnvironment),
 		"PEER_YARD_STATE=" + filepath.Join(peer, "yard-state"), "PEER_YARD_BACKUP=" + filepath.Join(peer, "yard-backup"), "PEER_PROFILE_STATE=" + filepath.Join(peer, "profile-state"), "PEER_PROFILE_BACKUP=" + filepath.Join(peer, "profile-backup")}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("peer fixture: %v: %s", err, output)

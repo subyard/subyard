@@ -1,11 +1,14 @@
 package testkit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -24,7 +27,9 @@ func RunWithOwnerLockRoot(m *testing.M) int {
 	if os.Getenv(ownerLockRootEnvironment) != "" {
 		return m.Run()
 	}
-	return runWithOwnerLockRoot("/tmp", m.Run)
+	// A helper binary started without the variable keeps its root in the run's
+	// temporary directory when it has one.
+	return runWithOwnerLockRoot(os.TempDir(), m.Run)
 }
 
 func runWithOwnerLockRoot(parent string, run func() int) int {
@@ -60,13 +65,19 @@ func runWithOwnerLockRoot(parent string, run func() int) int {
 }
 
 // holdOwnerLockRoot keeps an exclusive flock for the life of the test binary.
-// The descriptor is close-on-exec, so helper processes never inherit it.
+// The holder appears under its swept name only once locked. The descriptor is
+// close-on-exec, so helper processes never inherit it.
 func holdOwnerLockRoot(root string) (*os.File, error) {
-	holder, err := os.OpenFile(filepath.Join(root, ownerLockRootHolder), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	pending := filepath.Join(root, ownerLockRootHolder+".pending")
+	holder, err := os.OpenFile(pending, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = holder.Close()
+		return nil, err
+	}
+	if err := os.Rename(pending, filepath.Join(root, ownerLockRootHolder)); err != nil {
 		_ = holder.Close()
 		return nil, err
 	}
@@ -95,6 +106,20 @@ func sweepOwnerLockRoots(parent string) {
 		}
 		_ = removeOwnerLockRoot(root)
 		_ = holder.Close()
+	}
+}
+
+// AssertNoSharedOwnerLock fails the test when a data home it used coordinated
+// in the shared /tmp namespace, where nothing removes the files.
+func AssertNoSharedOwnerLock(t testing.TB, dataHome string) {
+	t.Helper()
+	if dataHome == "" {
+		return
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(dataHome)))
+	path := filepath.Join("/tmp", "subyard-owner-locks-"+strconv.Itoa(os.Getuid()), hex.EncodeToString(digest[:])+".lock")
+	if _, err := os.Lstat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("data home %s coordinated in the shared /tmp namespace (%s): pass %s to the process", dataHome, path, ownerLockRootEnvironment)
 	}
 }
 

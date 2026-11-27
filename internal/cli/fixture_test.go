@@ -191,6 +191,7 @@ func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 		uninstall.OwnerLockRootEnvironment+"="+os.Getenv(uninstall.OwnerLockRootEnvironment))
 	fixture.Environment = slices.Clip(fixture.Environment)
 	fixture.Home, fixture.ConfigHome, fixture.DataHome = fixture.Env("HOME"), fixture.Env("SUBYARD_CONFIG_HOME"), fixture.Env("SUBYARD_HOME")
+	t.Cleanup(func() { testkit.AssertNoSharedOwnerLock(t, fixture.DataHome) })
 	for _, home := range []string{fixture.Home, fixture.ConfigHome, fixture.DataHome} {
 		if !filepath.IsAbs(home) || !slices.ContainsFunc(fixture.owned, func(owned string) bool { return below(owned, home) }) {
 			t.Fatalf("fixture home %q is not below the fixture's directories", home)

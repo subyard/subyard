@@ -62,6 +62,19 @@ done
   || { printf 'install runtime rollback: shared owner lock directory changed\n' >&2; exit 1; }
 printf 'ok: owner barrier repairs its lock directory mode\n'
 
+# The installer reads the lock root as the engine does: a relative, unclean or
+# double-slash root is refused before anything is created.
+for root in relative/locks "$TMP/lock-root/../lock-root" "/$TMP/lock-root"; do
+  set +e
+  SUBYARD_OWNER_LOCK_ROOT="$root" SUBYARD_HOME="$TMP/home" ENGINE_CAPTURE="$capture" "$installer" \
+    --runtime-root "$runtime_root" --rollback >"$TMP/stdout" 2>"$TMP/stderr"
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] && grep -Fq 'SUBYARD_OWNER_LOCK_ROOT must be a clean absolute path' "$TMP/stderr" \
+    || { printf 'install runtime rollback: lock root %s accepted (status=%s)\n' "$root" "$status" >&2; exit 1; }
+done
+printf 'ok: owner barrier refuses an unsafe lock root\n'
+
 # Put a harmless absolute member first, then enough names to exceed the pipe buffer.
 member="$TMP/$(printf '%0100d' 0)"
 touch "$member"

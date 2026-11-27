@@ -209,7 +209,8 @@ printf 'ok: CLI help, globals and profile completion contract\n'
   for path in source operator; do cp -a "$shared_root/$path" "$shared_root/$path.before"; done
   config_environment=(env -i "PATH=$PATH" "HOME=$operator" "SUBYARD_OPERATOR_HOME=$operator"
     "SUBYARD_CONFIG_HOME=$config_home" "SUBYARD_HOME=$data_home" "SUBYARD_NO_AUDIT=1"
-    "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0")
+    "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0"
+    "SUBYARD_OWNER_LOCK_ROOT=${SUBYARD_OWNER_LOCK_ROOT:-}")
   shared_yard() { "${config_environment[@]}" "$asset_root/bin/yard" "$@"; }
   shared_terminal() {
     local command_line
@@ -238,4 +239,8 @@ printf 'ok: CLI help, globals and profile completion contract\n'
     && [ "$(git -C "$source" rev-parse HEAD)" = "$original_head" ] || fail 'shared onboarding changed Git inputs'
   [ "$(shared_yard config sync path)" = "$checkout" ] || fail 'wrong authoritative checkout'
   shared_yard config sync --check >/dev/null
+  # The fixture data home coordinates under the run's lock root, never in /tmp.
+  shared_lock="/tmp/subyard-owner-locks-$(id -u)/$(printf '%s' "$data_home" | sha256sum | cut -d ' ' -f 1).lock"
+  [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ] || [ ! -e "$shared_lock" ] \
+    || fail 'fixture data home coordinated in the shared /tmp namespace'
 )
