@@ -12,35 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// The fixture holds digests produced by `git show v0.30.0:scripts/lib/teardown-plan.py`
-// (artifact_digest) for escaped names, links and extreme metadata.
-func TestGuardDigestsMatchFrozenReleasedHelper(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("testdata", "v0.30.0-artifact-digests.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cases []struct {
-		Entries []Entry
-		Binding string
-	}
-	if err := json.Unmarshal(body, &cases); err != nil || len(cases) != 3 {
-		t.Fatal("invalid frozen digest fixture", err)
-	}
-	for index, fixture := range cases {
-		if got, err := digest(fixture.Entries); err != nil || got != fixture.Binding {
-			t.Fatalf("case %d: digest %q, released %q (%v)", index, got, fixture.Binding, err)
-		}
-	}
-}
-
-func TestRecoverySchemaAcceptsReleasedAndCurrentOnly(t *testing.T) {
+func TestRecoverySchemaAcceptsCurrentOnly(t *testing.T) {
 	_, plan := recoveryFixture(t)
-	for schema, accepted := range map[int]bool{0: false, 1: true, RecoverySchema: true, RecoverySchema + 1: false} {
+	for schema, accepted := range map[int]bool{0: false, 1: false, RecoverySchema: true, RecoverySchema + 1: false} {
 		plan.Schema = schema
 		if err := plan.Validate(plan.Installation.OperatorUID); (err == nil) != accepted {
 			t.Fatalf("schema %d: %v", schema, err)
@@ -48,72 +26,41 @@ func TestRecoverySchemaAcceptsReleasedAndCurrentOnly(t *testing.T) {
 	}
 }
 
-// Schema 1 facts keep their drift guards under the Go guard: unchanged approved
-// facts are accepted, replacement, symbolic links and additions refuse. The
-// full-uninstall lane resumes an actual v0.30.0-written checkpoint end to end.
-func TestSchemaOneFactsKeepDriftGuards(t *testing.T) {
-	for _, drift := range []string{"unchanged", "replaced", "symlinked", "foreign"} {
-		t.Run(drift, func(t *testing.T) {
-			store, plan := recoveryFixture(t)
-			owned := filepath.Join(store.Directory, "owned")
-			if err := os.MkdirAll(filepath.Join(owned, "nested"), 0700); err != nil {
+// A schema-1 plan saved by v0.30.0 or older refuses before any resume step and
+// names its retained release, or v0.32.0 once that launcher is gone.
+func TestRecoveryStoreRefusesSchemaOneWithNextStep(t *testing.T) {
+	store, plan := recoveryFixture(t)
+	plan.Schema = 1
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(store.Directory, "plan.json"), body, 0600)
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	for _, retained := range []bool{false, true} {
+		if retained {
+			if err := os.MkdirAll(filepath.Dir(launcher), 0700); err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, filepath.Join(owned, "nested", "data"), []byte("approved"), 0600)
-			tree, err := Capture(owned)
-			if err != nil {
-				t.Fatal(err)
+			testkit.WriteFile(t, launcher, []byte("retained release"), 0700)
+		}
+		next := "install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume " + store.Directory
+		if retained {
+			next = "resume it with its retained release:\n  " + launcher + " _uninstall-resume " + store.Directory
+		}
+		for name, read := range map[string]func() error{
+			"read":   func() error { _, _, err := store.Read(); return err },
+			"resume": func() error { _, err := store.ReadForResume(t.Context()); return err },
+		} {
+			err := read()
+			var refusal LegacyRecoverySchemaError
+			if !errors.As(err, &refusal) || !strings.HasSuffix(err.Error(), next) || !strings.Contains(err.Error(), "Retain "+store.Directory) {
+				t.Fatalf("retained=%v %s: %v", retained, name, err)
 			}
-			artifact, err := CaptureArtifact(filepath.Join(owned, "nested", "data"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			plan.Schema, plan.Trees = 1, []Tree{tree}
-			plan.Services = []RecoveryService{{Scope: "user", Units: []string{"subyard-fixture.service"}, Artifacts: []ports.TeardownArtifact{artifact}}}
-			body, err := json.Marshal(plan)
-			if err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, filepath.Join(store.Directory, "plan.json"), body, 0600)
-			saved, _, err := store.Read()
-			if err != nil || saved.Schema != 1 {
-				t.Fatalf("released store was not resumable: %v", err)
-			}
-			switch drift {
-			case "replaced":
-				testkit.WriteFile(t, filepath.Join(owned, "nested", "data.next"), []byte("approved"), 0600)
-				if err := os.Rename(filepath.Join(owned, "nested", "data.next"), filepath.Join(owned, "nested", "data")); err != nil {
-					t.Fatal(err)
-				}
-			case "symlinked":
-				if err := os.Rename(filepath.Join(owned, "nested"), filepath.Join(store.Directory, "moved")); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(store.Directory, "moved"), filepath.Join(owned, "nested")); err != nil {
-					t.Fatal(err)
-				}
-			case "foreign":
-				testkit.WriteFile(t, filepath.Join(owned, "nested", "foreign"), []byte("foreign"), 0600)
-			}
-			approved := saved.Services[0].Artifacts[0]
-			guardErr := classify("guard-artifact", guardArtifact(approved.Path, approved.Binding, approved.Entries, nil))
-			treeErr := saved.Trees[0].Remove()
-			if drift == "unchanged" {
-				if guardErr != nil || treeErr != nil {
-					t.Fatalf("unchanged released facts refused: %v %v", guardErr, treeErr)
-				}
-				if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("approved released tree remains", err)
-				}
-				return
-			}
-			if drift != "foreign" && !errors.Is(guardErr, domain.ErrPlanStale) || !errors.Is(treeErr, domain.ErrPlanStale) {
-				t.Fatalf("%s accepted: artifact=%v tree=%v", drift, guardErr, treeErr)
-			}
-			if _, err := os.Lstat(filepath.Join(owned, "nested")); err != nil {
-				t.Fatal("drifted released tree was deleted", err)
-			}
-		})
+		}
+	}
+	if saved, err := os.ReadFile(filepath.Join(store.Directory, "plan.json")); err != nil || !bytes.Equal(saved, body) {
+		t.Fatal("refused schema-1 plan changed", err)
 	}
 }
 

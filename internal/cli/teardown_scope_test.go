@@ -112,7 +112,7 @@ func TestTeardownPendingRecoveryRejectsOriginalInvalidFlags(t *testing.T) {
 		if err := os.Mkdir(directory, 0700); err != nil {
 			t.Fatal(err)
 		}
-		original := uninstall.RecoveryPlan{Schema: 1, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home, ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}, Stage: uninstall.RecoveryPrepared}
+		original := uninstall.RecoveryPlan{Schema: uninstall.RecoverySchema, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home, ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}, Stage: uninstall.RecoveryPrepared}
 		body, _ := json.Marshal(original)
 		path := filepath.Join(directory, ".plan-next")
 		fixture.Write(path, string(body), 0600)
@@ -376,7 +376,7 @@ func TestTeardownFirstPublicationAdmissionPrecedesContextAndConsent(t *testing.T
 				t.Fatal(err)
 			}
 			installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: home, ConfigHome: filepath.Join(root, "state"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")}
-			original := uninstall.RecoveryPlan{Schema: 1, Installation: installation, Stage: uninstall.RecoveryPrepared}
+			original := uninstall.RecoveryPlan{Schema: uninstall.RecoverySchema, Installation: installation, Stage: uninstall.RecoveryPrepared}
 			body, _ := json.Marshal(original)
 			if kind == "truncated" {
 				body = body[:len(body)/2]

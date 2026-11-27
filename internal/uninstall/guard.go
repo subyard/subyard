@@ -322,7 +322,7 @@ func digest(entries []Entry) (string, error) {
 	if len(entries) == 0 {
 		return "", nil
 	}
-	// Schema-1 recovery rehashes these exact compact JSON bytes.
+	// Saved recovery plans of earlier releases rehash these exact JSON bytes.
 	payload, err := json.Marshal(entries)
 	if err != nil {
 		return "", err

@@ -106,13 +106,28 @@ func (store RecoveryStore) validateDirectory() error {
 	return nil
 }
 
-// RecoverySchema is written by this engine; Validate also accepts schema 1.
+// RecoverySchema is the only schema this engine writes and resumes. Schema 2
+// marks plans whose retained runtime has only the native guard; engines before
+// it refuse them.
 const RecoverySchema = 2
 
+// LegacyRecoverySchemaError refuses a schema-1 plan saved by v0.30.0 or older.
+// Its retained release resumes it; v0.32.0 is the last release that also does.
+type LegacyRecoverySchemaError struct {
+	Directory string
+	Launcher  string
+}
+
+func (err LegacyRecoverySchemaError) Error() string {
+	refusal := "full uninstall recovery plan schema 1 was saved by Subyard 0.30.0 or older; this release does not resume it. Retain " + err.Directory
+	if err.Launcher != "" {
+		return fmt.Sprintf("%s and resume it with its retained release:\n  %s _uninstall-resume %s", refusal, err.Launcher, err.Directory)
+	}
+	return fmt.Sprintf("%s, install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume %s", refusal, err.Directory)
+}
+
 func (plan RecoveryPlan) Validate(uid uint32) error {
-	// Schema 2 marks plans whose retained runtime has only the native guard;
-	// engines before it refuse them, and schema 1 stores resume unchanged.
-	if plan.Schema != 1 && plan.Schema != RecoverySchema {
+	if plan.Schema != RecoverySchema {
 		return errors.New("unsupported full uninstall recovery schema")
 	}
 	if err := plan.Installation.Validate(plan.Installation.DataHome, uid); err != nil {
@@ -301,7 +316,19 @@ func (store RecoveryStore) readPlan(binding Tree) (RecoveryPlan, error) {
 	if decoder.Decode(&extra) != io.EOF {
 		return plan, errors.New("uninstall recovery plan has trailing data")
 	}
+	if plan.Schema == 1 {
+		return plan, LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+	}
 	return plan, plan.Validate(store.UID)
+}
+
+// retainedLauncher is the store's retained engine, or empty once it is gone.
+func (store RecoveryStore) retainedLauncher() string {
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	if _, err := os.Lstat(launcher); err != nil {
+		return ""
+	}
+	return launcher
 }
 
 // ReadBody binds transport to the original publication, rather than hashing a
@@ -412,10 +439,10 @@ func (store RecoveryStore) Remove() error {
 
 // ResumeHint is the diagnostic of an incomplete removal with its exact retry.
 // Once the retained launcher is gone, any engine of this or a newer release
-// resumes the store; without one on PATH, the operator installs it first.
+// that reads this schema resumes the store; without one on PATH, the operator
+// installs it first.
 func (store RecoveryStore) ResumeHint() string {
-	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	if _, err := os.Lstat(launcher); err == nil {
+	if launcher := store.retainedLauncher(); launcher != "" {
 		return fmt.Sprintf("Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", store.Directory, launcher, store.Directory)
 	}
 	if _, err := exec.LookPath("yard"); err != nil {

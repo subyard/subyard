@@ -351,7 +351,7 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	// confirmed execution before removal, so lost consent cannot hide behind an
 	// unreadable store and this test never needs physical teardown.
 	original := uninstall.RecoveryPlan{
-		Schema: 1, Stage: uninstall.RecoveryPrepared,
+		Schema: uninstall.RecoverySchema, Stage: uninstall.RecoveryPrepared,
 		Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()),
 			DataHome: home, ConfigHome: filepath.Join(root, "state"),
 			RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")},

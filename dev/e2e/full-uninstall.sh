@@ -146,7 +146,7 @@ PY_PROCESSES
   printf 'ok: approved artifacts absent; foreign workload, shared pool, user service, host project, SSH and shell controls preserved\n'
 }
 interrupt_full_removal() {
-  local runner="$1" data_root="$2" config_root="$3" launcher="$4" prefix="$5" resumer="${6:-}" wrapper caller
+  local runner="$1" data_root="$2" config_root="$3" launcher="$4" prefix="$5" wrapper caller
   # Watch native config-directory loss and kill the original caller. Its
     # retained engine/adapters must then complete from a fresh process.
     "$runner" bash -c 'printf "%s\n" "$$" > "$1"; chmod 644 "$1"; shift; exec setsid "$@"' _ "$state/${prefix}full.pid" "$launcher" teardown --full --yes > "$state/${prefix}full.log" 2>&1 &
@@ -190,15 +190,10 @@ PY
     wait "$wrapper" 2>/dev/null || true
     [ ! -e "$config_root" ] || fail 'interruption did not remove config'
     for _ in {1..100}; do [ -x "$data_root.uninstall/runtime/bin/yard" ] && break; sleep 0.1; done
-    # By default the retained engine resumes; a newer resumer must accept the older checkpoint.
-    resumer="${resumer:-$data_root.uninstall/runtime/bin/yard}"
-    "$runner" "$resumer" _uninstall-resume "$data_root.uninstall" < /dev/null > "$state/${prefix}retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
-    "$runner" "$resumer" _uninstall-resume "$data_root.uninstall" --yes > "$state/${prefix}retry.log" 2>&1
+    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" < /dev/null > "$state/${prefix}retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
+    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" --yes > "$state/${prefix}retry.log" 2>&1
 
 }
-
-# shellcheck source=dev/e2e/full-uninstall-legacy.sh
-. "$ROOT/dev/e2e/full-uninstall-legacy.sh"
 
 case "$mode" in
   preflight)
@@ -230,7 +225,7 @@ case "$mode" in
     sudo -n chmod 0750 "$state"
     sudo -n install -d -o dev -g dev -m 0700 "$state/release"
     sudo -n install -d -o root -g root -m 0755 "$state/host-helper"
-    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network released-install.log released-full.log released-retry-preview.log released-retry.log; do
+    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network; do
       sudo -n install -o dev -g dev -m 0600 /dev/null "$state/$file"
     done
     incus profile device get default root pool --project default > "$state/baseline-pool"
@@ -266,7 +261,6 @@ case "$mode" in
     operator_env env YARD_RELEASE_BASE_URL="file://$state/release" YARD_BIN_DIR="$state/bin" \
       YARD_SHELL_RC="$state/shell.rc" YARD_LOGIN_RC="$state/login.rc" \
       bash "$state/bootstrap.sh" --version "$version" --yes >/dev/null
-    released_checkpoint_resume
     operator_env mkdir -p "$state/config/yards"
     operator_env bash -c 'cat > "$1/config/config.env" <<CONFIG
 INCUS_PROJECT=subyard-full-$2

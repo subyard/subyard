@@ -771,8 +771,9 @@ The owner fixture uses explicitly synthetic, supported-version bundles built fro
 current frozen source and its ordinary V2 registry. It checks inactive broker preservation,
 active helper replacement and rollback, then creates a fresh current-owned `test-yard`
 through public update and init while retaining protected history. These bundles do not
-represent authentic historical releases. Published-release fixtures start at v0.28.0. Native deletion and v0.30.0 checkpoint
-resume belong to `full-uninstall`; older product recovery readers retain host-free contracts.
+represent authentic historical releases. Published-release fixtures start at v0.28.0. Native deletion and checkpoint
+resume belong to `full-uninstall`; older product recovery readers and the schema-1 recovery plan refusal
+retain host-free contracts.
 
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |

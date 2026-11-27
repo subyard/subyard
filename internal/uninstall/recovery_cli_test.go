@@ -108,3 +108,40 @@ func TestStoreRemovalResumesAtEveryInterruption(t *testing.T) {
 		t.Fatal("interruption never left an empty recovery directory")
 	}
 }
+
+// The CLI renders the schema-1 refusal's own next step and leaves the store as found.
+func TestResumeRefusesSchemaOnePlanWithItsNextStep(t *testing.T) {
+	t.Setenv("PATH", testkit.TempDir(t))
+	store, plan := uninstall.CompletedRecoveryStoreFixture(t)
+	path := filepath.Join(store.Directory, "plan.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := bytes.Replace(body, []byte(fmt.Sprintf(`"Schema":%d,`, uninstall.RecoverySchema)), []byte(`"Schema":1,`), 1)
+	if bytes.Equal(released, body) {
+		t.Fatal("fixture plan has no schema field")
+	}
+	testkit.WriteFile(t, path, released, 0600)
+	var diagnostics bytes.Buffer
+	root := filepath.Dir(plan.Installation.DataHome)
+	program, err := cli.New(cli.Options{
+		RepositoryRoot: "../..", WorkingDir: root, Stdout: &diagnostics, Stderr: &diagnostics,
+		Environment: []string{"HOME=" + root},
+		Arguments:   []string{"_uninstall-resume", store.Directory, "--yes"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	want := fmt.Sprintf("resume it with its retained release:\n  %s _uninstall-resume %s\n", launcher, store.Directory)
+	if code := program.Run(t.Context()); code != 1 || !strings.HasSuffix(diagnostics.String(), want) || strings.Contains(diagnostics.String(), "ORIGINAL") {
+		t.Fatalf("exit=%d output=%q, want suffix %q", code, diagnostics.String(), want)
+	}
+	if saved, err := os.ReadFile(path); err != nil || !bytes.Equal(saved, released) {
+		t.Fatal("refused schema-1 plan changed", err)
+	}
+	if _, err := os.Lstat(launcher); err != nil {
+		t.Fatal("retained launcher was removed", err)
+	}
+}
