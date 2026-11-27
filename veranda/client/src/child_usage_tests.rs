@@ -55,6 +55,7 @@ fn framed(observation: &Observation, mode: &str, registry: Option<&Processes>) -
         Arc::new(|_| {}),
         registry,
         Some(observation.source(SourceKind::Local)),
+        None,
     )
     .unwrap()
 }
@@ -208,6 +209,7 @@ fn child_usage_framed_normal_rejected_and_failed_spawn_keep_original_errors() {
         Arc::new(|_| {}),
         None,
         Some(observation.source(SourceKind::Local)),
+        None,
     );
     assert!(matches!(rejected, Err(NativeError { ref code, .. }) if code == "incompatible_engine"));
     let failed = RpcClient::open_observed(
@@ -216,6 +218,7 @@ fn child_usage_framed_normal_rejected_and_failed_spawn_keep_original_errors() {
         Arc::new(|_| {}),
         None,
         Some(observation.source(SourceKind::Local)),
+        None,
     );
     assert!(matches!(failed, Err(NativeError { ref code, .. }) if code == "transport_unavailable"));
     let stopped = Processes::default();
@@ -226,6 +229,7 @@ fn child_usage_framed_normal_rejected_and_failed_spawn_keep_original_errors() {
         Arc::new(|_| {}),
         Some(&stopped),
         Some(observation.source(SourceKind::Local)),
+        None,
     );
     assert!(registration.is_err());
     let value = snapshot(&observation);
@@ -261,6 +265,7 @@ fn child_usage_negotiating_registry_shutdown_still_owns_cleanup() {
             Arc::new(|_| {}),
             Some(&other),
             Some(source),
+            None,
         )
     });
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -372,6 +377,7 @@ fn child_usage_provisional_rpc_keeps_event_admission_absent() {
         Some(&registry),
         None,
         observation.child_usage_context(),
+        None,
     )
     .unwrap();
     client

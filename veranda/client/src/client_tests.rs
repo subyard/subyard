@@ -21,6 +21,7 @@ fn child_usage_provisional_cancel_keeps_publication_guard_and_two_registry_owner
             Some(&registry_child),
             Some(&attempt_child.processes),
             context,
+            None,
         )
     });
     let deadline = Instant::now() + Duration::from_secs(2);

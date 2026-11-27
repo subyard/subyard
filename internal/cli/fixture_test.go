@@ -222,7 +222,7 @@ func syntheticFixtureRoot(t *testing.T) (string, []string) {
 		"teardown||@teardown||forward|mutate|dynamic|public|lifecycle|teardown|teardown|teardown|--keep-data --yes --help|",
 		"status||@status||forward|read|never|public|lifecycle|status|status|status|--all --help|",
 		"space||@space||local|read|never|public|lifecycle|simple|space|space|--refresh --help|",
-		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --yes --help|",
+		"logs||@logs||forward|read|never|public|lifecycle|simple|logs|logs|-f -n --updates --audit --rpc --yes --help|",
 		"usage||@usage||forward|read|never|public|lifecycle|simple|usage|usage|--help|",
 		"ssh-agent||@ssh-agent||deny|mutate|dynamic|public|lifecycle|ssh-agent|ssh-agent <command>|manage temporary SSH access|--key --ttl --json --yes --help|unlock status lock",
 		"shell||@shell||forward|mutate|never|public|lifecycle|project-shell|shell|shell|--root --yes --help|",

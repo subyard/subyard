@@ -3,6 +3,7 @@ use crate::connections::{
     ConnectionStore, ConnectionSummary, ConsentedConnection, NavigationSelection, RemoveAssessment,
     TrustAssessment,
 };
+use crate::diagnostics::DiagnosticLog;
 use crate::local_fleet::{safe_id, safe_name, LocalFleetSnapshot, NativeError, OwnerInventory};
 use crate::observation::{
     Effect, Observation, Observed, Retirement, Source, SourceKind, UpdateObservation,
@@ -105,6 +106,7 @@ pub struct Client {
     launch_count: Arc<AtomicUsize>,
     processes: Processes,
     observation: Option<Observation>,
+    diagnostics: Arc<DiagnosticLog>,
 }
 
 /// A single provisional trust connection. Cancellation and registration share
@@ -172,6 +174,7 @@ impl Client {
     fn with_observation(root: PathBuf, emit: Emit, observation: Option<Observation>) -> Arc<Self> {
         let (wake, receiver) = mpsc::sync_channel(1);
         let client = Arc::new(Self {
+            diagnostics: DiagnosticLog::new(root.clone()),
             store: Mutex::new(ConnectionStore::new(root)),
             sessions: Mutex::new(HashMap::new()),
             read_scope: Mutex::new(None),
@@ -288,11 +291,16 @@ impl Client {
             Some(&self.processes),
             Some(&attempt.processes),
             usage,
+            Some(self.diagnostics.clone()),
         )?;
-        let inventory: OwnerInventory =
-            decode(rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?)?;
-        let context: CurrentContext =
-            decode(rpc.call("context.get", "", json!({}), QUERY_TIMEOUT)?)?;
+        let inventory: OwnerInventory = rpc.decode(
+            "owner.inventory",
+            rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?,
+        )?;
+        let context: CurrentContext = rpc.decode(
+            "context.get",
+            rpc.call("context.get", "", json!({}), QUERY_TIMEOUT)?,
+        )?;
         context.validate(None)?;
         let snapshot = inventory.into_snapshot(rpc.engine_version.clone(), context.yard_name)?;
         rpc.close();
@@ -506,13 +514,18 @@ impl Client {
             }),
             Some(&self.processes),
             observation.clone(),
+            Some(self.diagnostics.clone()),
         )?;
-        let context: CurrentContext =
-            decode(rpc.call("context.get", "", json!({}), QUERY_TIMEOUT)?)?;
+        let context: CurrentContext = rpc.decode(
+            "context.get",
+            rpc.call("context.get", "", json!({}), QUERY_TIMEOUT)?,
+        )?;
         context.validate(key.yard.as_deref())?;
         let inventory_epoch = epoch.load(Ordering::Acquire);
-        let inventory: OwnerInventory =
-            decode(rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?)?;
+        let inventory: OwnerInventory = rpc.decode(
+            "owner.inventory",
+            rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?,
+        )?;
         let snapshot =
             inventory.into_snapshot(rpc.engine_version.clone(), context.yard_name.clone())?;
         if let Some(id) = &key.connection {
@@ -931,16 +944,20 @@ impl Client {
             parameters,
             Duration::from_secs(30),
         )?;
-        let exact: ExactPlan = match decode(raw).and_then(|exact: ExactPlan| {
-            exact.validate(&operation_id, &command)?;
-            Ok(exact)
-        }) {
-            Ok(exact) => exact,
-            Err(error) => {
-                let _ = session.rpc.discard(&operation_id);
-                return Err(error);
-            }
-        };
+        let exact: ExactPlan =
+            match session
+                .rpc
+                .decode("operation.plan", raw)
+                .and_then(|exact: ExactPlan| {
+                    exact.validate(&operation_id, &command)?;
+                    Ok(exact)
+                }) {
+                Ok(exact) => exact,
+                Err(error) => {
+                    let _ = session.rpc.discard(&operation_id);
+                    return Err(error);
+                }
+            };
         if epoch != session.epoch.load(Ordering::Acquire) {
             let _ = session.rpc.discard(&operation_id);
             return Err(expired());
@@ -1248,7 +1265,7 @@ impl Client {
             yard,
         })?;
         session.rpc.require("session-prepare-v1")?;
-        let descriptor: Descriptor = decode(session.rpc.call("session.prepare", "", json!({"kind":kind,"scope":if host_scope { "host" } else { "yard" },"projectId":project.as_deref().unwrap_or("")}), QUERY_TIMEOUT)?)?;
+        let descriptor: Descriptor = session.rpc.decode("session.prepare", session.rpc.call("session.prepare", "", json!({"kind":kind,"scope":if host_scope { "host" } else { "yard" },"projectId":project.as_deref().unwrap_or("")}), QUERY_TIMEOUT)?)?;
         descriptor.validate(kind, &session.current_yard, host_scope, project.as_deref())?;
         Ok((session, descriptor))
     }
@@ -1472,13 +1489,17 @@ fn query_observed<T: for<'de> Deserialize<'de>>(
 ) -> Result<Observed<T>, NativeError> {
     let (value, proof) = session.rpc.call_observed(method, QUERY_TIMEOUT)?;
     Ok(Observed {
-        value: decode(value)?,
+        value: session.rpc.decode(method, value)?,
         proof,
     })
 }
 fn query<T: for<'de> Deserialize<'de>>(session: &Session, method: &str) -> Result<T, NativeError> {
-    decode(session.rpc.call(method, "", json!({}), QUERY_TIMEOUT)?)
+    session.rpc.decode(
+        method,
+        session.rpc.call(method, "", json!({}), QUERY_TIMEOUT)?,
+    )
 }
+#[cfg(test)]
 fn decode<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, NativeError> {
     serde_json::from_value(value).map_err(|_| transport::invalid())
 }

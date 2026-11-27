@@ -1542,8 +1542,14 @@ attempt ID, operation ID, direction, bounded phase events, verified source/targe
 available, and a safe terminal status/code. It retains the newest 30 attempts and never copies hook
 output, error text, environment values, or journal JSON. Local `yard logs --updates [-n N]` reads
 that history and `yard logs --audit [-n N]` reads the current command audit file plus five retained
-1 MiB rotations without loading yard configuration or Incus. Explicit yard selectors continue
-through normal owner routing.
+1 MiB rotations without loading yard configuration or Incus. Each `yard rpc --stdio` owner also
+appends one record per failed request (time, request and operation ID, method, code and the full
+local error text) to the private `$SUBYARD_HOME/logs/rpc-errors.log`, keeping one previous
+256 KiB generation; `yard logs --rpc [-n N]` shows the newest records. Records are best effort:
+the session queues at most 64 and writes them after the response under the owner barrier of the
+installation generation it started in. A record that cannot take the barrier and the log lock
+within 250 ms is dropped, as are records beyond the queue.
+Explicit yard selectors continue through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
 Only a subsequent release may replace the default protocol with owners that support it. An optional

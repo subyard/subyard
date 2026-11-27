@@ -793,3 +793,19 @@ func TestSlowSteadyReaderReceivesLargeFrameWithoutStall(t *testing.T) {
 		t.Fatalf("slow steady reader was treated as stalled: %v", err)
 	}
 }
+
+func TestFaultOfReportsAClientCancelledRequestAsCancelled(t *testing.T) {
+	cancelled, cancel := context.WithCancelCause(context.Background())
+	cancel(contextCanceled)
+	for name, fault := range map[string]*Error{
+		"cancelled error":   FaultOf(context.Background(), fmt.Errorf("plan: %w", context.Canceled)),
+		"cancelled context": FaultOf(cancelled, errors.New("stopped")),
+	} {
+		if fault.Code != CodeCancelled {
+			t.Fatalf("%s: code = %s", name, fault.Code)
+		}
+	}
+	if fault := FaultOf(context.Background(), errors.New("failed")); fault.Code == CodeCancelled {
+		t.Fatal("an ordinary failure was reported as cancelled")
+	}
+}

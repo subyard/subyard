@@ -234,6 +234,15 @@ func normalizeKey(value string) string {
 	return string(result)
 }
 
+// FaultOf is the error a session sends for a handler error of a request
+// whose context is ctx.
+func FaultOf(ctx context.Context, err error) *Error {
+	if errors.Is(err, context.Canceled) || errors.Is(context.Cause(ctx), contextCanceled) {
+		err = contextCanceled
+	}
+	return asFault(err)
+}
+
 func asFault(err error) *Error {
 	var fault *Error
 	if errors.As(err, &fault) {

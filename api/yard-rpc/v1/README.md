@@ -47,6 +47,19 @@ ignore it, and older owners omit it, in which case clients keep their fixed text
 for the error `code`. A relay built before error data existed drops `data` from
 the errors it forwards, so a client behind it also falls back to that fixed text.
 
+The owner keeps each failed request's full local error text with its request
+ID, operation ID, method and code; `yard logs --rpc` on the owner shows them.
+Veranda records only value-free facts about the failures it shows generically
+in `rpc-errors.log` in its private store (0600, two 32 KiB generations): time,
+method and code (from this vocabulary or its own transport codes, otherwise
+`unknown`), its own request ID, a class (`disconnected`,
+`transport_unavailable`, `invalid_response`, `rpc_timeout`,
+`incompatible_engine`, `owner_error`, `error_data_rejected`) and, for an
+undecodable result, the serde category and the decoded type and the name of a
+field it declares. Repeats of the previous failure become one summary record
+with a `count` and `last` time, appended when another failure arrives, at
+least hourly, and when the client exits.
+
 Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 [`negotiate.schema.json`](negotiate.schema.json): `version`, `protocolMin`,
 `protocolMax`, `engineVersion`, and `capabilities`. Product version compatibility

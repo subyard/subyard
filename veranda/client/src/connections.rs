@@ -1113,6 +1113,82 @@ fn safe_editor_id(id: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
+/// Appends one line to a private store file, creating the root privately. A
+/// file the line would grow past `limit` bytes first becomes `<name>.1`, so the
+/// pair stays bounded. Nothing is synced or locked across processes: two
+/// Veranda processes appending at once may lose a line or rotate twice, which a
+/// best-effort log accepts.
+pub(crate) fn append_private_store_line(
+    root: &Path,
+    name: &str,
+    line: &[u8],
+    limit: u64,
+) -> Result<(), NativeError> {
+    ensure_private_root(root)?;
+    let path = root.join(name);
+    let mut file = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_private_file(&path)?,
+        Err(_) => return Err(store_io()),
+        Ok(_) => open_private_append(&path)?,
+    };
+    let size = file.metadata().map_err(|_| store_io())?.len();
+    if size + line.len() as u64 > limit {
+        let previous = root.join(format!("{name}.1"));
+        match fs::symlink_metadata(&previous) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(store_io()),
+            Ok(_) => check_private_file(&previous)?,
+        }
+        fs::rename(&path, &previous).map_err(|_| store_io())?;
+        file = create_private_file(&path)?;
+    }
+    file.write_all(line).map_err(|_| store_io())
+}
+fn open_private_append(path: &Path) -> Result<File, NativeError> {
+    let mut options = OpenOptions::new();
+    options.append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(|_| unsafe_store())?;
+    let metadata = file.metadata().map_err(|_| store_io())?;
+    if is_link(&metadata) || !metadata.is_file() {
+        return Err(unsafe_store());
+    }
+    check_access(path, &metadata, false)?;
+    Ok(file)
+}
+/// Reads a private store file of at most `limit` bytes; missing reads as empty.
+pub(crate) fn read_private_store_file(
+    root: &Path,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<u8>, NativeError> {
+    let path = root.join(name);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(store_io()),
+        Ok(_) => {}
+    }
+    check_ancestors(root)?;
+    check_private_dir(root)?;
+    let mut bytes = Vec::new();
+    open_private_read(&path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| store_io())?;
+    if bytes.len() as u64 > limit {
+        return Err(store_io());
+    }
+    Ok(bytes)
+}
 fn atomic_private_replace(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
     let parent = path.parent().ok_or_else(invalid_bundle)?;
     check_ancestors(parent)?;

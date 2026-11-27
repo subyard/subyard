@@ -98,7 +98,7 @@ Default --soft clears only explicitly declared disposable profile caches in the 
 
 ## logs
 
-tail yard runtime logs or show host update/audit history.
+tail yard runtime logs or show host update/audit/RPC error history.
 
 ```text
 Usage: yard logs [-f] [-n LINES] [UNIT]

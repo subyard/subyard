@@ -119,6 +119,15 @@ while True:
                          stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
         reply(request, {'descendantStarted':True})
         sys.exit(0)
+    if method == 'synthetic.exit':
+        sys.stderr.write('SECRET_TOKEN=hunter2 /home/operator/private\n')
+        os._exit(3)
+    if method == 'synthetic.bad-result':
+        reply(request, {'count': 'SECRET-RESULT-VALUE'})
+        continue
+    if method == 'synthetic.hold':
+        held_requests[operation] = request
+        continue
     if method == 'synthetic.error-data':
         value = fixture(request['params']['fixture'])
         value.update(id=request['id'], operationId=operation)
@@ -851,6 +860,7 @@ fn correlation_actual_transport_invalid_event_never_calls_classifier() {
         }),
         None,
         Some(source),
+        None,
     )
     .unwrap();
     assert!(rpc
@@ -892,6 +902,7 @@ fn correlation_actual_transport_failure_duplicate_and_empty_data_still_dispatch(
         }),
         None,
         Some(source.clone()),
+        None,
     )
     .unwrap();
     rpc.call(
@@ -978,6 +989,7 @@ fn correlation_actual_transport_classifies_when_ticket_admission_is_full() {
         }),
         None,
         Some(source),
+        None,
     )
     .unwrap();
     rpc.call(
@@ -1044,6 +1056,7 @@ fn correlation_framed_seal_retains_validated_receipt_during_held_classifier() {
             }),
             None,
             Some(source),
+            None,
         )
         .unwrap(),
     );
@@ -1169,4 +1182,204 @@ fn owner_error_data_reaches_the_fault_and_invalid_data_keeps_the_fixed_text() {
         .unwrap();
     assert_eq!(result["pong"], true);
     client.close();
+}
+
+fn logged(
+    fixture: &OwnerFixture,
+    log: &Arc<crate::diagnostics::DiagnosticLog>,
+    mode: &str,
+) -> Result<RpcClient, NativeError> {
+    RpcClient::open_observed(
+        fixture.command(mode),
+        PRODUCT_VERSION,
+        Arc::new(|_| {}),
+        None,
+        None,
+        Some(log.clone()),
+    )
+}
+
+#[test]
+fn rpc_failures_are_logged_as_closed_facts_without_values() {
+    use crate::diagnostics::{Class, Structure};
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let client = logged(&fixture, &log, "future-vocabulary").unwrap();
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Count {
+        count: u64,
+    }
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Total {
+        total: u64,
+    }
+    let value = client
+        .call(
+            "synthetic.bad-result",
+            "op-bad",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    let invalid: Result<Count, _> = client.decode("owner.inventory", value.clone());
+    assert_eq!(invalid.unwrap_err().code, "invalid_response");
+    let missing: Result<Total, _> = client.decode("owner.inventory", value);
+    assert_eq!(missing.unwrap_err().code, "invalid_response");
+    let _ = client
+        .call(
+            "synthetic.error-data",
+            "op-error-data",
+            json!({"fixture": "error-config-refusal", "data": {"schemaVersion": 9, "refusals": []}}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    let failed = client
+        .call(
+            "synthetic.exit",
+            "op-exit",
+            json!({}),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+    assert_eq!(failed.code, "disconnected");
+    client.close();
+    let facts: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| {
+            assert!(record.at > 0);
+            (
+                record.class,
+                record.method,
+                record.code,
+                record.request.is_empty(),
+                record.structure,
+                record.path,
+            )
+        })
+        .collect();
+    let fact = |class, method: &str, code: &str, request: bool, structure, path: &str| {
+        (
+            class,
+            method.to_string(),
+            code.to_string(),
+            request,
+            structure,
+            path.to_string(),
+        )
+    };
+    // Test-only methods are outside the vocabulary.
+    assert_eq!(
+        facts,
+        vec![
+            fact(
+                Class::InvalidResponse,
+                "owner.inventory",
+                "invalid_response",
+                true,
+                Some(Structure::InvalidType),
+                "Count"
+            ),
+            fact(
+                Class::InvalidResponse,
+                "owner.inventory",
+                "invalid_response",
+                true,
+                Some(Structure::MissingField),
+                "Total.total"
+            ),
+            fact(
+                Class::ErrorDataRejected,
+                "unknown",
+                "plan_failed",
+                false,
+                None,
+                ""
+            ),
+            fact(Class::OwnerError, "unknown", "plan_failed", false, None, ""),
+            fact(
+                Class::Disconnected,
+                "unknown",
+                "disconnected",
+                false,
+                None,
+                ""
+            ),
+        ]
+    );
+    let file = fixture.store_root().join(crate::diagnostics::FILE);
+    let raw = fs::read_to_string(&file).unwrap();
+    for (index, marker) in [
+        "SECRET",
+        "hunter2",
+        "/home/operator",
+        "plan init",
+        "HOST_LINKS",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            !raw.contains(marker),
+            "fixture marker {index} reached the log"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn closing_the_session_and_negotiation_failures_are_logged_only_when_they_are_failures() {
+    use crate::diagnostics::Class;
+    let fixture = OwnerFixture::new();
+    let log = crate::diagnostics::DiagnosticLog::new(fixture.store_root());
+    let client = logged(&fixture, &log, "future-vocabulary").unwrap();
+    let call = client
+        .begin("synthetic.hold", "op-hold", json!({}))
+        .unwrap();
+    client.close();
+    // Closing cancels the held request; its failure is not logged.
+    assert!(client.wait(call, Duration::from_secs(2)).is_err());
+    assert_eq!(
+        log.records(),
+        vec![],
+        "an intentional close is not a failure"
+    );
+    for mode in ["version-mismatch", "capability-missing"] {
+        assert!(logged(&fixture, &log, mode).is_err());
+    }
+    let missing = Command::new(fixture.store_root().join("missing-program"));
+    assert!(RpcClient::open_observed(
+        missing,
+        PRODUCT_VERSION,
+        Arc::new(|_| {}),
+        None,
+        None,
+        Some(log.clone())
+    )
+    .is_err());
+    let facts: Vec<_> = log
+        .records()
+        .into_iter()
+        .map(|record| (record.class, record.code))
+        .collect();
+    assert_eq!(
+        facts,
+        vec![
+            (Class::IncompatibleEngine, "incompatible_engine".to_string()),
+            (Class::IncompatibleEngine, "capability_missing".to_string()),
+            (
+                Class::TransportUnavailable,
+                "transport_unavailable".to_string()
+            ),
+        ]
+    );
 }
