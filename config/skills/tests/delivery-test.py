@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """Host-free shared delivery contracts use synthetic capability packages only."""
-import importlib.util
-import json
 import os
 from pathlib import Path
 import signal
@@ -13,9 +11,6 @@ import unittest
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 import deliver
-spec = importlib.util.spec_from_file_location('preview_migration', SOURCE/'migrate-preview.py')
-migration = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(migration)
 
 
 class Delivery(unittest.TestCase):
@@ -234,86 +229,6 @@ runpy.run_path(script, run_name='__main__')
         (self.skill/'reference.md').unlink()
         self.run_mode('apply')
         self.assertFalse((self.installed/'reference.md').exists())
-
-
-class PreviewMigration(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='subyard-preview-migration-', dir='/tmp')
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.home = self.root/'home'
-        self.path = self.home/'.codex/AGENTS.md'
-        self.path.parent.mkdir(parents=True)
-        self.inventory = self.root/'inventory.json'
-        self.data = b'Unmarked instructions.\n\n' + migration.LEGACY + b'\n'
-        self.path.write_bytes(self.data)
-        self.path.chmod(0o644)
-        os.chown(self.path,-1,os.getuid())
-        self.record = dict(id='codex',kind='file',path=str(self.path),digest=migration.hashlib.sha256(self.data).hexdigest())
-        self.save()
-
-    def save(self):
-        self.inventory.write_text(json.dumps(dict(schema=1,entries=[self.record])))
-        self.inventory.chmod(0o600)
-
-    def test_strip_and_repeat_preserve_text_then_retirement_removes_the_copy(self):
-        migration.migrate(self.home,os.getuid(),self.inventory)
-        self.assertEqual(self.path.read_bytes(),b'Unmarked instructions.\n\n\n')
-        once = self.inventory.read_bytes()
-        migration.migrate(self.home,os.getuid(),self.inventory)
-        self.assertEqual(self.inventory.read_bytes(),once)
-        # Run the actual owning inventory program through full retirement: the
-        # unchanged migrated copy is removed and no longer recorded.
-        state = self.root/'inventory'
-        state.mkdir(mode=0o700)
-        (state/'inventory.json').write_bytes(once)
-        (state/'inventory.json').chmod(0o600)
-        program = (SOURCE.parents[1]/'internal/adapters/reconcileruntime/integration_inventory.py').read_text().replace('@STATE_ROOT@',str(state)).replace('@STATE_UID@',str(os.getuid()))
-        request = json.dumps(dict(home=str(self.home),uid=os.getuid(),entries=[]))
-        for mode in ('observe','apply','commit'):
-            result = subprocess.run([sys.executable,'-B','-c',program,mode],input=request,text=True,capture_output=True)
-            self.assertEqual(result.returncode,0,mode+": "+result.stderr)
-        self.assertFalse(os.path.lexists(self.path))
-        recorded = json.loads((state/'inventory.json').read_bytes())
-        self.assertNotIn(str(self.path),[entry['path'] for entry in recorded['entries']])
-        self.assertNotIn(str(self.path),recorded.get('released',[]))
-
-    def test_unsafe_inventory_directory_refuses_without_writes(self):
-        before = self.inventory.read_bytes()
-        self.root.chmod(0o777)
-        try:
-            with self.assertRaisesRegex(ValueError,'unsafe integration inventory directory'):
-                migration.migrate(self.home,os.getuid(),self.inventory)
-            self.assertEqual(self.path.read_bytes(),self.data)
-            self.assertEqual(self.inventory.read_bytes(),before)
-        finally:
-            self.root.chmod(0o700)
-
-    def test_current_block_all_three_destinations(self):
-        entries = []
-        for relative in ('.claude/CLAUDE.md','.codex/AGENTS.md','.config/opencode/AGENTS.md'):
-            path = self.home/relative
-            path.parent.mkdir(parents=True,exist_ok=True)
-            data = b'Before\n'+migration.CURRENT+b'\nAfter\n'
-            path.write_bytes(data)
-            path.chmod(0o644)
-            os.chown(path,-1,os.getuid())
-            entries.append(dict(id='synthetic',kind='file',path=str(path),digest=migration.hashlib.sha256(data).hexdigest()))
-        self.inventory.write_text(json.dumps(dict(schema=1,entries=entries)))
-        self.inventory.chmod(0o600)
-        migration.migrate(self.home,os.getuid(),self.inventory)
-        for entry in entries:
-            self.assertEqual(Path(entry['path']).read_bytes(),b'Before\n\nAfter\n')
-
-    def test_drift_ambiguous_unowned_and_unknown_blocks_are_preserved(self):
-        for changed in (self.data+b'Guest edit\n', self.data+migration.LEGACY, self.data.replace(b'For a static',b'For my static')):
-            self.path.write_bytes(changed)
-            with self.assertRaises(ValueError):
-                migration.migrate(self.home,os.getuid(),self.inventory)
-            self.assertEqual(self.path.read_bytes(),changed)
-        self.inventory.unlink()
-        migration.migrate(self.home,os.getuid(),self.inventory)
-        self.assertEqual(self.path.read_bytes(),changed)
 
 
 if __name__ == '__main__':

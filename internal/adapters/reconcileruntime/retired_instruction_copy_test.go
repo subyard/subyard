@@ -20,13 +20,13 @@ import (
 
 // Execute the real inventory in a disposable guest filesystem; all other native
 // phases retain the existing materialized-owner fixture contracts.
-type previewInventoryExecutor struct {
+type inventoryExecutor struct {
 	*retryableIntegrationExecutor
 	root, home, state string
 	mutations         int
 }
 
-func (e *previewInventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+func (e *inventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
 		replacements := strings.NewReplacer("/var/lib/subyard/integrations", e.state, "OWNER = int('0')", fmt.Sprintf("OWNER = int('%d')", os.Getuid()), "/usr/local/libexec/subyard/projects-changed", e.root+"/core/projects-changed", "/etc/subyard/agent-project-hooks", e.root+"/core/agent-project-hooks")
 		program := replacements.Replace(request.Command[3])
@@ -76,12 +76,12 @@ func (e *previewInventoryExecutor) Exec(ctx context.Context, project, instance s
 	return e.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
 }
 
-// legacyPreviewBlock is the exact managed block that older releases appended.
+// legacyPreviewBlock is a managed block that older releases appended to copies.
 const legacyPreviewBlock = "<!-- subyard-preview -->\nFor a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.\n<!-- /subyard-preview -->\n"
 
-// preparedPreviewFixture owns a Claude instruction copy that an older release
+// retiredInstructionFixture owns a Claude instruction copy that an older release
 // recorded in the inventory; current packages no longer declare it.
-func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, *previewInventoryExecutor, string) {
+func retiredInstructionFixture(t *testing.T, selected bool, body []byte) (Runtime, *inventoryExecutor, string) {
 	t.Helper()
 	root := testkit.TempDir(t)
 	runtime, base := materializedIntegrationFixture(t, root, true)
@@ -93,7 +93,7 @@ func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, 
 			runtime.Integrations = append(runtime.Integrations, definition)
 		}
 	}
-	executor := &previewInventoryExecutor{retryableIntegrationExecutor: base, root: root, home: root + "/guest-home", state: root + "/inventory"}
+	executor := &inventoryExecutor{retryableIntegrationExecutor: base, root: root, home: root + "/guest-home", state: root + "/inventory"}
 	runtime.Executor = executor
 	path := executor.home + "/.claude/CLAUDE.md"
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -114,28 +114,13 @@ func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, 
 	return runtime, executor, path
 }
 
-func TestCurrentPreparedPreviewRefusesUnknownMarkersBeforeAnyMutation(t *testing.T) {
-	unknown := []byte("Guest text.\n<!-- subyard-preview -->\nUser-owned unknown body.\n<!-- /subyard-preview -->\n")
-	runtime, executor, path := preparedPreviewFixture(t, true, unknown)
-	// Even a valid ownership digest cannot authorize replacing an unknown block.
-	before, _ := os.ReadFile(executor.state + "/inventory.json")
-	if _, err := runtime.IntegrationPlan(context.Background()); err == nil {
-		t.Fatal("unknown block admitted to current materialized plan")
-	}
-	after, _ := os.ReadFile(executor.state + "/inventory.json")
-	actual, _ := os.ReadFile(path)
-	if executor.mutations != 0 || !bytes.Equal(before, after) || !bytes.Equal(actual, unknown) {
-		t.Fatal("refused current migration changed files")
-	}
-}
-
-// An unchanged instruction copy that Subyard owns is removed at the next
-// apply, also after the preview cutover migrated it, and the result converges.
+// An unchanged instruction copy that Subyard owns is removed at the next apply,
+// with or without an older managed block, and the result converges.
 func TestRetiredInstructionCopyIsRemovedWhenUnchanged(t *testing.T) {
 	for name, body := range map[string]string{"plain": "Copied host text.\n", "preview": "Copied host text.\n\n" + legacyPreviewBlock} {
 		for _, selected := range []bool{false, true} {
 			t.Run(fmt.Sprint(name, "/selected=", selected), func(t *testing.T) {
-				runtime, executor, path := preparedPreviewFixture(t, selected, []byte(body))
+				runtime, executor, path := retiredInstructionFixture(t, selected, []byte(body))
 				plan, err := runtime.IntegrationPlan(context.Background())
 				if err != nil {
 					t.Fatal(err)
@@ -162,7 +147,7 @@ func TestRetiredInstructionCopyIsRemovedWhenUnchanged(t *testing.T) {
 // A copy edited in the yard is not Subyard's to delete: the plan refuses it by
 // path and nothing changes.
 func TestRetiredInstructionCopyEditedInTheYardIsKept(t *testing.T) {
-	runtime, executor, path := preparedPreviewFixture(t, true, []byte("Copied host text.\n"))
+	runtime, executor, path := retiredInstructionFixture(t, true, []byte("Copied host text.\n"))
 	edited := []byte("Copied host text.\nEdited in the yard.\n")
 	testkit.WriteFile(t, path, edited, 0o644)
 	before, _ := os.ReadFile(executor.state + "/inventory.json")
@@ -174,16 +159,5 @@ func TestRetiredInstructionCopyEditedInTheYardIsKept(t *testing.T) {
 	actual, _ := os.ReadFile(path)
 	if executor.mutations != 0 || !bytes.Equal(before, after) || !bytes.Equal(actual, edited) {
 		t.Fatal("refused retirement changed files")
-	}
-}
-
-func TestCurrentConfigRefreshMigratesOwnedPreviewBlock(t *testing.T) {
-	runtime, _, path := preparedPreviewFixture(t, true, []byte("Retained config-only text.\n"+legacyPreviewBlock))
-	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	actual, err := os.ReadFile(path)
-	if err != nil || string(actual) != "Retained config-only text.\n\n" {
-		t.Fatalf("config-only current migration: %q %v", actual, err)
 	}
 }

@@ -59,7 +59,8 @@ type IncusReader interface {
 }
 
 type Runtime struct {
-	// Retained only when restoring frozen materialization recipes.
+	// appliedIntegrationInspection inspects committed consumers for passive
+	// release admission (AppliedIntegrationPlan, WithInstalledConfiguration).
 	appliedIntegrationInspection bool
 	profileDiagnostics           bool
 	persistProjection            map[string]string

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -1222,10 +1223,11 @@ func isRetiredSetting(name string) bool {
 	switch name {
 	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
 		return true
-	case "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD":
-		// Host instruction files are no longer copied; the user-dotfiles profile links them.
-		return true
 	default:
+		if profile.RetiredInstructionSetting(name) {
+			// Host instruction files are no longer copied; the user-dotfiles profile links them.
+			return true
+		}
 		// The explicit integration cleanup hook no longer exists.
 		agent, cleanup := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), "_CLEANUP")
 		return cleanup && strings.HasPrefix(name, "AGENT_") && domain.SafeName(agent)

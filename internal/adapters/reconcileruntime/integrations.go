@@ -226,22 +226,20 @@ type declaredArtifacts struct {
 	owners  []string
 }
 
-// declaredArtifactCatalog lists what this release can declare: the desired
-// entries, the legacy destinations and persist links, and the materialized
-// destinations and owners of every catalog integration.
-// retiredInstructionCopies are where releases through 0.32.0 copied host
+// retiredInstructionPaths are where releases through 0.32.0 copied host
 // instruction files. Inventories may still record them, so their refusals and
 // retirement name these paths.
-var retiredInstructionCopies = []string{".claude/CLAUDE.md", ".codex/AGENTS.md", ".config/opencode/AGENTS.md"}
-
 func (runtime Runtime) retiredInstructionPaths() []string {
-	paths := make([]string, 0, len(retiredInstructionCopies))
-	for _, path := range retiredInstructionCopies {
+	var paths []string
+	for _, path := range profile.RetiredInstructionCopies() {
 		paths = append(paths, "/home/"+runtime.devUser()+"/"+path)
 	}
 	return paths
 }
 
+// declaredArtifactCatalog lists what this release can declare: the desired
+// entries, the legacy destinations and persist links, and the materialized
+// destinations and owners of every catalog integration.
 func (runtime Runtime) declaredArtifactCatalog(entries []integrationArtifact, legacy []string) declaredArtifacts {
 	catalog := declaredArtifacts{desired: entries, paths: append(slices.Clone(legacy), runtime.retiredInstructionPaths()...), owners: append([]string{"_projects"}, strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))...)}
 	for _, entry := range entries {
@@ -810,7 +808,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 		}
 	}
-	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": true, "persist": runtime.persistProjection}
+	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "persist": runtime.persistProjection}
 	if evidence != nil {
 		request["config_diagnostics"] = evidence
 	}

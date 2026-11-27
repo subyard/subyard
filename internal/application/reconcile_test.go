@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,6 +206,26 @@ func TestInitStagesEnrollNetworkPolicyBeforeInstanceCreation(t *testing.T) {
 	}
 	if !strings.Contains(stages[policy].Label, "restart affected running yards") {
 		t.Fatalf("network policy consequence omits peer restarts: %q", stages[policy].Label)
+	}
+}
+
+// Provision applies integrations and commits inventory retirement; profile owner
+// hooks follow in the same init. An unchanged artifact retired there, such as an
+// instruction copy at a path a profile links, is gone before the profile claims it.
+func TestInitRetiresIntegrationArtifactsBeforeProfileServicesInOneApply(t *testing.T) {
+	stages := InitStages(domain.Context{IncusProject: "subyard"})
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{}, verified: map[ports.ReconcileStageID]bool{}}
+	reconciler := Reconciler{Stages: stages, Runner: fixture}
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	provision, services := slices.Index(fixture.applied, ports.ReconcileStageProvision), slices.Index(fixture.applied, ports.ReconcileStageProfileServices)
+	if provision < 0 || services < 0 || provision > services {
+		t.Fatalf("profile services do not follow integration retirement in one apply: %v", fixture.applied)
 	}
 }
 

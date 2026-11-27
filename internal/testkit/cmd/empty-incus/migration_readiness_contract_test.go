@@ -25,7 +25,7 @@ import (
 func TestHistoryReadinessContract(t *testing.T) {
 	root := testkit.TempDir(t)
 	files := map[string][]byte{"config/skills/core/sample/SKILL.md": []byte("generic core skill\n")}
-	for _, name := range []string{"scripts/refresh-agent-skills.sh", "config/skills/package.py", "config/skills/refresh.sh", "config/skills/deliver.py", "config/skills/probe.py", "config/skills/migrate-preview.py"} {
+	for _, name := range []string{"scripts/refresh-agent-skills.sh", "config/skills/package.py", "config/skills/refresh.sh", "config/skills/deliver.py", "config/skills/probe.py"} {
 		payload, err := os.ReadFile(filepath.Join("../../../..", name))
 		if err != nil {
 			t.Fatal(err)
@@ -311,14 +311,14 @@ func TestDirectOwnedGuestModelsPersistAndSettingsBaseline(t *testing.T) {
 		t.Fatalf("owned inventory reported absent: %d", code)
 	}
 	reader := reconcileruntime.IntegrationInventoryReader()
-	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "preview_skill_cutover": true, "persist": nil, "retain_pending_intent": true}
+	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "persist": nil, "retain_pending_intent": true}
 	step, code := run([]string{"python3", "-B", "-c", reader, "settings"}, read)
 	if code != 0 || !bytes.Contains(step.Stdout, []byte(`"applied_settings":null`)) {
 		t.Fatalf("initial settings read: %d %s", code, step.Stdout)
 	}
 	entries := []map[string]string{{"id": "_projects", "kind": "file", "path": "/usr/local/libexec/subyard/projects-changed"}, {"id": "_projects", "kind": "file", "path": "/etc/subyard/agent-project-hooks"}}
 	capture := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": entries, "legacy": []string{}, "adopt": false, "expected": strings.Repeat("a", 64),
-		"preview_skill_cutover": true, "persist": map[string]string{}, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}}
+		"persist": map[string]string{}, "applied_settings": map[string]string{}, "diagnostics": map[string]any{"key": strings.Repeat("a", 64), "digests": map[string]string{}}}
 	for _, change := range []string{"entries", "expected", "files", "unknown"} {
 		changed := maps.Clone(capture)
 		switch change {
@@ -348,7 +348,7 @@ func TestObservedGuestAnswersAbsentInventoryAndQueuesNativeObservations(t *testi
 	control := filepath.Join(testkit.TempDir(t), "control")
 	respond := observedGuestResponder(guestContract{}, control)
 	reader := reconcileruntime.IntegrationInventoryReader()
-	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "preview_skill_cutover": true, "persist": nil}
+	read := map[string]any{"home": "/home/dev", "uid": 1000, "developer": "dev", "entries": nil, "expected": "", "legacy": []string{}, "adopt": false, "persist": nil}
 	for mode, want := range map[string]string{"settings": `{"installed":false,"applied_settings":null,"diagnostics":null}`, "selection": `{"installed":false,"selected":[],"applied_settings":null,"diagnostics":null}`} {
 		stdin, _ := json.Marshal(read)
 		call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", reader, mode}, Stdin: stdin}

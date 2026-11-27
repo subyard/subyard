@@ -243,24 +243,28 @@ func TestIntegrationApprovalSourcesValidation(t *testing.T) {
 }
 
 // Published releases through 0.32.0 declare host instruction copies. Rollback
-// preparation decodes those target declarations: the exact retired shape is
-// dropped, and the kind is otherwise unsupported.
+// preparation decodes those target declarations: exactly their three retired
+// shapes are dropped, and the kind is otherwise unsupported.
 func TestDecodeIntegrationDropsRetiredInstructionArtifacts(t *testing.T) {
 	declaration := func(instructions string) []byte {
 		return []byte(`{"schema_version":2,"artifacts":[{"id":"config","kind":"config","source":"base.json","destination":".sample/config","format":"raw"},` + instructions + `]}`)
 	}
-	metadata, err := DecodeIntegration("sample", declaration(`{"id":"instructions","label":"Sample instructions","kind":"instructions","source_setting":"HOST_SAMPLE_MD","destination":".sample/AGENTS.md","format":"raw"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := metadata.Data()
-	if err != nil || len(data.Artifacts) != 1 || data.Artifacts[0].ID != "config" {
-		t.Fatalf("retired instruction artifact kept: %#v %v", data.Artifacts, err)
+	for setting, destination := range map[string]string{"HOST_CLAUDE_MD": ".claude/CLAUDE.md", "HOST_CODEX_AGENTS_MD": ".codex/AGENTS.md", "HOST_OPENCODE_AGENTS_MD": ".config/opencode/AGENTS.md"} {
+		metadata, err := DecodeIntegration("sample", declaration(`{"id":"instructions","label":"Sample instructions","kind":"instructions","source_setting":"`+setting+`","destination":"`+destination+`","format":"raw"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := metadata.Data()
+		if err != nil || len(data.Artifacts) != 1 || data.Artifacts[0].ID != "config" {
+			t.Fatalf("retired instruction artifact kept: %#v %v", data.Artifacts, err)
+		}
 	}
 	for _, instructions := range []string{
-		`{"id":"instructions","kind":"instructions","source":"AGENTS.md","destination":".sample/AGENTS.md","format":"raw"}`,
-		`{"id":"instructions","kind":"instructions","source_setting":"HOST_SAMPLE_MD","destination":".sample/AGENTS.md","format":"destination"}`,
-		`{"id":"notes","kind":"instructions","source_setting":"HOST_SAMPLE_MD","destination":".sample/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source":"AGENTS.md","destination":".codex/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_CODEX_AGENTS_MD","destination":".codex/AGENTS.md","format":"destination"}`,
+		`{"id":"notes","kind":"instructions","source_setting":"HOST_CODEX_AGENTS_MD","destination":".codex/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_SAMPLE_MD","destination":".sample/AGENTS.md","format":"raw"}`,
+		`{"id":"instructions","kind":"instructions","source_setting":"HOST_CLAUDE_MD","destination":".codex/AGENTS.md","format":"raw"}`,
 	} {
 		if _, err := DecodeIntegration("sample", declaration(instructions)); err == nil {
 			t.Fatalf("instruction artifact accepted: %s", instructions)
