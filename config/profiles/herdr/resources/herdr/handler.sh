@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Share a container yard's Herdr Core over tailnet SSH.
 # Usage: yard herdr <up|status|is-up|pair|sync|update|restart|logs|down>
-#   pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
+#   pair --key PUBKEY [--name LABEL] | --from-host [--all | FINGERPRINT...] | --list | --revoke FINGERPRINT
 #   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
 #   update [--force]  Upgrade or restore the pinned release
 #   logs [--follow]   Read Herdr logs
@@ -176,6 +176,8 @@ usage() {
   cat <<EOF
 Usage: ${PROG:-yard} herdr <up|status|is-up|pair|sync|update|restart|logs|down>
   pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
+  pair --from-host [--all | FINGERPRINT...]
+                    Preview or pair keys from the host account's authorized_keys
   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
   update [--force]  Upgrade to the latest compatible release, or restore the pin
   logs [--follow]   Read Herdr logs

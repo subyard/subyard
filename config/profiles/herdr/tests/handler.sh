@@ -3,6 +3,7 @@ set -euo pipefail
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/subyard-herdr-handler.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
+keygen=$(command -v ssh-keygen)
 mkdir -p "$test_root/bin" "$test_root/fixture/config/profiles"
 ln -s "$PWD/scripts" "$test_root/fixture/scripts"
 cp -a config/profiles/herdr "$test_root/fixture/config/profiles/"
@@ -24,6 +25,7 @@ case "$1" in
     shift 5
     case "$1" in
       uname) printf 'x86_64\n' ;;
+      ssh-keygen) printf '256 SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC host (ED25519)\n' ;;
       cat) printf '%s\n' "${HERDR_TEST_ACTUAL:-$HERDR_TEST_DIGEST}" ;;
       cmp) cat >/dev/null ;;
       install) ;;
@@ -81,12 +83,16 @@ case "$1" in
             printf 'stop Core\n' >> "$HERDR_TEST_CALLS"
             [ "${HERDR_TEST_CORE:-up}" = stopped ] ;;
           */herdr-profile:sync) printf 'sync projects\n' >> "$HERDR_TEST_CALLS" ;;
+          sh:-c) cat "$HERDR_TEST_GUEST_KEYS" ;;
           */herdr-profile:registration-ready) [ "${HERDR_TEST_REGISTRATION:-ready}" = ready ] ;;
           */herdr-profile:keys)
             case "$3:$4" in
               apply:list) printf '1  fixture-client\n' ;;
               prepare:revoke) printf '{"changed":true,"digest":"%064d"}\n' 1 ;;
               apply:revoke) printf 'revoke client key\n' >> "$HERDR_TEST_CALLS" ;;
+              apply:add|apply:existing)
+                printf '%s %s %s\n' "$4" "$6" "$(cat)" >> "$HERDR_TEST_CALLS"
+                printf '{"changed":false}\n' ;;
               *) exit 84 ;;
             esac ;;
           *) exit 89 ;;
@@ -96,7 +102,7 @@ case "$1" in
   *) exit 87 ;;
 esac
 INCUS
-printf '#!/bin/sh\nexit 86\n' > "$test_root/fixture/config/profiles/herdr/bin/herdr-profile"
+go build -o "$test_root/fixture/config/profiles/herdr/bin/herdr-profile" ./config/profiles/herdr/cmd/herdr-profile
 cat > "$test_root/bin/timeout" <<'TIMEOUT'
 #!/bin/sh
 [ "$1:$2:$6:$7" = '5:bash:100.100.100.100:6768' ] && [ "${HERDR_TEST_LISTENER:-up}" = up ]
@@ -223,6 +229,73 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   SUBYARD_RESOURCE_ACTION=pair-list "$handler" pair --list | grep -Fx '1  fixture-client' >/dev/null
   SUBYARD_RESOURCE_ACTION=pair-revoke "$handler" pair --revoke "$key"
   grep -Fxq 'revoke client key' "$HERDR_TEST_CALLS"
+)
+
+(
+  # Host keys: a bare new key, a granted key, an RSA key the yard accepts outside Herdr and a key with options.
+  export SUBYARD_OPERATOR_HOME="$test_root/operator" SUBYARD_CONFIG_HOME="$test_root/config"
+  export HERDR_TEST_HOST_KEYS="$SUBYARD_OPERATOR_HOME/.ssh/authorized_keys" HERDR_TEST_GUEST_KEYS="$test_root/guest-keys"
+  mkdir -m 0700 "$test_root/keys" "$SUBYARD_OPERATOR_HOME" "$SUBYARD_OPERATOR_HOME/.ssh"
+  mkdir -p "$SUBYARD_CONFIG_HOME/generated/integration-locks"
+  install -m 0600 /dev/null "$SUBYARD_CONFIG_HOME/generated/integration-locks/default.lock"
+  declare -A fp
+  for name in laptop desk manual office; do
+    type=ed25519
+    if [ "$name" = manual ]; then type=rsa; fi
+    "$keygen" -q -t "$type" -N '' -C "user@$name" -f "$test_root/keys/$name"
+    fp[$name]=$("$keygen" -E sha256 -lf "$test_root/keys/$name.pub" | cut -d ' ' -f2)
+  done
+  { cat "$test_root/keys/laptop.pub" "$test_root/keys/desk.pub" "$test_root/keys/manual.pub"
+    printf 'restrict %s\nnot a key\n' "$(cat "$test_root/keys/office.pub")"; } > "$HERDR_TEST_HOST_KEYS"
+  chmod 0600 "$HERDR_TEST_HOST_KEYS"
+  { printf 'from="127.0.0.1,::1",no-agent-forwarding %s subyard-herdr:desk-old\n' "$(cut -d ' ' -f1-2 "$test_root/keys/desk.pub")"
+    cat "$test_root/keys/manual.pub"; } > "$HERDR_TEST_GUEST_KEYS"
+  missing="SHA256:$(printf '%043d' 0)"
+
+  "$handler" pair --from-host | jq -e '.action == "pair-list" and .changed == false' >/dev/null
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=pair-list SUBYARD_OPERATION_ID=fixture \
+    "$handler" pair --from-host > "$test_root/preview"
+  printf '%s\n' "${fp[laptop]}  user-laptop  new" "${fp[desk]}  desk-old  granted" "${fp[manual]}  user-manual  unmanaged" \
+    "${fp[office]}  user-office  skipped:options" 'line 5  unrecognized' \
+    'Pair new keys with yard herdr pair --from-host --all or --from-host SHA256:FINGERPRINT...' | cmp - "$test_root/preview"
+
+  "$handler" pair --from-host --all | jq -e '.action == "pair-add" and .changed and (.consequences | length) == 1 and
+    (.consequences[0] | test("^authorize Herdr public key fingerprint:[0-9a-f]{64} \\(user-laptop\\) from the host account"))' >/dev/null
+  : > "$HERDR_TEST_CALLS"
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=pair-add SUBYARD_OPERATION_ID=fixture \
+    "$handler" pair --from-host --all > "$test_root/granted"
+  printf 'add %s %s\n' user-laptop "$(cut -d ' ' -f1-2 "$test_root/keys/laptop.pub")" \
+    desk-old "$(cut -d ' ' -f1-2 "$test_root/keys/desk.pub")" | cmp - "$HERDR_TEST_CALLS"
+  grep -Fxq "Paired ${fp[laptop]}  user-laptop" "$test_root/granted"
+  grep -Fxq "Already paired ${fp[desk]}  desk-old" "$test_root/granted"
+  grep -Fxq 'hc machine add dev@fixture.ts.net:6768' "$test_root/granted"
+
+  "$handler" pair --from-host "${fp[desk]}" | jq -e '.action == "pair-existing" and .changed == false' >/dev/null
+  : > "$HERDR_TEST_CALLS"
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=pair-existing SUBYARD_OPERATION_ID=fixture \
+    "$handler" pair --from-host "${fp[desk]}" >/dev/null
+  printf 'existing desk-old %s\n' "$(cut -d ' ' -f1-2 "$test_root/keys/desk.pub")" | cmp - "$HERDR_TEST_CALLS"
+  if SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=pair-add SUBYARD_OPERATION_ID=fixture \
+    "$handler" pair --from-host "${fp[desk]}" >/dev/null 2>&1; then exit 1; fi
+
+  # Every independent refusal is reported together.
+  if result=$(YARD_KIND=vm HERDR_TEST_LISTENER=down "$handler" pair --from-host "${fp[manual]}" "${fp[office]}" "$missing" 2>&1); then exit 1; fi
+  for expected in 'container yards only' "${fp[manual]} is already authorized in the yard outside Herdr" \
+    "${fp[office]} has authorization options" "$missing is not in the owner account"; do
+    [[ "$result" == *"$expected"* ]]
+  done
+  if result=$(HERDR_TEST_LISTENER=down "$handler" pair --from-host "${fp[office]}" 2>&1); then exit 1; fi
+  [[ "$result" == *'ingress is not ready'*"${fp[office]} has authorization options"* ]]
+  if result=$(HERDR_TEST_RUNNING=no "$handler" pair --from-host --all 2>&1); then exit 1; fi
+  [[ "$result" == *'yard is not running'* ]]
+  chmod 0620 "$HERDR_TEST_HOST_KEYS"
+  if result=$(HERDR_TEST_LISTENER=down "$handler" pair --from-host --all 2>&1); then exit 1; fi
+  [[ "$result" == *'ingress is not ready'*"could not read the owner account's authorized_keys"* ]]
+  chmod 0600 "$HERDR_TEST_HOST_KEYS"
+  for arguments in '--all extra' 'not-a-fingerprint' '--name laptop'; do
+    # shellcheck disable=SC2086 # Split the argument fixture.
+    if "$handler" pair --from-host $arguments >/dev/null 2>&1; then exit 1; else [ "$?" -eq 2 ]; fi
+  done
 )
 
 HERDR_TEST_CORE=down "$handler" down | jq -e '.changed and (.consequences[0] | contains("unavailable"))' >/dev/null

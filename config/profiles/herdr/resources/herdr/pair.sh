@@ -14,7 +14,24 @@ parse_pair() {
     pair_value="$2"
     return
   fi
-  svc_usage_error 'use pair --key PUBKEY [--name LABEL], --list or --revoke FINGERPRINT'
+  if [ "$#" -ge 1 ] && [ "$1" = --from-host ]; then
+    shift
+    pair_operation=host
+    pair_selection=(list)
+    if [ "$#" -eq 1 ] && [ "$1" = --all ]; then
+      pair_selection=(all)
+    elif [ "$#" -gt 0 ]; then
+      pair_selection=(select)
+      for pair_value in "$@"; do
+        [[ "$pair_value" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] ||
+          svc_usage_error 'use pair --from-host [--all | SHA256:FINGERPRINT...]'
+        pair_selection+=("$pair_value")
+      done
+      pair_value=''
+    fi
+    return
+  fi
+  svc_usage_error 'use pair --key PUBKEY [--name LABEL], --from-host [--all | SHA256:FINGERPRINT...], --list or --revoke FINGERPRINT'
 }
 
 owner_fingerprint() {
@@ -47,8 +64,86 @@ with_pair_lock() (
 
 write_key() { with_pair_lock key_operation apply "$1"; }
 
+# host_keys classifies the owner account's authorized_keys against the guest grants.
+host_keys() {
+  local owner guest state=unknown
+  owner=$(owner_fingerprint) || die 'could not read the managed owner public key fingerprint'
+  [ -x "${native:?}" ] || die 'Herdr profile helper is missing from the built runtime'
+  # The guest read only refines the preview; the guest key operation decides at apply.
+  if yard_running && guest=$(as_dev sh -c 'cat -- "$HOME/.ssh/authorized_keys"' 2>/dev/null); then
+    state=known
+  fi
+  if [ "$state" = known ]; then
+    printf '%s\n' "$guest" | "$native" host-keys "${SUBYARD_OPERATOR_HOME:-}" "$owner" known "$@"
+  else
+    "$native" host-keys "${SUBYARD_OPERATOR_HOME:-}" "$owner" unknown "$@" < /dev/null
+  fi
+}
+
+# host_pair_report collects every independent refusal before it returns the key report.
+host_pair_report() {
+  local report refusal
+  local -a refusals=()
+  mapfile -t refusals < <(allowed_refusals)
+  if [ "$YARD_KIND" = container ] && [ "$NESTED_E2E_VMS" != 1 ]; then
+    if ! yard_running; then
+      refusals+=("yard is not running — start it: $(yard_cmd_hint) start")
+    elif [ "${pair_selection[0]}" != list ] && ! route_ready; then
+      refusals+=('Herdr SSH ingress is not ready. Run yard herdr up.')
+    fi
+  fi
+  report=$(host_keys "${pair_selection[@]}") || die 'could not classify the owner account authorized_keys'
+  refusal=$(jq -er .refusal <<< "$report") || die 'invalid Herdr host key report'
+  [ -z "$refusal" ] || refusals+=("$refusal")
+  [ "${#refusals[@]}" -eq 0 ] || die "$(printf '%s\n' "${refusals[@]}")"
+  printf '%s\n' "$report"
+}
+
+host_pair_assessment() {
+  local report
+  report=$(host_pair_report)
+  jq -c --arg list "${pair_selection[0]}" '
+    [.selected[] | select(.status != "granted")] as $new
+    | if $list == "list" then {action:"pair-list",changed:false,consequences:[]}
+      elif ($new | length) == 0 then {action:"pair-existing",changed:false,consequences:[]}
+      else {action:"pair-add",changed:true,consequences:[$new[] |
+        "authorize Herdr public key fingerprint:\(.digest) (\(.label)) from the host account for the development user"]}
+      end
+    | {schema:"yard.resource-action-assessment.v1"} + .' <<< "$report"
+}
+
+host_pair_list() {
+  local report
+  report=$(host_pair_report)
+  jq -r '(.keys[] | "\(.fingerprint)  \(.label)  \(.status)"), (.unrecognized[] | "line \(.)  unrecognized")' <<< "$report"
+  if jq -e 'any(.keys[]; .status == "new")' <<< "$report" >/dev/null; then
+    printf 'Pair new keys with %s herdr pair --from-host --all or --from-host SHA256:FINGERPRINT...\n' "${PROG:-yard}"
+  fi
+}
+
+host_pair_grant() {
+  local report operation=add key label fingerprint status
+  report=$(host_pair_report)
+  if [ "$SUBYARD_RESOURCE_ACTION" = pair-existing ]; then
+    operation=existing
+  elif ! jq -e 'any(.selected[]; .status != "granted")' <<< "$report" >/dev/null; then
+    die 'the Herdr grant changed; retry pairing'
+  fi
+  while IFS=$'\t' read -r -u 3 fingerprint label status key; do
+    pair_value="$key"
+    pair_label="$label"
+    key_operation apply "$operation" >/dev/null
+    if [ "$status" = granted ]; then
+      printf 'Already paired %s  %s\n' "$fingerprint" "$label"
+    else
+      printf 'Paired %s  %s\n' "$fingerprint" "$label"
+    fi
+  done 3< <(jq -r '.selected[] | [.fingerprint, .label, .status, .key] | @tsv' <<< "$report")
+}
+
 pair_assessment() {
   local local_action result changed fingerprint consequence=''
+  if [ "$pair_operation" = host ]; then host_pair_assessment; return; fi
   allowed
   svc_require_yard_running
   if [ "$pair_operation" = add ]; then
@@ -75,6 +170,13 @@ pair_assessment() {
 }
 
 pair_apply() {
+  case "$SUBYARD_RESOURCE_ACTION:$pair_operation" in
+    pair-list:host) host_pair_list; return ;;
+    pair-add:host|pair-existing:host)
+      with_pair_lock host_pair_grant
+      pair_endpoint
+      return ;;
+  esac
   allowed
   svc_require_yard_running
   case "$SUBYARD_RESOURCE_ACTION:$pair_operation" in
