@@ -1225,7 +1225,7 @@ func isRetiredSetting(name string) bool {
 		return true
 	default:
 		if profile.RetiredInstructionSetting(name) {
-			// Host instruction files are no longer copied; the user-dotfiles profile links them.
+			// Host instruction files are no longer copied; a user-dotfiles install provides them.
 			return true
 		}
 		// The explicit integration cleanup hook no longer exists.

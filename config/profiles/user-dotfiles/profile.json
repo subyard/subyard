@@ -11,7 +11,7 @@
       "default": "https://github.com/subyard/yard-dotfiles"
     },
     {
-      "name": "USER_DOTFILES_SUBDIR",
+      "name": "USER_DOTFILES_INSTALL_COMMAND",
       "type": "string",
       "scopes": ["shipped", "shared", "host", "yard", "command"],
       "application": "yard-init",

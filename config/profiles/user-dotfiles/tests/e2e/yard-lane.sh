@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installed-candidate clone/link: no host instruction copy, nonfatal source failure, retry on
-# the next init, links every agent reads, and disable.
+# Installed-candidate clone and install: no host instruction copy, nonfatal source failure,
+# retry on the next init, one install run whose links every agent reads, and uninstall on disable.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
@@ -132,6 +132,7 @@ first="ud-e2e-$token"
 source_url="ssh://dev@localhost/home/dev/lane-dotfiles.git"
 clone=/home/dev/.local/share/subyard-user-dotfiles/dev/lane-dotfiles
 links=(/home/dev/.claude/CLAUDE.md /home/dev/.codex/AGENTS.md /home/dev/.config/opencode/AGENTS.md)
+runs() { as_dev "$first" sh -c 'cat "$HOME/lane-runs" 2>/dev/null || :'; }
 
 printf 'user-dotfiles_e2e_stage=create\n'
 YARDS+=("$first")
@@ -146,12 +147,31 @@ yard "$first" start --yes
 for link in "${links[@]}"; do
   ! as_dev "$first" test -e "$link" -o -L "$link" || die "$link exists before the profile is enabled"
 done
+# The lane repository links its instructions the way subyard/yard-dotfiles does and
+# records each run of its scripts.
 # shellcheck disable=SC2016
 as_dev "$first" sh -euc '
 work="$(mktemp -d)"
-mkdir -p "$work/yard/agents"
-printf "%s\n" "Repository instructions." > "$work/AGENTS.md"
-printf "%s\n" "Lane yard instructions." > "$work/yard/agents/AGENTS.md"
+mkdir -p "$work/agents"
+printf "%s\n" "Lane yard instructions." > "$work/agents/AGENTS.md"
+cat > "$work/install.sh" <<"SCRIPT"
+#!/bin/sh
+set -eu
+echo install >> "$HOME/lane-runs"
+for link in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
+  mkdir -p "$HOME/${link%/*}"
+  ln -sfT "$PWD/agents/AGENTS.md" "$HOME/$link"
+done
+SCRIPT
+cat > "$work/uninstall.sh" <<"SCRIPT"
+#!/bin/sh
+set -eu
+echo uninstall >> "$HOME/lane-runs"
+for link in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
+  [ "$(readlink "$HOME/$link" || :)" != "$PWD/agents/AGENTS.md" ] || rm -f "$HOME/$link"
+done
+SCRIPT
+chmod +x "$work/install.sh" "$work/uninstall.sh"
 git -C "$work" init -q -b main
 git -C "$work" add -A
 git -C "$work" -c user.name=lane -c user.email=lane@example.org commit -q -m dotfiles
@@ -160,11 +180,11 @@ git clone -q --bare "$work" "$HOME/lane-dotfiles.git"
 
 printf 'user-dotfiles_e2e_stage=enable-unavailable\n'
 yard "$first" config set USER_DOTFILES_SOURCE "$source_url" --scope yard --yes
-yard "$first" config set USER_DOTFILES_SUBDIR yard --scope yard --yes
 yard "$first" profile enable user-dotfiles --yes 2>"$STATE/enable-unavailable.log"
 grep -F >/dev/null 'user-dotfiles: warning: could not clone dev/lane-dotfiles;' "$STATE/enable-unavailable.log" \
   || die 'missing enable retry warning'
 [ "$(ready "$first")" = false ] || die 'enable with an unreachable source reported ready'
+[ -z "$(runs)" ] || die 'an install ran without a clone'
 
 printf 'user-dotfiles_e2e_stage=retry\n'
 # Access comes from an in-yard IdentityFile, not the per-yard agent socket: unlocking
@@ -180,17 +200,20 @@ printf "Host localhost\n  IdentityFile ~/.ssh/lane_key\n" >> "$HOME/.ssh/config"
 '
 yard "$first" init --yes
 for link in "${links[@]}"; do
-  [ "$(as_dev "$first" readlink "$link")" = "$clone/yard/agents/AGENTS.md" ] || die "link $link is missing after retry"
+  [ "$(as_dev "$first" readlink "$link")" = "$clone/agents/AGENTS.md" ] || die "install did not link $link"
   # Each agent opens its instruction file through the link.
   [ "$(as_dev "$first" cat "$link")" = 'Lane yard instructions.' ] || die "link $link is not readable"
 done
+# Install runs once: the next init leaves it alone.
 yard "$first" init --yes
+[ "$(runs)" = install ] || die "install ran other than once: $(runs)"
 [ "$(ready "$first")" = true ] || die 'the profile is not ready after retry'
 
 printf 'user-dotfiles_e2e_stage=disable\n'
 yard "$first" profile disable user-dotfiles --yes
 for link in "${links[@]}"; do
-  ! as_dev "$first" test -L "$link" || die "disable kept link $link"
+  ! as_dev "$first" test -L "$link" || die "uninstall kept link $link"
 done
-as_dev "$first" test -f "$clone/yard/agents/AGENTS.md" || die 'disable removed the clone'
-printf 'ok: user-dotfiles no host copy, unavailable source warning, retry, readable links and disable\n'
+[ "$(runs)" = $'install\nuninstall' ] || die "disable did not run uninstall.sh once: $(runs)"
+as_dev "$first" test -f "$clone/agents/AGENTS.md" || die 'disable removed the clone'
+printf 'ok: user-dotfiles no host copy, unavailable source warning, retry, install once and uninstall on disable\n'

@@ -1,45 +1,73 @@
 #!/usr/bin/env bash
-# As the yard developer: clone the dotfiles source once and link agent instructions.
+# As the yard developer: clone the dotfiles source and install it once; uninstall on disable.
 # Rules: docs/user-dotfiles.md.
-# Usage: guest.sh check|verify|apply [URL [SUBDIR]]; check and verify print "work" for drift.
+# Usage: guest.sh check|verify|apply [URL [INSTALL_COMMAND]]; an empty URL disables.
+# Check and verify print "work" for drift.
 set -euo pipefail
 mode="$1"
 url="${2:-}"
-subdir="${3:-}"
+command="${3:-}"
 cd "$HOME"
 store="$HOME/.local/share/subyard-user-dotfiles"
-links=(.claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md)
+state="$store/.installed" # OWNER/REPO of the installed clone; names never start with a dot
+scripts=(install.sh install bootstrap.sh bootstrap script/bootstrap setup.sh setup script/setup)
 segment='[A-Za-z0-9][A-Za-z0-9._-]*'
 work=0
-target='' # the configured instruction file, empty when none is linked
-link_text() { # <link>: the exact text; command substitution would strip trailing newlines
-  local text
-  text="$(readlink -- "$1"; printf x)"
-  text="${text%x}"
-  printf '%s' "${text%$'\n'}"
-}
-unlink_ours() { # <link> <text> <relative>: remove the link only if it is still ours when it is moved aside
-  local aside moved text
-  aside="$(mktemp -d "${1%/*}/.subyard-user-dotfiles.XXXXXX")"
-  moved="$aside/link"
-  if mv -T -- "$1" "$moved" 2>/dev/null; then
-    text="$(link_text "$moved" 2>/dev/null; printf x)"
-    if [ -L "$moved" ] && [ "${text%x}" = "$2" ]; then
-      unlink -- "$moved"
-    else
-      mv -nT -- "$moved" "$1" 2>/dev/null || :
-      if [ -e "$moved" ] || [ -L "$moved" ]; then
-        printf 'user-dotfiles: warning: ~/%s changed while it was unlinked; kept what replaced the link at %s\n' "$3" "$moved" >&2
-        return
-      fi
-    fi
-  fi
-  rmdir -- "$aside"
-}
 skipped() {
   case "$mode" in check) work=1 ;; apply) printf 'user-dotfiles: warning: %s\n' "$1" >&2 ;; esac
 }
-# Pass 1: parse and clone the source, giving the link target.
+run_script() { # <clone> <relative script>: run it in the clone; on failure warn with its output
+  local log rc=0
+  log="$(mktemp)"
+  if [ -x "$1/$2" ]; then
+    (cd "$1" && timeout -k 10 300 "./$2") </dev/null >"$log" 2>&1 || rc=$?
+  else
+    (cd "$1" && timeout -k 10 300 bash "./$2") </dev/null >"$log" 2>&1 || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    printf 'user-dotfiles: warning: %s/%s exited with status %s; once fixed, run it again in %s. Its output:\n' \
+      "${1#"$store/"}" "$2" "$rc" "$1" >&2
+    tail -n 50 -- "$log" | sed 's/^/  /' >&2
+  fi
+  rm -f -- "$log"
+}
+install_clone() { # <clone>: the configured command, else the first script, else link top-level dot entries
+  local script entry
+  if [ -n "$command" ]; then
+    if [[ "$command" =~ ^$segment(/$segment)*$ ]] && [ -f "$1/$command" ]; then
+      run_script "$1" "$command"
+    else
+      printf 'user-dotfiles: warning: USER_DOTFILES_INSTALL_COMMAND names no file in %s; nothing was installed\n' "${1#"$store/"}" >&2
+    fi
+    return
+  fi
+  for script in "${scripts[@]}"; do
+    if [ -f "$1/$script" ]; then run_script "$1" "$script"; return; fi
+  done
+  for entry in "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "${entry##*/}" != .git ] || continue
+    if [ -e "$HOME/${entry##*/}" ] || [ -L "$HOME/${entry##*/}" ]; then
+      printf 'user-dotfiles: warning: left ~/%s in place; move it away and link it to %s yourself\n' "${entry##*/}" "$entry" >&2
+    else
+      ln -sT -- "$entry" "$HOME/${entry##*/}"
+    fi
+  done
+}
+uninstall_clone() { # <OWNER/REPO>: run uninstall.sh when the clone has one, then forget the install
+  local clone="$store/$1"
+  if ! [[ "$1" =~ ^$segment/$segment$ ]]; then
+    printf 'user-dotfiles: warning: forgot an invalid install record\n' >&2
+  elif [ -f "$clone/uninstall.sh" ]; then
+    run_script "$clone" uninstall.sh
+  else
+    printf 'user-dotfiles: warning: %s has no uninstall.sh; left the files it installed in place\n' "$1" >&2
+  fi
+  rm -f -- "$state"
+}
+installed=''
+if [ -f "$state" ]; then installed="$(<"$state")"; fi
+name=''
 if [ -n "$url" ]; then
   # Query and fragment go first, then the authority (with userinfo) or the SCP host.
   path="${url%%[?#]*}"
@@ -53,69 +81,41 @@ if [ -n "$url" ]; then
   path="${path%/}"
   path="${path#/}"
   name="${path#"${path%/*/*}/"}"
-  subdir="${subdir#/}"
-  subdir="${subdir%/}"
   if ! [[ "$name" =~ ^$segment/$segment$ ]]; then
+    name=''
     skipped 'skipped the source: its path has no valid owner/repo; fix USER_DOTFILES_SOURCE'
-  elif [ -n "$subdir" ] && ! [[ "$subdir" =~ ^$segment(/$segment)*$ ]]; then
-    skipped 'skipped the source: USER_DOTFILES_SUBDIR is not a relative path of plain names; fix it'
-  else
-    clone="$store/$name"
-    if [ -z "$(ls -A "$clone" 2>/dev/null)" ]; then
-      # Verify accepts a source that apply could not clone; check reports it for retry.
-      case "$mode" in
-        check) work=1 ;;
-        verify) ;;
-        apply)
-          mkdir -p "${clone%/*}"
-          temporary="$(mktemp -d "${clone%/*}/.tmp-${clone##*/}.XXXXXX")"
-          if GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:ssh:file:subyard-github timeout -k 10 60 \
-            git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1; then
-            mv -T "$temporary" "$clone" # replaces only an empty directory
-          else
-            rmdir "$temporary" 2>/dev/null || :
-            skipped "could not clone $name; fix Git access or USER_DOTFILES_SOURCE, then retry yard profile enable user-dotfiles or yard init"
-          fi
-          ;;
-      esac
-    fi
-    file="$clone${subdir:+/$subdir}/agents/AGENTS.md"
-    if [ -f "$file" ]; then
-      target="$file"
-    elif [ -n "$(ls -A "$clone" 2>/dev/null)" ]; then
-      skipped "$name${subdir:+/$subdir} has no agents/AGENTS.md; add it or fix USER_DOTFILES_SUBDIR"
-    fi
   fi
 fi
-# Pass 2: ours is a link whose text is exactly <store>/OWNER/REPO[/SUBDIR]/agents/AGENTS.md.
-# Keep it only when it is the configured target.
-for relative in "${links[@]}"; do
-  link="$HOME/$relative"
-  [ -L "$link" ] || continue
-  text="$(link_text "$link"; printf x)"
-  text="${text%x}"
-  [[ "$text" =~ ^"$store"/$segment(/$segment)+/agents/AGENTS\.md$ ]] || continue
-  [ -z "$target" ] || [ "$text" != "$target" ] || continue
-  if [ "$mode" = apply ]; then unlink_ours "$link" "$text" "$relative"; else work=1; fi
-done
-# Pass 3: link each agent instruction path that is free.
-if [ -n "$target" ]; then
-  for relative in "${links[@]}"; do
-    link="$HOME/$relative"
-    if [ -L "$link" ]; then
-      text="$(link_text "$link"; printf x)"
-      [ "${text%x}" != "$target" ] || continue
-    fi
-    if [ -e "$link" ] || [ -L "$link" ]; then
-      skipped "left ~/$relative in place: it is not a link to $name${subdir:+/$subdir}/agents/AGENTS.md; move it away to link it"
-      continue
-    fi
-    if [ "$mode" = apply ]; then
-      mkdir -p "${link%/*}"
-      ln -sT -- "$target" "$link"
-    else
-      work=1
-    fi
-  done
+# Disabled, or the source moved to another repository: uninstall what was installed.
+if [ -n "$installed" ] && [ "$installed" != "$name" ] && { [ -n "$name" ] || [ -z "$url" ]; }; then
+  if [ "$mode" = apply ]; then uninstall_clone "$installed"; installed=''; else work=1; fi
+fi
+# Not yet installed, or its clone is gone: clone when needed, then install once.
+if [ -n "$name" ] && { [ "$installed" != "$name" ] || [ -z "$(ls -A "$store/$name" 2>/dev/null)" ]; }; then
+  clone="$store/$name"
+  case "$mode" in
+    check) work=1 ;;
+    verify) ;; # Apply warned about a source it could not clone; check reports it for retry.
+    apply)
+      # An existing clone is reused as is: the yard never pulls or replaces it.
+      if [ -z "$(ls -A "$clone" 2>/dev/null)" ]; then
+        mkdir -p "${clone%/*}"
+        temporary="$(mktemp -d "${clone%/*}/.tmp-${clone##*/}.XXXXXX")"
+        if GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:ssh:file:subyard-github timeout -k 10 60 \
+          git clone -q -- "$url" "$temporary" </dev/null >/dev/null 2>&1; then
+          mv -T "$temporary" "$clone" # replaces only an empty directory
+        else
+          rmdir "$temporary" 2>/dev/null || :
+          skipped "could not clone $name; fix Git access or USER_DOTFILES_SOURCE, then retry yard profile enable user-dotfiles or yard init"
+        fi
+      fi
+      if [ -n "$(ls -A "$clone" 2>/dev/null)" ]; then
+        # Recorded before the install runs: a failed install is not retried.
+        printf '%s\n' "$name" >"$state.tmp"
+        mv -fT "$state.tmp" "$state"
+        install_clone "$clone"
+      fi
+      ;;
+  esac
 fi
 if [ "$work" = 1 ]; then printf 'work\n'; fi

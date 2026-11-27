@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One leased VM: the installed candidate selects the profile in a named yard, then
-# checks the unavailable-source warning, retry, links and disable.
+# checks the unavailable-source warning, retry, the one install run and the uninstall on disable.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 slot=''

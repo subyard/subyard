@@ -465,7 +465,7 @@ seed_host_instruction_copy() {
     || die 'the published release did not copy the instruction file'
 }
 
-# A symlink at the instruction path in the yard, such as a user-dotfiles link: the rollback,
+# A symlink at the instruction path in the yard, such as a user-dotfiles install link: the rollback,
 # or init after it, refuses it, keeps the link and its target, and succeeds and copies the
 # file again once the operator removes it. The candidate's inventory no longer records the
 # path, so the retained release's rollback inspection refuses it without its detail; the
@@ -486,7 +486,7 @@ verify_symlinked_instruction_file() { # <rollback command...>
       || die 'init refused the symlinked instruction file without its path and step'
   else
     for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
-      'profile disable user-dotfiles in each yard that uses it (its clone is kept) or move any other file at these paths away'; do
+      'runs uninstall.sh from its dotfiles clone when there is one and keeps the clone, then move any file or link left at these paths away'; do
       grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
     done
   fi

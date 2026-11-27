@@ -17,20 +17,20 @@ case "$1" in
   --pause|--resume) exit 0 ;;
   *) exit 2 ;;
 esac
-# A guest never provisioned has no links to remove.
+# A guest never provisioned has nothing installed.
 if [ "$selected" != 1 ] && [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ]; then exit 0; fi
 state="$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" || exit 2
 case "$state" in RUNNING) ;; ''|STOPPED) exit 0 ;; *) exit 2 ;; esac
 if [ "$mode" = check ] && [ "${SUBYARD_PROFILE_POST_APPLY:-0}" = 1 ]; then mode=verify; fi
-# Deselected or removed: no source, so guest.sh unlinks our links and keeps the clone.
+# Deselected or removed: no source, so guest.sh uninstalls and keeps the clone.
 source=''
-subdir=''
+command=''
 if [ "$selected" = 1 ]; then
   source="${USER_DOTFILES_SOURCE:-}"
-  subdir="${USER_DOTFILES_SUBDIR:-}"
+  command="${USER_DOTFILES_INSTALL_COMMAND:-}"
 fi
 output="$(incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- \
-  runuser -u "$DEV_USER" -- bash -s -- "$mode" "$source" "$subdir" <"$profile/guest.sh")" \
-  || { printf 'user-dotfiles: clone or link operation failed\n' >&2; exit 2; }
+  runuser -u "$DEV_USER" -- bash -s -- "$mode" "$source" "$command" <"$profile/guest.sh")" \
+  || { printf 'user-dotfiles: clone or install operation failed\n' >&2; exit 2; }
 # A transport failure never reads as drift (exit 1).
 [ -z "$output" ] || [ "$mode" = apply ] || exit 1
