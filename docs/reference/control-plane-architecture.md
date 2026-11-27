@@ -36,9 +36,10 @@ across L1 and/or L2; it is not another runtime layer. See [Workflows](../workflo
 - The accepted delivery contract places Yard and Veranda in one public monorepo under one product
   tag `vMAJOR.MINOR.PATCH`, with separately installable artifacts. The core installer and `yard update`
   remain CLI/engine-only; Veranda is delivered separately.
-- The accepted compatibility policy supports an exact Yard/Veranda pair with the same product SemVer.
+- The accepted compatibility policy supports Veranda with the engine release line it ships with and
+  the previous one, the [engine window](decisions-and-glossary.md#veranda-engine-window).
   Yard RPC versions and capabilities form an independent wire contract for typed negotiation,
-  feature gating and actionable incompatibility diagnostics, without promising an arbitrary
+  feature gating and actionable incompatibility diagnostics, without promising a wider
   cross-version compatibility matrix.
 
 The shared `Orchestrator` owns policy/confirmation, and core CLI/RPC commands share preparation in

@@ -2289,6 +2289,11 @@ mod tests {
                 .unwrap()
                 .into_snapshot("0.32.0".into(), "default".into())
                 .unwrap();
+            assert!(!decode::<YardStatus>(fixture("yard-status"))
+                .unwrap()
+                .facts()
+                .unwrap()
+                .is_empty());
         }
     }
     #[test]

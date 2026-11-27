@@ -822,7 +822,8 @@ def refusal_text(root, version, engine):
     lines = json.loads((root / 'veranda/compatibility.json').read_text(encoding='utf8'))['engineLines']
     current, previous = lines['current'], lines['previous']
     parts = engine.split('.')
-    stable = len(parts) == 3 and all(p.isascii() and p.isdigit() and (p == '0' or not p.startswith('0')) for p in parts)
+    stable = len(parts) == 3 and all(p.isascii() and p.isdigit() and (p == '0' or not p.startswith('0'))
+                                     and int(p) < 2 ** 64 for p in parts)
     newer = stable and (int(parts[0]), int(parts[1])) > tuple(int(part) for part in current.split('.'))
     remedy = 'Update Veranda.' if newer else 'Install a supported Subyard release on the owner.'
     return f'Veranda {version} supports Subyard {current} and {previous}; this owner runs Subyard {engine}. {remedy}'

@@ -885,8 +885,8 @@ The window is strict: Veranda N refuses N+1. The engine stays client-agnostic: n
 parameters stay empty and Go keeps no Veranda version list. Tests cover the N−1 line through
 fixtures published with its first release `N−1.0`; later patch releases of both lines are
 admitted untested and rely on the additive v1 contract. The window moves when a new line
-starts, not at patch releases; release gates check it. There is no wider matrix and no fallback
-through CLI output.
+starts, not at patch releases; a release gate is to check that it names the release's own
+line. There is no wider matrix and no fallback through CLI output.
 
 Profile editing uses current shipped optional schema 1
 and descriptorless/resource-only profiles without depending on a future registry. Owner
