@@ -76,6 +76,13 @@ Read by task; links are relative to this skill.
 - Select owning lanes, including profile-owned lanes and transitive validators, from
   [coverage ownership](../../../docs/testing.md#coverage-ownership). Mocks cannot close a
   contract the map assigns to a physical lane.
+- Also run the existing tests and lanes the change can break outside its own area: shared code,
+  callers, affected profiles. A whole Periodic run is not required. Merge only when they show
+  nothing existing breaks.
+- A test that fails on the default branch or its scheduled runs, even once on a loaded runner, is
+  a defect, not a tolerated flake. Plan its fix at once and queue it first; tell the operator
+  which merged change let it in and which check missed it. Make timing-dependent tests wait for
+  completed work, not deadlines.
 - Planned checks on available allocated VMs are agent work: complete them before readiness.
 - Release preparation, acceptance and publication follow the
   [agent release workflow](../../../docs/reference/release-publication.md#agent-release-workflow).
