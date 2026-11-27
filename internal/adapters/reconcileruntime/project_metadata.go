@@ -285,8 +285,8 @@ func (runtime Runtime) checkProjectMetadataScope(ctx context.Context) error {
 		return nil
 	}
 	observed, err := runtime.metadataRequest(ctx, "inspect", hooks.metadata)
-	if refusal := new(ProjectMetadataError); errors.As(err, &refusal) {
-		// Captured targets passed inspection, so a refusal now is a changed input.
+	if refusal := new(ProjectMetadataError); !errors.Is(err, domain.ErrPlanStale) && errors.As(err, &refusal) && refusal.Reason != "io_failure" {
+		// Captured targets passed inspection, so a target refusal now is a changed input.
 		return fmt.Errorf("%w: captured project root or metadata changed: %w", domain.ErrPlanStale, err)
 	}
 	if err != nil {

@@ -73,7 +73,8 @@ type ProjectHookFailure struct {
 }
 
 // RefusedBeforeHooks reports an unsuccessful exit in which no approved hook reported a
-// failure. The scoped dispatcher validates its scope before running any hook.
+// failure. The scoped dispatcher validates its scope before running any hook. A hook
+// outside the approved paths is not reported; callers recheck that scope before retrying.
 func (failure *ProjectHookFailure) RefusedBeforeHooks() bool {
 	return failure.Reason == projectHooksUnsuccessful && len(failure.Hooks) == 0
 }

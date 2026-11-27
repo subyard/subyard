@@ -140,6 +140,9 @@ func (executor *hookPlanExecutor) Exec(_ context.Context, _ string, _ string, re
 		payload, _ := json.Marshal(executor.observation)
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
+	if request.Command[0] == "python3" && executor.metadata == "unavailable" {
+		return ports.InstanceExecResult{ExitCode: 1}, errors.New("transport failed")
+	}
 	if request.Command[0] == "python3" && executor.metadata != "" {
 		return ports.InstanceExecResult{Stdout: []byte(`{"expected":` + executor.metadata + `,"projects":"` + testRuntimeOldDigest + `"}`)}, nil
 	}
@@ -201,7 +204,7 @@ func TestNoProjectHookWorkRequiresBoundReadyMetadataAndEmptyInstalledHooks(t *te
 }
 
 func TestEmptyProjectHookPlanRetainsFreshDriftRefusal(t *testing.T) {
-	for _, scenario := range []string{"ready", "zero projects", "project drift", "metadata drift", "agent hook", "resource hook"} {
+	for _, scenario := range []string{"ready", "zero projects", "project drift", "metadata drift", "metadata unavailable", "agent hook", "resource hook"} {
 		t.Run(scenario, func(t *testing.T) {
 			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}, metadata: `[{"metadata":[[],"fingerprint"]}]`}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
@@ -229,12 +232,21 @@ func TestEmptyProjectHookPlanRetainsFreshDriftRefusal(t *testing.T) {
 				executor.observation.Projects = testRuntimeNewDigest
 			case "metadata drift":
 				executor.metadata = `[{"metadata":[[],"changed"]}]`
+			case "metadata unavailable":
+				executor.metadata = "unavailable"
 			case "agent hook":
 				executor.observation.Hooks = []string{"agent-projects-changed"}
 			case "resource hook":
 				executor.observation.Hooks = []string{"/usr/local/libexec/subyard/projects-changed.d/resource"}
 			}
 			err = runtime.CheckProjectHookPlan(context.Background(), true)
+			if scenario == "metadata unavailable" {
+				// A failed guest read is not a changed input.
+				if err == nil || errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
+					t.Fatalf("unavailable metadata guard: err=%v effects=%d", err, executor.calls)
+				}
+				return
+			}
 			ready := scenario == "ready" || scenario == "zero projects" || scenario == "project drift"
 			if ready && err != nil || !ready && !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
 				t.Fatalf("empty plan guard: err=%v effects=%d", err, executor.calls)
