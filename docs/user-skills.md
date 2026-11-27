@@ -52,13 +52,13 @@ accepts skipped sources.
   source and its target still has `SKILL.md`. So `yard profile disable user-skills`,
   deselecting the profile and running `yard init`, removing a source or deleting a skill folder
   removes those links and keeps the clones. To disable one skill, delete its folder in the
-  clone; removing only its link gets it re-added.
+  clone; removing only its link gets it re-added. Apply moves a link aside and checks it again
+  before removing it; anything else found there is moved back, or kept beside the path with a
+  warning when the path was re-created.
 - Concurrent edits by the same user during a run are not guarded.
 
 Out of scope:
 
-- the same-user race between reading and unlinking a link: there is no atomic primitive, and
-  the user already has the same rights;
 - relative or differently spelled links into the store;
 - a hand-made link with our exact spelling, which is treated as ours;
 - updating clones or deciding whether a source is trusted;

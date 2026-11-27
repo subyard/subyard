@@ -11,6 +11,30 @@ segment='[A-Za-z0-9][A-Za-z0-9._-]*'
 work=0
 seen=()
 names=() # configured, not skipped
+link_text() { # <link>: the exact text; command substitution would strip trailing newlines
+  local text
+  text="$(readlink -- "$1"; printf x)"
+  text="${text%x}"
+  printf '%s' "${text%$'\n'}"
+}
+unlink_ours() { # <link> <text> <relative>: remove the link only if it is still ours when it is moved aside
+  local aside moved text
+  aside="$(mktemp -d "${1%/*}/.subyard-user-skills.XXXXXX")"
+  moved="$aside/link"
+  if mv -T -- "$1" "$moved" 2>/dev/null; then
+    text="$(link_text "$moved" 2>/dev/null; printf x)"
+    if [ -L "$moved" ] && [ "${text%x}" = "$2" ]; then
+      unlink -- "$moved"
+    else
+      mv -nT -- "$moved" "$1" 2>/dev/null || :
+      if [ -e "$moved" ] || [ -L "$moved" ]; then
+        printf 'user-skills: warning: ~/%s changed while it was unlinked; kept what replaced the link at %s\n' "$3" "$moved" >&2
+        return
+      fi
+    fi
+  fi
+  rmdir -- "$aside"
+}
 skipped() {
   case "$mode" in check) work=1 ;; apply) printf 'user-skills: warning: %s\n' "$1" >&2 ;; esac
 }
@@ -74,7 +98,7 @@ for harness in "${harnesses[@]}"; do
     keep=0
     for other in "${names[@]}"; do [ "$other" != "$name" ] || keep=1; done
     if [ "$keep" = 1 ] && [ -e "$target/SKILL.md" ]; then continue; fi
-    if [ "$mode" = apply ]; then unlink -- "$link"; else work=1; fi
+    if [ "$mode" = apply ]; then unlink_ours "$link" "$target" "$harness/${link##*/}"; else work=1; fi
   done
 done
 # Pass 3: link each configured skill where the path is free.
