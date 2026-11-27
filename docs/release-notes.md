@@ -43,11 +43,12 @@
 - **Before rolling back to 0.32.0 or older,** run `yard -Y NAME profile disable user-dotfiles`
   in each yard that uses the profile, move any file or link left at an instruction path away,
   and unset `USER_DOTFILES_SOURCE` and `USER_DOTFILES_INSTALL_COMMAND` wherever you set them
-  (`yard -Y NAME config unset SETTING --scope SCOPE`). For 0.31.0 or older, also run
-  `yard -Y NAME profile disable user-skills` where `ENVIRONMENT_PROFILES` lists it and unset
-  `USER_SKILL_SOURCES`, since those releases do not ship user skills. Otherwise the rollback is
-  refused with "the retained release cannot provide a safe rollback plan" and this recovery;
-  the rollback plan lists these steps. After updating again, re-enable the profiles or run
+  (`yard -Y NAME config unset SETTING --scope SCOPE`, with `--git` for a setting saved with
+  `--git`). For 0.31.0 or older, also unset `USER_SKILL_SOURCES`, which those releases do not
+  know. A rollback to 0.31.0 or 0.32.0 that misses a step is refused with "the retained release
+  cannot provide a safe rollback plan" and this recovery, and one to 0.30.0 with a setting left
+  with "cannot read the yard settings"; the rollback plan lists these steps. After updating
+  again, set the unset settings again before re-enabling the profile, or run
   `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the default
   selection; see [user dotfiles](user-dotfiles.md).
 

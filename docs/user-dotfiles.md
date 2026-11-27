@@ -91,17 +91,18 @@ uses the profile:
    `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or `~/.config/opencode/AGENTS.md` away.
 2. In each scope that sets them, run
    `yard -Y NAME config unset USER_DOTFILES_SOURCE --scope SCOPE` and
-   `yard -Y NAME config unset USER_DOTFILES_INSTALL_COMMAND --scope SCOPE`.
-3. For 0.31.0 or older, which do not ship [user skills](user-skills.md) either: disabling a
-   profile the yard inherited writes the remaining selection to its `ENVIRONMENT_PROFILES`, so
-   run `yard -Y NAME profile disable user-skills` where it lists `user-skills`, and
-   `yard -Y NAME config unset USER_SKILL_SOURCES --scope SCOPE` in each scope that sets it.
+   `yard -Y NAME config unset USER_DOTFILES_INSTALL_COMMAND --scope SCOPE`, adding `--git` for
+   a setting saved with `--git`.
+3. For 0.31.0 or older, which do not know the [user skills](user-skills.md) setting either,
+   unset `USER_SKILL_SOURCES` the same way.
 
-Otherwise the rollback is refused with "the retained release cannot provide a safe rollback
-plan" and this recovery. After updating again, the yard keeps the explicit selection: run
-`yard -Y NAME profile enable user-dotfiles` (and `user-skills`), or, if the yard inherited its
-selection before, `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the
-default selection.
+A rollback to 0.31.0 or 0.32.0 that misses a step is refused with "the retained release cannot
+provide a safe rollback plan" and this recovery; one to 0.30.0 with a setting left is refused
+with "yard NAME: release 0.30.0 cannot read the yard settings". After updating again, set the
+unset settings again first, then run `yard -Y NAME profile enable user-dotfiles`. Disabling
+wrote the yard's remaining selection to its `ENVIRONMENT_PROFILES`; if the yard inherited its
+selection before, `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` returns it to
+the default selection instead of the enable.
 
 Out of scope: updating the clone, deciding whether a source is trusted, and what the
 repository's scripts do.

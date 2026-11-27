@@ -471,39 +471,6 @@ disable_user_dotfiles() {
   done
 }
 
-# Disable wrote the remaining selection explicitly, and a rollback target that does not ship a
-# selected profile (user-skills before 0.32.0) cannot load it. Without the recovery the
-# rollback is refused, keeps the candidate active and names the step; after a repair the lane
-# follows the recovery and disables each such profile.
-keep_rollback_target_profiles() {
-  local runtime="$OPERATOR_HOME/.subyard/runtime" selected name missing=() output
-  selected="$(operator_yard -Y default profile list --json | jq -r '.profiles[] | select(.effective) | .name')" \
-    || die 'cannot list the selected profiles'
-  for name in $selected; do
-    operator_env test -d "$runtime/$OLD_RELEASE_TARGET/config/profiles/$name" || missing+=("$name")
-  done
-  [ "${#missing[@]}" -gt 0 ] || return 0
-  if output="$(operator_yard update --rollback --yes 2>&1)"; then
-    printf '%s\n' "$output" >"$STATE_ROOT/rollback-unshipped-profiles.log"
-    die "the rollback accepted selected profiles the target does not ship: ${missing[*]}"
-  fi
-  printf '%s\n' "$output" >"$STATE_ROOT/rollback-unshipped-profiles.log"
-  [ "$(operator_env readlink "$runtime/current")" = "$CANDIDATE_RELEASE_TARGET" ] \
-    || die 'the refused rollback did not keep the candidate active'
-  for name in "${missing[@]}"; do
-    grep -Fq -- "yard -Y NAME profile disable $name " <<<"$output" \
-      || die "the rollback refusal does not name profile disable $name"
-  done
-  # A refused rollback first repairs the current release.
-  operator_yard migrate --yes >"$STATE_ROOT/rollback-profiles-migrate.log" 2>&1 \
-    || die 'migrate after the refused rollback failed'
-  for name in "${missing[@]}"; do
-    operator_yard -Y default profile disable "$name" --yes >>"$STATE_ROOT/rollback-profiles.log" 2>&1 \
-      || die "profile disable $name before the rollback failed"
-  done
-  ok "rollback refused selected profiles the target does not ship (${missing[*]}), then they were disabled"
-}
-
 seed_host_instruction_copy() {
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'published-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
@@ -533,7 +500,7 @@ verify_symlinked_instruction_file() { # <rollback command...>
       || die 'init refused the symlinked instruction file without its path and step'
   else
     for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
-      'which runs uninstall.sh and keeps the clone, move any file or link left at these paths away'; do
+      'profile disable user-dotfiles (runs uninstall.sh, keeps the clone), move leftovers at these paths away'; do
       grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
     done
   fi
@@ -658,7 +625,6 @@ if [ "$registry_relation" = 0 ]; then
     # shellcheck disable=SC1090
     . "$ROOT/$ROLLBACK_SCENARIO"
   fi
-  keep_rollback_target_profiles
   history_before="$(operator_env sha256sum "$V2_STATE_ROOT/history-checkpoint.json" | awk '{print $1}')"
   info "rolling back to the published v$OLD_VERSION"
   if [ "$LOCAL_CONFIG_CHECKS" = 1 ]; then
