@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -82,7 +83,7 @@ func TestLeaseStoreAcquireSlotDoesNotFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Slots[0] != before.Slots[0] {
+	if !reflect.DeepEqual(after.Slots[0], before.Slots[0]) {
 		t.Fatalf("failed exact acquire mutated neighbor: before=%#v after=%#v",
 			before.Slots[0], after.Slots[0])
 	}

@@ -41,6 +41,9 @@ type JournalRecord struct {
 	DurationMS         int64     `json:"duration_ms,omitempty"`
 	IncidentID         string    `json:"incident_id,omitempty"`
 	RecoveryAttempt    uint64    `json:"recovery_attempt,omitempty"`
+	HoldLevel          uint64    `json:"hold_level,omitempty"`
+	HoldUntil          time.Time `json:"hold_until,omitzero"`
+	HoldReason         string    `json:"hold_reason,omitempty"`
 	// Own is computed for the reader and never stored.
 	Own bool `json:"own,omitempty"`
 }
@@ -53,6 +56,7 @@ var (
 		"start", "stop", "delete", "restart", "list", "query", "info", "config",
 		"project", "network", "profile", "operation", "console", "storage",
 	}
+	holdReasons = []string{"manual", "expired"}
 )
 
 func closedValue(value string, allowed []string) bool {
@@ -77,6 +81,9 @@ func journalRecordFor(event BrokerEvent) (JournalRecord, bool) {
 		if outcome == "" {
 			outcome = "error"
 		}
+	case "slot.hold_ended":
+		// Not a failure: tells readers a held slot is leasable again.
+		outcome = ""
 	case "lease.stop_succeeded":
 		if event.DurationMS < slowStopDuration.Milliseconds() {
 			return JournalRecord{}, false
@@ -91,7 +98,8 @@ func journalRecordFor(event BrokerEvent) (JournalRecord, bool) {
 		ResourceGeneration: event.ResourceGeneration, LeaseEpoch: event.LeaseEpoch,
 		FromState: event.FromState, ToState: event.ToState, Step: event.Step, Outcome: outcome,
 		Operation: event.Operation, DurationMS: event.DurationMS, IncidentID: event.IncidentID,
-		RecoveryAttempt: event.RecoveryAttempt,
+		RecoveryAttempt: event.RecoveryAttempt, HoldLevel: event.HoldLevel, HoldUntil: event.HoldUntil,
+		HoldReason: event.HoldReason,
 	}, true
 }
 
@@ -102,7 +110,8 @@ func validateJournalRecord(record JournalRecord) error {
 	}
 	if (record.SlotID != "" && !brokerSlotID.MatchString(record.SlotID)) ||
 		(record.IncidentID != "" && !brokerRecordID.MatchString(record.IncidentID)) ||
-		record.Outcome == "" || !closedValue(record.Outcome, journalOutcomes) ||
+		(record.Outcome == "") != (record.Kind == "slot.hold_ended") ||
+		!closedValue(record.Outcome, journalOutcomes) || !closedValue(record.HoldReason, holdReasons) ||
 		!closedValue(record.Step, journalSteps) || !closedValue(record.Operation, journalOperations) ||
 		record.DurationMS < 0 || record.Own {
 		return errors.New("invalid error journal fields")
@@ -135,8 +144,8 @@ func (recorder EventRecorder) archiveJournalRecord(record JournalRecord) error {
 	})
 }
 
-// trimJournal bounds the journal while the host sink cannot acknowledge, which
-// is the only time the shared archive is pruned.
+// trimJournal bounds the journal on every write; host-sink acknowledgement
+// prunes it only by the archive's age and size limits.
 func (recorder EventRecorder) trimJournal() error {
 	entries, err := os.ReadDir(recorder.journalDirectory())
 	if err != nil {

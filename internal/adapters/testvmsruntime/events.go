@@ -66,6 +66,10 @@ type BrokerEvent struct {
 	Step      string `json:"step,omitempty"`
 	Outcome   string `json:"outcome,omitempty"`
 	Operation string `json:"operation,omitempty"`
+	// Loop-protection hold of the slot; see countQuarantine.
+	HoldLevel  uint64    `json:"hold_level,omitempty"`
+	HoldUntil  time.Time `json:"hold_until,omitzero"`
+	HoldReason string    `json:"hold_reason,omitempty"`
 }
 
 type CommandEvidence struct {
@@ -412,7 +416,7 @@ func validateBrokerEvent(event BrokerEvent) error {
 		return errors.New("invalid broker incident reference")
 	}
 	if !closedValue(event.Step, journalSteps) || !closedValue(event.Outcome, journalOutcomes) ||
-		!closedValue(event.Operation, journalOperations) {
+		!closedValue(event.Operation, journalOperations) || !closedValue(event.HoldReason, holdReasons) {
 		return errors.New("invalid broker event failure facts")
 	}
 	if event.Context != nil && validateLeaseContext(*event.Context) != nil {
