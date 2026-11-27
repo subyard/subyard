@@ -1083,12 +1083,23 @@ error_journal_request() {
 render_error_journal() {
   jq -r '.errors[] | "\(.timestamp) \(.slot_id // "-") \(.kind)"
     + (if .step then " step=\(.step)" else "" end)
-    + " outcome=\(.outcome)"
+    + (if .outcome then " outcome=\(.outcome)" else "" end)
     + (if .operation then " operation=\(.operation)" else "" end)
     + (if .duration_ms then " duration_ms=\(.duration_ms)" else "" end)
     + (if .recovery_attempt then " recovery_attempt=\(.recovery_attempt)" else "" end)
     + (if .incident_id then " incident_id=\(.incident_id)" else "" end)
+    + (if .hold_level then " hold_level=\(.hold_level)" else "" end)
+    + (if .hold_until then " hold_until=\(.hold_until)" else "" end)
+    + (if .hold_reason then " hold_reason=\(.hold_reason)" else "" end)
     + (if .own then " own" else "" end)' | tr -d '\000-\010\013-\037\177'
+}
+
+# One line per slot that loop protection holds, with the operator's lift command.
+render_hold_status() {
+  jq -r --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .pool.slots[] | select((.hold_until // "") > $now) |
+    "\(.slot_id) is held by loop protection until \(.hold_until) (level \(.hold_level // 0)); the operator can lift it: yard test-vms recover --slot \(.slot_id | ltrimstr("slot-") | tonumber)"' \
+    <<<"$1" 2>/dev/null | tr -d '\000-\010\013-\037\177' || true
 }
 
 read_error_journal() {
@@ -1130,7 +1141,7 @@ render_error_summary() {
 # journal records (the quarantine and the recovery records that follow it);
 # another holder's run is never printed. Never fails.
 report_quarantine() {
-  local slot="$1" context="$2" run="${3:-}" epoch="${4:-}" response incident=unavailable number
+  local slot="$1" context="$2" run="${3:-}" epoch="${4:-}" response incident=unavailable number hold
   [[ "$slot" =~ ^slot-[0-9]{3}$ ]] || return 0
   number="$((10#${slot#slot-}))"
   if response="$(error_journal_request "$slot" 20 30 2>/dev/null)"; then
@@ -1138,14 +1149,23 @@ report_quarantine() {
       [.errors[] | select(.incident_id) |
         select($own == "" or (.own == true and ($epoch == "" or (.lease_epoch | tostring) == $epoch)))]
       | last | .incident_id // "unavailable"' <<<"$response" 2>/dev/null)" || incident=unavailable
+    # A loop-protection hold is public: the latest record that names one.
+    hold="$(jq -r --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      [.errors[] | select(.hold_until or .kind == "slot.hold_ended")] | last |
+      if . != null and (.hold_until // "") > $now then .hold_until else "" end' <<<"$response" 2>/dev/null)" || hold=
   fi
   [[ "$incident" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || incident=unavailable
-  printf 'E2E_QUARANTINE slot=%s run=%s incident_id=%s\n' "$slot" "${run:--}" "$incident" >&2
+  [[ "${hold:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]] || hold=
+  printf 'E2E_QUARANTINE slot=%s run=%s incident_id=%s%s\n' "$slot" "${run:--}" "$incident" "${hold:+ hold_until=$hold}" >&2
   if [ -n "$run" ]; then
     printf '%s: %s was quarantined during %s of run %s (incident %s); the broker recovers it automatically.\n' \
       "$E2E_PROGRAM" "$slot" "$context" "$run" "$incident" >&2
   else
     printf '%s: %s is quarantined (incident %s).\n' "$E2E_PROGRAM" "$slot" "$incident" >&2
+  fi
+  if [ -n "$hold" ]; then
+    printf '%s: %s failed repeatedly and is held until %s; the operator can lift the hold with: yard test-vms recover --slot %s\n' \
+      "$E2E_PROGRAM" "$slot" "$hold" "$number" >&2
   fi
   printf '%s: tell the operator and ask them to run: yard test-vms logs --slot %s\n' "$E2E_PROGRAM" "$number" >&2
 }
@@ -2017,7 +2037,7 @@ client_main() {
     prepare) prepare_identity ;;
     status)
       response="$(facade_request status)" || die 'test environment unavailable'
-      if [ "$json" = 1 ]; then printf '%s\n' "$response"; else render_pool_status "$response"; render_error_summary "$response"; fi
+      if [ "$json" = 1 ]; then printf '%s\n' "$response"; else render_pool_status "$response"; render_hold_status "$response"; render_error_summary "$response"; fi
       ;;
     logs) read_agent_logs logs "$count" "$json" '' ;;
     errors) read_error_journal "$count" "$json" ;;

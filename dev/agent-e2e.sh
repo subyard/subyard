@@ -542,6 +542,7 @@ main() {
         printf '%s\n' "$status_response"
       else
         render_pool_status "$status_response"
+        render_hold_status "$status_response"
         render_error_summary "$status_response"
       fi
       return

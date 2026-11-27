@@ -63,7 +63,10 @@ case "$command" in
     [ ! -e "$FAKE/lease-logs" ] || capabilities="$(jq -c '. + ["lease-logs-v1"]' <<<"$capabilities")"
     [ ! -e "$FAKE/error-journal" ] || capabilities="$(jq -c '. + ["error-journal-v1"]' <<<"$capabilities")"
     jq -cn --argjson capabilities "$capabilities" '{schema_version:1,status:"ok",capabilities:$capabilities,
-      pool:{schema_version:2,slots:[{slot_id:"slot-002",state:"available",resource_generation:1,lease_epoch:1}]}}'
+      pool:{schema_version:2,slots:[{slot_id:"slot-002",state:"available",resource_generation:1,lease_epoch:1}]}}' |
+      if [ -f "$FAKE/held" ]; then
+        jq -c '.pool.slots[0] |= (.state = "quarantined" | .hold_level = 2 | .hold_until = "2999-01-01T00:00:00Z")'
+      else cat; fi
     ;;
   acquire-v3\ *|acquire-v4\ *)
     read -r protocol _ _ _ yard project run purpose _ _ slot count _ <<<"$command"
@@ -173,6 +176,11 @@ case "$command" in
       # After many failed recoveries the quarantine itself left the requested tail.
       if [ -f "$FAKE/recovery-tail" ]; then
         jq -c '.errors |= [.[0], (.[2] | .kind = "recovery.failed" | .step = "recovery" | .recovery_attempt = 21)]'
+      elif [ -f "$FAKE/held" ]; then
+        # The fifth quarantine started a hold; an earlier hold of the slot has ended.
+        jq -c '.errors |= [(.[0] | .hold_until = "2000-01-01T00:00:00Z" | .hold_level = 1),
+          (.[0] | .kind = "slot.hold_ended" | del(.outcome) | .hold_reason = "expired"), .[1],
+          (.[2] | .hold_until = "2999-01-01T00:00:00Z" | .hold_level = 2)]'
       else cat; fi
     ;;
   *) log "rejected $command"; printf '%s\n' '{"schema_version":1,"status":"error","code":"invalid_request"}' ;;
@@ -449,7 +457,19 @@ touch "$TMP/recovery-tail"
 if client release "$handle" 2>"$TMP/err"; then fail 'a quarantined release succeeded with recovery records'; fi
 grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=01795371892254664249-1843ff2f64712754" "$TMP/err" \
   || fail "the incident was lost behind recovery records: $(cat "$TMP/err")"
-rm -f "$TMP/recovery-tail" "$TMP/release-rejected"
+rm -f "$TMP/recovery-tail"
+touch "$TMP/held"
+if client release "$handle" 2>"$TMP/err"; then fail 'a quarantined release succeeded under a hold'; fi
+grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=01795371892254664249-1843ff2f64712754 hold_until=2999-01-01T00:00:00Z" "$TMP/err" \
+  && grep -Fxq 'subyard-test-vms: slot-002 failed repeatedly and is held until 2999-01-01T00:00:00Z; the operator can lift the hold with: yard test-vms recover --slot 2' "$TMP/err" \
+  || fail "the hold was not reported: $(cat "$TMP/err")"
+client errors --yard test-yard --slot 2 > "$TMP/out" 2>"$TMP/err" || fail "errors under a hold failed: $(cat "$TMP/err")"
+grep -Eq '^2026-08-24T11:00:00Z slot-002 slot.hold_ended incident_id=[0-9a-f-]+ hold_reason=expired$' "$TMP/out" \
+  || fail "hold end was not rendered: $(cat "$TMP/out")"
+client status --yard test-yard > "$TMP/out" 2>"$TMP/err" || fail 'status under a hold failed'
+grep -Fxq 'slot-002 is held by loop protection until 2999-01-01T00:00:00Z (level 2); the operator can lift it: yard test-vms recover --slot 2' "$TMP/out" \
+  || fail "status did not show the hold: $(cat "$TMP/out")"
+rm -f "$TMP/held" "$TMP/release-rejected"
 client release "$handle" 2>"$TMP/err" || fail 'release after a quarantined refusal failed'
 ! grep -Fq E2E_RELEASE_EVENT "$TMP/err" && ! grep -Fq E2E_QUARANTINE "$TMP/err" \
   || fail 'a successful release printed refusal diagnostics'
