@@ -57,7 +57,9 @@ done
   facade_request() {
     printf '%s\n' "${1%% *}" >> "$TMP/log-requests"
     case "$1" in
-      status) printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":["lease-logs-v1"]}' ;;
+      status) printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":["lease-logs-v1","error-journal-v1"]}' ;;
+      "errors-v1 $log_client slot-002 2")
+        printf '%s\n' '{"schema_version":1,"status":"ok","errors":[{"timestamp":"2026-08-24T12:01:05Z","slot_id":"slot-002","kind":"lease.stop_failed","step":"delete-allocation","outcome":"error","own":true}]}' ;;
       "logs-v1 $log_client slot-002 2")
         printf '%s\n' '{"schema_version":1,"status":"ok","events":[{"kind":"fixture.first"},{"kind":"fixture.last"}]}' ;;
       "logs-v1 $log_client - 50") printf '%s\n' '{"schema_version":1,"status":"ok","events":[]}' ;;
@@ -75,9 +77,14 @@ done
   [ -z "$(main --yard test-yard --logs)" ] || fail 'empty lease history failed or printed output'
   grep -Fq 'fixture failure' <<<"$(main --yard test-yard --incident "$incident_id")" \
     || fail 'incident rendering lost diagnostics'
+  [ "$(main --yard test-yard --errors --slot 2 -n 2)" = \
+    '2026-08-24T12:01:05Z slot-002 lease.stop_failed step=delete-allocation outcome=error own' ] \
+    || fail 'error journal rendering lost typed fields'
+  LEASE_REQUESTED_SLOT=''
   ! grep -Eq '^(acquire|renew|release)' "$TMP/log-requests" \
     || fail 'diagnostic read changed lease lifecycle'
-  for args in '--logs -n 0' '--logs -n 201' '--logs -- true' '--logs --ssh 1' \
+  for args in '--logs -n 0' '--logs -n 201' '--logs -- true' '--logs --ssh 1' '--errors --logs' \
+    '--errors -n 0' '--errors -- true' '--errors --incident bad-id' '--errors --wait 1m' \
     '--logs --incident bad-id' '--incident ../bad' '--logs --purpose test' '--logs --vm-count 1'; do
     rc=0
     # shellcheck disable=SC2086

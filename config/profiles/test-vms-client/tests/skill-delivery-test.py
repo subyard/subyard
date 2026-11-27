@@ -105,13 +105,13 @@ class ClientProfile(unittest.TestCase):
                      'acquire --slot N', 'exec HANDLE --', 'release HANDLE', '`available`', '`held` or `busy`',
                      '`provisioning`, `draining`, `recovering`', '`capacity`', '--wait 20m',
                      '`quarantined`, `stopped`, `legacy*`, `unavailable`',
-                     'exec HANDLE -- true', 'resets the idle timer',
+                     'exec HANDLE -- true', 'resets the idle timer', 'client.sh errors', 'E2E_QUARANTINE',
                      'Nothing in the VM survives', 'cannot reach this', 'root',
                      'https://github.com/Subyard/Subyard/blob/master/docs/test-vms.md#pool-facts-for-agents'):
             self.assertIn(term, text)
         # Every documented command exists in the shipped client.
         usage = subprocess.run(['bash', str(SKILL / 'client.sh'), '--help'], capture_output=True, text=True, check=True).stdout
-        for command in ('status', 'acquire --slot N', 'exec HANDLE', 'release HANDLE', 'leases', 'logs'):
+        for command in ('status', 'acquire --slot N', 'exec HANDLE', 'release HANDLE', 'leases', 'logs', 'errors'):
             self.assertIn(command, usage)
 
 
