@@ -612,7 +612,9 @@ Host instruction sources and frozen historical recovery recipes remain intact. S
 ## Coding-agent compatibility
 
 Codex, Claude Code, OpenCode and pi can run directly in the yard. Their versions are not a
-Subyard compatibility allowlist. Claude provisioning resolves the official `latest` native release,
+Subyard compatibility allowlist. In a measured default yard an idle OpenCode session held about
+0.6 GiB of RAM and peaked at about 1.1 GiB; count that per running session when you size
+`LIMITS_MEMORY`. Claude provisioning resolves the official `latest` native release,
 verifies its platform SHA-256 against the versioned manifest, and atomically installs it under
 `/opt/subyard/claude` with `/usr/local/bin/claude` pointing to it. A newer working managed installation
 is preserved; an existing command owned by another installer is left unchanged and reported as a conflict.

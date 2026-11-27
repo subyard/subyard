@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Yard disk use
+
+- Yards no longer keep downloaded APT packages. Provisioning writes
+  `/etc/apt/apt.conf.d/99subyard-no-archive-cache`, so `apt-get` removes downloaded archives
+  after a successful install, and clears the archives that earlier provisioning kept.
+  Rollback leaves the file in place; delete it in the yard to keep archives again.
+
 ### Claude managed instructions
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by
