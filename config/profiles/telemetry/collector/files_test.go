@@ -47,8 +47,14 @@ func TestPrivateDirPolicy(t *testing.T) {
 				mkdirMode(t, target, 0o700)
 				symlink(t, target, path)
 			}},
-		{name: "dangling symlink", refusal: "data directory must be a real directory",
+		{name: "dangling symlink", refusal: "mkdir {path}: file exists",
 			prepare: func(t *testing.T, path string) { symlink(t, path+"-missing", path) }},
+		{name: "symlink to own file", refusal: "mkdir {path}: not a directory",
+			prepare: func(t *testing.T, path string) {
+				mkdirMode(t, filepath.Dir(path), 0o700)
+				testkit.WriteFile(t, path+"-target", nil, 0o600)
+				symlink(t, path+"-target", path)
+			}},
 		{name: "regular file", refusal: "mkdir {path}: not a directory",
 			prepare: func(t *testing.T, path string) {
 				mkdirMode(t, filepath.Dir(path), 0o700)

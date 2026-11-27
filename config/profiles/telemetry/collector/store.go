@@ -87,6 +87,13 @@ func privateDir(path string) error {
 	var state *safefs.DirStateError
 	switch {
 	case errors.Is(err, safefs.ErrSymlink):
+		// The texts follow what os.MkdirAll reported for each link target.
+		switch target, statErr := os.Stat(path); {
+		case statErr != nil:
+			return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.EEXIST}
+		case !target.IsDir():
+			return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+		}
 		return errors.New("data directory must be a real directory")
 	case errors.Is(err, safefs.ErrNotDirectory):
 		return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
