@@ -803,7 +803,10 @@ late. Each slot checks coverage for its own commit and image. A completed push o
 counts when its `pool` job succeeded and the run finished without cancellation. The workflow reads
 the scheduled run title for its image and treats older unlabelled schedules and `ci-probe/**`
 pushes as Debian runs. A failed check after pool success can be repeated with Re-run or a manual
-dispatch.
+dispatch. A scheduled slot on a covered commit still runs `candidate` and `pool` and skips the
+check matrix and supersede, so a changed upstream build fails within one slot on a commit that
+passed before. Each check job's summary names the exact Incus packages on the runner and in the
+test yard, also kept in `incus-builds.log` once the pool is installed.
 
 On `master`, a new main run replaces an earlier run for the same image and, when it proceeds to
 testing, stops its Intel retries. Main runs and retries on `master` show the image in their titles.
