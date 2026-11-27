@@ -1123,8 +1123,8 @@ network namespace, and excludes each top-level `/tmp` entry they reference, comp
 `[A-Za-z0-9._-]` widened to a `?` glob. It refuses to run without that view: when a
 process other than one exiting during the scan cannot be read. tmpfiles itself
 keeps flocked files and directories, bound sockets and mounts; the policy also keeps
-the opt-in disposable tree, every `x` and `X` path under `/tmp` the installed
-tmpfiles configuration declares, and the vendor exclusions: current-boot
+the opt-in disposable tree, every exclusion and directory under `/tmp` the
+installed tmpfiles configuration declares, and the vendor exclusions: current-boot
 `systemd-private-*` service directories, SSH agent directories, X server locks and
 the X socket directories.
 A path another mount namespace maps from `/tmp` under a different name is not seen;

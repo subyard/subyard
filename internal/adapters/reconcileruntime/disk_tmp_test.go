@@ -457,7 +457,7 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 		"proc/20/cwd": filepath.Join(tmp, "cwd"), "proc/20/fd/3": filepath.Join(tmp, "open/file") + " (deleted)",
 		"proc/21/fd/4": filepath.Join(tmp, weird, "file"), "proc/21/fd/5": filepath.Join(tmp, invalid, "file"),
 		"proc/22/exe": "/usr/bin/true", "proc/22/cwd": filepath.Join(tmp, accented), "proc/self": "22",
-		"proc/25/ns/net": "net:[2]", "proc/26/ns/net": "net:[2]",
+		"proc/25/ns/net": "net:[2]", "proc/24/ns/net": "net:[2]", "proc/26/ns/net": "net:[2]",
 	} {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, link)), 0o755); err != nil {
 			t.Fatal(err)
@@ -473,13 +473,14 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 	testkit.WriteFile(t, filepath.Join(root, "proc/23/maps"), []byte(
 		"7f00-7f10 r-xp 00000000 08:01 1234                       "+filepath.Join(tmp, `mapped\012library`, "lib.so")+" (deleted)\n"+
 			"7f10-7f20 r--p 00000000 08:01 1235                       /usr/lib/libc.so.6\n"), 0o600)
-	// Each network namespace has its own socket table.
+	// Each network namespace has its own socket table, read through any process
+	// still in it: process 24 exits before its table is read.
 	if err := os.MkdirAll(filepath.Join(root, "proc/25/net"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(root, "proc/25/net/unix"), []byte("Num       RefCount Protocol Flags    Type St Inode Path\n"+
-		"0000000000000000: 00000002 00000000 00010000 0001 01 1234 "+filepath.Join(tmp, "sockets/listen")+"\n"+
-		"0000000000000001: 00000002 00000000 00010000 0001 01 1235 @abstract\n"), 0o644)
+		"0000000000000000: 00000002 00000000 00010000 0001 01  1234 "+filepath.Join(tmp, "sockets/listen")+"\n"+
+		"0000000000000001: 00000002 00000000 00010000 0001 01 12350 @abstract\n"), 0o644)
 	runtimeDirectory := filepath.Join(root, "run")
 	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
 		t.Fatal(err)
@@ -544,7 +545,7 @@ exec /usr/bin/systemd-tmpfiles --clean "$@"
 		t.Fatal(err)
 	}
 	want := "x " + tmp + "/a?b\nx " + tmp + "/caf??\nx " + tmp + "/cwd\nx " + tmp + "/mapped*\nx " + tmp + "/open\nx " + tmp + "/sockets*\nx " + tmp + "/we?ird???b\n" +
-		"x " + tmp + "/podman-run-*\nX " + tmp + "/vendor\n"
+		"x " + tmp + "/podman-run-*\nX " + tmp + "/vendor\nx " + tmp + "/.X11-unix\n"
 	if string(exclusions) != want {
 		t.Fatalf("exclusions:\n got %q\nwant %q", exclusions, want)
 	}

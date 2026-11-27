@@ -217,19 +217,26 @@ scan=0
 find /proc/ -mindepth 1 -maxdepth 3 -ignore_readdir_race -regextype posix-extended \
   -regex '/proc/[0-9]+/(cwd|root|exe|fd/[0-9]+)' -lname '/tmp/*' -printf '%l\0' \
   -o -regex '/proc/[0-9]+(/fd)?' -o -prune >"$runtime/links" 2>"$runtime/errors" || scan=1
+# Mapping paths escape newlines, so an escape widens the rest of the name to "*".
 find /proc/ -mindepth 1 -maxdepth 2 -ignore_readdir_race -regextype posix-extended \
-  -regex '/proc/[0-9]+/maps' -exec cat {} + \
-  -o -regex '/proc/[0-9]+' -o -prune >"$runtime/maps" 2>>"$runtime/errors" || scan=1
+  -regex '/proc/[0-9]+/maps' -exec sed -n \
+  's|^[^ ]* [^ ]* [^ ]* [^ ]* [^ ]*  */tmp/\([^/][^/]*\).*|\1|; T; s/\\.*/*/; s/[^A-Za-z0-9._*-]/?/g; p' {} + \
+  -o -regex '/proc/[0-9]+' -o -prune >"$runtime/mapped" 2>>"$runtime/errors" || scan=1
 # tmpfiles keeps only sockets bound in its own network namespace: read the
-# socket table of every namespace once.
+# socket table of every namespace once, through any process still in it.
 find /proc/ -mindepth 1 -maxdepth 3 -ignore_readdir_race -regextype posix-extended \
   -regex '/proc/[0-9]+/ns/net' -printf '%l %h\n' \
   -o -regex '/proc/[0-9]+(/ns)?' -o -prune >"$runtime/namespaces" 2>>"$runtime/errors" || scan=1
-sort -u -k1,1 -o "$runtime/namespaces" "$runtime/namespaces"
+sort -k1,1 -o "$runtime/namespaces" "$runtime/namespaces"
 : >"$runtime/sockets"
-while read -r _ directory; do
-  [ -n "$directory" ] || continue
-  cat "${directory%/ns}/net/unix" >>"$runtime/sockets" 2>>"$runtime/errors" || scan=1
+read_namespace=
+while read -r namespace directory; do
+  [ -n "$directory" ] && [ "$namespace" != "$read_namespace" ] || continue
+  if cat "${directory%/ns}/net/unix" >>"$runtime/sockets" 2>>"$runtime/errors"; then
+    read_namespace=$namespace
+  else
+    scan=1
+  fi
 done <"$runtime/namespaces"
 if [ "$scan" != 0 ]; then
   [ -s "$runtime/errors" ] || fail 'cannot inspect process references'
@@ -238,19 +245,18 @@ if [ "$scan" != 0 ]; then
 fi
 # Every byte outside the plain alphabet becomes "?", a glob matching a superset
 # of the name: glob characters, specifiers and newlines only protect more.
-# Mapping paths escape newlines, so an escape widens the rest of the name to "*".
 sed -z -n 's|^/tmp/\([^/][^/]*\).*|\1|; T; s/[^A-Za-z0-9._-]/?/g; p' "$runtime/links" >"$runtime/names.z"
 tr '\0' '\n' <"$runtime/names.z" >"$runtime/names"
-sed -n 's|^[^ ]* [^ ]* [^ ]* [^ ]* [^ ]*  */tmp/\([^/][^/]*\).*|\1|; T; s/\\.*/*/; s/[^A-Za-z0-9._*-]/?/g; p' \
-  "$runtime/maps" >>"$runtime/names"
+cat "$runtime/mapped" >>"$runtime/names"
 # Socket paths are not escaped: a name may continue past a newline.
-sed -n 's|^[^ ]*: [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* /tmp/\([^/][^/]*\).*|\1|; T; s/[^A-Za-z0-9._-]/?/g; s/$/*/; p' \
+sed -n 's|^[^ ]*:  *[^ ]*  *[^ ]*  *[^ ]*  *[^ ]*  *[^ ]*  *[^ ]*  */tmp/\([^/][^/]*\).*|\1|; T; s/[^A-Za-z0-9._-]/?/g; s/$/*/; p' \
   "$runtime/sockets" >>"$runtime/names"
 sort -u -o "$runtime/names" "$runtime/names"
 sed 's|^|x /tmp/|' "$runtime/names" >"$runtime/in-use.conf"
-# Exclusions other packages declare for /tmp apply as well.
+# Exclusions and directories other packages declare under /tmp are kept too.
 systemd-tmpfiles --cat-config >"$runtime/vendor" || fail 'cannot read the tmpfiles configuration'
-sed -n 's|^\([xX]\)[[:space:]][[:space:]]*\(/tmp/[^[:space:]][^[:space:]]*\).*|\1 \2|p' \
+sed -n -e 's|^\([xX]\)[[:space:]][[:space:]]*\(/tmp/[^[:space:]][^[:space:]]*\).*|\1 \2|p' \
+  -e 's|^[dDvqQ][!+=^-]*[[:space:]][[:space:]]*\(/tmp/[^[:space:]][^[:space:]]*\).*|x \1|p' \
   "$runtime/vendor" >>"$runtime/in-use.conf"
 exec systemd-tmpfiles --clean "$config" "$runtime/in-use.conf"
 EOF
@@ -473,10 +479,7 @@ case "${1:-}" in
     else
       refuse 'cannot read the /tmp filesystem'; findings=1
     fi
-    if [ "$findings" != 0 ]; then
-      [ "$memory" = 0 ] || refuse 'the active /tmp is memory-backed and needs a yard restart'
-      exit 1
-    fi
+    [ "$findings" = 0 ] || exit 1
     [ "$memory" = 0 ] || exit 10
     ;;
   apply)
