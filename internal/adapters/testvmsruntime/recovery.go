@@ -114,7 +114,7 @@ func (runtime *Runtime) handleQuarantineLocked(
 		IncidentID:         artifact.IncidentID,
 		Context:            leaseContextFromSlot(slot),
 		agentClientID:      slot.ClientID,
-	})
+	}.withHold(slot, runtime.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("persist quarantine event: %w", err)
 	}
@@ -247,6 +247,12 @@ func (runtime *Runtime) completeRecovery(
 	}
 	slotID := startedSlot.SlotID
 	startedAt := runtime.Now().UTC()
+	if startedSlot.holdLifted {
+		if err := runtime.recordHoldEnded(startedSlot, "manual"); err != nil {
+			_, finishErr := store.FinishRecovery(slotID, err, "", "")
+			return errors.Join(fmt.Errorf("persist hold end: %w", err), finishErr)
+		}
+	}
 	if _, err := runtime.eventRecorder().Record(BrokerEvent{
 		Kind:               "recovery.start",
 		SlotID:             startedSlot.SlotID,
@@ -271,7 +277,28 @@ func (runtime *Runtime) completeRecovery(
 		finished, finishErr := store.FinishRecovery(slotID, nil, "", "")
 		if finishErr != nil {
 			rebuildErr = finishErr
+		} else if finished.State == SlotQuarantined {
+			// Loop protection keeps the cleaned slot until its hold ends.
+			_, eventErr := runtime.eventRecorder().Record(BrokerEvent{
+				Kind:               "recovery.held",
+				SlotID:             finished.SlotID,
+				ResourceGeneration: finished.ResourceGeneration,
+				LeaseEpoch:         finished.LeaseEpoch,
+				FromState:          SlotRecovering,
+				ToState:            SlotQuarantined,
+				RecoveryAttempt:    finished.RecoveryAttempt,
+				DurationMS:         duration.Milliseconds(),
+				IncidentID:         finished.IncidentID,
+				Context:            leaseContextFromSlot(startedSlot),
+				agentClientID:      startedSlot.ClientID,
+			}.withHold(finished, runtime.Now().UTC()))
+			return eventErr
 		} else {
+			if !startedSlot.HoldUntil.IsZero() {
+				if err := runtime.recordHoldEnded(finished, "expired"); err != nil {
+					return err
+				}
+			}
 			_, eventErr := runtime.eventRecorder().Record(BrokerEvent{
 				Kind:               "recovery.available",
 				SlotID:             finished.SlotID,
@@ -674,9 +701,33 @@ func storeSlot(store LeaseStore, slotID string) (LeaseSlot, error) {
 }
 
 func dueForRecovery(slot LeaseSlot, now time.Time) bool {
+	// A clock moved back never defers recovery longer than the hold cap.
 	return slot.State == SlotRecovering ||
 		(slot.State == SlotQuarantined &&
-			(slot.NextRecoveryAt.IsZero() || !now.Before(slot.NextRecoveryAt)))
+			(slot.NextRecoveryAt.IsZero() || !now.Before(slot.NextRecoveryAt) ||
+				slot.NextRecoveryAt.Sub(now) > holdCap))
+}
+
+// withHold adds slot's active hold to a slot event.
+func (event BrokerEvent) withHold(slot LeaseSlot, now time.Time) BrokerEvent {
+	if until := activeHoldUntil(slot, now); !until.IsZero() {
+		event.HoldLevel = slot.HoldLevel
+		event.HoldUntil = until
+	}
+	return event
+}
+
+func (runtime *Runtime) recordHoldEnded(slot LeaseSlot, reason string) error {
+	_, err := runtime.eventRecorder().Record(BrokerEvent{
+		Kind:               "slot.hold_ended",
+		SlotID:             slot.SlotID,
+		ResourceGeneration: slot.ResourceGeneration,
+		LeaseEpoch:         slot.LeaseEpoch,
+		HoldLevel:          slot.HoldLevel,
+		HoldReason:         reason,
+		IncidentID:         slot.IncidentID,
+	})
+	return err
 }
 
 func readinessEvidence(readiness *readinessFailure) string {

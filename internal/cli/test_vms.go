@@ -507,6 +507,11 @@ func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDe
 			"save incident evidence, then stop and delete exact allocation-owned VM disks and snapshots",
 			"verify empty working storage before publishing the slot as available",
 		}
+		if execution.snapshot != nil && execution.snapshot.HoldUntil.After(time.Now()) {
+			consequences = append(consequences, fmt.Sprintf(
+				"lift the loop-protection hold that keeps slot %d until %s; further quarantines start a longer hold",
+				execution.slot, execution.snapshot.HoldUntil.UTC().Format(time.RFC3339)))
+		}
 		return "test-vms.recover", domain.ActionDelta{Changed: !execution.noOp, Consequences: consequences}, nil
 	default:
 		return "", domain.ActionDelta{}, fmt.Errorf(
