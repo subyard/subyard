@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // The recover plan tells the operator that it lifts an active hold.
@@ -27,11 +28,14 @@ func TestTestVMRecoverPlanNamesALiftedHold(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lifted := slices.ContainsFunc(delta.Consequences, func(line string) bool {
-				return strings.Contains(line, "lift the loop-protection hold that keeps slot 3 until "+until.Format(time.RFC3339))
-			})
-			if lifted != scenario.want {
-				t.Fatalf("consequences = %q", delta.Consequences)
+			// The confirmation shows the operation steps' consequences.
+			for _, consequences := range [][]string{delta.Consequences, domain.OperationStepConsequences(execution.steps())} {
+				lifted := slices.ContainsFunc(consequences, func(line string) bool {
+					return strings.Contains(line, "lift the loop-protection hold that keeps slot 3 until "+until.Format(time.RFC3339))
+				})
+				if lifted != scenario.want {
+					t.Fatalf("consequences = %q", consequences)
+				}
 			}
 		})
 	}
