@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -280,14 +281,15 @@ func retireGateRegistry(t *testing.T, registry rt.RegistryV2, floors map[string]
 }
 
 // Disabling a profile the yard inherited writes the remaining selection explicitly, and a
-// rollback target cannot load a selection naming a profile it does not ship. The agents
-// boundary recovery therefore disables every default-selected profile that the oldest
-// release sharing the candidate's registry lacks. Published releases never change, so the
-// list of profiles shipped by 0.31.0 is a fixed fact.
+// rollback target can load neither a selection naming a profile it does not ship nor a
+// persisted setting it does not know. Each agents boundary recovery therefore disables every
+// default-selected profile that its oldest target lacks and unsets that profile's settings.
+// Published releases never change, so their profile lists are fixed facts.
 func TestAgentsRollbackRecoveryDisablesDefaultProfilesOlderTargetsLack(t *testing.T) {
 	root := filepath.Join("..", "..")
-	shipped := []string{"amnezia", "android", "default", "git-fetch", "github", "hermes", "openclaw", "orca",
+	v031 := []string{"amnezia", "android", "default", "git-fetch", "github", "hermes", "openclaw", "orca",
 		"subyard-dev", "telemetry", "test-vms-client", "test-vms"}
+	shipped := map[string][]string{"0.31.0": v031, "0.32.0": append(slices.Clone(v031), "herdr", "user-skills")}
 	data, err := os.ReadFile(filepath.Join(root, "config/release-rollback.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -296,30 +298,54 @@ func TestAgentsRollbackRecoveryDisablesDefaultProfilesOlderTargetsLack(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovery := ""
+	recoveries := map[string]string{}
 	for _, boundary := range declaration.Boundaries {
-		if boundary.Component == "agents" && boundary.ThroughVersion == "0.32.0" {
-			recovery = boundary.Recovery
+		if boundary.Component == "agents" {
+			recoveries[boundary.ThroughVersion] = boundary.Recovery
 		}
-	}
-	if recovery == "" {
-		t.Fatal("missing the agents boundary through 0.32.0")
 	}
 	definitions, err := profile.Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked := 0
+	checked := map[string]int{}
 	for _, definition := range definitions {
-		if len(definition.DefaultYards) == 0 || slices.Contains(shipped, definition.Name) {
+		if len(definition.DefaultYards) == 0 {
 			continue
 		}
-		checked++
-		if !strings.Contains(recovery, "yard -Y NAME profile disable "+definition.Name+" ") {
-			t.Errorf("the agents rollback recovery does not disable %s, which 0.31.0 does not ship", definition.Name)
+		// The newest release that lacks the profile owns its step: the step then applies to
+		// every older target too, and never to a target that ships the profile.
+		owner := ""
+		for _, version := range []string{"0.32.0", "0.31.0"} {
+			if !slices.Contains(shipped[version], definition.Name) {
+				owner = version
+				break
+			}
+		}
+		if owner == "" {
+			continue
+		}
+		checked[owner]++
+		recovery, ok := recoveries[owner]
+		if !ok {
+			t.Fatalf("missing the agents boundary through %s", owner)
+		}
+		disable := regexp.MustCompile(`yard -Y NAME profile disable ` + regexp.QuoteMeta(definition.Name) + `([^A-Za-z0-9._-]|$)`)
+		if !disable.MatchString(recovery) {
+			t.Errorf("the agents rollback recovery through %s does not disable %s, which %s does not ship", owner, definition.Name, owner)
+		}
+		for _, setting := range definition.Settings {
+			if !strings.Contains(recovery, "yard -Y NAME config unset "+setting.Name+" ") {
+				t.Errorf("the agents rollback recovery through %s does not unset %s of %s", owner, setting.Name, definition.Name)
+			}
+		}
+		for version, other := range recoveries {
+			if version != owner && disable.MatchString(other) {
+				t.Errorf("the agents rollback recovery through %s disables %s, which belongs to %s", version, definition.Name, owner)
+			}
 		}
 	}
-	if checked == 0 {
-		t.Fatal("no default-selected profile is newer than 0.31.0; the test no longer checks anything")
+	if checked["0.32.0"] == 0 || checked["0.31.0"] == 0 {
+		t.Fatalf("checked default-selected profiles per boundary %v; the test no longer checks both", checked)
 	}
 }

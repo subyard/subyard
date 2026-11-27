@@ -34,8 +34,8 @@
     {
       "component": "agents",
       "throughVersion": "0.31.0",
-      "reason": "Split Claude approval drop-ins remain active after rollback; Codex approval fragments survive but are inert in 0.31.0.",
-      "recovery": "Stop agent sessions before rollback. After rollback, back up and remove only the listed Subyard-managed files in each affected yard, then run yard init before restarting agents. Preserve operator-owned policies and account for custom installation paths.",
+      "reason": "Split Claude approval drop-ins remain active after rollback; Codex approval fragments survive but are inert in 0.31.0. These releases do not ship the user-skills profile or its USER_SKILL_SOURCES setting.",
+      "recovery": "Stop agent sessions before rollback. After rollback, back up and remove only the listed Subyard-managed files in each affected yard, then run yard init before restarting agents. Preserve operator-owned policies and account for custom installation paths. Before rollback, also run yard -Y NAME profile disable user-skills where ENVIRONMENT_PROFILES lists it and yard -Y NAME config unset USER_SKILL_SOURCES --scope SCOPE in each scope that sets it.",
       "sourceDigest": "16d7bf324dec53c2dbb75b027622f476f5402f402c325db202c19683b847be42",
       "files": [
         "/etc/claude-code/managed-settings.d/48-subyard-update-lock.json",
@@ -49,8 +49,8 @@
     {
       "component": "agents",
       "throughVersion": "0.32.0",
-      "reason": "Managed Claude instructions added after 0.32.0 remain active after rollback. Releases through 0.32.0 copy host instruction files to the agent instruction paths and refuse a file or link at these paths, such as a link from a user-dotfiles install script.",
-      "recovery": "Before rollback, run yard -Y NAME profile disable user-dotfiles in each yard that uses it; it runs uninstall.sh from its clone when there is one and keeps the clone. Then move any file or link left at these paths away. For 0.31.0 or older, also run yard -Y NAME profile disable user-skills where ENVIRONMENT_PROFILES lists it. After rollback, back up and remove /etc/claude-code/CLAUDE.md if its rule is unwanted, run yard init, then restart agent sessions. Account for custom installation paths.",
+      "reason": "Releases through 0.32.0 copy host instruction files to the agent instruction paths; 0.31.0 and 0.32.0 refuse a file or link there, such as a link from a user-dotfiles install script, and 0.30.0 replaces it. They do not know the user-dotfiles settings. Managed Claude instructions added after 0.32.0 remain active after rollback.",
+      "recovery": "Before rollback, in each yard that uses user-dotfiles run yard -Y NAME profile disable user-dotfiles, which runs uninstall.sh and keeps the clone, move any file or link left at these paths away, and in each scope that sets them run yard -Y NAME config unset USER_DOTFILES_SOURCE --scope SCOPE and yard -Y NAME config unset USER_DOTFILES_INSTALL_COMMAND --scope SCOPE. After rollback, back up and remove /etc/claude-code/CLAUDE.md if its rule is unwanted, run yard init, then restart agent sessions.",
       "sourceDigest": "f3b370ecc06db1dc00c6fc8d78b0bab13b53aa1dd7d749c35002b2785a3e8c40",
       "files": [
         "/etc/claude-code/CLAUDE.md",

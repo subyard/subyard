@@ -83,15 +83,25 @@ init retries. Apply prints a warning for each skipped item; check reports drift,
 - **Earlier copies.** `yard init` first removes an unchanged instruction copy that a release
   through 0.32.0 made, so the same init can install a file at that path.
 
-Before rolling back to a release that copies host instruction files (0.32.0 and older), run
-`yard -Y NAME profile disable user-dotfiles` in each yard that uses the profile, then move any
-file or link left at `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or
-`~/.config/opencode/AGENTS.md` away. Disabling a profile the yard inherited writes the remaining
-selection to its `ENVIRONMENT_PROFILES`, and 0.31.0 and older do not ship `user-skills`: before
-rolling back to one of them, also run `yard -Y NAME profile disable user-skills` in each yard
-whose `ENVIRONMENT_PROFILES` lists it. While a file or link remains at an instruction path, such
-a rollback is refused with "the retained release cannot provide a safe rollback plan", the paths
-and this recovery.
+Releases 0.32.0 and older copy host instruction files to the agent instruction paths, and do
+not know this profile or its settings. Before rolling back to one of them, in each yard that
+uses the profile:
+
+1. Run `yard -Y NAME profile disable user-dotfiles`, then move any file or link left at
+   `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or `~/.config/opencode/AGENTS.md` away.
+2. In each scope that sets them, run
+   `yard -Y NAME config unset USER_DOTFILES_SOURCE --scope SCOPE` and
+   `yard -Y NAME config unset USER_DOTFILES_INSTALL_COMMAND --scope SCOPE`.
+3. For 0.31.0 or older, which do not ship [user skills](user-skills.md) either: disabling a
+   profile the yard inherited writes the remaining selection to its `ENVIRONMENT_PROFILES`, so
+   run `yard -Y NAME profile disable user-skills` where it lists `user-skills`, and
+   `yard -Y NAME config unset USER_SKILL_SOURCES --scope SCOPE` in each scope that sets it.
+
+Otherwise the rollback is refused with "the retained release cannot provide a safe rollback
+plan" and this recovery. After updating again, the yard keeps the explicit selection: run
+`yard -Y NAME profile enable user-dotfiles` (and `user-skills`), or, if the yard inherited its
+selection before, `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the
+default selection.
 
 Out of scope: updating the clone, deciding whether a source is trusted, and what the
 repository's scripts do.
