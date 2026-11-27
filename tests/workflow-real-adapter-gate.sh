@@ -420,8 +420,10 @@ def run_metadata(run_id, event, title, status="completed", conclusion="success")
     return {"databaseId": run_id, "event": event, "displayTitle": title,
             "status": status, "conclusion": conclusion}
 
-def job_result(name, conclusion):
-    return {"status": "completed", "jobs": [{"name": name, "status": "completed", "conclusion": conclusion}]}
+def job_result(name, conclusion, *others):
+    jobs = [(name, conclusion), *others]
+    return {"status": "completed", "jobs": [{"name": job, "status": "completed", "conclusion": result}
+                                            for job, result in jobs]}
 
 def exercise_step(job, image, runs, job_results, event="schedule", ref="master", origin="", run_id=50, list_exit=0):
     script = dedent(periodic_jobs[job].split("        run: |\n", 1)[1])
@@ -444,7 +446,10 @@ manual = run_metadata(8, "workflow_dispatch", f"Periodic E2E ({ubuntu})")
 probe = run_metadata(7, "push", f"Periodic E2E ({ubuntu})")  # Push titles are commit messages.
 legacy = run_metadata(6, "schedule", "Periodic E2E")
 assert exercise_step("changes", ubuntu, [debian_run, cancelled, manual, probe, legacy], {}) == (0, "matrix=true", [])
-pool_ok = job_result("pool", "success")
+pool_ok = job_result("pool", "success", ("supersede", "success"))
+# A pool-only run skipped supersede; it does not cover the commit on its own.
+pool_only = job_result("pool", "success", ("supersede", "skipped"))
+assert exercise_step("changes", ubuntu, [ubuntu_run], {"20": pool_only}) == (0, "matrix=true", ["view 20"])
 assert exercise_step("changes", ubuntu, [ubuntu_run, debian_run], {"20": pool_ok}) == (0, "matrix=false", ["view 20"])
 assert exercise_step("changes", debian, [ubuntu_run, debian_run], {"10": pool_ok}) == (0, "matrix=false", ["view 10"])
 assert exercise_step("changes", ubuntu, [ubuntu_run], {"20": job_result("pool", "skipped")}) == (0, "matrix=true", ["view 20"])
