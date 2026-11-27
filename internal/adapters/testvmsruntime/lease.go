@@ -837,6 +837,7 @@ func (store LeaseStore) FinishRecovery(
 			slot.FailureReason = "loop protection hold"
 			slot.HoldUntil = until
 			slot.NextRecoveryAt = until
+			boundHoldReset(slot, now)
 		} else {
 			slot.HoldStartedAt = time.Time{}
 			slot.HoldUntil = time.Time{}
@@ -862,6 +863,7 @@ const (
 // countQuarantine counts a release or acquire quarantine of slot at now.
 // Recovery failures and interrupted recoveries are not counted.
 func countQuarantine(slot *LeaseSlot, now time.Time) {
+	boundHoldReset(slot, now)
 	if slot.HoldLevel > 0 && !now.Before(slot.HoldResetAt) {
 		slot.HoldLevel = 0
 		slot.HoldResetAt = time.Time{}
@@ -913,6 +915,21 @@ func activeHoldUntil(slot LeaseSlot, now time.Time) time.Time {
 		return limit
 	}
 	return slot.HoldUntil
+}
+
+// boundHoldReset keeps the level reset at most 24 hours after the end of the
+// active hold, or after now without one, so a clock moved back never delays it.
+func boundHoldReset(slot *LeaseSlot, now time.Time) {
+	if slot.HoldLevel == 0 {
+		return
+	}
+	limit := now
+	if until := activeHoldUntil(*slot, now); !until.IsZero() {
+		limit = until
+	}
+	if limit = limit.Add(holdResetAfter); slot.HoldResetAt.After(limit) {
+		slot.HoldResetAt = limit
+	}
 }
 
 // liftHold ends an active hold early and keeps its level, which now resets

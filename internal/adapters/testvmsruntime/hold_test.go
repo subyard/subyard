@@ -267,3 +267,26 @@ func TestLoopProtectionHoldEndsStayReadableAfterRollback(t *testing.T) {
 		}
 	}
 }
+
+// A hold shortened by a clock moved back also brings its level reset forward.
+func TestLoopProtectionClockMovedBackKeepsTheQuietPeriod(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	f.holdUntilLoop()
+	f.now = f.now.Add(-30 * 24 * time.Hour)
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	f.now = f.slot(1).HoldUntil
+	brokerMust(t, f.rt.ReapExpired(f.ctx, f.store))
+	if slot := f.slot(1); slot.State != SlotAvailable {
+		t.Fatalf("clamped hold did not end: %+v", slot)
+	}
+	f.now = f.now.Add(holdResetAfter + time.Minute)
+	if next := f.holdUntilLoop(); next.HoldLevel != 1 || next.HoldUntil.Sub(next.HoldStartedAt) != holdBase {
+		t.Fatalf("hold after a quiet day: %+v", next)
+	}
+	// Without a hold, a reset deadline left far ahead by the clock is bounded too.
+	slot := LeaseSlot{HoldLevel: 3, HoldResetAt: f.now.Add(30 * 24 * time.Hour)}
+	boundHoldReset(&slot, f.now)
+	if !slot.HoldResetAt.Equal(f.now.Add(holdResetAfter)) {
+		t.Fatalf("reset at %s", slot.HoldResetAt)
+	}
+}
