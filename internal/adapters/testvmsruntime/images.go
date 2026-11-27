@@ -525,7 +525,8 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 	validationErr := builder.checkGuestTools(validationCtx, vm)
 	if validationErr == nil {
 		_, validationErr = builder.guest(validationCtx, vm, nil, "sh", "-eu", "-c",
-			`incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"`)
+			`incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"
+test "$(systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer | tr '\n' ' ')" = 'masked masked '`)
 	}
 	if validationErr == nil {
 		validationErr = validationCtx.Err()

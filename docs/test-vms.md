@@ -88,8 +88,10 @@ Android SDK and emulator setup belong to the separate Android workflow. Images c
 project data, credentials or project caches. On x86_64, broker VMs support ACPI S3 (`deep`)
 with RTC wakeup; other architectures do not receive the broker's ICH9 S3 override.
 
-Bases refresh on recipe changes, explicit request or after seven days. Validation must pass
-before publication; active leases pin their bases and keep their disks through refresh.
+Bases refresh on recipe changes, explicit request or after seven days. They take distro updates
+only then: leased guests have the apt-daily timers masked, so an unattended upgrade cannot change
+a guest during a lease or delay its release stop. Validation must pass before publication;
+active leases pin their bases and keep their disks through refresh.
 Legacy retained allocations need explicit safe retirement before reuse; releasing an active
 legacy lease retains its old disks. Preserve needed data before proposing retirement.
 

@@ -135,3 +135,74 @@ printf 'caller-complete\n'
 		})
 	}
 }
+
+func TestBaseRecipeFinalizeDisablesGuestAutoUpgrade(t *testing.T) {
+	source, err := os.ReadFile("../../../scripts/e2e-lab/base.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
+	if !strings.HasPrefix(root, "/tmp/") {
+		t.Fatal("recipe fixtures require TMPDIR=/tmp")
+	}
+	// Run the production finalizer against fixture copies of its absolute guest paths.
+	body := strings.NewReplacer(
+		"/home/dev/", filepath.Join(root, "home/dev")+"/",
+		"/var/lib/subyard", filepath.Join(root, "var/lib/subyard"),
+	).Replace(string(source))
+	for _, directory := range []string{"home/dev/.cache/subyard-e2e-platform", "var/lib/subyard", "bin", "recipe"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(root, "base.sh"), []byte(body), 0600)
+	testkit.WriteFile(t, filepath.Join(root, "recipe/manifest.sha256"), []byte("recipe\n"), 0600)
+	bin := filepath.Join(root, "bin")
+	for _, name := range []string{"bash", "cut", "sort", "sha256sum"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub := `#!/bin/bash
+set -eu
+name="${0##*/}"
+printf '%s %s\n' "$name" "$*" >> "$HOME/effects"
+case "$name:$*" in
+  'getent:group kvm') printf 'kvm:x:993:\n' ;;
+  'dpkg-query:'*) printf 'fixture=1\n' ;;
+  'usermod:-aG kvm dev' | 'install:'* | 'chown:'* | 'apt-get:clean') : ;;
+  'systemctl:disable --now apt-daily.timer apt-daily-upgrade.timer' | 'systemctl:mask apt-daily.timer apt-daily-upgrade.timer') : ;;
+  *) printf 'unexpected physical operation: %s %s\n' "$name" "$*" >&2; exit 99 ;;
+esac
+`
+	for _, name := range []string{"getent", "usermod", "install", "chown", "systemctl", "dpkg-query", "apt-get"} {
+		testkit.WriteFile(t, filepath.Join(bin, name), []byte(stub), 0700)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/bash", "-c", `
+set -euo pipefail
+. ./base.sh
+recipe_root="$PWD/recipe"
+base_finalize_image
+`)
+	command.Dir = root
+	command.Env = []string{"HOME=" + root, "PATH=" + bin, "LC_ALL=C", "SUBYARD_BASE_ENVIRONMENT=subyard-pair"}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("base finalizer failed: %v\n%s", err, output)
+	}
+	effects, err := os.ReadFile(filepath.Join(root, "effects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(effects), "systemctl disable --now apt-daily.timer apt-daily-upgrade.timer\nsystemctl mask apt-daily.timer apt-daily-upgrade.timer\n") {
+		t.Fatalf("finalizer must mask the guest auto-upgrade timers: %s", effects)
+	}
+	if _, err := os.Stat(filepath.Join(root, "var/lib/subyard/base-manifest.sha256")); err != nil {
+		t.Fatalf("finalizer did not write the base manifest: %v", err)
+	}
+}
