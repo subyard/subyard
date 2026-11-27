@@ -471,7 +471,7 @@ ssh_pwauth: false
 		"-c", "boot.autostart=false",
 		"-c", "user.subyard.managed=" + managedMarker, "-c", "user.subyard.base_owner=" + registry.Owner,
 		"-c", "user.subyard.base_key=" + buildKey, "-c", "cloud-init.user-data=" + cloud}
-	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+	if _, rawQEMU := vmLowLevelPolicy(imageArchitecture()); rawQEMU != "" {
 		args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
 	}
 	if _, err := builder.incus(ctx, args...); err != nil {

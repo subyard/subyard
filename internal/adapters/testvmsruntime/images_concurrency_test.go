@@ -148,7 +148,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			}
 			wantRawQEMU := ""
 			if imageArchitecture() == "x86_64" {
-				wantRawQEMU = "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n"
+				wantRawQEMU = "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n\n[device \"qemu_balloon\"]\nfree-page-reporting = \"on\"\n"
 			}
 			if properties()["raw.qemu.conf"] != wantRawQEMU {
 				return nil, nil, errors.New("builder sleep configuration does not match architecture")

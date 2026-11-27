@@ -86,7 +86,9 @@ Both types have the generic host baseline (Go bootstrap, build utilities, ShellC
 network/archive tools and the product Incus installer). `android-test` selects larger resources;
 Android SDK and emulator setup belong to the separate Android workflow. Images contain no
 project data, credentials or project caches. On x86_64, broker VMs support ACPI S3 (`deep`)
-with RTC wakeup; other architectures do not receive the broker's ICH9 S3 override.
+with RTC wakeup, and their virtio balloon offers Free Page Reporting, so RAM a guest frees
+returns to the host instead of staying resident in QEMU. Other architectures do not receive
+the broker's low-level override and keep freed guest RAM resident until the VM stops.
 
 Bases refresh on recipe changes, explicit request or after seven days. Validation must pass
 before publication; active leases pin their bases and keep their disks through refresh.
@@ -745,7 +747,10 @@ so use the generic 40 GiB `android-test` target; the standard 20 GiB guest has i
 disk headroom. The fixture verifies available disk before requesting the nested lease.
 It also verifies the broker's separate 2 GiB RAM plus 2 GiB swap budget across setup and boot,
 compares live owner counters with admission arithmetic, and runs a pair whose combined startup
-budget is 5 GiB outside that process ceiling. Finally it kills the nested requesting wrapper,
+budget is 5 GiB outside that process ceiling. Both held guests must negotiate balloon Free Page
+Reporting, and at least half of 512 MiB that one guest fills and frees must leave QEMU's
+resident memory.
+Finally it kills the nested requesting wrapper,
 checks that renewal stops and waits for the advertised 20-minute expiry and disposable cleanup,
 then verifies SSH fencing and clean reacquisition. Run it with:
 
