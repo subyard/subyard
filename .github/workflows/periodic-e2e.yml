@@ -90,8 +90,8 @@ jobs:
           matrix=true
           if [ "$EVENT" = schedule ]; then
             # A run covers its commit only once its checks started: one that failed before its
-            # pool was ready checked nothing. A pool-only run on a covered commit also counts;
-            # the oldest-first lookup finds the run that covered it first.
+            # pool was ready checked nothing. A pool-only run skips supersede and covers nothing,
+            # so a cancelled Re-run of the covering run brings the full matrix back.
             runs="$(gh run list --workflow periodic-e2e.yml --commit "$HEAD" --status completed \
               --limit 1000 --json databaseId,event,conclusion,displayTitle)"
             # Look oldest first so later skipped slots do not require a pool lookup each time.
@@ -102,8 +102,9 @@ jobs:
                   (.event == "push" or (.event == "schedule" and .displayTitle == "Periodic E2E"))))
               | .databaseId' <<<"$runs")"
             for id in $ids; do
-              pool="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.name == "pool") | .conclusion')"
-              if [ "$pool" = success ]; then
+              started="$(gh run view "$id" --json jobs --jq '[.jobs[]
+                | select(.name == "pool" or .name == "supersede") | .conclusion] | sort | join(",")')"
+              if [ "$started" = success,success ]; then
                 matrix=false
                 break
               fi
