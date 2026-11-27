@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -110,6 +111,22 @@ func (runtime *Runtime) protectedAgentCleanup(ctx context.Context, root string, 
 	return cleanup, nil
 }
 
+// boundaryInspectionRefusal names the declared agent boundaries when the
+// retained release refuses to plan: a file it refuses at one of their paths is
+// the likely cause, and their recovery replaces the generic next step.
+func boundaryInspectionRefusal(message, next string, boundaries []releasetransition.RollbackBoundary) (string, string) {
+	if len(boundaries) == 0 {
+		return message, next
+	}
+	var causes, recoveries []string
+	for _, boundary := range boundaries {
+		causes = append(causes, boundary.Reason+" Paths: "+strings.Join(boundary.Files, ", "))
+		recoveries = append(recoveries, boundary.Recovery)
+	}
+	return message + "; declared rollback limitations: " + strings.Join(causes, "; "),
+		"follow the declared recovery, then retry yard update --rollback: " + strings.Join(recoveries, " ")
+}
+
 // AgentCleanupConsequences projects accepted limitations into the existing plan
 // consequences. It adds no cleanup action, authorization, or protocol family.
 func (prepared Prepared) AgentCleanupConsequences() []string {
@@ -120,7 +137,7 @@ func (prepared Prepared) AgentCleanupConsequences() []string {
 	for _, cleanup := range prepared.AgentCleanup {
 		notes = append(notes, "Agent integration rollback limitation (manual cleanup; rollback proceeds): "+cleanup.Reason)
 		for _, path := range cleanup.Files {
-			notes = append(notes, "Surviving yard file: "+path)
+			notes = append(notes, "Affected yard path: "+path)
 		}
 		notes = append(notes, "Manual cleanup: "+cleanup.Recovery)
 	}

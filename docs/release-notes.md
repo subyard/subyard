@@ -31,9 +31,9 @@
   never updates the clone; ask an agent in the yard to run `git pull` in it. The same applies to
   [user skills](user-skills.md): no `yard init` is needed after a pull.
 - **Before rolling back to 0.32.0,** run `yard -Y NAME profile disable user-dotfiles` in each
-  yard that uses the profile. While a link remains at an instruction path, the rollback is
-  refused with "the retained release cannot provide a safe rollback plan". The rollback plan
-  lists these paths.
+  yard that uses the profile, or move any other file at an instruction path away. While a file
+  or link remains there, the rollback is refused with "the retained release cannot provide a
+  safe rollback plan", the paths and this recovery. The rollback plan lists these paths.
 
 ## 0.32.0
 

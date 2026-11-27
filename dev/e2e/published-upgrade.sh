@@ -468,7 +468,8 @@ seed_host_instruction_copy() {
 # A symlink at the instruction path in the yard, such as a user-dotfiles link: the rollback,
 # or init after it, refuses it, keeps the link and its target, and succeeds and copies the
 # file again once the operator removes it. The candidate's inventory no longer records the
-# path, so the retained release's rollback inspection refuses it without its detail.
+# path, so the retained release's rollback inspection refuses it without its detail; the
+# candidate then names the declared agent boundary's paths and recovery.
 verify_symlinked_instruction_file() { # <rollback command...>
   local link="$INSTRUCTION_COPY" output rc=0
   local step='replace it with a regular file or remove it, then run yard -Y default init --configs'
@@ -484,8 +485,10 @@ verify_symlinked_instruction_file() { # <rollback command...>
       || grep -Fq "$preserve" <<<"$output" \
       || die 'init refused the symlinked instruction file without its path and step'
   else
-    { grep -Fq "$link" <<<"$output" || grep -Fq 'the retained release cannot provide a safe rollback plan' <<<"$output"; } \
-      || die 'the rollback was refused for an unrelated reason'
+    for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
+      'profile disable user-dotfiles in each yard that uses it (its clone is kept) or move any other file at these paths away'; do
+      grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
+    done
   fi
   guest_dev test -L "$link" && [ "$(guest_dev cat "$link.real")" = 'published-upgrade instructions' ] \
     || die 'the refusal changed the symlinked instruction file or its target'

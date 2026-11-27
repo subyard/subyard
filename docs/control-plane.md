@@ -1261,7 +1261,7 @@ Each entry has:
 - `reason` and `recovery`: single-line explanations, at most 512 bytes each. Recovery describes
   the manual next step; it grants no automatic cleanup authority.
 - For `agents`, `sourceDigest` binds the reviewed integration sources and `files` lists the
-  surviving yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
+  affected yard paths (absolute or `~/` relative to the yard developer's home), sorted and unique.
 
 Sort entries by numeric semantic `throughVersion`, then `component`. Retain a boundary while
 incompatible releases remain possible targets. For `registry` and `profile:ACTIVATION_ID`, an older target at or below the
@@ -1277,7 +1277,9 @@ Newer targets and same-release repair are unaffected.
 
 An `agents` entry is a **non-blocking accepted limitation**. Rollback and profile preparation
 proceed through their existing compatibility checks. The operator-facing plan output and result
-show the surviving yard files and manual cleanup instructions, also documented in release notes.
+show the affected yard paths and manual cleanup instructions, also documented in release notes.
+When the retained release cannot plan the rollback, the refusal names these paths and recovery
+instead of the generic next step, because a file it refuses there is the likely cause.
 Agent declarations neither authorize automatic removal nor add integration rollback hooks. Stop
 agent sessions before rollback and complete the documented cleanup before restarting them.
 

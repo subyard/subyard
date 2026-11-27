@@ -1408,10 +1408,13 @@ func (runtime *Runtime) prepareRetainedTransition(
 			// by a caller-side guard. Preserve their specific safe next action.
 			return Prepared{}, verifiedPreparation(err)
 		}
+		message, next := "the retained release cannot provide a safe rollback plan",
+			"restore a compatible retained release, then run yard update --rollback"
+		if parsed.selection != nil {
+			message, next = boundaryInspectionRefusal(message, next, parsed.selection.agentCleanup)
+		}
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
-			observed, release, nil, releasetransition.CodeRollbackIncompatible,
-			"the retained release cannot provide a safe rollback plan",
-			"restore a compatible retained release, then run yard update --rollback",
+			observed, release, nil, releasetransition.CodeRollbackIncompatible, message, next,
 		)))
 	}
 	return runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners), nil

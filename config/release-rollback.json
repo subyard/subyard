@@ -49,8 +49,8 @@
     {
       "component": "agents",
       "throughVersion": "0.32.0",
-      "reason": "Managed Claude instructions added after 0.32.0 remain active after rollback. Agent instruction links of the user-dotfiles profile also remain, and releases through 0.32.0 refuse them because they copy host instruction files there.",
-      "recovery": "Before rollback, run yard -Y NAME profile disable user-dotfiles in each yard that uses it; its clone is kept. After rollback, back up and remove /etc/claude-code/CLAUDE.md in each affected yard if its rule is unwanted, run yard init, then restart agent sessions. Account for custom installation paths.",
+      "reason": "Managed Claude instructions added after 0.32.0 remain active after rollback. Releases through 0.32.0 copy host instruction files to the agent instruction paths and refuse a file or link at these paths, such as a user-dotfiles profile link.",
+      "recovery": "Before rollback, run yard -Y NAME profile disable user-dotfiles in each yard that uses it (its clone is kept) or move any other file at these paths away. After rollback, back up and remove /etc/claude-code/CLAUDE.md in each affected yard if its rule is unwanted, run yard init, then restart agent sessions. Account for custom installation paths.",
       "sourceDigest": "f3b370ecc06db1dc00c6fc8d78b0bab13b53aa1dd7d749c35002b2785a3e8c40",
       "files": [
         "/etc/claude-code/CLAUDE.md",

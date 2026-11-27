@@ -55,6 +55,8 @@ init retries. Apply prints a warning for each skipped item; check reports drift,
 - **Missing file.** A clone without `[SUBDIR/]agents/AGENTS.md` gets no links and a warning.
 - **Link.** Each path in the table is linked only where it is free. An existing file, directory
   or other link is left in place with a warning; move it away and run `yard init` to link it.
+  `yard init` first removes an unchanged instruction copy that an earlier release made, so the
+  same init links that path.
 - **Ours.** A link is ours only when its text is exactly
   `~/.local/share/subyard-user-dotfiles/OWNER/REPO[/SUBDIR]/agents/AGENTS.md` with plain
   segments. Paths are compared as strings and never resolved; relative or differently spelled
@@ -62,11 +64,14 @@ init retries. Apply prints a warning for each skipped item; check reports drift,
 - **Unlink.** Apply removes each of our links that is not the configured target: after
   `yard profile disable user-dotfiles`, deselecting the profile and running `yard init`, emptying
   `USER_DOTFILES_SOURCE`, changing the source or subdirectory, or deleting the file. The clone is
-  kept.
+  kept. Apply moves a link aside and checks it again before removing it; anything else found
+  there is moved back, or kept beside the path with a warning when the path was re-created.
 
 Before rolling back to a release that copies host instruction files (0.32.0 and older), run
-`yard -Y NAME profile disable user-dotfiles` in each yard that uses the profile. While a link
-remains, such a rollback is refused: "the retained release cannot provide a safe rollback plan".
+`yard -Y NAME profile disable user-dotfiles` in each yard that uses the profile, or move any
+other file at these paths away. While a file or link remains there, such a rollback is refused
+with "the retained release cannot provide a safe rollback plan", the three paths and this
+recovery.
 
 Out of scope: updating the clone, deciding whether a source is trusted, other dotfiles than the
 agent instruction file, and a hand-made link with our exact spelling, which is treated as ours.

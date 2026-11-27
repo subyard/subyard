@@ -1087,7 +1087,7 @@ Restart agent sessions only after this cleanup. Codex also leaves inert files un
 `49-subyard-approval-hook.toml`, `50-subyard-git-approval.rules.inc` and
 `51-subyard-sudo-approval.rules.inc`. Back up and remove these Subyard-managed fragments
 before `yard init`; 0.31.0 restores its combined `requirements.toml`.
-The rollback plan and result list the surviving files and manual recovery instructions.
+The rollback plan and result list the affected yard paths and manual recovery instructions.
 
 Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
 standard bypass mode is also covered by the SDK fixture. A native CLI terminal check using

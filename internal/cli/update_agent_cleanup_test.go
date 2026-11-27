@@ -46,45 +46,15 @@ func TestRollbackCommandPrintsCleanupOncePerPlan(t *testing.T) {
 	for _, resumed := range []bool{false, true} {
 		for _, assumeYes := range []bool{false, true} {
 			t.Run(fmt.Sprint("resumed=", resumed, "/yes=", assumeYes), func(t *testing.T) {
-				fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
-				environment = append(environment, "ACTIVE_CAPTURE="+filepath.Join(root, "active.log"))
-				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
-				active := filepath.Join(runtimeRoot, "releases/current-a")
-				target := filepath.Join(runtimeRoot, "releases/previous-b")
-				engine := filepath.Join(target, "bin/yard-engine")
-				data, err := os.ReadFile(engine)
-				if err != nil {
-					t.Fatal(err)
-				}
-				enginePayload := strings.Replace(string(data), "yard-engine 1.2.3", "yard-engine 1.2.2", 1)
-				if resumed {
-					enginePayload = strings.ReplaceAll(enginePayload, `"status":"migration-required"`, `"status":"recovering","transaction":"tx-0123456789abcdef"`)
-					enginePayload = strings.ReplaceAll(enginePayload, `"code":"transition-required"`, `"code":"recovery-pending"`)
-					enginePayload = strings.ReplaceAll(enginePayload, `"inspection":{"plan":`, `"inspection":{"resume":"tx-0123456789abcdef","plan":`)
-					enginePayload = strings.ReplaceAll(enginePayload, `"resume":"tx-0123456789abcdef","plan":"plan-v1-`, `"resume":"tx-0123456789abcdef","plan":"resume-v1-`)
-				}
-				writeCLIFile(t, engine, enginePayload, 0o700)
-				declaration := releasetransition.RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}, Boundaries: []releasetransition.RollbackBoundary{{Component: "agents", ThroughVersion: "1.2.2", Reason: "policies changed or added survive", Recovery: "restore the previous managed policy", SourceDigest: releasetransition.Fingerprint(strings.Repeat("b", 64)), Files: []string{"/etc/sample/policy.json"}}}}
-				data, err = json.Marshal(declaration)
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeCLIFile(t, filepath.Join(active, "config/release-rollback.json"), string(data), 0o600)
-				for _, release := range []string{active, target} {
-					paths := []string{"bin/yard", "bin/yard-engine", "config/release-transition.json"}
-					if release == active {
-						paths = append(paths, "config/release-rollback.json")
+				fixture, root, environment, runtimeRoot := newRollbackBoundaryFixture(t, func(engine string) string {
+					if resumed {
+						engine = strings.ReplaceAll(engine, `"status":"migration-required"`, `"status":"recovering","transaction":"tx-0123456789abcdef"`)
+						engine = strings.ReplaceAll(engine, `"code":"transition-required"`, `"code":"recovery-pending"`)
+						engine = strings.ReplaceAll(engine, `"inspection":{"plan":`, `"inspection":{"resume":"tx-0123456789abcdef","plan":`)
+						engine = strings.ReplaceAll(engine, `"resume":"tx-0123456789abcdef","plan":"plan-v1-`, `"resume":"tx-0123456789abcdef","plan":"resume-v1-`)
 					}
-					var manifest strings.Builder
-					for _, path := range paths {
-						data, err := os.ReadFile(filepath.Join(release, path))
-						if err != nil {
-							t.Fatal(err)
-						}
-						fmt.Fprintf(&manifest, "%x  ./%s\n", sha256.Sum256(data), path)
-					}
-					writeCLIFile(t, filepath.Join(release, "runtime-files.sha256"), manifest.String(), 0o600)
-				}
+					return engine
+				})
 				args := []string{"update", "--rollback", "--runtime-root", runtimeRoot}
 				if assumeYes {
 					args = append(args, "--yes")
@@ -108,7 +78,7 @@ func TestRollbackCommandPrintsCleanupOncePerPlan(t *testing.T) {
 					t.Fatalf("resume unexpectedly prompted: %s", plan)
 				}
 				for _, part := range []string{plan, result} {
-					for _, note := range []string{"policies changed or added survive", "Surviving yard file: /etc/sample/policy.json", "Manual cleanup: restore the previous managed policy"} {
+					for _, note := range []string{"policies changed or added survive", "Affected yard path: /etc/sample/policy.json", "Manual cleanup: restore the previous managed policy"} {
 						if strings.Count(part, note) != 1 {
 							t.Fatalf("cleanup %q not shown exactly once: %s", note, part)
 						}
@@ -116,6 +86,71 @@ func TestRollbackCommandPrintsCleanupOncePerPlan(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// newRollbackBoundaryFixture prepares a rollback to 1.2.2 whose active release
+// declares one agent boundary; patch edits the retained engine script.
+func newRollbackBoundaryFixture(t *testing.T, patch func(string) string) (*cliFixture, string, []string, string) {
+	t.Helper()
+	fixture, root, environment, runtimeRoot := newUpdateReleaseFixture(t)
+	environment = append(environment, "ACTIVE_CAPTURE="+filepath.Join(root, "active.log"))
+	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
+	active := filepath.Join(runtimeRoot, "releases/current-a")
+	target := filepath.Join(runtimeRoot, "releases/previous-b")
+	engine := filepath.Join(target, "bin/yard-engine")
+	data, err := os.ReadFile(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, engine, patch(strings.Replace(string(data), "yard-engine 1.2.3", "yard-engine 1.2.2", 1)), 0o700)
+	declaration := releasetransition.RollbackDeclaration{SchemaVersion: 1, PredecessorRegistryDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)), Migrations: []json.RawMessage{}, ProfileFormats: []json.RawMessage{}, Boundaries: []releasetransition.RollbackBoundary{{Component: "agents", ThroughVersion: "1.2.2", Reason: "policies changed or added survive", Recovery: "restore the previous managed policy", SourceDigest: releasetransition.Fingerprint(strings.Repeat("b", 64)), Files: []string{"/etc/sample/policy.json"}}}}
+	data, err = json.Marshal(declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(active, "config/release-rollback.json"), string(data), 0o600)
+	for _, release := range []string{active, target} {
+		paths := []string{"bin/yard", "bin/yard-engine", "config/release-transition.json"}
+		if release == active {
+			paths = append(paths, "config/release-rollback.json")
+		}
+		var manifest strings.Builder
+		for _, path := range paths {
+			data, err := os.ReadFile(filepath.Join(release, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&manifest, "%x  ./%s\n", sha256.Sum256(data), path)
+		}
+		writeCLIFile(t, filepath.Join(release, "runtime-files.sha256"), manifest.String(), 0o600)
+	}
+	return fixture, root, environment, runtimeRoot
+}
+
+// A retained release that refuses to plan, as one refusing a file at a declared
+// agent path does, gets the boundary's paths and recovery as its next step.
+func TestRollbackInspectionFailureNamesAgentBoundaryRecovery(t *testing.T) {
+	fixture, root, environment, runtimeRoot := newRollbackBoundaryFixture(t, func(engine string) string {
+		return strings.Replace(engine, `if [ "${UPDATE_CANCEL_INSPECTION:-}" = 1 ]; then exec sleep 30; fi`, `exit 3`, 1)
+	})
+	var stdout, stderr bytes.Buffer
+	program := fixture.New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"update", "--rollback", "--runtime-root", runtimeRoot, "--yes"},
+		Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
+	if code := program.Run(context.Background()); code == 0 {
+		t.Fatalf("rollback succeeded: %s", stdout.String())
+	}
+	rendered := stdout.String() + stderr.String()
+	for _, want := range []string{
+		"the retained release cannot provide a safe rollback plan; declared rollback limitations: policies changed or added survive Paths: /etc/sample/policy.json",
+		"follow the declared recovery, then retry yard update --rollback: restore the previous managed policy",
+	} {
+		if strings.Count(rendered, want) != 1 {
+			t.Fatalf("refusal does not name %q exactly once: %s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "restore a compatible retained release") {
+		t.Fatalf("refusal kept the generic next step: %s", rendered)
 	}
 }
 
