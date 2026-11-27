@@ -1118,7 +1118,7 @@ render_error_summary() {
     jq -r --arg since "$since" --arg hint "$E2E_ERRORS_HINT" '
       [.errors[] | select(.timestamp >= $since)] as $recent |
       if ($recent | length) == 0 then "broker errors in the last 24 h: none"
-      else "broker errors in the last 24 h: \($recent | length); latest: \($recent[-1].timestamp) \($recent[-1].slot_id // "-") \($recent[-1].kind); details: \($hint)"
+      else "broker errors in the last 24 h: \($recent | length)\(if ($recent | length) >= 200 then "+" else "" end); latest: \($recent[-1].timestamp) \($recent[-1].slot_id // "-") \($recent[-1].kind); details: \($hint)"
       end' <<<"$response" | tr -d '\000-\010\013-\037\177'
   else
     printf 'broker errors: unavailable\n'
@@ -1127,14 +1127,15 @@ render_error_summary() {
 
 # Tell the agent which slot was quarantined, with which incident, and the
 # command the operator runs. The incident comes from this controller's own
-# journal record; another holder's run is never printed. Never fails.
+# journal records (the quarantine and the recovery records that follow it);
+# another holder's run is never printed. Never fails.
 report_quarantine() {
   local slot="$1" context="$2" run="${3:-}" epoch="${4:-}" response incident=unavailable number
   [[ "$slot" =~ ^slot-[0-9]{3}$ ]] || return 0
   number="$((10#${slot#slot-}))"
   if response="$(error_journal_request "$slot" 20 30 2>/dev/null)"; then
     incident="$(jq -r --arg own "${run:+1}" --arg epoch "$epoch" '
-      [.errors[] | select(.kind == "slot.quarantined") |
+      [.errors[] | select(.incident_id) |
         select($own == "" or (.own == true and ($epoch == "" or (.lease_epoch | tostring) == $epoch)))]
       | last | .incident_id // "unavailable"' <<<"$response" 2>/dev/null)" || incident=unavailable
   fi

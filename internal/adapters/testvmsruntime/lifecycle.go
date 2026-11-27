@@ -61,7 +61,7 @@ func (runtime *Runtime) acquireSlotLocked(
 		return grant, err
 	}
 	if agentLogClientID.MatchString(stored.ClientID) {
-		child.agentLogOwner = capabilityDigest(stored.ClientID)
+		child.agentLogOwner, child.agentLogClient = capabilityDigest(stored.ClientID), stored.ClientID
 	}
 	if stored.LegacyRetained {
 		exists, err := child.projectPresence(ctx)
@@ -859,16 +859,18 @@ func failureStep(err error) string {
 
 func failureOutcome(err error) string {
 	var timeout *stopTimeoutError
-	if errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) {
+	var readiness *readinessFailure
+	if errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &readiness) && readiness.Expired) {
 		return "timeout"
 	}
 	return "error"
 }
 
 func (runtime *Runtime) useLeaseSlot(slot LeaseSlot) {
-	runtime.agentLogOwner = ""
+	runtime.agentLogOwner, runtime.agentLogClient = "", ""
 	if agentLogClientID.MatchString(slot.ClientID) {
-		runtime.agentLogOwner = capabilityDigest(slot.ClientID)
+		runtime.agentLogOwner, runtime.agentLogClient = capabilityDigest(slot.ClientID), slot.ClientID
 	}
 	if slot.Environment == nil {
 		return

@@ -33,10 +33,12 @@ func vmSleepPolicy(architecture string) (lowlevel, rawQEMU string) {
 }
 
 type Runtime struct {
-	slotAccountRoot   string
-	lookupUser        func(string) (*user.User, error)
-	allocation        *LeaseIdentity
-	agentLogOwner     string
+	slotAccountRoot string
+	lookupUser      func(string) (*user.User, error)
+	allocation      *LeaseIdentity
+	agentLogOwner   string
+	// agentLogClient routes this allocation's own records to its archive.
+	agentLogClient    string
 	memoryProbe       func() (MemoryCapacity, error)
 	brokerMemoryProbe func() (BrokerMemoryCapacity, error)
 	usageProbe        func(context.Context, LeaseSlot) allocationUsage
@@ -943,6 +945,7 @@ func (runtime *Runtime) recordSlowIncus(operation string, duration time.Duration
 		if runtime.allocation != nil && runtime.allocation.SlotID == slot {
 			event.ResourceGeneration = runtime.allocation.ResourceGeneration
 			event.LeaseEpoch = runtime.allocation.LeaseEpoch
+			event.agentClientID = runtime.agentLogClient
 		}
 	}
 	recorder := runtime.eventRecorder()
@@ -1023,7 +1026,7 @@ func (runtime *Runtime) waitFor(
 		now := runtime.Now()
 		if !now.Before(deadline) || waitCtx.Err() != nil {
 			return &readinessFailure{Label: label, Budget: runtime.Config.BootTimeout,
-				StartedAt: started, ObservedAt: now, LastProbe: lastFailure}
+				StartedAt: started, ObservedAt: now, LastProbe: lastFailure, Expired: true}
 		}
 		probeErr := probe(waitCtx)
 		if ctx.Err() != nil {
@@ -1082,6 +1085,8 @@ type readinessFailure struct {
 	StartedAt  time.Time
 	ObservedAt time.Time
 	LastProbe  string
+	// Expired says the readiness budget ran out.
+	Expired bool
 }
 
 func (failure *readinessFailure) Error() string {

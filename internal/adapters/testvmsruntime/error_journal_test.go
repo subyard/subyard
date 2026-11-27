@@ -3,6 +3,7 @@ package testvmsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -375,5 +376,55 @@ func TestRecoveryJournalFromOlderBrokerWithRetiringSlotLoads(t *testing.T) {
 	testkit.WriteFile(t, store.recoveryJournalPath(), []byte(`{"schema_version":1,"slots":[{"slot_id":"slot-002","resource_generation":2,"lease_epoch":1,"state":"draining","incident_id":"01767225600000000000-38d2a5c89e81b2a6"}]}`), 0o600)
 	if _, err := store.Status(); err != nil {
 		t.Fatalf("older recovery journal: %v", err)
+	}
+}
+
+// A slow call made for a lease is the holder's own record.
+func TestSlowIncusRecordsOfALeaseAreTheHoldersOwn(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	owner := strings.Repeat("d", 32)
+	f.acquireAs(1, owner)
+	child := f.rt.slotRuntime(1, "")
+	child.useLeaseSlot(f.slot(1))
+	child.recordSlowIncus("stop", slowIncusLifecycle, "", true)
+	for reader, own := range map[string]bool{owner: true, "-": false, strings.Repeat("e", 32): false} {
+		records, _ := f.journal("errors-v1 " + reader + " slot-001 50")
+		if len(records) != 1 || records[0].Kind != "incus.slow" || records[0].Own != own ||
+			records[0].LeaseEpoch != f.slot(1).LeaseEpoch {
+			t.Errorf("reader %s: %+v", reader, records)
+		}
+	}
+}
+
+func TestReadinessBudgetExpiryIsATimeout(t *testing.T) {
+	rt := &Runtime{Config: Config{BootTimeout: 50 * time.Millisecond}, Now: time.Now}
+	rt.prepareDefaults()
+	err := rt.waitFor(t.Context(), "fixture readiness", func(context.Context) error { return errors.New("not ready") })
+	if failureStep(err) != "readiness" || failureOutcome(err) != "timeout" {
+		t.Fatalf("step=%s outcome=%s err=%v", failureStep(err), failureOutcome(err), err)
+	}
+	unobserved := &readinessFailure{Label: "fixture", LastProbe: "error_kind=not_observed"}
+	if failureOutcome(unobserved) != "error" {
+		t.Fatalf("unobserved readiness outcome = %s", failureOutcome(unobserved))
+	}
+}
+
+// Legacy and corrupt-state slots have no allocation identity: their guests are
+// never asked for jobs or journals.
+func TestGuestSnapshotRequiresAnAllocationIdentity(t *testing.T) {
+	f := newBrokerPoolFixture(t, 1)
+	f.acquire(1, "legacy")
+	child := f.rt.slotRuntime(1, "")
+	f.incus.calls = nil
+	snapshot := child.guestSnapshot(f.ctx, "")
+	for _, section := range []string{"vm_1_guest_jobs", "vm_1_guest_journal"} {
+		if snapshot[section] != "unavailable: allocation ownership not verified" {
+			t.Errorf("%s = %q", section, snapshot[section])
+		}
+	}
+	for _, call := range f.incus.calls {
+		if slices.Contains(call, "exec") {
+			t.Fatalf("guest command without allocation identity: %v", call)
+		}
 	}
 }

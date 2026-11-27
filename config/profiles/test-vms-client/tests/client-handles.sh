@@ -169,7 +169,11 @@ case "$command" in
         own:($own == "1")},
       {schema_version:1,event_id:"01795371892254664249-0000000000000003",timestamp:$now,sequence:3,
         kind:"slot.quarantined",slot_id:"slot-002",lease_epoch:2,step:"fence-and-stop",outcome:"timeout",
-        incident_id:"01795371892254664249-1843ff2f64712754",own:($own == "1")}]}'
+        incident_id:"01795371892254664249-1843ff2f64712754",own:($own == "1")}]}' |
+      # After many failed recoveries the quarantine itself left the requested tail.
+      if [ -f "$FAKE/recovery-tail" ]; then
+        jq -c '.errors |= [.[0], (.[2] | .kind = "recovery.failed" | .step = "recovery" | .recovery_attempt = 21)]'
+      else cat; fi
     ;;
   *) log "rejected $command"; printf '%s\n' '{"schema_version":1,"status":"error","code":"invalid_request"}' ;;
 esac
@@ -441,7 +445,11 @@ grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=0179537189225466
   && grep -Fxq 'subyard-test-vms: tell the operator and ask them to run: yard test-vms logs --slot 2' "$TMP/err" \
   && grep -Fxq "errors-v1 slot=slot-002 count=20 client=$(cat "$(find "$TMP/client" -name client-id)")" "$TMP/facade.log" \
   || fail "quarantined release did not name its incident: $(cat "$TMP/err")"
-rm -f "$TMP/release-rejected"
+touch "$TMP/recovery-tail"
+if client release "$handle" 2>"$TMP/err"; then fail 'a quarantined release succeeded with recovery records'; fi
+grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=01795371892254664249-1843ff2f64712754" "$TMP/err" \
+  || fail "the incident was lost behind recovery records: $(cat "$TMP/err")"
+rm -f "$TMP/recovery-tail" "$TMP/release-rejected"
 client release "$handle" 2>"$TMP/err" || fail 'release after a quarantined refusal failed'
 ! grep -Fq E2E_RELEASE_EVENT "$TMP/err" && ! grep -Fq E2E_QUARANTINE "$TMP/err" \
   || fail 'a successful release printed refusal diagnostics'
