@@ -60,6 +60,18 @@ func TestPrivateDirPolicy(t *testing.T) {
 				mkdirMode(t, filepath.Dir(path), 0o700)
 				testkit.WriteFile(t, path, nil, 0o600)
 			}},
+		{name: "dangling parent symlink", refusal: "mkdir {parent}: file exists",
+			prepare: func(t *testing.T, path string) { symlink(t, path+"-missing", filepath.Dir(path)) }},
+		{name: "regular file parent", refusal: "mkdir {parent}: not a directory",
+			prepare: func(t *testing.T, path string) { testkit.WriteFile(t, filepath.Dir(path), nil, 0o600) }},
+		{name: "unsearchable parent", refusal: "mkdir {path}: permission denied",
+			prepare: func(t *testing.T, path string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root searches any directory")
+				}
+				mkdirMode(t, filepath.Dir(path), 0)
+				t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0o700) })
+			}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(testkit.TempDir(t), "parent", "data")
@@ -77,10 +89,11 @@ func TestPrivateDirPolicy(t *testing.T) {
 				}
 				return
 			}
-			if want := strings.ReplaceAll(test.refusal, "{path}", path); err == nil || err.Error() != want {
+			want := strings.NewReplacer("{path}", path, "{parent}", filepath.Dir(path)).Replace(test.refusal)
+			if err == nil || err.Error() != want {
 				t.Fatalf("privateDir error = %v, want %q", err, want)
 			}
-			if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) || after.Mode() != before.Mode() {
+			if after, err := os.Lstat(path); before == nil && err == nil || before != nil && (err != nil || !os.SameFile(before, after) || after.Mode() != before.Mode()) {
 				t.Fatalf("refused entry changed: %v -> %v (%v)", before, after, err)
 			}
 		})

@@ -75,19 +75,21 @@ type Store struct {
 // fileFault is a test-only interruption hook for safefs publications.
 var fileFault func(safefs.Point) error
 
-// privateDir creates a missing directory and its missing parents with mode 0700
-// and sets an existing own directory to exactly 0700. It refuses a symlink, a
-// non-directory and another owner's directory, keeping the collector's texts.
-// Like the producers' private_directory it does not sync, because syncing
-// would need read access to the parent; publications sync their own entries.
+// privateDir creates a missing directory with mode 0700 and sets an existing
+// own directory to exactly 0700. It refuses a symlink, a non-directory and
+// another owner's directory. Missing parents and every refusal keep the texts
+// os.MkdirAll and the previous checks reported. Like the producers'
+// private_directory it does not sync, because syncing would need read access
+// to the parent; publications sync their own entries.
 func privateDir(path string) error {
-	err := safefs.EnsureDir(path, safefs.DirOptions{
-		Existing: safefs.Repair, ParentMode: 0o700, Durability: safefs.BestEffort, Fault: fileFault,
-	})
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Repair, Durability: safefs.BestEffort, Fault: fileFault})
 	var state *safefs.DirStateError
+	var pathErr *fs.PathError
 	switch {
 	case errors.Is(err, safefs.ErrSymlink):
-		// The texts follow what os.MkdirAll reported for each link target.
 		switch target, statErr := os.Stat(path); {
 		case statErr != nil:
 			return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.EEXIST}
@@ -101,6 +103,9 @@ func privateDir(path string) error {
 		return fmt.Errorf("telemetry directory %s must not be accessible by group or others", path)
 	case errors.Is(err, safefs.ErrUnsafeOwner):
 		return errors.New("data directory has another owner")
+	case errors.As(err, &pathErr) && pathErr.Path == path && (pathErr.Op == "open" || pathErr.Op == "lstat"):
+		// os.MkdirAll reported a failed lookup of the leaf as a failed mkdir.
+		return &fs.PathError{Op: "mkdir", Path: path, Err: pathErr.Err}
 	}
 	return err
 }
