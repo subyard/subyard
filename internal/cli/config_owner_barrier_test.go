@@ -51,7 +51,8 @@ func TestDispatcherConfigApplierRetainsOwnerBarrier(t *testing.T) {
 					testkit.WriteFile(t, dispatcher, []byte("#!/bin/sh\nexec \"$SUBYARD_TEST_EXECUTABLE\" -test.run=^TestConfigApplierOwnerBarrierProcess$ -- \"$@\"\n"), 0700)
 					environment := map[string]string{
 						"HOME": root, "SUBYARD_TEST_EXECUTABLE": executable,
-						"SUBYARD_TEST_CONFIG_OWNER_HOME": home,
+						"SUBYARD_TEST_CONFIG_OWNER_HOME":   home,
+						uninstall.OwnerLockRootEnvironment: os.Getenv(uninstall.OwnerLockRootEnvironment),
 					}
 					switch homeSource {
 					case "explicit":

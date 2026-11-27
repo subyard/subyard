@@ -226,7 +226,8 @@ def main():
     os.set_inheritable(inherited_fd, True)
     os.environ.update(SUBYARD_RUN_TEMP=str(path), SUBYARD_RUN_TEMP_FD=str(inherited_fd),
                       SUBYARD_RUN_TEMP_ENTERED=str(os.getpid()), TMPDIR=str(path), GOTMPDIR=str(path),
-                      PYTHONDONTWRITEBYTECODE="1")
+                      # Owner coordination of temporary data homes goes with the run root.
+                      SUBYARD_OWNER_LOCK_ROOT=str(path), PYTHONDONTWRITEBYTECODE="1")
     os.execvp(sys.argv[2], sys.argv[2:])
 
 

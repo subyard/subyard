@@ -149,7 +149,11 @@ def main():
         home = os.environ['SUBYARD_HOME']
         if not home.startswith('/') or os.path.normpath(home) != home:
             raise ValueError('invalid native owner scope')
-        directory = Path('/tmp')/('subyard-owner-locks-'+str(uid))
+        # Test runs relocate owner coordination into their private root.
+        root = os.environ.get('SUBYARD_OWNER_LOCK_ROOT', '') or '/tmp'
+        if not root.startswith('/') or os.path.normpath(root) != root:
+            raise ValueError('invalid owner lock root')
+        directory = Path(root)/('subyard-owner-locks-'+str(uid))
         parent = directory.lstat()
         if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid or stat.S_IMODE(parent.st_mode) != 0o700:
             raise ValueError('unsafe native owner barrier parent')

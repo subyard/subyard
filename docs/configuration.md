@@ -1731,7 +1731,8 @@ The recovery directory disappears only after verified cleanup. Stable, secret-fr
 coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-locks-<uid>` and the shared host-network lock under
 `/run/lock/subyard-network` remain: removing an active lock inode would let queued operations
 bypass serialization. Queued mutations and late audit/cache writers recheck their original
-installation generation before writing.
+installation generation before writing. Test runs alone relocate these files with
+`SUBYARD_OWNER_LOCK_ROOT`; installations never set it.
 
 ### Adopting an existing yard
 

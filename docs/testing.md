@@ -743,9 +743,9 @@ a check fails.
 
 The two top-level host-free runners (`tests/run.sh`, `dev/test-profiles.sh`) and their
 Makefile entrypoints give each invocation a private root under `/tmp`, with `TMPDIR`
-and `GOTMPDIR` pointing into it. Nested runners reuse that root. The runner holds an
-exclusive flock on the directory itself, inherited by children; the owner removes its root
-only once unlocked, otherwise the next run does.
+and `GOTMPDIR` (and `SUBYARD_OWNER_LOCK_ROOT`, below) pointing into it. Nested runners
+reuse that root. The runner holds an exclusive flock on the directory itself, inherited
+by children; the owner removes its root only once unlocked, otherwise the next run does.
 The next invocation removes abandoned sibling roots only after taking their lock and
 validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
 mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks
@@ -753,6 +753,14 @@ are preserved. Profile runners share the caller's process group, so group signal
 their children directly. A PID-only INT or TERM stops dispatch without signalling running
 profiles or other group members; the dispatcher waits for those profiles and exits with
 130 or 143. The shell wrapper forwards these signals only to the dispatcher and waits.
+
+Owner lock and epoch files of temporary data homes follow `SUBYARD_OWNER_LOCK_ROOT` into
+the run root instead of accumulating in `/tmp/subyard-owner-locks-<uid>`. A Go test binary
+refuses owner coordination without that variable; a package whose tests reach it runs
+them through `testkit.RunWithOwnerLockRoot` in its `TestMain`, which provides and removes
+a private root when no runner did; the next test binary removes a root whose binary was
+killed once no process holds it. Handlers that re-enter `yard` inherit the variable.
+Other programs run outside a runner coordinate in `/tmp`, as an installation does.
 
 A descendant that closes inherited fds and outlives its runner cannot retain the lock;
 it may lose its scratch at the next run. SIGKILL before receipt publication leaves an

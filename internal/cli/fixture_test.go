@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // cliFixture is one CLI test environment. The default flavour is a synthetic
@@ -185,6 +186,9 @@ func newFixture(t *testing.T, options ...fixtureOption) *cliFixture {
 		fixture.Root, fixture.Environment = syntheticFixtureRoot(t)
 		fixture.owned = []string{fixture.Root}
 	}
+	// Processes the fixture starts coordinate under the test binary's lock root.
+	fixture.Environment = append(slices.Clip(fixture.Environment),
+		uninstall.OwnerLockRootEnvironment+"="+os.Getenv(uninstall.OwnerLockRootEnvironment))
 	fixture.Environment = slices.Clip(fixture.Environment)
 	fixture.Home, fixture.ConfigHome, fixture.DataHome = fixture.Env("HOME"), fixture.Env("SUBYARD_CONFIG_HOME"), fixture.Env("SUBYARD_HOME")
 	for _, home := range []string{fixture.Home, fixture.ConfigHome, fixture.DataHome} {

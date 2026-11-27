@@ -40,23 +40,17 @@ printf 'ok: runtime installer delegates rollback to ReleaseTransition\n'
 
 # The owner barrier restores its own lock directory, including one its owner
 # cannot read, through a pinned inode; the installer requires exactly 0700.
-# A copy points the barrier at a private lock root, so the shared directory
-# under /tmp is never changed.
+# A private lock root keeps the shared directory under /tmp unchanged.
 shared_locks="/tmp/subyard-owner-locks-$(id -u)"
 shared_before="$(stat -c %a "$shared_locks" 2>/dev/null || echo absent)"
 install -d -m 0700 "$TMP/lock-root"
-installer="$TMP/install-runtime-release.sh"
-sed "s|pathlib.Path(\"/tmp\")|pathlib.Path($(printf '%s' "\"$TMP/lock-root\""))|" \
-  "$ROOT/scripts/install-runtime-release.sh" > "$installer"
-grep -Fq "pathlib.Path(\"$TMP/lock-root\")" "$installer" \
-  || { printf 'install runtime rollback: lock root fixture was not applied\n' >&2; exit 1; }
-chmod 0700 "$installer"
+installer="$ROOT/scripts/install-runtime-release.sh"
 locks="$TMP/lock-root/subyard-owner-locks-$(id -u)"
 for mode in 0300 1755; do
   install -d -m 0700 "$locks"
   chmod "$mode" "$locks"
   set +e
-  SUBYARD_HOME="$TMP/home" ENGINE_CAPTURE="$capture" "$installer" \
+  SUBYARD_OWNER_LOCK_ROOT="$TMP/lock-root" SUBYARD_HOME="$TMP/home" ENGINE_CAPTURE="$capture" "$installer" \
     --runtime-root "$runtime_root" --rollback >"$TMP/stdout" 2>"$TMP/stderr"
   status=$?
   set -e

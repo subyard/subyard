@@ -3167,7 +3167,7 @@ func (cli *CLI) runOwnerProjectState(
 }
 
 func (cli *CLI) handlerEnvironment(name, arg0 string) map[string]string {
-	return map[string]string{
+	values := map[string]string{
 		"YARD_ENGINE":              Version,
 		"YARD_VERSION":             Version,
 		"SUBYARD_DISPATCH_PATH":    cli.options.DispatcherPath,
@@ -3175,6 +3175,12 @@ func (cli *CLI) handlerEnvironment(name, arg0 string) map[string]string {
 		"SUBYARD_DISPATCH_ARG0":    arg0,
 		"SUBYARD_REPOSITORY_ROOT":  cli.options.RepositoryRoot,
 	}
+	// A handler that re-enters yard coordinates where its parent does. Only a
+	// test run relocates that root.
+	if root := cli.baseEnv[uninstall.OwnerLockRootEnvironment]; root != "" {
+		values[uninstall.OwnerLockRootEnvironment] = root
+	}
+	return values
 }
 
 type wallClock struct{}
