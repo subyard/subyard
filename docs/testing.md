@@ -747,7 +747,8 @@ and `GOTMPDIR` pointing into it. Nested runners reuse that root. The runner hold
 exclusive flock on the directory itself, inherited by children; the owner removes its root
 only once unlocked, otherwise the next run does. `dev/agent-e2e.sh` keeps its local lane
 scratch in the same kind of root, so a killed lane controller leaves only a root that the
-next lane controller or host-free run removes.
+next lane controller or host-free run removes. In a `subyard-dev` yard a daily timer also
+removes such roots once they are older than seven days.
 The next invocation removes abandoned sibling roots only after taking their lock and
 validating an inode-bound receipt. Cleanup uses pinned directory fds and does not cross
 mounts. Unknown directories, symlinks, incomplete or invalid receipts, and live locks

@@ -109,6 +109,31 @@ with tempfile.TemporaryDirectory(prefix='subyard-run-temp-test-', dir='/tmp') as
         assert len(diagnostic.getvalue().splitlines()) == 1 and str(root) in diagnostic.getvalue()
         run('true')
 
+        # The timer sweep removes only abandoned roots created more than the given days ago.
+        # Every entry sweeps unlocked roots, so all three exist before any is abandoned.
+        aged = [blocked(name) for name in ('aged-old', 'aged-new', 'aged-live')]
+        for process, _ in aged[:2]:
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        for _, root in (aged[0], aged[2]):
+            old = time.time() - 8 * 86400
+            os.utime(root / module.RECEIPT, (old, old), follow_symlinks=False)
+        unrelated = Path(tempfile.mkdtemp(prefix='subyard-run-temp-unrelated-', dir='/tmp'))
+        os.utime(unrelated, (time.time() - 30 * 86400,) * 2)
+        try:
+            for days in ('0', 'x'):
+                assert subprocess.run(['python3', str(helper), 'sweep', days], env=environment,
+                                      capture_output=True).returncode != 0, days
+            subprocess.run(['python3', str(helper), 'sweep', '7'], env=environment, check=True)
+            assert [root.exists() for _, root in aged] == [False, True, True], aged
+            assert unrelated.is_dir()
+        finally:
+            os.kill(aged[2][0].pid, signal.SIGKILL)
+            aged[2][0].wait(timeout=10)
+            unrelated.rmdir()
+        run('true')
+        assert not roots(), roots()
+
         # Failed cleanup preserves the command status, including a successful command.
         original = helper.read_text()
         helper.write_text(original.replace('if sys.argv[1] == "clean":',

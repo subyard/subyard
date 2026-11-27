@@ -69,6 +69,41 @@ RandomizedDelaySec=30m
 WantedBy=timers.target
 EOF
 }
+# Host-free runners sweep abandoned run roots on entry; the timer catches those no run followed.
+RUN_ROOTS_HELPER="$PROFILE_DIR/../../../dev/test-run-temp.py"
+[ -f "$RUN_ROOTS_HELPER" ] || { printf 'subyard-dev provision: missing %s\n' "$RUN_ROOTS_HELPER" >&2; exit 1; }
+run_roots_service() {
+  cat <<EOF
+[Unit]
+Description=Remove unlocked Subyard test run roots older than seven days
+[Service]
+Type=oneshot
+User=$DEV_USER
+Group=$DEV_GROUP
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 /usr/local/lib/subyard-dev/test-run-temp.py sweep 7
+EOF
+}
+run_roots_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Remove abandoned Subyard test run roots daily
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+[Install]
+WantedBy=timers.target
+EOF
+}
+check_run_roots_timer() {
+  cmp -s "$RUN_ROOTS_HELPER" "$SYSTEM_ROOT/usr/local/lib/subyard-dev/test-run-temp.py" &&
+    cmp -s <(run_roots_service) "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-run-roots-trim.service" &&
+    cmp -s <(run_roots_timer) "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-run-roots-trim.timer" &&
+    systemctl is-enabled --quiet subyard-dev-run-roots-trim.timer &&
+    systemctl is-active --quiet subyard-dev-run-roots-trim.timer
+}
 check_cache_timer() {
   cmp -s "$PROFILE_DIR/trim-gocache.py" "$SYSTEM_ROOT/usr/local/lib/subyard-dev/trim-gocache.py" &&
     cmp -s <(cache_service) "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.service" &&
@@ -171,6 +206,7 @@ if [ "$check_only" -eq 1 ]; then
   done
   check_environment || changed=1
   check_cache_timer || changed=1
+  check_run_roots_timer || changed=1
   if [ "$changed" -eq 0 ]; then
     mapfile -t go_env < <(run_go_as_dev env GOCACHE GOMODCACHE GOTOOLCHAIN)
     [ "${go_env[0]-}" = "$GOCACHE" ] || changed=1
@@ -221,8 +257,13 @@ install -m 0644 "$PROFILE_DIR/trim-gocache.py" "$SYSTEM_ROOT/usr/local/lib/subya
 cache_service > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.service"
 cache_timer > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.timer"
 chmod 0644 "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim."{service,timer}
+install -m 0644 "$RUN_ROOTS_HELPER" "$SYSTEM_ROOT/usr/local/lib/subyard-dev/test-run-temp.py"
+run_roots_service > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-run-roots-trim.service"
+run_roots_timer > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-run-roots-trim.timer"
+chmod 0644 "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-run-roots-trim."{service,timer}
 systemctl daemon-reload
 systemctl enable --now subyard-dev-gocache-trim.timer
+systemctl enable --now subyard-dev-run-roots-trim.timer
 
 if [ "$with_rust" = 1 ]; then
 for directory in "$DEV_HOME/.cargo" "$DEV_HOME/.rustup"; do

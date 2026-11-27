@@ -86,7 +86,8 @@ def remove(parent, name, fd):
     os.rmdir(name, dir_fd=parent)
 
 
-def sweep(parent):
+def sweep(parent, created_before=None):
+    """Remove unlocked roots with valid receipts; with a cutoff, only roots created before it."""
     for name in sorted(os.listdir(parent)):
         if not name.startswith(PREFIX):
             continue
@@ -94,7 +95,9 @@ def sweep(parent):
             fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if valid(fd):
+                # The receipt is written once at creation, so its mtime is the root's age.
+                if valid(fd) and (created_before is None or os.stat(
+                        RECEIPT, dir_fd=fd, follow_symlinks=False).st_mtime < created_before):
                     try:
                         remove(parent, name, fd)
                     except (OSError, ValueError) as error:
@@ -165,6 +168,17 @@ def main():
         except (KeyError, OSError, ValueError):
             return_code = 1
         sys.exit(return_code)
+    if sys.argv[1] == "sweep":
+        # The subyard-dev timer: roots that no later run swept, after this many days.
+        days = int(sys.argv[2])
+        if days < 1:
+            raise ValueError("sweep age must be at least one day")
+        parent = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            sweep(parent, time.time() - days * 86400)
+        finally:
+            os.close(parent)
+        return
     if sys.argv[1] == "retain":
         retain(sys.argv[2])
         return
@@ -200,7 +214,7 @@ def main():
                 os.close(parent)
         return
     if sys.argv[1] != "enter":
-        raise ValueError("expected enter or clean")
+        raise ValueError("expected check, enter, clean, retain or sweep")
     try:
         fd, path = inherited()
     except (KeyError, OSError, ValueError):

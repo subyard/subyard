@@ -38,6 +38,7 @@ cat > "$tmp/fake-bin/systemctl" <<'SH'
 #!/bin/sh
 case "$*" in
   daemon-reload|'enable --now subyard-dev-gocache-trim.timer'|'is-enabled --quiet subyard-dev-gocache-trim.timer'|'is-active --quiet subyard-dev-gocache-trim.timer') exit 0 ;;
+  'enable --now subyard-dev-run-roots-trim.timer'|'is-enabled --quiet subyard-dev-run-roots-trim.timer'|'is-active --quiet subyard-dev-run-roots-trim.timer') exit 0 ;;
   *) exit 99 ;;
 esac
 SH
@@ -195,7 +196,8 @@ run_hook
   || fail "Go environment was not re-applied exactly once per provision"
 
 # Missing or changed units/helper must be reported as drift.
-for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/system/subyard-dev-gocache-trim.timer usr/local/lib/subyard-dev/trim-gocache.py; do
+for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/system/subyard-dev-gocache-trim.timer usr/local/lib/subyard-dev/trim-gocache.py \
+  etc/systemd/system/subyard-dev-run-roots-trim.service etc/systemd/system/subyard-dev-run-roots-trim.timer usr/local/lib/subyard-dev/test-run-temp.py; do
   cp "$tmp/system/$artifact" "$tmp/saved-artifact"
   printf 'drift\n' >> "$tmp/system/$artifact"
   status=0
@@ -209,6 +211,12 @@ for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/
 done
 grep -Fxq 'Persistent=true' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
 grep -Fxq 'OnCalendar=*-*-* 00,06,12,18:00:00' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
+# The run-root timer runs the shared run-root helper's aged sweep.
+cmp -s "$ROOT/dev/test-run-temp.py" "$tmp/system/usr/local/lib/subyard-dev/test-run-temp.py" \
+  && grep -Fxq 'ExecStart=/usr/bin/python3 /usr/local/lib/subyard-dev/test-run-temp.py sweep 7' \
+    "$tmp/system/etc/systemd/system/subyard-dev-run-roots-trim.service" \
+  && grep -Fxq 'Persistent=true' "$tmp/system/etc/systemd/system/subyard-dev-run-roots-trim.timer" \
+  || fail "run-root timer drifted from the shared helper"
 status=0
 env "${common_env[@]}" SUBYARD_GOCACHE_LIMIT=invalid bash "$HOOK" --check >"$tmp/invalid.out" 2>&1 || status=$?
 [ "$status" -eq 2 ] || fail "invalid limit accepted"
