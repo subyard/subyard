@@ -136,18 +136,22 @@ func TestRPCErrorRecordsWaitForTheOwnerBarrierAfterTheResponse(t *testing.T) {
 	failure := errors.New("plan failed")
 	_, home, recorder, closeRecorder := failingRecorder(t, failure)
 	release := holdOwnerBarrier(t, home)
+	const requests = 300
 	started := time.Now()
-	for index := 1; index <= 100; index++ {
+	for index := 1; index <= requests; index++ {
 		id := fmt.Sprintf("veranda-%d", index)
 		if _, err := recorder.Handle(context.Background(), rpc.Call{ID: id, OperationID: id, Method: "operation.plan"}, nil); !errors.Is(err, failure) {
 			t.Fatalf("error = %v", err)
 		}
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("100 failed responses took %s", elapsed)
+	// The bound is not a speed target. A response that waits for its record,
+	// or for room in the full queue, waits out a 250 ms write deadline; over
+	// the requests beyond the backlog that takes about a minute.
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("%d failed responses took %s", requests, elapsed)
 	}
 	log := audit.RPCErrorLog{Home: home}
-	if records, err := log.Read(200); err != nil || len(records) != 0 {
+	if records, err := log.Read(requests); err != nil || len(records) != 0 {
 		t.Fatalf("records under the barrier = %+v err=%v", records, err)
 	}
 	release()
@@ -159,16 +163,17 @@ func TestRPCErrorRecordsWaitForTheOwnerBarrierAfterTheResponse(t *testing.T) {
 		}
 	}
 	closeRecorder()
-	records, err := log.Read(200)
-	// Each write waits for the barrier only briefly, so a slow run may drop
-	// the first queued records too; the rest keep their order.
+	records, err := log.Read(requests)
+	// At most the writer's record and a full queue survive the barrier. Which
+	// requests those are depends on when the writer takes a record and on
+	// writes that give up on the barrier, so only their order is fixed.
 	if err != nil || len(records) == 0 || len(records) > rpcErrorBacklog+1 {
 		t.Fatalf("records = %d err=%v", len(records), err)
 	}
 	previous := 0
 	for index, record := range records {
 		var number int
-		if _, err := fmt.Sscanf(record.Request, "veranda-%d", &number); err != nil || number <= previous || number > rpcErrorBacklog+1 {
+		if _, err := fmt.Sscanf(record.Request, "veranda-%d", &number); err != nil || number <= previous {
 			t.Fatalf("record %d = %+v", index, record)
 		}
 		previous = number
