@@ -153,9 +153,9 @@ frozen format/ownership reader contracts retained in host-free tests.
 Releases v0.28.0 to v0.30.0 save full-uninstall recovery plans as schema 1, whose artifact
 digests their Python helper produced. Approved support decision: the current engine no longer
 resumes schema 1. `yard _uninstall-resume` and the saved-plan detection of `teardown --full`
-refuse such a plan before any confirmation or change. The refusal names the store's retained
-launcher, which remains the plan's recovery owner, or, when that launcher is gone, v0.32.0: the
-last release that resumes schema 1. Keep the complete v0.32.0 asset set published permanently,
+refuse such a plan before any confirmation or change, including permission repair. The refusal
+names the store's retained launcher when it is an executable regular file, since it remains the
+plan's recovery owner, and always v0.32.0 as the fallback: the last release that resumes schema 1. Keep the complete v0.32.0 asset set published permanently,
 as for every release a documented recovery route names. Rollback to v0.30.0 stays supported;
 a plan v0.30.0 saves after rollback is resumed by its own retained launcher.
 

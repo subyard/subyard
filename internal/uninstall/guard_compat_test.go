@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
@@ -26,42 +28,88 @@ func TestRecoverySchemaAcceptsCurrentOnly(t *testing.T) {
 	}
 }
 
-// A schema-1 plan saved by v0.30.0 or older refuses before any resume step and
-// names its retained release, or v0.32.0 once that launcher is gone.
-func TestRecoveryStoreRefusesSchemaOneWithNextStep(t *testing.T) {
-	store, plan := recoveryFixture(t)
-	plan.Schema = 1
-	body, err := json.Marshal(plan)
-	if err != nil {
-		t.Fatal(err)
+// Schema-2 plans saved by v0.31.0 and v0.32.0 rehash these exact bytes. The
+// digest is frozen from an independent Python encoding of Go's HTML-safe JSON.
+func TestGuardDigestMatchesFrozenSchemaTwoBytes(t *testing.T) {
+	entries := []Entry{
+		{Path: ".", Mode: 16832, Size: 4096, Modified: -1, Device: ^uint64(0), Inode: 2, UID: ^uint32(0), Changed: 1763500000987654321},
+		{Path: "link <&>\t\"é😀\u2028\\", Mode: 41471, Size: 24, Link: "../t\b\f\x01\u2029"},
 	}
-	testkit.WriteFile(t, filepath.Join(store.Directory, "plan.json"), body, 0600)
-	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	for _, retained := range []bool{false, true} {
-		if retained {
-			if err := os.MkdirAll(filepath.Dir(launcher), 0700); err != nil {
+	if got, err := digest(entries); err != nil || got != "578a8b3357da6b886d85e71dea4d81758cc5bd8130224f635a9123c8694bdefe" {
+		t.Fatalf("digest %q (%v) differs from the frozen schema-2 bytes", got, err)
+	}
+}
+
+// A schema-1 plan saved by v0.30.0 or older refuses before the protected read
+// repairs the store. Only an executable regular retained launcher is offered,
+// always with the v0.32.0 fallback.
+func TestRecoveryStoreRefusesSchemaOneWithNextStep(t *testing.T) {
+	for _, shape := range []string{"absent", "dangling", "directory", "not-executable", "executable"} {
+		t.Run(shape, func(t *testing.T) {
+			store, plan := recoveryFixture(t)
+			plan.Schema = 1
+			body, err := json.Marshal(plan)
+			if err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, launcher, []byte("retained release"), 0700)
-		}
-		next := "install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume " + store.Directory
-		if retained {
-			next = "resume it with its retained release:\n  " + launcher + " _uninstall-resume " + store.Directory
-		}
-		for name, read := range map[string]func() error{
-			"read":   func() error { _, _, err := store.Read(); return err },
-			"resume": func() error { _, err := store.ReadForResume(t.Context()); return err },
-		} {
-			err := read()
-			var refusal LegacyRecoverySchemaError
-			if !errors.As(err, &refusal) || !strings.HasSuffix(err.Error(), next) || !strings.Contains(err.Error(), "Retain "+store.Directory) {
-				t.Fatalf("retained=%v %s: %v", retained, name, err)
+			planPath := filepath.Join(store.Directory, "plan.json")
+			testkit.WriteFile(t, planPath, body, 0644)
+			launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+			if shape != "absent" {
+				if err := os.MkdirAll(filepath.Dir(launcher), 0700); err != nil {
+					t.Fatal(err)
+				}
 			}
+			switch shape {
+			case "dangling":
+				err = os.Symlink(filepath.Join(store.Directory, "missing"), launcher)
+			case "directory":
+				err = os.Mkdir(launcher, 0700)
+			case "not-executable", "executable":
+				mode := map[string]os.FileMode{"not-executable": 0600, "executable": 0700}[shape]
+				testkit.WriteFile(t, launcher, []byte("retained release"), mode)
+			}
+			if err != nil || os.Chmod(store.Directory, 0755) != nil {
+				t.Fatal("prepare store", err)
+			}
+			before := statTimes(t, store.Directory, planPath)
+			fallback := "install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume " + store.Directory
+			want := ", " + fallback
+			if shape == "executable" {
+				want = " and resume it with its retained release:\n  " + launcher + " _uninstall-resume " + store.Directory + "\nIf that fails, " + fallback
+			}
+			for name, read := range map[string]func() error{
+				"read":   func() error { _, _, err := store.Read(); return err },
+				"resume": func() error { _, err := store.ReadForResume(t.Context()); return err },
+			} {
+				err := read()
+				var refusal LegacyRecoverySchemaError
+				if !errors.As(err, &refusal) || !strings.HasSuffix(err.Error(), "Retain "+store.Directory+want) {
+					t.Fatalf("%s: %v", name, err)
+				}
+			}
+			if after := statTimes(t, store.Directory, planPath); !reflect.DeepEqual(after, before) {
+				t.Fatalf("refusal changed the store: %v, was %v", after, before)
+			}
+			if saved, err := os.ReadFile(planPath); err != nil || !bytes.Equal(saved, body) {
+				t.Fatal("refused schema-1 plan changed", err)
+			}
+		})
+	}
+}
+
+// statTimes records the mode and change time that a protected repair would alter.
+func statTimes(t *testing.T, paths ...string) []string {
+	t.Helper()
+	var facts []string
+	for _, path := range paths {
+		var stat syscall.Stat_t
+		if err := syscall.Lstat(path, &stat); err != nil {
+			t.Fatal(err)
 		}
+		facts = append(facts, fmt.Sprintf("%s mode=%o ctime=%d.%09d", path, stat.Mode, stat.Ctim.Sec, stat.Ctim.Nsec))
 	}
-	if saved, err := os.ReadFile(filepath.Join(store.Directory, "plan.json")); err != nil || !bytes.Equal(saved, body) {
-		t.Fatal("refused schema-1 plan changed", err)
-	}
+	return facts
 }
 
 // The corpus holds outcomes of `git show v0.30.0:scripts/lib/teardown-plan.py`

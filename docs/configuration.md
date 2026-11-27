@@ -1723,8 +1723,8 @@ command printed by the failed operation. Its entrypoint remains usable after con
 Retry uses the saved owner identity and approved paths, with a fresh confirmation. An ordinary
 local `teardown --full` also detects this saved plan when its original data root is selected.
 A plan saved by v0.30.0 or older (recovery schema 1) is refused without changes: resume it with
-its retained launcher as above, or, if that launcher is gone, install v0.32.0, the last release
-that resumes it, and run `yard _uninstall-resume /exact/data-root.uninstall`.
+its retained launcher as above, or, if that launcher is gone or fails, install v0.32.0, the last
+release that resumes it, and run `yard _uninstall-resume /exact/data-root.uninstall`.
 The recovery directory disappears only after verified cleanup. Stable, secret-free account
 coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-locks-<uid>` and the shared host-network lock under
 `/run/lock/subyard-network` remain: removing an active lock inode would let queued operations

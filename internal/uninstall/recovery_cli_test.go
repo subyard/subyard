@@ -134,7 +134,7 @@ func TestResumeRefusesSchemaOnePlanWithItsNextStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	want := fmt.Sprintf("resume it with its retained release:\n  %s _uninstall-resume %s\n", launcher, store.Directory)
+	want := fmt.Sprintf("resume it with its retained release:\n  %s _uninstall-resume %s\nIf that fails, install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume %s\n", launcher, store.Directory, store.Directory)
 	if code := program.Run(t.Context()); code != 1 || !strings.HasSuffix(diagnostics.String(), want) || strings.Contains(diagnostics.String(), "ORIGINAL") {
 		t.Fatalf("exit=%d output=%q, want suffix %q", code, diagnostics.String(), want)
 	}

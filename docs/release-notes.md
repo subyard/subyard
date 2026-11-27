@@ -15,7 +15,7 @@
   `yard _uninstall-resume` and `yard teardown --full` refuse its saved plan without changes.
   Resume it with the launcher retained in the recovery directory:
   `<data-root>.uninstall/runtime/bin/yard _uninstall-resume <data-root>.uninstall`. If that
-  launcher is gone, install 0.32.0, the last release that resumes such a plan, and run
+  launcher is gone or fails, install 0.32.0, the last release that resumes such a plan, and run
   `yard _uninstall-resume <data-root>.uninstall`. The refusal prints the exact command.
 
 ## 0.32.0

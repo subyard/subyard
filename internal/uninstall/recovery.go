@@ -119,11 +119,42 @@ type LegacyRecoverySchemaError struct {
 }
 
 func (err LegacyRecoverySchemaError) Error() string {
+	fallback := fmt.Sprintf("install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume %s", err.Directory)
 	refusal := "full uninstall recovery plan schema 1 was saved by Subyard 0.30.0 or older; this release does not resume it. Retain " + err.Directory
 	if err.Launcher != "" {
-		return fmt.Sprintf("%s and resume it with its retained release:\n  %s _uninstall-resume %s", refusal, err.Launcher, err.Directory)
+		return fmt.Sprintf("%s and resume it with its retained release:\n  %s _uninstall-resume %s\nIf that fails, %s", refusal, err.Launcher, err.Directory, fallback)
 	}
-	return fmt.Sprintf("%s, install Subyard 0.32.0 (https://github.com/Subyard/Subyard/releases/tag/v0.32.0), the last release that resumes schema 1 plans, then run:\n  yard _uninstall-resume %s", refusal, err.Directory)
+	return refusal + ", " + fallback
+}
+
+// legacySchema refuses a schema-1 plan before the protected read repairs or
+// binds the store, so the refusal leaves it exactly as found. Any other state
+// continues to that read, which reports it.
+func (store RecoveryStore) legacySchema() error {
+	if !filepath.IsAbs(store.Directory) {
+		return nil
+	}
+	directory, err := openParent(store.Directory)
+	if err != nil {
+		return nil
+	}
+	defer directory.Close()
+	for _, name := range []string{"plan.json", ".plan-next"} {
+		file, err := directory.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+		var header struct{ Schema int }
+		if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || json.NewDecoder(io.LimitReader(file, 64<<20)).Decode(&header) != nil || header.Schema != 1 {
+			return nil
+		}
+		return LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+	}
+	return nil
 }
 
 func (plan RecoveryPlan) Validate(uid uint32) error {
@@ -257,6 +288,9 @@ func (err EmptyRecoveryCleanupError) Unwrap() error { return err.error }
 // ReadForResume reads the saved plan or reports ErrNoRecoveryStore after an
 // absent store or successful cleanup of an empty one.
 func (store RecoveryStore) ReadForResume(ctx context.Context) (RecoveryPlan, error) {
+	if err := store.legacySchema(); err != nil {
+		return RecoveryPlan{}, err
+	}
 	binding, err := store.readBinding()
 	if errors.Is(err, os.ErrNotExist) {
 		return RecoveryPlan{}, ErrNoRecoveryStore
@@ -277,6 +311,9 @@ func (store RecoveryStore) ReadForResume(ctx context.Context) (RecoveryPlan, err
 }
 
 func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
+	if err := store.legacySchema(); err != nil {
+		return RecoveryPlan{}, Tree{}, err
+	}
 	binding, err := store.readBinding()
 	if err != nil {
 		return RecoveryPlan{}, binding, err
@@ -322,10 +359,11 @@ func (store RecoveryStore) readPlan(binding Tree) (RecoveryPlan, error) {
 	return plan, plan.Validate(store.UID)
 }
 
-// retainedLauncher is the store's retained engine, or empty once it is gone.
+// retainedLauncher is the store's retained engine: an executable regular file,
+// or empty once it is gone or unusable. It is never run here.
 func (store RecoveryStore) retainedLauncher() string {
 	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	if _, err := os.Lstat(launcher); err != nil {
+	if info, err := os.Lstat(launcher); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return ""
 	}
 	return launcher
@@ -442,7 +480,8 @@ func (store RecoveryStore) Remove() error {
 // that reads this schema resumes the store; without one on PATH, the operator
 // installs it first.
 func (store RecoveryStore) ResumeHint() string {
-	if launcher := store.retainedLauncher(); launcher != "" {
+	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
+	if _, err := os.Lstat(launcher); err == nil {
 		return fmt.Sprintf("Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", store.Directory, launcher, store.Directory)
 	}
 	if _, err := exec.LookPath("yard"); err != nil {
