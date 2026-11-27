@@ -78,6 +78,11 @@ func (log RPCErrorLog) Append(ctx context.Context, record RPCError) error {
 	}
 	defer lock.Release()
 	// A restrictive umask must not leave the shared lock unopenable later.
+	if info, err := lock.Stat(); err != nil {
+		return err
+	} else if err := checkOwnFile(info); err != nil {
+		return err
+	}
 	if err := lock.Chmod(0o600); err != nil {
 		return err
 	}
@@ -128,15 +133,30 @@ func openRPCErrorLog(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	// RepairMode refuses a foreign or linked file; the exact mode then also
-	// covers a file that a restrictive umask created unreadable.
-	if err := safefs.RepairMode(file, 0o077); err != nil {
-		return nil, errors.Join(err, file.Close())
+	// The exact mode also covers a file that a restrictive umask created
+	// unreadable; it is set only on a file that is this writer's alone.
+	info, err := file.Stat()
+	if err == nil {
+		err = checkOwnFile(info)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err == nil {
+		err = file.Chmod(0o600)
+	}
+	if err != nil {
 		return nil, errors.Join(err, file.Close())
 	}
 	return file, nil
+}
+
+// checkOwnFile admits an opened file whose mode this writer may set: a
+// regular file of the current user with no other hard link, so a link to
+// another file never has that file's mode changed.
+func checkOwnFile(info os.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return fmt.Errorf("refusing RPC error log file %s that is not a private regular file", info.Name())
+	}
+	return nil
 }
 
 // Read returns the newest records, oldest first, at most limit of them.

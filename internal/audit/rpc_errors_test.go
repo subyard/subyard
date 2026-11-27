@@ -153,3 +153,36 @@ func TestRPCErrorLogKeepsExactModesUnderARestrictiveUmask(t *testing.T) {
 		}
 	}
 }
+
+// A hard link to another file of the operator never has its mode changed.
+func TestRPCErrorLogLeavesAHardLinkedLockOrLogUnchanged(t *testing.T) {
+	for _, name := range []string{".yard.lock", rpcErrorFile} {
+		t.Run(name, func(t *testing.T) {
+			home := testkit.TempDir(t)
+			if err := os.MkdirAll(filepath.Join(home, "logs"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(home, "tool")
+			testkit.WriteFile(t, target, []byte("#!/bin/sh\n"), 0o700)
+			if err := os.Link(target, filepath.Join(home, "logs", name)); err != nil {
+				t.Fatal(err)
+			}
+			log := RPCErrorLog{Home: home}
+			if err := log.Append(context.Background(), RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err == nil {
+				t.Fatal("a record was written through a hard link")
+			}
+			if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o700 {
+				t.Fatalf("target: info=%v err=%v", info, err)
+			}
+			if payload, err := os.ReadFile(target); err != nil || string(payload) != "#!/bin/sh\n" {
+				t.Fatalf("target = %q err=%v", payload, err)
+			}
+			if name == rpcErrorFile {
+				return
+			}
+			if _, err := os.Stat(filepath.Join(home, "logs", rpcErrorFile)); !os.IsNotExist(err) {
+				t.Fatal("the log was written", err)
+			}
+		})
+	}
+}
