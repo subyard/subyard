@@ -135,7 +135,7 @@ func TestRemoteProjectCopyCreationPassesNativeMetadataGuardWithSharedParent(t *t
 }
 
 func TestPreparedProjectMetadataRepair(t *testing.T) {
-	for _, scenario := range []string{"missing", "existing", "legacy", "foreign yard", "identity version", "target", "imported at", "root mode", "legacy bind root", "metadata mode", "conflicting schema", "conflicting projectId", "conflicting name", "conflicting mode", "invalid schema", "malformed", "symlink", "root symlink", "source symlink", "hardlink", "unreadable metadata", "nonregular metadata", "oversized metadata", "missing root", "missing src", "stale", "unrelated drift", "scope drift"} {
+	for _, scenario := range []string{"missing", "existing", "legacy", "foreign yard", "identity version", "target", "imported at", "root mode", "legacy bind root", "metadata mode", "conflicting schema", "conflicting projectId", "conflicting name", "conflicting mode", "invalid schema", "malformed", "symlink", "root symlink", "source symlink", "hardlink", "unreadable metadata", "nonregular metadata", "oversized metadata", "missing root", "missing src", "stale", "root replaced", "unrelated drift", "scope drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			workspace := filepath.Join(root, "sample")
@@ -272,14 +272,23 @@ os.fstat=legacy_owner
 			if scenario == "stale" {
 				testkit.WriteFile(t, metadata, payload, 0o600)
 			}
+			// Sibling entries and root children are outside the bound target facts.
 			if scenario == "scope drift" {
 				testkit.WriteFile(t, filepath.Join(root, "unregistered"), []byte("changed"), 0o600)
 			}
 			if scenario == "unrelated drift" {
 				testkit.WriteFile(t, filepath.Join(workspace, "session"), []byte("changed"), 0o600)
 			}
+			if scenario == "root replaced" {
+				if err := os.Rename(workspace, workspace+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			err = runtime.repairProjectMetadata(context.Background())
-			if scenario == "stale" || scenario == "unrelated drift" || scenario == "scope drift" {
+			if scenario == "stale" || scenario == "root replaced" {
 				if err == nil {
 					t.Fatal("stale metadata accepted")
 				}
@@ -287,11 +296,8 @@ os.fstat=legacy_owner
 				if !errors.Is(err, domain.ErrPlanStale) || !errors.As(err, &failure) {
 					t.Fatalf("lost stale classification: %v", err)
 				}
-				if scenario != "scope drift" && (failure.Reason != "stale_inputs" || failure.ProjectID != "sample" || failure.Root != "/srv/workspaces/sample") {
+				if failure.Reason != "stale_inputs" || failure.ProjectID != "sample" || failure.Root != "/srv/workspaces/sample" {
 					t.Fatalf("lost stale project diagnostic: %v", err)
-				}
-				if scenario == "scope drift" && (failure.Reason != "scope_changed" || failure.ProjectID != "" || failure.Root != "/srv/workspaces") {
-					t.Fatalf("scope drift attributed to wrong project: %v", err)
 				}
 				return
 			}
@@ -477,14 +483,16 @@ os.fsync=substitute
 type metadataHookExecutor struct {
 	metadataFileExecutor
 	calls           int
-	metadataCalls   int
+	publications    int
 	observations    int
 	expectedBinding string
 }
 
 func (fixture *metadataHookExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if request.Command[0] == "python3" {
-		fixture.metadataCalls++
+		if !bytes.Contains(request.Stdin, []byte(`"mode":"inspect"`)) {
+			fixture.publications++
+		}
 		return fixture.metadataFileExecutor.Exec(ctx, project, instance, request)
 	}
 	if request.Command[0] == "bash" {
@@ -493,7 +501,8 @@ func (fixture *metadataHookExecutor) Exec(ctx context.Context, project, instance
 		command := exec.CommandContext(ctx, "bash", "-s", "--", "--observe")
 		command.Stdin = strings.NewReader(script)
 		output, err := command.CombinedOutput()
-		return ports.InstanceExecResult{Stdout: output}, err
+		// Report guest paths, as the real observer does inside the yard.
+		return ports.InstanceExecResult{Stdout: bytes.ReplaceAll(output, []byte(fixture.root), []byte("/srv/workspaces"))}, err
 	}
 	if request.Command[1] == "-eu" {
 		return ports.InstanceExecResult{}, nil
@@ -556,19 +565,19 @@ func TestReadyProjectMetadataSkipsPublicationChecksAndRetainsHookGuard(t *testin
 	if err := runtime.PrepareProjectMetadata(ctx); err != nil || runtime.HookPlan.HasMetadataRepair() {
 		t.Fatalf("matching metadata acquired publication work: %v", err)
 	}
-	metadataCalls, observations := executor.metadataCalls, executor.observations
+	publications, observations := executor.publications, executor.observations
 	// Publication would require a fresh native check, but this invocation only
 	// runs the separately guarded hooks over already-present project metadata.
 	testkit.WriteFile(t, state, []byte("unavailable"), 0o600)
 	if err := runtime.RunProjectHooks(ctx); err != nil || executor.calls != 1 {
 		t.Fatalf("ready metadata hook invocation: calls=%d err=%v", executor.calls, err)
 	}
-	if data, err := os.ReadFile(nativeCalls); err != nil || string(data) != "observe\n" || executor.metadataCalls != metadataCalls || executor.observations != observations+2 || runtime.HookPlan.metadataCompleted {
-		t.Fatalf("no-work metadata repeated publication checks: native=%q metadata=%d->%d observations=%d->%d completed=%t err=%v", data, metadataCalls, executor.metadataCalls, observations, executor.observations, runtime.HookPlan.metadataCompleted, err)
+	if data, err := os.ReadFile(nativeCalls); err != nil || string(data) != "observe\n" || executor.publications != publications || executor.observations != observations+2 || runtime.HookPlan.metadataCompleted {
+		t.Fatalf("no-work metadata repeated publication checks: native=%q publications=%d->%d observations=%d->%d completed=%t err=%v", data, publications, executor.publications, observations, executor.observations, runtime.HookPlan.metadataCompleted, err)
 	}
 	testkit.WriteFile(t, metadata, bytes.ReplaceAll(payload, []byte("Sample"), []byte("Changed")), 0o600)
-	if err := runtime.RunProjectHooks(ctx); !errors.Is(err, domain.ErrPlanStale) || executor.calls != 1 || executor.metadataCalls != metadataCalls {
-		t.Fatalf("metadata drift bypassed hook guard: calls=%d metadata=%d err=%v", executor.calls, executor.metadataCalls, err)
+	if err := runtime.RunProjectHooks(ctx); !errors.Is(err, domain.ErrPlanStale) || executor.calls != 1 || executor.publications != publications {
+		t.Fatalf("metadata drift bypassed hook guard: calls=%d publications=%d err=%v", executor.calls, executor.publications, err)
 	}
 }
 
@@ -875,7 +884,7 @@ func TestProjectMetadataFailureBoundsLegacyIdentity(t *testing.T) {
 	}
 }
 
-func TestProjectMetadataDispatcherParityWithDirectorySymlinks(t *testing.T) {
+func TestProjectMetadataIgnoresUnregisteredDirectorySymlinks(t *testing.T) {
 	for _, scenario := range []string{"ready", "missing", "target symlink"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, outside := testkit.TempDir(t), testkit.TempDir(t)

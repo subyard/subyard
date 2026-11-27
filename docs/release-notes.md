@@ -28,6 +28,17 @@
   `stats`, `yard status` and `yard profile status telemetry` show the `storage-capacity` warning.
   See [usage and attribution](telemetry.md#usage-and-attribution).
 
+### Init on a busy yard
+
+- **`yard init` no longer fails with "operation plan is stale: project hook inputs changed" while
+  agents work.** Creating or removing worktrees, build outputs or unregistered directories under
+  `/srv/workspaces` during the prompt or provisioning no longer invalidates the plan. Init still
+  refuses when, after confirmation, a registered project root is removed or replaced, its
+  `.subyard-meta.json` changes, or an installed project hook is added or changed.
+- When workspace entries change at the moment the hooks start, init observes again and tries
+  up to three times in all. If they keep changing, init names that cause instead of reporting a
+  failed agent hook; retry when the activity settles.
+
 ### Claude managed instructions
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by

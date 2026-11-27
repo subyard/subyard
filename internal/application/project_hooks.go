@@ -72,6 +72,12 @@ type ProjectHookFailure struct {
 	Hooks        []string
 }
 
+// RefusedBeforeHooks reports an unsuccessful exit in which no approved hook reported a
+// failure. The scoped dispatcher validates its scope before running any hook.
+func (failure *ProjectHookFailure) RefusedBeforeHooks() bool {
+	return failure.Reason == projectHooksUnsuccessful && len(failure.Hooks) == 0
+}
+
 func (*ProjectHookFailure) Error() string {
 	return "an optional agent project hook failed; run 'yard init' to repair wiring and retry active integrations, or use the integration's sync command"
 }

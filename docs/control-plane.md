@@ -121,7 +121,8 @@ additional prompt. Missing roots, unsafe ownership or paths, hard-linked, non-re
 oversized or invalid metadata, conflicting `schema`, `projectId`, `name` or `mode`, and stale
 observations stop initialization; guest directories never authorize additional projects.
 Inspection reports every refusing project together in ProjectID order, with the path and
-specific corrective action. Apply still requires the exact expected snapshot and workspace digest.
+specific corrective action. Apply still requires the exact expected snapshot of each captured
+root, `src` and metadata file; directories bind identity, not size or timestamps.
 Legacy bind wrappers and sources may remain root-owned with the developer's group
 and without world-write access. Only captured missing or stale-content metadata in a non-writable
 legacy bind wrapper uses privileged publication; the new file belongs to the developer
@@ -3030,8 +3031,14 @@ Entries must be unique, clean absolute paths directly inside
 `/usr/local/libexec/subyard/projects-changed.d`, without carriage returns, line feeds or NUL. Core captures the
 bounded installed hook inventory, source fingerprints and project-root scope before consent,
 then rejects expansion or changed captured inputs before invoking a hook.
-Core captures canonical workspace roots and their direct metadata without traversing source
-trees. Native hooks own discovery and bind their known nested-root inputs through `hook_binding`.
+Core binds each registered project root's directory identity (mode, owner, group, device,
+inode), its `src` identity and the content of its `.subyard-meta.json`, without traversing source
+trees. Other workspace entries are checked only for membership: a registered root must remain
+listed, while added worktrees, build outputs and unregistered siblings do not stale the plan.
+The installed dispatcher still compares its own observation with the latest host observation
+before any hook runs; init observes again and dispatches up to three times in all when only that
+observation moved, then reports that workspace entries kept changing.
+Native hooks own discovery and bind their known nested-root inputs through `hook_binding`.
 An observation's optional `hook_binding` is a lowercase SHA-256 digest of safe native
 registration metadata, known-root identities and Git-resolved repository locations.
 Core retains it privately and supplies `SUBYARD_PROJECT_HOOK_BINDING` to the corresponding

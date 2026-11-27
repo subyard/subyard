@@ -28,7 +28,6 @@ type ProjectHookPlan struct {
 	allowedHooks      []string
 	source            string
 	ownerProjects     []domain.ProjectRecord
-	resolvedProjects  string
 	executionWiring   string
 	hookBindings      map[string]string
 	unavailable       bool
@@ -38,6 +37,7 @@ type ProjectHookPlan struct {
 	stopped           bool
 	metadata          *projectMetadataPlan
 	metadataCompleted bool
+	publishedMetadata json.RawMessage
 }
 
 type hookObservation struct {
@@ -253,25 +253,25 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 	if plan.approved.Projects == "" {
 		return fmt.Errorf("%w: project hooks acquired new guest work", domain.ErrPlanStale)
 	}
-	if !plan.conditional && observation.Projects != plan.approved.Projects || beforeWrites && !plan.conditional && observation.Wiring != plan.approved.Wiring {
-		return fmt.Errorf("%w: project hook inputs changed", domain.ErrPlanStale)
+	// Agents change workspace listings and timestamps at any time; the guard binds the
+	// registered roots, hooks, wiring and dispatcher, not that volatile digest.
+	if beforeWrites && !plan.conditional && observation.Wiring != plan.approved.Wiring {
+		return fmt.Errorf("%w: project hook wiring changed", domain.ErrPlanStale)
 	}
+	roots := plan.ownerRoots()
 	if plan.conditional {
-		roots := []string{}
-		for _, record := range plan.ownerProjects {
-			roots = append(roots, filepath.Dir(record.YardPath))
-		}
-		slices.Sort(roots)
-		roots = slices.Compact(roots)
 		if !slices.Equal(roots, observation.Roots) {
 			return fmt.Errorf("%w: conditional guest project scope differs from captured owner records", domain.ErrPlanStale)
 		}
-		if plan.resolvedProjects != "" && observation.Projects != plan.resolvedProjects {
-			return fmt.Errorf("%w: conditional project hook inputs changed", domain.ErrPlanStale)
+	} else {
+		for _, root := range roots {
+			if !slices.Contains(observation.Roots, root) {
+				return fmt.Errorf("%w: registered project root %s is missing", domain.ErrPlanStale, root)
+			}
 		}
-		if !beforeWrites {
-			plan.resolvedProjects = observation.Projects
-		}
+	}
+	if err := runtime.checkProjectMetadataScope(ctx); err != nil {
+		return err
 	}
 	if !beforeWrites {
 		if plan.executionWiring != "" && observation.Wiring != plan.executionWiring {
@@ -319,14 +319,13 @@ func (plan *ProjectHookPlan) Binding() string {
 // plan at their execution boundary before treating the operation as unchanged.
 func (plan *ProjectHookPlan) NoProjectHookWork() bool {
 	if plan == nil || plan.conditional || plan.unavailable || plan.stopped ||
-		plan.current.Projects == "" || plan.current.Wiring == "" || len(plan.current.Hooks) != 0 ||
-		plan.current.Projects != plan.approved.Projects {
+		plan.current.Projects == "" || plan.current.Wiring == "" || len(plan.current.Hooks) != 0 {
 		return false
 	}
 	if plan.metadata == nil {
 		return plan.ownerProjects != nil && len(plan.ownerProjects) == 0
 	}
-	if len(plan.metadata.Expected) == 0 || plan.metadata.Projects != plan.current.Projects {
+	if len(plan.metadata.Expected) == 0 {
 		return false
 	}
 	step := plan.MetadataOperationStep("")
@@ -362,6 +361,15 @@ func (plan *ProjectHookPlan) OperationStep(target string) domain.OperationStep {
 		Preconditions: []string{"captured project inventory and hook inputs remain unchanged", "guest hook paths remain inside the captured installed and declared scope"}, Verify: "native dispatcher exits successfully and captured project inputs remain unchanged", Consequence: "retry installed project hooks once for active resources"}
 }
 
+func (plan *ProjectHookPlan) ownerRoots() []string {
+	roots := []string{}
+	for _, record := range plan.ownerProjects {
+		roots = append(roots, filepath.Dir(record.YardPath))
+	}
+	slices.Sort(roots)
+	return slices.Compact(roots)
+}
+
 func (plan *ProjectHookPlan) CaptureOwnerProjects(records []domain.ProjectRecord) {
 	if plan != nil {
 		plan.ownerProjects = slices.Clone(records)
@@ -377,12 +385,7 @@ func (plan *ProjectHookPlan) CheckContinuationScope(current *ProjectHookPlan) er
 	}
 	roots := plan.approved.Roots
 	if plan.conditional {
-		roots = nil
-		for _, record := range plan.ownerProjects {
-			roots = append(roots, filepath.Dir(record.YardPath))
-		}
-		slices.Sort(roots)
-		roots = slices.Compact(roots)
+		roots = plan.ownerRoots()
 	}
 	if !slices.Equal(plan.allowedHooks, current.allowedHooks) || !slices.Equal(roots, current.approved.Roots) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
 		return fmt.Errorf("%w: project hook continuation scope changed", domain.ErrPlanStale)
@@ -394,6 +397,8 @@ func (plan *ProjectHookPlan) Environment() map[string]string {
 	if plan == nil {
 		return nil
 	}
+	// The dispatcher iterates the approved hooks; an empty set stays a JSON list.
+	hooks := append([]string{}, plan.allowedHooks...)
 	payload, _ := json.Marshal(struct {
 		Hooks    []string          `json:"hooks"`
 		Projects string            `json:"projects"`
@@ -401,7 +406,7 @@ func (plan *ProjectHookPlan) Environment() map[string]string {
 		Bindings map[string]string `json:"bindings"`
 		Facts    map[string]string `json:"facts"`
 		Resolved map[string]string `json:"resolved"`
-	}{plan.allowedHooks, plan.current.Projects, plan.current.Roots, plan.hookBindings, plan.current.Facts, plan.current.Resolved})
+	}{hooks, plan.current.Projects, plan.current.Roots, plan.hookBindings, plan.current.Facts, plan.current.Resolved})
 	return map[string]string{"SUBYARD_PROJECT_HOOK_SCOPE": string(payload)}
 }
 

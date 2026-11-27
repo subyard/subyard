@@ -373,9 +373,12 @@ step projection; owning runners retain check/apply/verify and specialized recove
 Fresh/stopped targets may require bounded conditional steps: preview distinguishes observed
 apply/skip from conditional. Unknown observation never means unknown metadata/target/desired.
 After prerequisite, live guard allows only old-scope effect or skip. New work/desired or worse
-recovery requires stale/new plan. Partial apply then skip is allowed, but the operation is not a
-general transaction. Existing recovery covers only approved partial effects; durable
-release/config authorization survives outer plan expiry/disconnect. Protected credential
+recovery requires stale/new plan. A plan guard binds what the approved step reads or writes
+(target identity, scope, desired state, consumed content hash), never metadata that changes with
+unrelated siblings. Agent-writable listings are checked by membership of registered targets;
+PIDs and service state are never guard inputs. Partial apply then skip is allowed, but the
+operation is not a general transaction. Existing recovery covers only approved partial effects;
+durable release/config authorization survives outer plan expiry/disconnect. Protected credential
 payload/passphrase never enters RPC.
 
 <a id="release-transition-and-integrity"></a>

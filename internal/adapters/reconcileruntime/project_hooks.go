@@ -82,20 +82,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			return err
 		}
 	}
-	var approved []string
-	if runtime.HookPlan != nil {
-		for _, hook := range runtime.HookPlan.allowedHooks {
-			if path := runtime.HookPlan.current.Resolved[hook]; path != "" {
-				approved = append(approved, path)
-			}
-		}
-	}
-	if err := application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-		for name, value := range runtime.HookPlan.Environment() {
-			request.Environment[name] = value
-		}
-		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	}, approved...); err != nil {
+	if err := runtime.dispatchProjectHooks(ctx); err != nil {
 		return err
 	}
 	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
@@ -105,4 +92,45 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		runtime.HookPlan.completed = true
 	}
 	return nil
+}
+
+// projectHookDispatchAttempts bounds redispatch after the installed dispatcher refused
+// a guest project digest that agents changed after the host observation.
+const projectHookDispatchAttempts = 3
+
+// The installed dispatcher compares its own observation with the latest host one
+// before it runs any hook. A refusal without a hook failure while the digest moved is
+// that race: observe again through the full plan guard and dispatch the fresh scope.
+func (runtime Runtime) dispatchProjectHooks(ctx context.Context) error {
+	for attempt := 1; ; attempt++ {
+		var approved []string
+		dispatched := ""
+		if runtime.HookPlan != nil {
+			dispatched = runtime.HookPlan.current.Projects
+			for _, hook := range runtime.HookPlan.allowedHooks {
+				if path := runtime.HookPlan.current.Resolved[hook]; path != "" {
+					approved = append(approved, path)
+				}
+			}
+		}
+		err := application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			for name, value := range runtime.HookPlan.Environment() {
+				request.Environment[name] = value
+			}
+			return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+		}, approved...)
+		var failure *application.ProjectHookFailure
+		if err == nil || runtime.HookPlan == nil || !errors.As(err, &failure) || !failure.RefusedBeforeHooks() {
+			return err
+		}
+		if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
+			return err
+		}
+		if runtime.HookPlan.current.Projects == dispatched {
+			return err
+		}
+		if attempt == projectHookDispatchAttempts {
+			return fmt.Errorf("project hook dispatcher refused %d times because guest workspace entries kept changing after observation; no project hook ran; retry init when workspace activity settles", attempt)
+		}
+	}
 }

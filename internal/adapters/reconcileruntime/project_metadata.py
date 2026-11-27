@@ -29,41 +29,29 @@ def directory(path):
         raise
 
 def fact(s):
-    return [s.st_mode, s.st_uid, s.st_gid, s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+    # A directory's size and times change with unrelated entries; bind only its identity.
+    identity = [s.st_mode, s.st_uid, s.st_gid, s.st_dev, s.st_ino]
+    return identity if stat.S_ISDIR(s.st_mode) else identity + [s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 
 def project_facts():
+    # Bind each captured root, its source directory and metadata, never sibling or working-tree entries.
     paths = {}
-    fd = directory(base)
-    try:
-        for name in os.listdir(fd):
-            path = base + '/' + name
-            s = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    for target in request['targets']:
+        root = target['root']
+        for path in (root, root + '/src', root + '/.subyard-meta.json'):
+            try: s = os.lstat(path)
+            except (FileNotFoundError, NotADirectoryError): continue
             paths[path] = fact(s)
             if stat.S_ISLNK(s.st_mode):
-                paths[path].append(os.readlink(name, dir_fd=fd))
-            if stat.S_ISDIR(s.st_mode):
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                try:
-                    for leaf in os.listdir(child):
-                        p = path + '/' + leaf
-                        ls = os.stat(leaf, dir_fd=child, follow_symlinks=False)
-                        paths[p] = fact(ls)
-                        if stat.S_ISLNK(ls.st_mode):
-                            paths[p].append(os.readlink(leaf, dir_fd=child))
-                        if len(paths) > 4096:
-                            raise Refusal('scope_limit')
-                finally:
-                    os.close(child)
-    finally:
-        os.close(fd)
+                paths[path].append(os.readlink(path))
+            if path == root and not stat.S_ISDIR(s.st_mode): break
     return paths
 
 def project_digest(paths):
     h = hashlib.sha256()
     for p, f in sorted(paths.items()):
         h.update(p.encode() + b'\0')
-        h.update(str(tuple(f[:8])).encode() + b'\0')
-        if len(f) > 8: h.update(f[8].encode())
+        h.update(str(tuple(f)).encode() + b'\0')
     return h.hexdigest()
 
 def inspect(target):
@@ -133,7 +121,7 @@ def main():
             observed.append(indexed_inspect(i))
         except (Refusal, OSError) as error:
             reason = failure_reason(error)
-            if request['mode'] != 'inspect' or reason in ('io_failure', 'scope_limit'):
+            if request['mode'] != 'inspect' or reason == 'io_failure':
                 raise
             refusals.append({'reason': reason, 'target': i, 'stale': False})
     if refusals:

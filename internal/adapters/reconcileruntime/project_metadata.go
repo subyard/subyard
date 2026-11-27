@@ -1,9 +1,11 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -79,8 +81,6 @@ func (failure *ProjectMetadataError) Error() string {
 		reason = "metadata names a different schema, projectId, name or mode than the owner record; if this directory belongs to this project, move this file out of the project root and rerun the operation to recreate it"
 	case "stale_inputs", "scope_changed":
 		reason = "captured workspace inputs changed; rerun the operation to capture a fresh plan"
-	case "scope_limit":
-		reason = "workspace inspection exceeds 4096 entries; move unrelated direct workspace entries outside /srv/workspaces and retry"
 	case "verification_failed":
 		reason = "published metadata could not be verified; check workspace storage and concurrent writers, then rerun the operation"
 	}
@@ -129,7 +129,7 @@ func metadataFailure(plan *projectMetadataPlan, output []byte) error {
 			return failure
 		}
 		switch detail.Reason {
-		case "missing_root", "missing_source", "unsafe_path", "unsafe_root_path", "unsafe_source_path", "unsafe_metadata_path", "unsafe_root", "unsafe_source", "access_denied", "metadata_type", "metadata_owner", "metadata_links", "metadata_size", "invalid_metadata", "conflicting_metadata", "stale_inputs", "scope_changed", "scope_limit", "verification_failed", "io_failure":
+		case "missing_root", "missing_source", "unsafe_path", "unsafe_root_path", "unsafe_source_path", "unsafe_metadata_path", "unsafe_root", "unsafe_source", "access_denied", "metadata_type", "metadata_owner", "metadata_links", "metadata_size", "invalid_metadata", "conflicting_metadata", "stale_inputs", "scope_changed", "verification_failed", "io_failure":
 		default:
 			return failure
 		}
@@ -269,6 +269,35 @@ func (plan *ProjectHookPlan) MetadataOperationStep(target string) *domain.Operat
 		Verify:        "all captured roots contain matching metadata; source and session files remain unchanged", Consequence: "restore missing metadata and repair captured metadata or root permission drift before installed hooks"}
 }
 
+// checkProjectMetadataScope binds the captured owner roots' identity and metadata
+// content that the hooks consume. Unrelated siblings and working-tree entries are
+// outside this guard.
+func (runtime Runtime) checkProjectMetadataScope(ctx context.Context) error {
+	hooks := runtime.HookPlan
+	if hooks == nil || hooks.metadata == nil {
+		return nil
+	}
+	captured := hooks.metadata.Expected
+	if hooks.publishedMetadata != nil {
+		captured = hooks.publishedMetadata
+	}
+	if len(captured) == 0 {
+		return nil
+	}
+	observed, err := runtime.metadataRequest(ctx, "inspect", hooks.metadata)
+	if refusal := new(ProjectMetadataError); errors.As(err, &refusal) {
+		// Captured targets passed inspection, so a refusal now is a changed input.
+		return fmt.Errorf("%w: captured project root or metadata changed: %w", domain.ErrPlanStale, err)
+	}
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(observed.Expected, captured) {
+		return fmt.Errorf("%w: captured project root or metadata changed", domain.ErrPlanStale)
+	}
+	return nil
+}
+
 func (runtime Runtime) metadataRequest(ctx context.Context, mode string, plan *projectMetadataPlan) (projectMetadataObservation, error) {
 	parsedUID, err := strconv.ParseUint(strconv.Itoa(runtime.Yard.DevUID), 10, 32)
 	if err != nil {
@@ -355,9 +384,6 @@ func (runtime Runtime) PrepareProjectMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if hooks.approved.Projects != "" && observation.Projects != hooks.approved.Projects {
-		return fmt.Errorf("%w: project metadata inputs changed during preparation", domain.ErrPlanStale)
-	}
 	plan.projectMetadataObservation = observation
 	return runtime.prepareMetadataHookBindings(ctx)
 }
@@ -373,9 +399,6 @@ func (runtime Runtime) repairProjectMetadata(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if hooks.current.Projects != "" && observed.Projects != hooks.current.Projects {
-			return fmt.Errorf("%w: conditional project metadata inputs changed", domain.ErrPlanStale)
-		}
 		plan.projectMetadataObservation = observed
 	}
 	if err := runtime.CheckProfileRuntimePlan(ctx); err != nil {
@@ -385,14 +408,9 @@ func (runtime Runtime) repairProjectMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// The native publisher checks all unchanged workspace facts before returning the
-	// exact resulting dispatcher digest; only authorized publication may rebind it.
-	if hooks.conditional {
-		hooks.resolvedProjects = observed.Projects
-	} else {
-		hooks.approved.Projects = observed.Projects
-	}
-	hooks.current.Projects = observed.Projects
+	// The publisher verified every unchanged target fact; its readback is the
+	// metadata that the following hook guards bind.
+	hooks.publishedMetadata = observed.Expected
 	if err := runtime.verifyMetadataHookBindings(ctx); err != nil {
 		return err
 	}
