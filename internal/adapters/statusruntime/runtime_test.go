@@ -897,27 +897,57 @@ func TestProfileDashboardCancellationKillsDescendants(t *testing.T) {
 	}
 }
 
+// expiringParent is a parent context whose deadline arrives when the test
+// expires it, so a slow owner check under load cannot exhaust it first.
+type expiringParent struct {
+	context.Context
+	done chan struct{}
+}
+
+func (parent expiringParent) Done() <-chan struct{} { return parent.done }
+
+func (parent expiringParent) Err() error {
+	select {
+	case <-parent.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
 type dashboardURLDeadline struct {
 	ports.Incus
-	calls int
+	calls   int
+	escaped bool
+	expire  func()
 }
 
 func (fake *dashboardURLDeadline) Instance(ctx context.Context, _, _ string) (ports.InstanceInfo, error) {
 	fake.calls++
-	<-ctx.Done()
-	return ports.InstanceInfo{}, ctx.Err()
+	fake.expire()
+	select {
+	case <-ctx.Done():
+		return ports.InstanceInfo{}, ctx.Err()
+	case <-time.After(5 * time.Second):
+		fake.escaped = true
+		return ports.InstanceInfo{}, errors.New("URL verification outlived its parent")
+	}
 }
 
 func TestProfileDashboardParentDeadlineAlsoGatesURLVerification(t *testing.T) {
 	root := testkit.TempDir(t)
 	marker := filepath.Join(root, "started")
 	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\nprintf started > \"$MARKER\"\n"), 0o700)
-	incus := &dashboardURLDeadline{}
-	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "MARKER": marker}, Incus: incus, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{ContainerRoute: &profile.IntegrationRoute{}}}}}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	ctx := expiringParent{Context: context.Background(), done: make(chan struct{})}
+	incus := &dashboardURLDeadline{expire: func() {
+		if ctx.Err() == nil {
+			close(ctx.done)
+		}
+	}}
+	// Only the parent can end URL verification: the probe's own bound is far away.
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "MARKER": marker}, Incus: incus, ProbeTimeout: time.Hour, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{ContainerRoute: &profile.IntegrationRoute{}}}}}
 	got := runtime.profileDashboardStatus(ctx, domain.Context{YardKind: domain.YardContainer}, true)
-	if len(got) != 1 || got[0].State != "down" || got[0].URL != "" || !strings.Contains(got[0].Hint, "reason=deadline ") || incus.calls != 1 {
+	if len(got) != 1 || got[0].State != "down" || got[0].URL != "" || !strings.Contains(got[0].Hint, "reason=deadline ") || incus.calls != 1 || incus.escaped {
 		t.Fatalf("URL verification escaped parent budget: %+v", got)
 	}
 	if err := os.Remove(marker); err != nil {
