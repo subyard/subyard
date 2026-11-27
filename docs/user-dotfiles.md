@@ -86,9 +86,12 @@ init retries. Apply prints a warning for each skipped item; check reports drift,
 Before rolling back to a release that copies host instruction files (0.32.0 and older), run
 `yard -Y NAME profile disable user-dotfiles` in each yard that uses the profile, then move any
 file or link left at `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or
-`~/.config/opencode/AGENTS.md` away. While a file or link remains there, such a rollback is
-refused with "the retained release cannot provide a safe rollback plan", the paths and this
-recovery.
+`~/.config/opencode/AGENTS.md` away. Disabling a profile the yard inherited writes the remaining
+selection to its `ENVIRONMENT_PROFILES`, and 0.31.0 and older do not ship `user-skills`: before
+rolling back to one of them, also run `yard -Y NAME profile disable user-skills` in each yard
+whose `ENVIRONMENT_PROFILES` lists it. While a file or link remains at an instruction path, such
+a rollback is refused with "the retained release cannot provide a safe rollback plan", the paths
+and this recovery.
 
 Out of scope: updating the clone, deciding whether a source is trusted, and what the
 repository's scripts do.

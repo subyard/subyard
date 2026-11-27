@@ -278,3 +278,48 @@ func retireGateRegistry(t *testing.T, registry rt.RegistryV2, floors map[string]
 	}
 	return retired
 }
+
+// Disabling a profile the yard inherited writes the remaining selection explicitly, and a
+// rollback target cannot load a selection naming a profile it does not ship. The agents
+// boundary recovery therefore disables every default-selected profile that the oldest
+// release sharing the candidate's registry lacks. Published releases never change, so the
+// list of profiles shipped by 0.31.0 is a fixed fact.
+func TestAgentsRollbackRecoveryDisablesDefaultProfilesOlderTargetsLack(t *testing.T) {
+	root := filepath.Join("..", "..")
+	shipped := []string{"amnezia", "android", "default", "git-fetch", "github", "hermes", "openclaw", "orca",
+		"subyard-dev", "telemetry", "test-vms-client", "test-vms"}
+	data, err := os.ReadFile(filepath.Join(root, "config/release-rollback.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := rt.ParseRollbackDeclaration(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery := ""
+	for _, boundary := range declaration.Boundaries {
+		if boundary.Component == "agents" && boundary.ThroughVersion == "0.32.0" {
+			recovery = boundary.Recovery
+		}
+	}
+	if recovery == "" {
+		t.Fatal("missing the agents boundary through 0.32.0")
+	}
+	definitions, err := profile.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, definition := range definitions {
+		if len(definition.DefaultYards) == 0 || slices.Contains(shipped, definition.Name) {
+			continue
+		}
+		checked++
+		if !strings.Contains(recovery, "yard -Y NAME profile disable "+definition.Name+" ") {
+			t.Errorf("the agents rollback recovery does not disable %s, which 0.31.0 does not ship", definition.Name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no default-selected profile is newer than 0.31.0; the test no longer checks anything")
+	}
+}

@@ -472,22 +472,18 @@ disable_user_dotfiles() {
   done
 }
 
-# Disable wrote the remaining selection explicitly; a rollback target that does not ship one of
-# those profiles could not load it, so the selection keeps only the target's profiles.
+# Disable wrote the remaining selection explicitly. As the rollback recovery says, each
+# selected profile that the rollback target does not ship (user-skills before 0.32.0) is
+# disabled too, so the target can load the selection.
 keep_rollback_target_profiles() {
-  local enabled kept=() name
-  enabled="$(operator_yard -Y default profile list --json | jq -r '.profiles[] | select(.effective) | .name')" \
+  local selected name
+  selected="$(operator_yard -Y default profile list --json | jq -r '.profiles[] | select(.effective) | .name')" \
     || die 'cannot list the selected profiles'
-  for name in $enabled; do
-    if operator_env test -d "$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/profiles/$name"; then
-      kept+=("$name")
-    fi
+  for name in $selected; do
+    operator_env test -d "$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/profiles/$name" && continue
+    operator_yard -Y default profile disable "$name" --yes >>"$STATE_ROOT/rollback-profiles.log" 2>&1 \
+      || die "profile disable $name before the rollback failed"
   done
-  [ "${kept[*]}" != "$(printf '%s\n' $enabled | paste -sd ' ')" ] || return 0
-  operator_yard -Y default config set ENVIRONMENT_PROFILES "${kept[*]}" --scope yard --yes \
-    >"$STATE_ROOT/rollback-profiles.log" 2>&1 || die 'cannot keep only the rollback target profiles'
-  operator_yard -Y default init --yes >>"$STATE_ROOT/rollback-profiles.log" 2>&1 \
-    || die 'init after keeping only the rollback target profiles failed'
 }
 
 seed_host_instruction_copy() {
@@ -519,7 +515,7 @@ verify_symlinked_instruction_file() { # <rollback command...>
       || die 'init refused the symlinked instruction file without its path and step'
   else
     for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
-      'runs uninstall.sh from its dotfiles clone when there is one and keeps the clone, then move any file or link left at these paths away'; do
+      'it runs uninstall.sh from its clone when there is one and keeps the clone. Then move any file or link left at these paths away.'; do
       grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
     done
   fi

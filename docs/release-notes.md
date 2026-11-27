@@ -42,7 +42,9 @@
   [user skills](user-skills.md), no `yard init` is needed after a pull.
 - **Before rolling back to 0.32.0,** run `yard -Y NAME profile disable user-dotfiles` in each
   yard that uses the profile, then move any file or link left at an instruction path away.
-  While a file or link remains there, the rollback is refused with "the retained release cannot
+  Before rolling back to 0.31.0 or older, also run `yard -Y NAME profile disable user-skills` in
+  each yard whose `ENVIRONMENT_PROFILES` lists it, since those releases do not ship it.
+  While a file or link remains at an instruction path, the rollback is refused with "the retained release cannot
   provide a safe rollback plan", the paths and this recovery. The rollback plan lists these
   paths.
 
