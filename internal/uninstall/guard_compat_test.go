@@ -98,49 +98,148 @@ func TestRecoveryStoreRefusesSchemaOneWithNextStep(t *testing.T) {
 	}
 }
 
-// An unreadable plan refuses before repair, since narrowing never makes it
-// readable; a readable current plan is still repaired and resumed.
-func TestRecoveryStoreReadsPlanBeforeRepair(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads owner-unreadable files")
+// Every state a read cannot prove current or empty stays as found and refuses;
+// a proven current store is narrowed and read, an empty one is removed.
+func TestRecoveryStoreRepairsOnlyProvenStores(t *testing.T) {
+	_, fixture := recoveryFixture(t)
+	encode := func(schema int) []byte {
+		plan := fixture
+		plan.Schema = schema
+		body, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
 	}
-	store, plan := recoveryFixture(t)
-	plan.Schema = 1
-	body, err := json.Marshal(plan)
-	if err != nil {
-		t.Fatal(err)
+	write := func(name string, body []byte, mode os.FileMode) func(*testing.T, string) {
+		return func(t *testing.T, dir string) { testkit.WriteFile(t, filepath.Join(dir, name), body, mode) }
 	}
-	planPath := filepath.Join(store.Directory, "plan.json")
-	testkit.WriteFile(t, planPath, body, 0240)
-	if err := os.Chmod(store.Directory, 0755); err != nil {
-		t.Fatal(err)
+	legacy := encode(1)
+	refused := []struct {
+		name    string
+		root    bool // the row relies on permission checks that root bypasses
+		prepare func(*testing.T, string)
+	}{
+		{"directory-0311", true, write("plan.json", legacy, 0644)},
+		{"plan-0240", true, write("plan.json", legacy, 0240)},
+		{"symlink", false, func(t *testing.T, dir string) {
+			write("elsewhere.json", legacy, 0644)(t, filepath.Dir(dir))
+			if err := os.Symlink(filepath.Join(filepath.Dir(dir), "elsewhere.json"), filepath.Join(dir, "plan.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"directory-plan", false, func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "plan.json"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"fifo", false, func(t *testing.T, dir string) {
+			if err := syscall.Mkfifo(filepath.Join(dir, "plan.json"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"truncated", false, write("plan.json", legacy[:len(legacy)/2], 0644)},
+		{"garbage", false, write("plan.json", []byte("not a plan"), 0644)},
+		{"schema-0", false, write("plan.json", encode(0), 0644)},
+		{"schema-3", false, write("plan.json", encode(RecoverySchema+1), 0644)},
+		{"planless", false, func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "runtime"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"schema-1", false, write("plan.json", legacy, 0644)},
+		{"schema-1-next-only", false, write(".plan-next", legacy, 0644)},
+		{"schema-1-trailing", false, write("plan.json", append(slices.Clone(legacy), " {}"...), 0644)},
+		{"schema-1-hardlinked", false, func(t *testing.T, dir string) {
+			write("plan.json", legacy, 0644)(t, dir)
+			if err := os.Link(filepath.Join(dir, "plan.json"), filepath.Join(filepath.Dir(dir), "alias.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
-	before := statTimes(t, store.Directory, planPath)
-	if _, _, err := store.Read(); !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("unreadable plan: %v", err)
+	for _, row := range refused {
+		for _, entry := range []string{"read", "resume"} {
+			t.Run(row.name+"/"+entry, func(t *testing.T) {
+				if row.root && os.Geteuid() == 0 {
+					t.Skip("root bypasses the permission this row relies on")
+				}
+				store := RecoveryStore{Directory: filepath.Join(testkit.TempDir(t), "data.uninstall"), UID: uint32(os.Getuid())}
+				if err := os.Mkdir(store.Directory, 0700); err != nil {
+					t.Fatal(err)
+				}
+				row.prepare(t, store.Directory)
+				mode := os.FileMode(0755)
+				if row.name == "directory-0311" {
+					mode = 0311
+				}
+				if err := os.Chmod(store.Directory, mode); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(store.Directory, 0700) })
+				guarded := []string{store.Directory}
+				for _, name := range []string{"plan.json", ".plan-next", "runtime"} {
+					if _, err := os.Lstat(filepath.Join(store.Directory, name)); err == nil {
+						guarded = append(guarded, filepath.Join(store.Directory, name))
+					}
+				}
+				before := statTimes(t, guarded...)
+				var err error
+				if entry == "read" {
+					_, _, err = store.Read()
+				} else {
+					_, err = store.ReadForResume(t.Context())
+				}
+				if err == nil {
+					t.Fatal("unproven store was read")
+				}
+				if after := statTimes(t, guarded...); !reflect.DeepEqual(after, before) {
+					t.Fatalf("refusal changed the store (%v): %v, was %v", err, after, before)
+				}
+			})
+		}
 	}
-	if _, err := store.ReadForResume(t.Context()); !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("unreadable plan on resume: %v", err)
+	for _, name := range []string{"plan.json", ".plan-next"} {
+		for _, entry := range []string{"read", "resume"} {
+			t.Run("schema-2-"+name+"/"+entry, func(t *testing.T) {
+				store, plan := recoveryFixture(t)
+				if _, err := store.Save(plan, nil); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(store.Directory, name)
+				if err := os.Rename(filepath.Join(store.Directory, "plan.json"), path); err != nil && name != "plan.json" {
+					t.Fatal(err)
+				}
+				if os.Chmod(path, 0664|os.ModeSetgid) != nil || os.Chmod(store.Directory, 0755) != nil {
+					t.Fatal("loosen current store")
+				}
+				var saved RecoveryPlan
+				var err error
+				if entry == "read" {
+					saved, _, err = store.Read()
+				} else {
+					saved, err = store.ReadForResume(t.Context())
+				}
+				directory, _ := os.Lstat(store.Directory)
+				file, _ := os.Lstat(path)
+				if err != nil || saved.Schema != RecoverySchema || directory.Mode().Perm() != 0700 || file.Mode() != 0600 {
+					t.Fatalf("current store was not narrowed and read: %v %v %v", err, directory.Mode(), file.Mode())
+				}
+			})
+		}
 	}
-	if after := statTimes(t, store.Directory, planPath); !reflect.DeepEqual(after, before) {
-		t.Fatalf("unreadable plan changed the store: %v, was %v", after, before)
+	empty := RecoveryStore{Directory: filepath.Join(testkit.TempDir(t), "data.uninstall"), UID: uint32(os.Getuid())}
+	if err := os.Mkdir(empty.Directory, 0755); err != nil || os.Chmod(empty.Directory, 0755) != nil {
+		t.Fatal("prepare empty store", err)
 	}
-
-	store, plan = recoveryFixture(t)
-	if _, err := store.Save(plan, nil); err != nil {
-		t.Fatal(err)
+	if _, err := empty.ReadForResume(t.Context()); !errors.Is(err, ErrNoRecoveryStore) {
+		t.Fatalf("empty store: %v", err)
 	}
-	planPath = filepath.Join(store.Directory, "plan.json")
-	if err := os.Chmod(planPath, 0660); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := store.ReadForResume(t.Context())
-	if info, statErr := os.Lstat(planPath); err != nil || statErr != nil || info.Mode().Perm() != 0600 || saved.Schema != RecoverySchema {
-		t.Fatalf("readable current plan was not repaired and resumed: %v %v %v", err, statErr, info)
+	if _, err := os.Lstat(empty.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("empty store remains", err)
 	}
 }
 
-// statTimes records the mode and change time that a protected repair would alter.
+// statTimes records the mode, content and change time that a repair or write would alter.
 func statTimes(t *testing.T, paths ...string) []string {
 	t.Helper()
 	var facts []string
@@ -149,7 +248,7 @@ func statTimes(t *testing.T, paths ...string) []string {
 		if err := syscall.Lstat(path, &stat); err != nil {
 			t.Fatal(err)
 		}
-		facts = append(facts, fmt.Sprintf("%s mode=%o ctime=%d.%09d", path, stat.Mode, stat.Ctim.Sec, stat.Ctim.Nsec))
+		facts = append(facts, fmt.Sprintf("%s mode=%o size=%d mtime=%d.%09d ctime=%d.%09d", path, stat.Mode, stat.Size, stat.Mtim.Sec, stat.Mtim.Nsec, stat.Ctim.Sec, stat.Ctim.Nsec))
 	}
 	return facts
 }

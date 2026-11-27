@@ -94,7 +94,6 @@ func (store RecoveryStore) validateDirectory() error {
 	if err := safePath(filepath.Join(store.Directory, "plan.json")); err != nil {
 		return err
 	}
-	_ = safefs.RepairPath(store.Directory, 0o077)
 	info, err := os.Lstat(store.Directory)
 	if err != nil {
 		return err
@@ -127,44 +126,50 @@ func (err LegacyRecoverySchemaError) Error() string {
 	return refusal + ", " + fallback
 }
 
-// legacySchema refuses a schema-1 plan before the protected read repairs or
-// binds the store, so the refusal leaves it exactly as found. A plan it cannot
-// open or read also refuses here: narrowing its permissions never makes it
-// readable. Any other state continues to that read, which reports it. A plan
-// replaced between the two reads is still caught by readPlan, after repair.
-func (store RecoveryStore) legacySchema() error {
-	if !filepath.IsAbs(store.Directory) {
+// admit refuses a schema-1 plan and narrows a current store, each only on a
+// plan header decoded through descriptors that change nothing; an empty store
+// is narrowed for its cleanup. Any other state, including every failure here,
+// stays as found for the protected read, which repairs nothing, to report.
+// Reads may still update access times. A plan replaced after this decode is
+// caught by readPlan's own schema check.
+func (store RecoveryStore) admit() error {
+	if safePath(filepath.Join(store.Directory, "plan.json")) != nil {
 		return nil
 	}
-	directory, err := openParent(store.Directory)
+	parent, err := openParent(store.Directory)
+	if err != nil {
+		return nil
+	}
+	defer parent.Close()
+	directory, err := parent.Open(".")
 	if err != nil {
 		return nil
 	}
 	defer directory.Close()
 	for _, name := range []string{"plan.json", ".plan-next"} {
-		file, err := directory.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		file, err := parent.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("read full uninstall recovery plan %s without changing it: %w", filepath.Join(store.Directory, name), err)
+			return nil
 		}
 		defer file.Close()
-		info, err := file.Stat()
-		var body []byte
-		if err == nil && !info.Mode().IsRegular() {
-			return nil
-		} else if err == nil {
-			body, err = io.ReadAll(io.LimitReader(file, 64<<20))
-		}
-		if err != nil {
-			return fmt.Errorf("read full uninstall recovery plan %s without changing it: %w", filepath.Join(store.Directory, name), err)
-		}
 		var header struct{ Schema int }
-		if json.Unmarshal(body, &header) != nil || header.Schema != 1 {
+		if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || json.NewDecoder(io.LimitReader(file, 64<<20)).Decode(&header) != nil {
 			return nil
 		}
-		return LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+		switch header.Schema {
+		case 1:
+			return LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
+		case RecoverySchema:
+			_ = safefs.RepairMode(directory, 0o077)
+			_ = safefs.RepairMode(file, 0o077)
+		}
+		return nil
+	}
+	if _, err := directory.Readdirnames(1); errors.Is(err, io.EOF) {
+		_ = safefs.RepairMode(directory, 0o077)
 	}
 	return nil
 }
@@ -300,9 +305,6 @@ func (err EmptyRecoveryCleanupError) Unwrap() error { return err.error }
 // ReadForResume reads the saved plan or reports ErrNoRecoveryStore after an
 // absent store or successful cleanup of an empty one.
 func (store RecoveryStore) ReadForResume(ctx context.Context) (RecoveryPlan, error) {
-	if err := store.legacySchema(); err != nil {
-		return RecoveryPlan{}, err
-	}
 	binding, err := store.readBinding()
 	if errors.Is(err, os.ErrNotExist) {
 		return RecoveryPlan{}, ErrNoRecoveryStore
@@ -323,9 +325,6 @@ func (store RecoveryStore) ReadForResume(ctx context.Context) (RecoveryPlan, err
 }
 
 func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
-	if err := store.legacySchema(); err != nil {
-		return RecoveryPlan{}, Tree{}, err
-	}
 	binding, err := store.readBinding()
 	if err != nil {
 		return RecoveryPlan{}, binding, err
@@ -335,6 +334,9 @@ func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
 }
 
 func (store RecoveryStore) readBinding() (Tree, error) {
+	if err := store.admit(); err != nil {
+		return Tree{}, err
+	}
 	if err := store.validateDirectory(); err != nil {
 		return Tree{}, err
 	}
@@ -342,7 +344,6 @@ func (store RecoveryStore) readBinding() (Tree, error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		path = filepath.Join(store.Directory, ".plan-next")
 	}
-	_ = safefs.RepairPath(path, 0o077)
 	return Capture(path)
 }
 
