@@ -25,7 +25,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install engine test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq ripgrep
+        run: bash dev/ci/apt-install.sh binutils curl gcc jq ripgrep
       - name: Build and run native engine
         run: |
           make build VERSION=0.29.0-test
@@ -50,7 +50,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install test tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep zsh
+          bash dev/ci/apt-install.sh binutils curl gcc jq openssh-server ripgrep zsh
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -93,7 +93,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install system test tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          bash dev/ci/apt-install.sh binutils curl gcc jq openssh-server ripgrep shellcheck zsh
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -137,7 +137,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install system test tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y acl binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          bash dev/ci/apt-install.sh acl binutils curl gcc jq openssh-server ripgrep shellcheck zsh
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -177,7 +177,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install system test tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          bash dev/ci/apt-install.sh binutils curl gcc jq openssh-server ripgrep shellcheck zsh
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi

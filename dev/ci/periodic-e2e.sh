@@ -89,8 +89,7 @@ enable_kvm() {
 }
 
 prepare_packages() {
-  sudo -n apt-get update -qq || return $?
-  sudo -n apt-get install -y -qq --no-install-recommends "${PACKAGES[@]}"
+  bash "$(dirname "${BASH_SOURCE[0]}")/apt-install.sh" -qq --no-install-recommends "${PACKAGES[@]}"
 }
 
 prepare_host() {

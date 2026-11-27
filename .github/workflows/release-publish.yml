@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install source fingerprint tool
-        run: sudo apt-get update -qq && sudo apt-get install -y ripgrep
+        run: bash dev/ci/apt-install.sh ripgrep
       - name: Download exact successful preparation and operator attestation
         id: candidate
         env:

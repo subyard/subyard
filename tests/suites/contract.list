@@ -32,6 +32,7 @@ ssh-client-alive.sh
 test-runner.sh
 test-vms.sh
 workflow-real-adapter-gate.sh
+ci-apt-install.sh
 pr-stats.sh
 cli-fixture-slice-check.sh
 litdiff.sh

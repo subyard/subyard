@@ -2093,7 +2093,7 @@ class Contracts(unittest.TestCase):
         self.assertIn("queue: max", publish)
         self.assertNotIn("  push:", publish)
         self.assertIn("ref: ${{ steps.candidate.outputs.commit }}", publish)
-        install = "sudo apt-get install -y ripgrep"
+        install = "bash dev/ci/apt-install.sh ripgrep"
         self.assertIn(install, publish)
         self.assertLess(publish.index(install), publish.index("dev/release-publication.py publish-ci"))
 

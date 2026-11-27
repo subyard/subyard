@@ -207,6 +207,9 @@ class TestAcceptance(unittest.TestCase):
             self.assertEqual(count, 1)
             runner = directory / "runner.sh"
             runner.write_text(script)
+            # The runner calls the shared apt helper beside it; no fixture source needs disabling.
+            shutil.copy2(root / "dev/ci/apt-install.sh", directory / "apt-install.sh")
+            (directory / "sources").mkdir()
             (tools / "sudo").write_text('''#!/bin/bash
 [ "$1" = -n ] && [ "$2" = apt-get ] || exit 99
 printf '%s\\n' "$3" >> "$TRACE"
@@ -237,7 +240,8 @@ exit "$COLLECTOR_EXIT"
                     log.unlink(missing_ok=True)
                     env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
                         GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", READY=str(ready), TRACE=str(log),
-                        RUNNER_TEMP=str(directory), UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector))
+                        RUNNER_TEMP=str(directory), UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector),
+                        SUBYARD_CI_APT_SOURCES=str(directory / "sources"))
                     result = subprocess.run(["bash", str(runner), "acceptance", "fixture", "prepared", "output", "test"],
                         cwd=directory, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
