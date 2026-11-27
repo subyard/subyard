@@ -99,6 +99,38 @@ for kept in foreign foreign-dangling foreign-dotdot foreign-redirect mismatch on
   [ -L "$skills/$kept" ] || fail "removed foreign link $kept"
 done
 [ "$(cat "$work/home/.claude/skills/taken")" = mine ] && [ -f "$clone/skills/demo/SKILL.md" ] || fail 'removed a file or clone'
+# A link replaced after the ownership check is moved back, never removed. A fake readlink
+# replaces the link right after reading it and, with RACE=reoccupy, refills the freed name too.
+mkdir -p "$work/race-bin"
+real_readlink="$(command -v readlink)"
+cat >"$work/race-bin/readlink" <<SCRIPT
+#!/usr/bin/env bash
+"$real_readlink" "\$@" && status=0 || status=\$?
+case "\${!#}" in
+  */.subyard-user-skills.*) [ "\$RACE" != reoccupy ] || printf 'later\\n' >"$skills/demo" ;;
+  "$skills/demo") unlink -- "\${!#}"; printf 'raced\\n' >"\${!#}" ;;
+esac
+exit "\$status"
+SCRIPT
+chmod +x "$work/race-bin/readlink"
+race() { HOME="$work/home" PATH="$work/race-bin:$PATH" RACE="$1" bash "$guest" apply 2>"$work/stderr"; }
+others_unlinked() { for harness in "${harnesses[@]:1}"; do [ ! -L "$work/home/$harness/demo" ] || fail "kept $harness/demo"; done; }
+run apply "$good"
+race back
+[ "$(cat "$skills/demo")" = raced ] || fail 'a replacement of our link was not moved back'
+[ -z "$(find "$skills" -name '.subyard-user-skills.*')" ] || fail 'left a private unlink directory'
+others_unlinked
+rm -f -- "$skills/demo"
+run apply "$good"
+race reoccupy
+[ "$(cat "$skills/demo")" = later ] || fail 'overwrote a re-created path'
+kept="$(find "$skills" -path '*/.subyard-user-skills.*/link')"
+[ -n "$kept" ] && [ "$(cat "$kept")" = raced ] || fail 'lost the replacement of our link'
+grep -qF "warning: ~/.agents/skills/demo changed while it was unlinked; kept what replaced the link at $kept" "$work/stderr" \
+  || fail 'missing warning for a re-created path'
+others_unlinked
+rm -f -- "$kept" "$skills/demo"
+rmdir -- "${kept%/link}"
 # With the store moved away, disable still removes our dangling links.
 run apply "$good"
 mv -T "$store" "$work/store-moved"
