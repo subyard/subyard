@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -300,8 +301,8 @@ esac`,
 			if code != 1 {
 				t.Fatalf("exit %d: %s", code, stderr)
 			}
-			findings := guestDiskTmpFindings(stderr)
-			if reported := strings.Count(string(stderr), guestDiskTmpFindingPrefix); len(findings) != reported {
+			findings := reconcileruntime.GuestDiskTmpFindings(stderr)
+			if reported := strings.Count(string(stderr), "guest-disk-tmp: "); len(findings) != reported {
 				t.Fatalf("host filter kept %d of %d findings: %q from:\n%s", len(findings), reported, findings, stderr)
 			}
 			message, _ := (&guestDiskTmpRefusal{yard: "default", exit: code, findings: findings}).ActivationDiagnostic()

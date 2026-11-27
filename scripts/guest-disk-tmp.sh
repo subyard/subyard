@@ -9,6 +9,8 @@ policy_files='/etc/subyard-guest-tmpfiles.conf
 /etc/systemd/system/subyard-tmp-boot.service
 /etc/systemd/system/subyard-tmp-clean.service
 /etc/systemd/system/subyard-tmp-clean.timer'
+policy_units='subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.service subyard-tmp-clean.timer'
+policy_links='subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer'
 
 # The host shows only these prefixed lines to the operator.
 refuse() { echo "guest-disk-tmp: $*" >&2; }
@@ -161,7 +163,7 @@ policy_guard() {
   done
   for file in $policy_files; do
     mode=644
-    [ "$file" != /usr/local/lib/subyard-guest-tmp ] || mode=755
+    case "$file" in /usr/local/lib/*) mode=755 ;; esac
     if [ -e "$file" ] || [ -L "$file" ]; then
       # Apply restores the mode of our own root-owned file with current content
       # unless group or other could have written it.
@@ -177,7 +179,7 @@ policy_guard() {
       refuse "guest temporary policy file missing: $file"; guard_failed=1
     fi
   done
-  for unit in subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.service subyard-tmp-clean.timer; do
+  for unit in $policy_units; do
     overrides=$(systemctl show "$unit" -p DropInPaths --value) \
       || { refuse "cannot inspect guest temporary policy unit: $unit"; guard_failed=1; continue; }
     case "$overrides" in
@@ -188,9 +190,9 @@ policy_guard() {
     directory=/etc/systemd/system/$target.wants
     if [ -e "$directory" ] || [ -L "$directory" ]; then safe_directory "$directory" || guard_failed=1; fi
   done
-  for unit in subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer; do
+  for unit in $policy_links; do
     target=sysinit.target
-    [ "$unit" != subyard-tmp-clean.timer ] || target=timers.target
+    case "$unit" in *.timer) target=timers.target ;; esac
     link=/etc/systemd/system/$target.wants/$unit
     if [ -e "$link" ] || [ -L "$link" ]; then
       [ -L "$link" ] && [ "$(stat -c '%u:%g' "$link")" = 0:0 ] \
@@ -210,34 +212,45 @@ policy_guard() {
 }
 
 unit_command() {
-  value=$(systemctl show "$1" -p "$2" --value) || return
+  value=$(systemctl show "$1" -p "$2" --value) \
+    || { refuse "cannot inspect guest temporary policy unit: $1"; return 1; }
   executable=${3%% *}
   prefix="{ path=$executable ; argv[]=$3 ; ignore_errors=no ; "
   case "$value" in
     "$prefix"*) remainder=${value#"$prefix"} ;;
-    *) echo 'guest temporary cleanup command is overridden' >&2; return 1 ;;
+    *) refuse "guest temporary cleanup command is overridden: $1 $2"; return 1 ;;
   esac
-  case "$remainder" in *'argv[]='*) echo 'extra guest temporary cleanup command' >&2; return 1 ;; esac
+  case "$remainder" in
+    *'argv[]='*) refuse "extra guest temporary cleanup command: $1 $2"; return 1 ;;
+  esac
 }
 
+unit_setting() {
+  [ "$(systemctl show "$1" -p "$2" --value 2>/dev/null)" = "$3" ] \
+    || { refuse "guest temporary policy unit setting differs: $1 $2"; return 1; }
+}
+
+# Reports every differing command and deadline; nothing here writes.
 check_units() {
-  unit_command subyard-tmp-shutdown.service ExecStart /usr/bin/true
-  unit_command subyard-tmp-shutdown.service ExecStop '/usr/local/lib/subyard-guest-tmp shutdown'
-  unit_command subyard-tmp-boot.service ExecStart '/usr/local/lib/subyard-guest-tmp boot'
-  unit_command subyard-tmp-clean.service ExecStart '/usr/local/lib/subyard-guest-tmp clean'
-  [ "$(systemctl show subyard-tmp-shutdown.service -p TimeoutStopUSec --value)" = 30s ]
-  [ "$(systemctl show subyard-tmp-shutdown.service -p TimeoutStopFailureMode --value)" = kill ]
+  units_failed=0
+  unit_command subyard-tmp-shutdown.service ExecStart /usr/bin/true || units_failed=1
+  unit_command subyard-tmp-shutdown.service ExecStop '/usr/local/lib/subyard-guest-tmp shutdown' || units_failed=1
+  unit_command subyard-tmp-boot.service ExecStart '/usr/local/lib/subyard-guest-tmp boot' || units_failed=1
+  unit_command subyard-tmp-clean.service ExecStart '/usr/local/lib/subyard-guest-tmp clean' || units_failed=1
+  unit_setting subyard-tmp-shutdown.service TimeoutStopUSec 30s || units_failed=1
+  unit_setting subyard-tmp-shutdown.service TimeoutStopFailureMode kill || units_failed=1
   for unit in subyard-tmp-boot.service subyard-tmp-clean.service; do
-    [ "$(systemctl show "$unit" -p TimeoutStartUSec --value)" = 30s ]
-    [ "$(systemctl show "$unit" -p TimeoutStartFailureMode --value)" = kill ]
+    unit_setting "$unit" TimeoutStartUSec 30s || units_failed=1
+    unit_setting "$unit" TimeoutStartFailureMode kill || units_failed=1
   done
+  return "$units_failed"
 }
 
 apply_policy() {
   policy_guard apply
   for file in $policy_files; do
     mode=644
-    [ "$file" != /usr/local/lib/subyard-guest-tmp ] || mode=755
+    case "$file" in /usr/local/lib/*) mode=755 ;; esac
     if [ -e "$file" ]; then
       [ "$(stat -c '%a' "$file")" = "$mode" ] || chmod "$mode" "$file"
       continue
@@ -327,24 +340,40 @@ case "${1:-}" in
     apply_policy
     ;;
   check)
-    [ -d /tmp ] && [ ! -L /tmp ]
-    [ "$(stat -c '%a:%u:%g' /tmp)" = 1777:0:0 ]
-    [ "$(readlink /etc/systemd/system/tmp.mount)" = /dev/null ]
-    [ "$(stat -c '%u:%g' /etc/systemd/system/tmp.mount)" = 0:0 ]
-    policy_guard check
-    check_units
+    # Readiness reports every unmet condition.
+    # Exit 0 is ready, 10 is memory-backed, 1 follows every reported finding.
+    findings=0
+    if [ -d /tmp ] && [ ! -L /tmp ]; then
+      ownership=$(stat -c '%a:%u:%g' /tmp 2>/dev/null || echo unknown)
+      [ "$ownership" = 1777:0:0 ] || { refuse "/tmp mode and owner are $ownership not 1777:0:0"; findings=1; }
+      [ -w /tmp ] || { refuse '/tmp is not writable'; findings=1; }
+    else
+      refuse '/tmp is not a real directory'; findings=1
+    fi
+    [ "$(readlink /etc/systemd/system/tmp.mount 2>/dev/null)" = /dev/null ] \
+      && [ "$(stat -c '%u:%g' /etc/systemd/system/tmp.mount 2>/dev/null)" = 0:0 ] \
+      || { refuse 'guest tmp.mount is not masked'; findings=1; }
+    policy_guard check || findings=1
+    check_units || findings=1
     for unit in subyard-tmp-shutdown.service subyard-tmp-clean.timer; do
-      systemctl is-active --quiet "$unit"
+      systemctl is-active --quiet "$unit" || { refuse "guest temporary policy unit is not active: $unit"; findings=1; }
     done
-    filesystem=$(findmnt -n --uniq -T /tmp -o FSTYPE)
-    case "$filesystem" in
-      tmpfs|ramfs) exit 10 ;; # Installed policy needs the next native boot.
-      ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p) ;;
-      *) exit 1 ;;
-    esac
-    not_mountpoint /tmp
-    [ "$(systemctl show subyard-tmp-boot.service -p Result --value)" = success ]
-    [ -w /tmp ]
+    memory=0
+    if filesystem=$(findmnt -n --uniq -T /tmp -o FSTYPE); then
+      case "$filesystem" in
+        tmpfs|ramfs) memory=1 ;; # Installed policy needs the next native boot.
+        ext2|ext3|ext4|btrfs|xfs|zfs|overlay|virtiofs|9p)
+          not_mountpoint /tmp || { refuse 'disk-backed /tmp is its own mount'; findings=1; }
+          [ "$(systemctl show subyard-tmp-boot.service -p Result --value)" = success ] \
+            || { refuse 'guest boot cleanup of /tmp did not succeed'; findings=1; }
+          ;;
+        *) refuse "unsupported /tmp filesystem: $filesystem"; findings=1 ;;
+      esac
+    else
+      refuse 'cannot read the /tmp filesystem'; findings=1
+    fi
+    [ "$findings" = 0 ] || exit 1
+    [ "$memory" = 0 ] || exit 10
     ;;
   *) exit 2 ;;
 esac

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -37,28 +35,9 @@ func assessRegisteredDiskTmp(ctx context.Context, runtime reconcileruntime.Runti
 		return nil
 	}
 	if guestExit && result.ExitCode != 0 {
-		return &guestDiskTmpRefusal{yard: runtime.Yard.YardName, exit: result.ExitCode, findings: guestDiskTmpFindings(result.Stderr)}
+		return &guestDiskTmpRefusal{yard: runtime.Yard.YardName, exit: result.ExitCode, findings: reconcileruntime.GuestDiskTmpFindings(result.Stderr)}
 	}
 	return errors.Join(fmt.Errorf("yard %s: assess guest disk /tmp safety: exit %d", runtime.Yard.YardName, result.ExitCode), err)
-}
-
-// The guest is outside the host's trust boundary: only this leaf's own prefixed
-// findings in a closed alphabet reach the operator, and only a bounded number.
-const (
-	guestDiskTmpFindingPrefix = "guest-disk-tmp: "
-	guestDiskTmpFindingLimit  = 8
-)
-
-var guestDiskTmpFinding = regexp.MustCompile(`^[A-Za-z0-9 _./:'-]{1,120}$`)
-
-func guestDiskTmpFindings(stderr []byte) []string {
-	findings := []string{}
-	for line := range strings.SplitSeq(string(stderr), "\n") {
-		if finding, ok := strings.CutPrefix(line, guestDiskTmpFindingPrefix); ok && guestDiskTmpFinding.MatchString(finding) && !slices.Contains(findings, finding) {
-			findings = append(findings, finding)
-		}
-	}
-	return findings
 }
 
 // guestDiskTmpRefusal is a guest's safety verdict, not an unavailable dependency.
@@ -74,13 +53,7 @@ func (refusal *guestDiskTmpRefusal) Error() string {
 }
 
 func (refusal *guestDiskTmpRefusal) ActivationDiagnostic() (string, string) {
-	reason := fmt.Sprintf("guest exit %d without a recognized reason", refusal.exit)
-	if count := len(refusal.findings); count > guestDiskTmpFindingLimit {
-		reason = fmt.Sprintf("%s; and %d more", strings.Join(refusal.findings[:guestDiskTmpFindingLimit], "; "), count-guestDiskTmpFindingLimit)
-	} else if count != 0 {
-		reason = strings.Join(refusal.findings, "; ")
-	}
-	return fmt.Sprintf("yard %s: guest disk /tmp policy refused: %s", refusal.yard, reason),
+	return fmt.Sprintf("yard %s: guest disk /tmp policy refused: %s", refusal.yard, reconcileruntime.GuestDiskTmpReason(refusal.exit, refusal.findings)),
 		"correct the reported guest state, then run yard update --check"
 }
 

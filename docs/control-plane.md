@@ -1066,8 +1066,12 @@ UUID and owner token. A retained create result establishes identity, without
 granting permission to restart a guest that may already contain active work.
 Provision readiness checks the actual backing filesystem, root ownership and mode
 1777 as well as the mask. An active tmpfs remains unconverged; post-apply diagnostics
-ask the owner to close sessions and stop/start that yard. Intentionally stopped yards
-retain their deferred policy marker and verify the actual filesystem when running.
+ask the owner to close sessions and stop/start that yard. After apply, provision
+verification names every unmet condition that does not depend on another unmet or
+unreadable one, in check order, including each guest `/tmp` policy finding, after any
+inspection failures. Ordinary observation still stops at the first of either.
+Intentionally stopped yards retain their deferred policy marker and verify the actual
+filesystem when running.
 Initial observation failures also retain these reasons; repairable drift stays a state.
 
 Starts wait for the guest agent, up to ten minutes for a VM. A guest reboot that Incus

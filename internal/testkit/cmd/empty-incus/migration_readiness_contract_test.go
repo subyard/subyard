@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -266,16 +267,22 @@ func TestHistoryDiskTmpCompletionAndPolicyCheckContract(t *testing.T) {
 			t.Fatalf("unmodelled %s accepted: %#v %v", action, result, err)
 		}
 	}
-	testkit.WriteFile(t, policy, append(append([]byte(nil), payload...), []byte("\n# changed source\n")...), 0600)
-	// Ordinary provision verification still sends the actual policy source and
-	// refuses changed bytes before proceeding to any other provision checks.
-	if ready, err := runtime.VerifyStageWithDiagnostic(ctx, ports.ReconcileStageProvision); ready {
+	changed := append(append([]byte(nil), payload...), []byte("\n# changed source\n")...)
+	testkit.WriteFile(t, policy, changed, 0600)
+	// Post-apply provision verification sends the actual policy source and
+	// names the refused check among the other unmet provision conditions.
+	ready, err := runtime.VerifyStageWithDiagnostic(ctx, ports.ReconcileStageProvision)
+	if ready || err == nil || !strings.Contains(err.Error(), "guest /tmp: guest exit 99 without a recognized reason") {
 		t.Fatalf("altered policy accepted: %v", err)
+	}
+	calls := server.ExecCalls()
+	if last := calls[len(calls)-1]; !slices.Equal(last.Command, []string{"sh", "-s", "--", "check"}) || !bytes.Equal(last.Stdin, changed) {
+		t.Fatalf("verification did not check the actual policy source: %#v", last.Command)
 	}
 	if err := migration.CompleteRegisteredDiskTmp(ctx, runtime); err != nil {
 		t.Fatalf("source change replayed completed migration: %v", err)
 	}
-	if len(server.ExecCalls()) != 5 || len(server.PowerCalls()) != 0 {
+	if len(server.ExecCalls()) != len(calls) || len(server.PowerCalls()) != 0 {
 		t.Fatalf("policy probes/lifecycle calls: exec=%d power=%d", len(server.ExecCalls()), len(server.PowerCalls()))
 	}
 }

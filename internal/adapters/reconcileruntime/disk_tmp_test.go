@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,19 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func diskTmpFixtureScript(t *testing.T, root, source, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := regexp.MustCompile(`/tmp([/ "'\n)]|$)`).ReplaceAllString(string(body), root+"/tmp${1}")
+	rewritten = strings.NewReplacer("/etc", root+"/etc", "/usr", root+"/usr").Replace(rewritten)
+	script := filepath.Join(root, name)
+	testkit.WriteFile(t, script, []byte(rewritten), 0700)
+	return script
+}
 
 // The shell leaf arrives over stdin in production. Rewrite only its fixed guest
 // paths into a private filesystem fixture; no command can publish host policy.
@@ -30,14 +44,7 @@ func diskTmpFixture(t *testing.T) (string, string, func(string, ...string) ([]by
 	if err := os.Chmod(filepath.Join(root, "tmp"), 0777|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
-	source, err := os.ReadFile("../../../scripts/guest-disk-tmp.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rewritten := regexp.MustCompile(`/tmp([/ "'\n)]|$)`).ReplaceAllString(string(source), root+"/tmp${1}")
-	rewritten = strings.NewReplacer("/etc", root+"/etc", "/usr", root+"/usr").Replace(rewritten)
-	script := filepath.Join(root, "policy.sh")
-	testkit.WriteFile(t, script, []byte(rewritten), 0700)
+	script := diskTmpFixtureScript(t, root, "../../../scripts/guest-disk-tmp.sh", "policy.sh")
 	for name, body := range map[string]string{
 		"stat": `[ "${3:-}" != "${FOREIGN_PATH:-}" ] || OWNER=1000:1000
 case "$2" in
@@ -79,11 +86,12 @@ case "$1" in --create) mkdir -p "$FIXTURE_ROOT/tmp/subyard-disposable"; chmod 17
   enable)
     shift
     for unit do
-      target=sysinit.target; [ "$unit" != subyard-tmp-clean.timer ] || target=timers.target
+      target=sysinit.target; case "$unit" in *.timer) target=timers.target ;; esac
       mkdir -p "$FIXTURE_ROOT/etc/systemd/system/$target.wants"
       ln -sf "$FIXTURE_ROOT/etc/systemd/system/$unit" "$FIXTURE_ROOT/etc/systemd/system/$target.wants/$unit"
     done ;;
-  daemon-reload|start|is-active) ;;
+  is-active) [ "${INACTIVE:-}" != "$3" ] ;;
+  daemon-reload|start) ;;
   *) exit 90 ;;
 esac`,
 	} {
@@ -124,7 +132,7 @@ func TestDiskTmpGuestPolicy(t *testing.T) {
 			t.Fatalf("%s reboot: %v %s", filesystem, err, output)
 		}
 	}
-	for _, environment := range []string{"OWNER=1:0", "OVERRIDE=1", "MOUNT_EXIT=0", "MOUNT_EXIT=1", "FILESYSTEM=unknown", "BOOT_RESULT=exit-code", "COMMAND_OVERRIDE=1", "TIMEOUT_OVERRIDE=infinity"} {
+	for _, environment := range []string{"OWNER=1:0", "OVERRIDE=1", "MOUNT_EXIT=0", "MOUNT_EXIT=1", "FILESYSTEM=unknown", "BOOT_RESULT=exit-code", "INACTIVE=subyard-tmp-clean.timer", "COMMAND_OVERRIDE=1", "TIMEOUT_OVERRIDE=infinity"} {
 		if output, err := run("check", environment); err == nil {
 			t.Fatalf("unsafe check accepted %s: %s", environment, output)
 		}
@@ -313,6 +321,37 @@ func TestDiskTmpCleanupRejectsManualShutdownAndUnsafeRoot(t *testing.T) {
 	}
 }
 
+func TestDiskTmpCheckReportsEveryIndependentFinding(t *testing.T) {
+	_, _, run := diskTmpFixture(t)
+	if output, err := run("apply"); err != nil {
+		t.Fatalf("apply: %v: %s", err, output)
+	}
+	output, err := run("check", "OVERRIDE=1", "TIMEOUT_OVERRIDE=infinity", "INACTIVE=subyard-tmp-clean.timer", "BOOT_RESULT=timeout")
+	var failure *exec.ExitError
+	if !errors.As(err, &failure) || failure.ExitCode() != 1 {
+		t.Fatalf("check: %v %s", err, output)
+	}
+	findings := GuestDiskTmpFindings(output)
+	for _, want := range []string{
+		"foreign guest temporary policy unit override: subyard-tmp-clean.timer",
+		"guest temporary policy unit setting differs: subyard-tmp-clean.service TimeoutStartUSec",
+		"guest temporary policy unit setting differs: subyard-tmp-boot.service TimeoutStartUSec",
+		"guest temporary policy unit is not active: subyard-tmp-clean.timer",
+		"boot cleanup of ",
+	} {
+		if !slices.ContainsFunc(findings, func(finding string) bool { return strings.Contains(finding, want) }) {
+			t.Errorf("finding %q missing from %q", want, findings)
+		}
+	}
+	if reported := strings.Count(string(output), "guest-disk-tmp: "); reported != len(findings) {
+		t.Fatalf("host filter kept %d of %d findings:\n%s", len(findings), reported, output)
+	}
+	// A memory-backed root with another finding is not merely a pending reboot.
+	if _, err := run("check", "FILESYSTEM=tmpfs", "INACTIVE=subyard-tmp-clean.timer"); !errors.As(err, &failure) || failure.ExitCode() != 1 {
+		t.Fatalf("tmpfs with a finding: %v", err)
+	}
+}
+
 func TestDiskTmpNativeTmpfiles(t *testing.T) {
 	root := testkit.TempDir(t)
 	tmp := filepath.Join(root, "tmp")
@@ -395,17 +434,10 @@ func TestDiskTmpReadinessDistinguishesReboot(t *testing.T) {
 	}
 }
 
-func TestDiskTmpPostApplyAndStoppedPolicy(t *testing.T) {
-	incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true,
-		Instance: ports.InstanceInfo{Status: "Running"}},
-		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 10}}}}
+func TestDiskTmpStoppedPolicy(t *testing.T) {
+	incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true}}
 	runtime := Runtime{RepositoryRoot: "../../..", Incus: incus, Executor: incus,
 		Yard: domain.Context{YardName: "minimal"}}
-	ready, err := runtime.VerifyStageWithDiagnostic(context.Background(), ports.ReconcileStageProvision)
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if ready || !errors.As(err, &diagnostic) || !strings.Contains(err.Error(), "yard -Y minimal stop") {
-		t.Fatalf("post-apply readiness lost diagnostic: ready=%v err=%v", ready, err)
-	}
 	incus.Reconcile.Instance = ports.InstanceInfo{Status: "Stopped", Config: map[string]string{
 		"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped",
 	}}
