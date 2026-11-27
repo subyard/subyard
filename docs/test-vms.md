@@ -73,8 +73,8 @@ slots are held, provisioning, draining or quarantined. Grants report the actual 
 
 Admission reserves provisioning RAM and builder promises against the lower of visible
 memory/cgroup headroom and verified physical-owner available RAM. Swap adds no RAM headroom;
-missing physical counters refuse admission. With the default 512 MiB per-VM overhead and
-4 GiB host reserve, a singleton needs 8.5 GiB available and a pair needs 13 GiB before other
+missing physical counters refuse admission. With the default 256 MiB per-VM overhead and
+4 GiB host reserve, a singleton needs 8.25 GiB available and a pair needs 12.5 GiB before other
 pending requests or builders. Held VMs consume available RAM rather than retaining a growth
 promise. The broker worker's separate process budget is not the VM budget.
 
@@ -391,7 +391,7 @@ A single VM can host the Android yard and both emulator pool slots. A pair is ne
 that actually coordinate two independent hosts, such as the full P0 matrix; it is not a general
 requirement for Subyard development. `--vm 1` on the default `subyard-pair` only selects where
 the payload runs: the broker still allocates both guests unless `--vm-count 1` is supplied.
-That singleton reserves 4.5 GiB including VM overhead, rather than the pair's 9 GiB.
+That singleton reserves 4.25 GiB including VM overhead, rather than the pair's 8.5 GiB.
 OpenClaw, GitHub, Hermes, Orca and subyard-dev acceptance request one standard guest; Amnezia
 retains its owner/client pair. Android uses its larger guest except for the skills lane below. The generic Android VM base
 does not include the SDK; the fixture provisions it.
@@ -509,7 +509,7 @@ bash dev/e2e/config-sync-acceptance.sh --slot "$slot"
 It is not part of release acceptance. The [coverage ownership map](testing.md#coverage-ownership)
 requires it for configuration-sync and configuration-source SSH/Git transport changes.
 The hosted controller has a provisional 90-minute timeout plus 10-minute TERM cleanup grace,
-pending measurement. It uses the standard pair: 9 GiB including VM overhead, with a 2 GiB hosted
+pending measurement. It uses the standard pair: 8.5 GiB including VM overhead, with a 2 GiB hosted
 memory reserve. The hosted wrapper uses 12 GiB VM disks when free space is below 65 GiB;
 normal broker memory and disk admission still apply.
 

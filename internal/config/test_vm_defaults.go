@@ -7,5 +7,5 @@ const (
 	DefaultTestVMCacheBudget   = "24GiB"
 	DefaultTestVMDiskReserve   = "5GiB"
 	DefaultTestVMMemoryReserve = "4GiB"
-	DefaultTestVMOverhead      = "512MiB"
+	DefaultTestVMOverhead      = "256MiB"
 )

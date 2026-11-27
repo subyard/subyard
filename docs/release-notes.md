@@ -14,6 +14,9 @@
 - On x86_64, test-vms broker VMs enable Free Page Reporting on their virtio balloon, so RAM
   a guest frees returns to the host instead of staying resident in QEMU. A VM that is
   running during the update gets the setting when it next starts.
+- The default per-VM admission overhead `E2E_VM_OVERHEAD` is 256 MiB instead of 512 MiB; a
+  broker without its own value admits a 4 GiB pair with 12.5 GiB available instead of 13 GiB.
+  Measured QEMU memory outside guest RAM was 60–120 MiB per VM.
 
 ### Claude managed instructions
 

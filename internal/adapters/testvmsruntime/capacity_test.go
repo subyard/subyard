@@ -158,15 +158,15 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 			refused       bool
 		}{
 			{"available headroom", "", 2, 18 << 30, false},
-			{"exact default reserve", "", 2, 13 << 30, false},
-			{"below default reserve", "", 2, (13 << 30) - 1, true},
+			{"exact default reserve", "", 2, 25 << 29, false},
+			{"below default reserve", "", 2, (25 << 29) - 1, true},
 			{"insufficient pair headroom", "", 2, 11 << 30, true},
 			{"explicit override", "2GiB", 2, 11 << 30, false},
 			{"higher explicit override", "8GiB", 2, 17 << 30, false},
-			{"below higher explicit override", "8GiB", 2, (17 << 30) - 1, true},
-			{"single exact default reserve", "", 1, 17 << 29, false},
-			{"single below default reserve", "", 1, (17 << 29) - 1, true},
-			{"pair refused at single headroom", "", 2, 17 << 29, true},
+			{"below higher explicit override", "8GiB", 2, (33 << 29) - 1, true},
+			{"single exact default reserve", "", 1, 33 << 28, false},
+			{"single below default reserve", "", 1, (33 << 28) - 1, true},
+			{"pair refused at single headroom", "", 2, 33 << 28, true},
 		} {
 			t.Run(fmt.Sprintf("builder=%t/%s", builder, test.name), func(t *testing.T) {
 				cfg := fixtureConfig(t)
@@ -201,7 +201,7 @@ func TestMemoryReserveAppliesToWorkingVMsAndSequentialBuilder(t *testing.T) {
 					}
 					// The builder uses one VM; admission must leave room for the
 					// larger of the sequential builder and working environment.
-					err = rt.admitBuild(context.Background(), store, grant, 9<<29, 20<<30, &ImageRegistry{})
+					err = rt.admitBuild(context.Background(), store, grant, 17<<28, 20<<30, &ImageRegistry{})
 				} else {
 					err = rt.reserveEnvironment(context.Background(), store, grant)
 				}
@@ -288,7 +288,7 @@ func TestConcurrentMixedAdmissionAndRetryAfterReady(t *testing.T) {
 	if err := rt.reserveEnvironment(context.Background(), store, betweenBootAndHeld); !errors.As(err, &refusal) || refusal.Admission == nil {
 		t.Fatalf("unpersisted boot completion released a RAM promise: %v", err)
 	}
-	winnerRAM, _ := environmentCommitment(*grants[winner].Environment, 512<<20)
+	winnerRAM, _ := environmentCommitment(*grants[winner].Environment, 256<<20)
 	if refusal.Admission.PendingVM != winnerRAM || refusal.Admission.Headroom >= refusal.Admission.Required {
 		t.Fatalf("refusal concealed the provisioning promise: %+v", refusal.Admission)
 	}
@@ -325,7 +325,7 @@ func TestCanceledProvisioningRetainsMemoryUntilCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			rt := Runtime{Config: cfg,
-				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 17 << 29}, nil },
+				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 33 << 28}, nil },
 				diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
 				usageProbe:     func(context.Context, LeaseSlot) allocationUsage { return allocationUsage{} },
 				Runner: &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {

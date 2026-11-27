@@ -158,7 +158,7 @@ func TestResourceStatusScalesRequestedVMCount(t *testing.T) {
 			status := rt.ResourceStatus(context.Background(), LeasePool{Slots: []LeaseSlot{
 				{SlotID: "slot-001", State: SlotProvisioning, Environment: &spec, Reserved: true},
 			}})
-			wantMemory, wantDisk := uint64(count)*(9<<29), uint64(count)*(20<<30)
+			wantMemory, wantDisk := uint64(count)*(17<<28), uint64(count)*(20<<30)
 			if len(status.Errors) != 0 || status.ReservedMemory != wantMemory || status.VirtualDiskCapacity != wantDisk || len(status.Slots) != 1 {
 				t.Fatalf("wrong aggregate commitments: %+v", status)
 			}
