@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net/url"
 	"os"
@@ -71,39 +72,42 @@ type Store struct {
 	done            chan struct{}
 }
 
+// fileFault is a test-only interruption hook for safefs publications.
+var fileFault func(safefs.Point) error
+
+// privateDir creates a missing directory with mode 0700 and sets an existing
+// own directory to exactly 0700. It refuses a symlink, a non-directory and
+// another owner's directory. Missing parents and every refusal keep the texts
+// os.MkdirAll and the previous checks reported. Like the producers'
+// private_directory it does not sync, because syncing would need read access
+// to the parent; publications sync their own entries.
 func privateDir(path string) error {
-	_, before := os.Lstat(path)
-	if err := os.MkdirAll(path, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	st, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	err := safefs.EnsureDir(path, safefs.DirOptions{Existing: safefs.Repair, Durability: safefs.BestEffort, Fault: fileFault})
+	var state *safefs.DirStateError
+	var pathErr *fs.PathError
+	switch {
+	case errors.Is(err, safefs.ErrSymlink):
+		switch target, statErr := os.Stat(path); {
+		case statErr != nil:
+			return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.EEXIST}
+		case !target.IsDir():
+			return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+		}
 		return errors.New("data directory must be a real directory")
-	}
-	if os.IsNotExist(before) {
-		if err := os.Chmod(path, 0700); err != nil {
-			return err
-		}
-		st, err = os.Lstat(path)
-		if err != nil {
-			return err
-		}
-	}
-	// Narrow the collector's own broader directory, then check the result.
-	_ = safefs.RepairPath(path, 0o077)
-	if st, err = os.Lstat(path); err != nil {
-		return err
-	}
-	if st.Mode().Perm()&0o077 != 0 {
+	case errors.Is(err, safefs.ErrNotDirectory):
+		return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+	case errors.As(err, &state) && state.Mode.Perm()&0o077 != 0:
 		return fmt.Errorf("telemetry directory %s must not be accessible by group or others", path)
-	}
-	if x, ok := st.Sys().(*syscall.Stat_t); !ok || int(x.Uid) != os.Geteuid() {
+	case errors.Is(err, safefs.ErrUnsafeOwner):
 		return errors.New("data directory has another owner")
+	case errors.As(err, &pathErr) && pathErr.Path == path && (pathErr.Op == "open" || pathErr.Op == "lstat"):
+		// os.MkdirAll reported a failed lookup of the leaf as a failed mkdir.
+		return &fs.PathError{Op: "mkdir", Path: path, Err: pathErr.Err}
 	}
-	return nil
+	return err
 }
 func privateFile(path string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)

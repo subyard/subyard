@@ -74,25 +74,7 @@ func publishPrivate(path string, data []byte) error {
 	if err := checkPrivateFile(path, 0); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".telemetry-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(data)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if err = errors.Join(err, f.Close()); err != nil {
-		return err
-	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDirectories(dir)
+	return safefs.WriteFile(path, data, safefs.Options{Mode: 0o600, TempPattern: ".telemetry-*", Fault: fileFault})
 }
 
 func (s *Store) publishCapturePolicy(ctx context.Context, policy Policy) error {
