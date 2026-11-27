@@ -143,6 +143,10 @@ Read by task; links are relative to this skill.
 - A brief is the loaded dev-flow skill's `roles/<role>.md` plus the role additions below.
 - Use the installed bridge skill.
   `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
+- Scratch files are per session and disposable. Never rely on another session's scratch paths,
+  and never store shared material there. Remove your own scratch files when your task ends.
+  Hand facts on in your report, where the coordinator puts them into the task file, and keep
+  artifacts with the PR or task output.
 
 ### Role additions
 
