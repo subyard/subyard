@@ -98,6 +98,48 @@ func TestRecoveryStoreRefusesSchemaOneWithNextStep(t *testing.T) {
 	}
 }
 
+// An unreadable plan refuses before repair, since narrowing never makes it
+// readable; a readable current plan is still repaired and resumed.
+func TestRecoveryStoreReadsPlanBeforeRepair(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads owner-unreadable files")
+	}
+	store, plan := recoveryFixture(t)
+	plan.Schema = 1
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(store.Directory, "plan.json")
+	testkit.WriteFile(t, planPath, body, 0240)
+	if err := os.Chmod(store.Directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	before := statTimes(t, store.Directory, planPath)
+	if _, _, err := store.Read(); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("unreadable plan: %v", err)
+	}
+	if _, err := store.ReadForResume(t.Context()); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("unreadable plan on resume: %v", err)
+	}
+	if after := statTimes(t, store.Directory, planPath); !reflect.DeepEqual(after, before) {
+		t.Fatalf("unreadable plan changed the store: %v, was %v", after, before)
+	}
+
+	store, plan = recoveryFixture(t)
+	if _, err := store.Save(plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	planPath = filepath.Join(store.Directory, "plan.json")
+	if err := os.Chmod(planPath, 0660); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.ReadForResume(t.Context())
+	if info, statErr := os.Lstat(planPath); err != nil || statErr != nil || info.Mode().Perm() != 0600 || saved.Schema != RecoverySchema {
+		t.Fatalf("readable current plan was not repaired and resumed: %v %v %v", err, statErr, info)
+	}
+}
+
 // statTimes records the mode and change time that a protected repair would alter.
 func statTimes(t *testing.T, paths ...string) []string {
 	t.Helper()

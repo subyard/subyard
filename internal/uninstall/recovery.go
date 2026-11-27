@@ -128,8 +128,10 @@ func (err LegacyRecoverySchemaError) Error() string {
 }
 
 // legacySchema refuses a schema-1 plan before the protected read repairs or
-// binds the store, so the refusal leaves it exactly as found. Any other state
-// continues to that read, which reports it.
+// binds the store, so the refusal leaves it exactly as found. A plan it cannot
+// open or read also refuses here: narrowing its permissions never makes it
+// readable. Any other state continues to that read, which reports it. A plan
+// replaced between the two reads is still caught by readPlan, after repair.
 func (store RecoveryStore) legacySchema() error {
 	if !filepath.IsAbs(store.Directory) {
 		return nil
@@ -145,11 +147,21 @@ func (store RecoveryStore) legacySchema() error {
 			continue
 		}
 		if err != nil {
-			return nil
+			return fmt.Errorf("read full uninstall recovery plan %s without changing it: %w", filepath.Join(store.Directory, name), err)
 		}
 		defer file.Close()
+		info, err := file.Stat()
+		var body []byte
+		if err == nil && !info.Mode().IsRegular() {
+			return nil
+		} else if err == nil {
+			body, err = io.ReadAll(io.LimitReader(file, 64<<20))
+		}
+		if err != nil {
+			return fmt.Errorf("read full uninstall recovery plan %s without changing it: %w", filepath.Join(store.Directory, name), err)
+		}
 		var header struct{ Schema int }
-		if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || json.NewDecoder(io.LimitReader(file, 64<<20)).Decode(&header) != nil || header.Schema != 1 {
+		if json.Unmarshal(body, &header) != nil || header.Schema != 1 {
 			return nil
 		}
 		return LegacyRecoverySchemaError{Directory: store.Directory, Launcher: store.retainedLauncher()}
