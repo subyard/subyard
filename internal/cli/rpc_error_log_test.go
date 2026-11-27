@@ -8,13 +8,15 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -158,13 +160,18 @@ func TestRPCErrorRecordsWaitForTheOwnerBarrierAfterTheResponse(t *testing.T) {
 	}
 	closeRecorder()
 	records, err := log.Read(200)
-	if err != nil || len(records) < rpcErrorBacklog || len(records) > rpcErrorBacklog+1 {
+	// Each write waits for the barrier only briefly, so a slow run may drop
+	// the first queued records too; the rest keep their order.
+	if err != nil || len(records) == 0 || len(records) > rpcErrorBacklog+1 {
 		t.Fatalf("records = %d err=%v", len(records), err)
 	}
+	previous := 0
 	for index, record := range records {
-		if record.Request != fmt.Sprintf("veranda-%d", index+1) {
+		var number int
+		if _, err := fmt.Sscanf(record.Request, "veranda-%d", &number); err != nil || number <= previous || number > rpcErrorBacklog+1 {
 			t.Fatalf("record %d = %+v", index, record)
 		}
+		previous = number
 	}
 }
 
@@ -206,5 +213,50 @@ func TestConcurrentFailedRequestsShareNoWriterState(t *testing.T) {
 	closeRecorder()
 	if records, err := (audit.RPCErrorLog{Home: home}).Read(64); err != nil || len(records) != 32 {
 		t.Fatalf("records = %d err=%v", len(records), err)
+	}
+}
+
+// A busy audit lock drops the record and frees the owner barrier at once, so
+// diagnostics never hold up a mutation.
+func TestABusyLogLockReleasesTheOwnerBarrierAndDropsTheRecord(t *testing.T) {
+	failure := errors.New("plan failed")
+	_, home, recorder, closeRecorder := failingRecorder(t, failure)
+	if err := os.Mkdir(filepath.Join(home, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := safefs.Lock(context.Background(), filepath.Join(home, "logs", ".yard.lock"), false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	if _, err := recorder.Handle(context.Background(), rpc.Call{ID: "veranda-1", Method: "operation.plan"}, nil); !errors.Is(err, failure) {
+		t.Fatalf("error = %v", err)
+	}
+	barrierFree := func() bool {
+		_, release, err := uninstall.TryOwnerLock(context.Background(), home)
+		if err != nil {
+			return false
+		}
+		release()
+		return true
+	}
+	waitFor := func(free bool) bool {
+		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+			if barrierFree() == free {
+				return true
+			}
+		}
+		return false
+	}
+	if !waitFor(false) {
+		t.Fatal("the writer never took the owner barrier")
+	}
+	if !waitFor(true) {
+		t.Fatal("the writer kept the owner barrier while the log lock was busy")
+	}
+	held.Release()
+	closeRecorder()
+	if records, err := (audit.RPCErrorLog{Home: home}).Read(5); err != nil || len(records) != 0 {
+		t.Fatalf("records = %+v err=%v", records, err)
 	}
 }

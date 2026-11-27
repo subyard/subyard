@@ -1547,7 +1547,8 @@ appends one record per failed request (time, request and operation ID, method, c
 local error text) to the private `$SUBYARD_HOME/logs/rpc-errors.log`, keeping one previous
 256 KiB generation; `yard logs --rpc [-n N]` shows the newest records. Records are best effort:
 the session queues at most 64 and writes them after the response under the owner barrier of the
-installation generation it started in, dropping the rest and those still blocked when it ends.
+installation generation it started in. A record that cannot take the barrier and the log lock
+within 250 ms is dropped, as are records beyond the queue.
 Explicit yard selectors continue through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,5 +125,31 @@ func TestRPCErrorLogGivesUpOnAHeldLockWhenItsContextEnds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "logs", rpcErrorFile)); !os.IsNotExist(err) {
 		t.Fatal("the log was written", err)
+	}
+}
+
+// Not parallel: the umask is process-wide.
+func TestRPCErrorLogKeepsExactModesUnderARestrictiveUmask(t *testing.T) {
+	home := testkit.TempDir(t)
+	for _, mask := range []int{0o400, 0o600} {
+		previous := syscall.Umask(mask)
+		log := RPCErrorLog{Home: home}
+		for _, request := range []string{"create", "append"} {
+			if err := log.Append(context.Background(), RPCError{Request: request, Method: "m", Code: "c", Error: "e"}); err != nil {
+				syscall.Umask(previous)
+				t.Fatalf("umask %o %s: %v", mask, request, err)
+			}
+		}
+		syscall.Umask(previous)
+		path := filepath.Join(home, "logs", rpcErrorFile)
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("umask %o: info=%v err=%v", mask, info, err)
+		}
+		if records, err := log.Read(10); err != nil || len(records) != 2 {
+			t.Fatalf("umask %o: records=%+v err=%v", mask, records, err)
+		}
+		if err := os.RemoveAll(filepath.Join(home, "logs")); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

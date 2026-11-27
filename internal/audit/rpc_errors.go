@@ -19,6 +19,9 @@ const (
 	rpcErrorFile           = "rpc-errors.log"
 	defaultRPCErrorMaximum = int64(256 * 1024)
 	maxRPCErrorText        = 8 * 1024
+	// rpcErrorWait bounds each write's wait for admission and the log lock, so
+	// a busy lock drops the record instead of keeping the owner barrier.
+	rpcErrorWait = 250 * time.Millisecond
 )
 
 // RPCError is one failed Yard RPC request served by this owner. Error is the
@@ -44,11 +47,14 @@ type RPCErrorLog struct {
 }
 
 // Append adds one record, first rotating a log that reached its maximum. It
-// waits for admission and the log lock only until ctx ends.
+// waits for admission and the log lock together at most rpcErrorWait, and
+// only until ctx ends.
 func (log RPCErrorLog) Append(ctx context.Context, record RPCError) error {
 	if log.Home == "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, rpcErrorWait)
+	defer cancel()
 	if log.BeforeWrite != nil {
 		release, write, err := log.BeforeWrite(ctx)
 		if err != nil || !write {
@@ -66,11 +72,15 @@ func (log RPCErrorLog) Append(ctx context.Context, record RPCError) error {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return err
 	}
-	lock, err := safefs.Lock(ctx, filepath.Join(directory, ".yard.lock"), false, 50*time.Millisecond)
+	lock, err := safefs.Lock(ctx, filepath.Join(directory, ".yard.lock"), false, 10*time.Millisecond)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
+	// A restrictive umask must not leave the shared lock unopenable later.
+	if err := lock.Chmod(0o600); err != nil {
+		return err
+	}
 	maximum := log.Maximum
 	if maximum <= 0 {
 		maximum = defaultRPCErrorMaximum
@@ -108,8 +118,7 @@ func (log RPCErrorLog) Append(ctx context.Context, record RPCError) error {
 	return errors.Join(err, file.Close())
 }
 
-// openRPCErrorLog opens the regular log for appending and narrows a file that
-// an earlier writer left readable by others.
+// openRPCErrorLog opens the regular log for appending with exactly mode 0600.
 func openRPCErrorLog(path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("refusing non-regular RPC error log %s", path)
@@ -119,7 +128,12 @@ func openRPCErrorLog(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	// RepairMode refuses a foreign or linked file; the exact mode then also
+	// covers a file that a restrictive umask created unreadable.
 	if err := safefs.RepairMode(file, 0o077); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	if err := file.Chmod(0o600); err != nil {
 		return nil, errors.Join(err, file.Close())
 	}
 	return file, nil
