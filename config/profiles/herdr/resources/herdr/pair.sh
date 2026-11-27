@@ -31,7 +31,8 @@ key_operation() {
   fi
 }
 
-write_key() (
+# with_pair_lock runs a key operation under the lock init uses for the owner SSH key.
+with_pair_lock() (
   # Init uses this same lock while it installs the owner SSH key.
   path="$SUBYARD_CONFIG_HOME/generated/integration-locks/${YARD_NAME:-default}.lock"
   if [ ! -L "$path" ] && [ -f "$path" ] && [ "$(stat -c '%u:%h' "$path")" = "$(id -u):1" ]; then
@@ -41,8 +42,10 @@ write_key() (
     die 'Herdr could not verify the yard operation lock; reconcile SSH with yard init'
   exec {pair_lock}< "$path"
   flock -w 15 "$pair_lock" || die 'another yard operation is reconciling SSH'
-  key_operation apply "$1"
+  "$@"
 )
+
+write_key() { with_pair_lock key_operation apply "$1"; }
 
 pair_assessment() {
   local local_action result changed fingerprint consequence=''
@@ -86,6 +89,10 @@ pair_apply() {
     pair-revoke:revoke) write_key revoke >/dev/null; return ;;
     *) die 'invalid assessed Herdr key operation' ;;
   esac
+  pair_endpoint
+}
+
+pair_endpoint() {
   local fingerprint
   fingerprint=$(yexec ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk 'NR == 1 {print $2}')
   printf 'User: %s\nHost: %s\nPort: %s\nEd25519 host key: %s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT" "$fingerprint"

@@ -114,6 +114,27 @@ func planKeyChange(contents, input []byte, owner, operation, argument string) ([
 	}
 }
 
+const authorizedKeysLimit = 1 << 20
+
+// readAuthorizedKeys reads the account's authorized_keys with sshd's StrictModes rules.
+func readAuthorizedKeys(home string) (string, []byte, error) {
+	dir := filepath.Join(home, ".ssh")
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return "", nil, errors.New("unsafe or missing account SSH directory")
+	}
+	path := filepath.Join(dir, "authorized_keys")
+	uid := uint32(os.Getuid())
+	// Public keys: like sshd, refuse only group or other write.
+	options := safefs.ReadOptions{MaxBytes: authorizedKeysLimit, OwnerUID: &uid, DenyPerm: 0o022, SingleLink: true}
+	contents, err := safefs.ReadRegular(path, options)
+	return path, contents, err
+}
+
+func fingerprintDigest(fingerprint string) string {
+	digest, _ := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(fingerprint, "SHA256:"))
+	return hex.EncodeToString(digest)
+}
+
 func manageKeys(args []string) error {
 	if len(args) < 3 || !publicFingerprint.MatchString(args[2]) {
 		return errors.New("managed owner SSH fingerprint is unavailable")
@@ -123,15 +144,7 @@ func manageKeys(args []string) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, ".ssh")
-	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
-		return errors.New("unsafe or missing development user SSH directory")
-	}
-	path := filepath.Join(dir, "authorized_keys")
-	uid := uint32(os.Getuid())
-	// Public keys: like sshd, refuse only group or other write.
-	options := safefs.ReadOptions{MaxBytes: 1 << 20, OwnerUID: &uid, DenyPerm: 0o022, SingleLink: true}
-	contents, err := safefs.ReadRegular(path, options)
+	path, contents, err := readAuthorizedKeys(home)
 	if err != nil {
 		return err
 	}
@@ -172,7 +185,6 @@ func manageKeys(args []string) error {
 			return err
 		}
 	}
-	digest, _ := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(assessment.Fingerprint, "SHA256:"))
-	assessment.Digest = hex.EncodeToString(digest)
+	assessment.Digest = fingerprintDigest(assessment.Fingerprint)
 	return json.NewEncoder(os.Stdout).Encode(assessment)
 }

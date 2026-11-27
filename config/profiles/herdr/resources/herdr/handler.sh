@@ -39,11 +39,14 @@ yard_running() {
   command -v incus >/dev/null &&
     [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]
 }
+allowed_refusals() {
+  [ "$YARD_KIND" = container ] || printf '%s\n' 'Herdr supports container yards only'
+  [ "$NESTED_E2E_VMS" != 1 ] || printf '%s\n' 'Herdr is unavailable in nested E2E mode'
+}
 allowed() {
-  local -a refusals=()
-  [ "$YARD_KIND" = container ] || refusals+=('Herdr supports container yards only')
-  [ "$NESTED_E2E_VMS" != 1 ] || refusals+=('Herdr is unavailable in nested E2E mode')
-  [ "${#refusals[@]}" -eq 0 ] || die "$(printf '%s\n' "${refusals[@]}")"
+  local refusals
+  refusals=$(allowed_refusals)
+  [ -z "$refusals" ] || die "$refusals"
 }
 observe() {
   if yexec test -x "$helper"; then
