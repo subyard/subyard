@@ -1008,7 +1008,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-recovery-phase-', dir='/tmp') a
     identifier = '00000000000000000001-abcdef0123456789'
     events = [{'kind':kind,'incident_id':identifier,'event_id':f'{index:020d}-abcdef0123456789','resource_generation':generation,'lease_epoch':9,'recovery_attempt':1}
               for index,(kind,generation) in enumerate([('slot.quarantined',4),('recovery.start',4),('recovery.available',5)],1)]
-    for failed in ['', 'pause', 'setup', 'release', 'consumed', 'quarantine', 'fence', 'incident', 'host', 'replay', 'restore', 'available', 'instances', 'volumes', 'events']:
+    for failed in ['', 'pause', 'setup', 'release', 'consumed', 'quarantine', 'fence', 'incident', 'snapshot', 'report', 'host', 'replay', 'restore', 'available', 'instances', 'volumes', 'events']:
         case = root/(failed or 'success'); case.mkdir(); log = case/'calls'
         runner = str(pathlib.Path(__file__).resolve().parents[1]/'agent-e2e.sh') if not failed else 'true'
         key_environment = dict(os.environ)
@@ -1026,7 +1026,8 @@ with tempfile.TemporaryDirectory(prefix='subyard-recovery-phase-', dir='/tmp') a
         available = dict(quarantined,state='available',resource_generation=6 if failed == 'available' else 5)
         incident = {'incident_id':identifier,'slot_id':'slot-001','resource_generation':4,'lease_epoch':9,
                     'created_at':'2026-10-12T00:00:00Z','failure_reason':'p0 targeted inventory fault',
-                    'context':{'schema_version':2,'yard':'test-yard','project':'subyard-test-yard'},'diagnostics':{},
+                    'context':{'schema_version':2,'yard':'test-yard','project':'subyard-test-yard'},
+                    'diagnostics':({} if failed == 'snapshot' else {'vm_1_guest_jobs':'No jobs running.','vm_1_guest_journal':'unavailable: guest agent not responding'}),
                     'command':{'command':('/wrong' if failed == 'incident' else '/run/subyard-staging-incus-fault/incus project list --format csv -c n'),'exit_code':1}}
         host = {'outer_state':'running','observed_at':'2026-10-12T00:00:01Z','host_memory':{'available_bytes':100,'outer_host_evidence':'collected by physical-owner host sink'},
                 'allocation_memory':{'limit_available':False,'available_bytes':100,
@@ -1047,7 +1048,12 @@ die() {{ echo "$*" >&2; exit 2; }}
 verify_broker_installation() {{ :; }}
 reaper_pause() {{ echo pause_$2 >> "$LOG"; [ "$FAILED" != pause ]; }}
 stop_sampler() {{ echo observer_stopped >> "$LOG"; }}
-start_holder_child() {{ [ -n "$FAILED" ] || [ -s "$STATE_PARENT/recovery/id_ed25519.pub" ]; printf 'slot-001\tconfig\tproject\trun\tpurpose\t4\t%s\n' "$base" > "$STATE_PARENT/recovery.ready"; HOLDER_STARTED_PID=42; }}
+start_holder_child() {{
+  [ -n "$FAILED" ] || [ -s "$STATE_PARENT/recovery/id_ed25519.pub" ]
+  printf 'slot-001\tconfig\tproject\trun1234\tpurpose\t4\t%s\n' "$base" > "$STATE_PARENT/recovery.ready"
+  [ "$FAILED" = report ] || printf 'E2E_QUARANTINE slot=slot-001 run=run1234 incident_id={identifier}\nagent-e2e: tell the operator and ask them to run: yard test-vms logs --slot 1\n'
+  HOLDER_STARTED_PID=42
+}}
 recovery_monotonic_seconds() {{ echo 100; }}
 status() {{ printf '%s\n' {held_body!r}; }}
 wait_state() {{ if [ "$1" = quarantined ]; then printf '%s\n' {quarantine_body!r}; else printf '%s\n' {available_body!r}; fi; }}
@@ -1090,7 +1096,7 @@ runtime_yard() {{ printf '%s\n' {shlex.quote(event_body)}; }}
             assert calls.index('release') < calls.index('consumed') < calls.index('capture') < calls.index('restore') < calls.index('systemctl'), calls
         else:
             assert 'STAGING_RECOVERY=' not in result.stdout, (failed,result.stdout)
-            if failed in ['pause','setup','release','consumed','quarantine','fence','incident','host','replay','restore']:
+            if failed in ['pause','setup','release','consumed','quarantine','fence','incident','snapshot','report','host','replay','restore']:
                 assert 'systemctl' not in calls, (failed,calls)
 print('actual singleton recovery phase requires original failure, capture, immutable replay, restoration, fencing and native availability proofs')
 

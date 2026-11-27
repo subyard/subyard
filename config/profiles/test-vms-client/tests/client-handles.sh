@@ -61,6 +61,7 @@ case "$command" in
     capabilities='["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1","disk-size-v1"]'
     [ ! -e "$FAKE/v4" ] || capabilities='["attribution-v2","environment-acquire-v3","disposable-v1","vm-count-v1","disk-size-v1","process-acquire-v4"]'
     [ ! -e "$FAKE/lease-logs" ] || capabilities="$(jq -c '. + ["lease-logs-v1"]' <<<"$capabilities")"
+    [ ! -e "$FAKE/error-journal" ] || capabilities="$(jq -c '. + ["error-journal-v1"]' <<<"$capabilities")"
     jq -cn --argjson capabilities "$capabilities" '{schema_version:1,status:"ok",capabilities:$capabilities,
       pool:{schema_version:2,slots:[{slot_id:"slot-002",state:"available",resource_generation:1,lease_epoch:1}]}}'
     ;;
@@ -95,6 +96,9 @@ case "$command" in
         exit 0 ;;
       capacity)
         printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"insufficient memory"}'
+        exit 0 ;;
+      provisioning-quarantine)
+        printf '%s\n' '{"schema_version":1,"status":"error","code":"quarantined","message":"slot provisioning failed"}'
         exit 0 ;;
     esac
     if [ "$protocol" = acquire-v4 ]; then
@@ -152,6 +156,20 @@ case "$command" in
       {kind:"lease.stop_failed",timestamp:"2026-08-24T12:01:05Z",slot_id:"slot-002",lease_epoch:2,duration_ms:64800,
         error:"drain step fence-and-stop: incus stop: context deadline exceeded\nconsole tail:\n  [ ok ] phase=forged\u001b[0m\nA stop job is running for fixture.service"},
       {kind:"slot.quarantined",timestamp:"2026-08-24T12:01:06Z",slot_id:"slot-002",lease_epoch:2,incident_id:"01795371892254664249-1843ff2f64712754"}]}'
+    ;;
+  errors-v1\ *)
+    read -r _ client slot count <<<"$command"
+    log "errors-v1 slot=$slot count=$count client=$client"
+    # Another holder's older quarantine of the same slot precedes this lease's own.
+    jq -cn --arg own "$([ "$client" != - ] && echo 1)" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{schema_version:1,status:"ok",errors:[
+      {schema_version:1,event_id:"01795371800000000000-0000000000000001",timestamp:"2026-08-24T11:00:00Z",sequence:1,
+        kind:"slot.quarantined",slot_id:"slot-002",lease_epoch:1,outcome:"error",incident_id:"01795371800000000000-00000000000000aa"},
+      {schema_version:1,event_id:"01795371892254664249-0000000000000002",timestamp:$now,sequence:2,
+        kind:"lease.stop_failed",slot_id:"slot-002",lease_epoch:2,step:"fence-and-stop",outcome:"timeout",duration_ms:64800,
+        own:($own == "1")},
+      {schema_version:1,event_id:"01795371892254664249-0000000000000003",timestamp:$now,sequence:3,
+        kind:"slot.quarantined",slot_id:"slot-002",lease_epoch:2,step:"fence-and-stop",outcome:"timeout",
+        incident_id:"01795371892254664249-1843ff2f64712754",own:($own == "1")}]}'
     ;;
   *) log "rejected $command"; printf '%s\n' '{"schema_version":1,"status":"error","code":"invalid_request"}' ;;
 esac
@@ -412,9 +430,55 @@ grep -Fxq 'E2E_RELEASE_EVENT unavailable slot=slot-002' "$TMP/err" \
   && ! grep -q '^logs-v1 ' "$TMP/facade.log" \
   || fail "refusal without lease-logs-v1 was not reported as unavailable: $(cat "$TMP/err")"
 [ -f "$TMP/client/handles/$handle/lease.json" ] || fail 'unavailable diagnostics removed the handle'
+# The broker's error journal names this lease's incident for the operator.
+grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=unavailable" "$TMP/err" \
+  && grep -Fxq 'subyard-test-vms: tell the operator and ask them to run: yard test-vms logs --slot 2' "$TMP/err" \
+  || fail "quarantine without the journal was not reported: $(cat "$TMP/err")"
+touch "$TMP/error-journal"
+if client release "$handle" 2>"$TMP/err"; then fail 'a quarantined release succeeded with the journal'; fi
+grep -Fxq "E2E_QUARANTINE slot=slot-002 run=$handle incident_id=01795371892254664249-1843ff2f64712754" "$TMP/err" \
+  && grep -Fxq "subyard-test-vms: slot-002 was quarantined during release of run $handle (incident 01795371892254664249-1843ff2f64712754); the broker recovers it automatically." "$TMP/err" \
+  && grep -Fxq 'subyard-test-vms: tell the operator and ask them to run: yard test-vms logs --slot 2' "$TMP/err" \
+  && grep -Fxq "errors-v1 slot=slot-002 count=20 client=$(cat "$(find "$TMP/client" -name client-id)")" "$TMP/facade.log" \
+  || fail "quarantined release did not name its incident: $(cat "$TMP/err")"
 rm -f "$TMP/release-rejected"
 client release "$handle" 2>"$TMP/err" || fail 'release after a quarantined refusal failed'
-! grep -Fq E2E_RELEASE_EVENT "$TMP/err" || fail 'a successful release printed refusal diagnostics'
+! grep -Fq E2E_RELEASE_EVENT "$TMP/err" && ! grep -Fq E2E_QUARANTINE "$TMP/err" \
+  || fail 'a successful release printed refusal diagnostics'
+
+# The pool journal is readable by any controller and printed as typed fields;
+# status adds one line about the last 24 hours.
+client errors --yard test-yard --slot 2 -n 5 > "$TMP/out" 2>"$TMP/err" || fail "errors failed: $(cat "$TMP/err")"
+grep -Eq '^2026-08-24T11:00:00Z slot-002 slot.quarantined outcome=error incident_id=01795371800000000000-00000000000000aa$' "$TMP/out" \
+  && grep -Eq '^[0-9T:-]+Z slot-002 lease.stop_failed step=fence-and-stop outcome=timeout duration_ms=64800 own$' "$TMP/out" \
+  && grep -Fxq "errors-v1 slot=slot-002 count=5 client=$(cat "$(find "$TMP/client" -name client-id)")" "$TMP/facade.log" \
+  || fail "errors output: $(cat "$TMP/out") $(cat "$TMP/err")"
+client errors --yard test-yard --json > "$TMP/out" || fail 'errors --json failed'
+jq -e 'type == "array" and length == 3' "$TMP/out" >/dev/null || fail "errors --json: $(cat "$TMP/out")"
+client status --yard test-yard > "$TMP/out" 2>"$TMP/err" || fail 'status failed'
+grep -Eq '^broker errors in the last 24 h: 2; latest: [0-9T:-]+Z slot-002 slot.quarantined; details: subyard-test-vms errors$' "$TMP/out" \
+  || fail "status error summary: $(cat "$TMP/out")"
+# A provisioning failure quarantines the slot during acquire: the same message names
+# this run and its own incident; a quarantined slot of another holder names only the slot.
+touch "$TMP/error-journal"
+printf 'provisioning-quarantine\n' > "$TMP/scenario"
+if client acquire --yard test-yard --slot 2 >/dev/null 2>"$TMP/err"; then fail 'a quarantined acquire succeeded'; fi
+grep -Eq '^E2E_QUARANTINE slot=slot-002 run=[0-9a-f]{8} incident_id=01795371892254664249-1843ff2f64712754$' "$TMP/err" \
+  && grep -Eq '^subyard-test-vms: slot-002 was quarantined during provisioning of run [0-9a-f]{8} ' "$TMP/err" \
+  && grep -Fq 'lease acquire failed (quarantined: slot provisioning failed)' "$TMP/err" \
+  || fail "quarantined acquire was not reported: $(cat "$TMP/err")"
+printf 'slot-quarantined\n' > "$TMP/scenario"
+if client acquire --yard test-yard --slot 2 >/dev/null 2>"$TMP/err"; then fail 'acquire of a quarantined slot succeeded'; fi
+grep -Fxq 'E2E_QUARANTINE slot=slot-002 run=- incident_id=01795371892254664249-1843ff2f64712754' "$TMP/err" \
+  && grep -Fxq 'subyard-test-vms: slot-002 is quarantined (incident 01795371892254664249-1843ff2f64712754).' "$TMP/err" \
+  || fail "quarantined slot was not reported: $(cat "$TMP/err")"
+rm -f "$TMP/scenario"
+rm -f "$TMP/error-journal"
+if client errors --yard test-yard 2>"$TMP/err"; then fail 'errors succeeded on a broker without the journal'; fi
+grep -Fq 'broker does not support the error journal (error-journal-v1); operator runtime update required' "$TMP/err" \
+  || fail "missing journal capability: $(cat "$TMP/err")"
+client status --yard test-yard > "$TMP/out" || fail 'status failed on an older broker'
+! grep -q '^broker errors' "$TMP/out" || fail 'status printed a journal line for an older broker'
 
 # Refusals leave no handle and keep the typed outcome and holder.
 for scenario in busy busy-wait capacity; do
@@ -463,6 +527,12 @@ for protocol in v3 v4; do
       [ "$(count acquire)" = 1 ] && [ "$((SECONDS - started))" -lt 10 ] \
         && grep -Fq 'operator action required' "$TMP/err" && ! grep -q 'event=refused' "$TMP/err" \
         || fail "$protocol $state waited or became a retryable capacity refusal"
+      if [ "$state" = quarantined ]; then
+        # Another holder's quarantine names the slot and incident, never that holder's run.
+        grep -Fxq 'E2E_QUARANTINE slot=slot-002 run=- incident_id=unavailable' "$TMP/err" \
+          && grep -Fxq 'subyard-test-vms: tell the operator and ask them to run: yard test-vms logs --slot 2' "$TMP/err" \
+          || fail "$protocol quarantined slot was not reported for the operator: $(cat "$TMP/err")"
+      fi
     fi
   done
   for scenario in race-success race-timeout; do

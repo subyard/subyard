@@ -52,7 +52,10 @@ python3 -B "$ROOT/config/skills/deliver.py" apply --provider profile-test-vms-cl
 client="$work/root/usr/local/share/subyard/skills/subyard-test-vms/client.sh"
 cd "$work"
 
-bash "$client" status "${route[@]}"
+bash "$client" status "${route[@]}" | tee "$work/status"
+grep -Eq '^broker errors in the last 24 h: ' "$work/status" || fail 'status did not summarize the broker error journal'
+bash "$client" errors "${route[@]}" -n 20 --json | jq -e 'type == "array"' >/dev/null \
+  || fail 'the installed client could not read the pool error journal'
 handle="$(bash "$client" acquire "${route[@]}" --slot "$slot" --purpose test-vms-client)"
 token="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 bash "$client" exec "$handle" -- sh -c 'id -u > /root/client-check && printf "%s\n" "$1" >> /root/client-check' check "$token"
@@ -65,4 +68,4 @@ handle=''
 if bash "$client" exec "$released" -- true 2>/dev/null; then fail 'exec succeeded after release'; fi
 
 bash "$ROOT/dev/agent-e2e.sh" "${route[@]}" --slot "$slot" --vm-count 1 --purpose test-vms-client-boundary --verify-boundary
-printf 'ok: Hermes yard delivery and retirement; installed client leased, ran root commands across calls, released; boundary verified\n'
+printf 'ok: Hermes yard delivery and retirement; installed client read the error journal, leased, ran root commands across calls, released; boundary verified\n'

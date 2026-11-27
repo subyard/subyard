@@ -673,6 +673,7 @@ restore_inventory_fault() {
 
 verify_singleton_recovery() {
   local held quarantined available uuid lease_project incident_id incident host captured incident_hash host_hash logs release_rc=0 until
+  local holder_run
   verify_broker_installation || die 'owner changed before recovery acceptance'
   [ "$REAPER_PAUSED" = 1 ] && [ "$REAPER_TIMER_STOPPED" = 1 ] \
     || die 'recovery capture requires the fixture-owned reaper pause'
@@ -689,7 +690,7 @@ verify_singleton_recovery() {
     [ "$(recovery_monotonic_seconds)" -lt "$until" ] || die 'recovery singleton acquire watchdog expired'
     sleep 1
   done
-  IFS=$'\t' read -r _ HOLDER_CONFIG _ _ _ HOLDER_GENERATION HELD_BASE < "$STATE_PARENT/$HOLDER_CLIENT.ready"
+  IFS=$'\t' read -r _ HOLDER_CONFIG _ holder_run _ HOLDER_GENERATION HELD_BASE < "$STATE_PARENT/$HOLDER_CLIENT.ready"
   [ "$HELD_BASE" = "$base" ] || die 'recovery allocation changed the validated base'
   held="$(status)"
   HOLDER_EPOCH="$(jq -er '.pool.slots[0].lease_epoch' <<<"$held")"
@@ -736,8 +737,13 @@ verify_singleton_recovery() {
     --argjson generation "$HOLDER_GENERATION" --argjson epoch "$HOLDER_EPOCH" --arg yard "$YARD" --arg project "$lease_project" '
     .incident_id==$id and .slot_id=="slot-001" and .resource_generation==$generation and .lease_epoch==$epoch and
     (.failure_reason | contains("p0 targeted inventory fault")) and .context.schema_version==2 and .context.yard==$yard and .context.project==$project and
-    .command.command==$command and .command.exit_code==1 and (.diagnostics|type)=="object"
-  ' "$incident" >/dev/null || die 'incident lost the original inventory failure'
+    .command.command==$command and .command.exit_code==1 and (.diagnostics|type)=="object" and
+    (.diagnostics.vm_1_guest_jobs|type)=="string" and (.diagnostics.vm_1_guest_journal|type)=="string"
+  ' "$incident" >/dev/null || die 'incident lost the original inventory failure or the guest snapshot'
+  # The holder's client named its own incident from the broker's error journal.
+  grep -Fxq "E2E_QUARANTINE slot=slot-001 run=$holder_run incident_id=$incident_id" "$STATE_PARENT/$HOLDER_CLIENT.log" \
+    && grep -Fxq 'agent-e2e: tell the operator and ask them to run: yard test-vms logs --slot 1' "$STATE_PARENT/$HOLDER_CLIENT.log" \
+    || die 'quarantined release did not report its incident for the operator'
   jq -e '
     .outer_state=="running" and (.observed_at|type)=="string" and
     .host_memory.outer_host_evidence=="collected by physical-owner host sink" and (.host_memory.available_bytes|type)=="number" and

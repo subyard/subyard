@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=scripts/lib/runtime.sh
 . "$REPO_ROOT/scripts/lib/runtime.sh"
 E2E_PROGRAM=agent-e2e
+E2E_ERRORS_HINT='dev/agent-e2e.sh --errors'
 # The shared broker client owns the route, facade, lease, keeper and guest transport.
 # This runner adds worktree copy, guest run directories, lanes and phase evidence.
 # shellcheck source=config/profiles/test-vms-client/skills/subyard-test-vms/client.sh
@@ -51,6 +52,7 @@ Usage:
   dev/agent-e2e.sh [--owner ID] [--pool ID] --prepare
   dev/agent-e2e.sh [--owner ID] [--pool ID] --status [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --errors [--slot N] [-n 1..200] [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
   dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
   dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--vm 1|2|both] -- COMMAND [ARG...]
@@ -84,7 +86,9 @@ lease-relative selectors, not physical slot names. Every invocation acquires a n
 script or one interactive SSH session when several steps must share mutable guest state. Every
 lease-taking mode requires --slot N, atomically requests that broker slot and never falls back.
 --logs reads only this controller's lease events, including failed acquisition and released leases.
---incident reads the diagnostic artifact referenced by an event. Neither command acquires a lease.
+--errors reads the broker failures of the whole pool (slot, step, outcome, timing and incident,
+without other controllers' attribution) and marks this controller's own records.
+--incident reads the diagnostic artifact referenced by an event. These reads never acquire a lease.
 The private client-id authorizes reads; keep it private. Broker diagnostics are retained for up to
 30 days, subject to a 512 MiB archive cap. Older brokers need an operator runtime update first.
 EOF
@@ -440,6 +444,9 @@ main() {
       --logs)
         [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
         mode=logs; diagnostic_mode=logs; shift ;;
+      --errors)
+        [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
+        mode=errors; diagnostic_mode=errors; shift ;;
       --incident)
         [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
         [ "$#" -ge 2 ] || die '--incident needs an incident ID'
@@ -495,20 +502,25 @@ main() {
   resolve_service_selection "$mode"
   configure_yard_scope
   [ -z "$diagnostic_mode" ] || [ "$diagnostic_mode" = "$mode" ] || die 'diagnostic reads cannot be combined with another mode'
-  [ "$status_json" = 0 ] || [ "$mode" = status ] || [ "$mode" = logs ] || die "--json is valid only with --status or --logs"
-  [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || die '-n is valid only with --logs'
+  [ "$status_json" = 0 ] || [ "$mode" = status ] || [ "$mode" = logs ] || [ "$mode" = errors ] \
+    || die "--json is valid only with --status, --logs or --errors"
+  [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || [ "$mode" = errors ] || die '-n is valid only with --logs or --errors'
   [ -z "$incident_id" ] || [ "$mode" = incident ] || die '--incident cannot be combined with another mode'
   if [ "$mode" = observe ]; then
     [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ -z "$IMAGE_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
     read_agent_observations "$observer_cursor"
     return
   fi
-  if [ "$mode" = logs ] || [ "$mode" = incident ]; then
+  if [ "$mode" = logs ] || [ "$mode" = incident ] || [ "$mode" = errors ]; then
     [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ -z "$IMAGE_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
       || die 'diagnostic reads do not accept allocation options'
     [ "$mode" != incident ] || [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot is not valid with --incident'
     [ "${#command[@]}" -eq 0 ] || die 'diagnostic reads take no guest command'
-    read_agent_logs "$mode" "$log_count" "$status_json" "$incident_id"
+    if [ "$mode" = errors ]; then
+      read_error_journal "$log_count" "$status_json"
+    else
+      read_agent_logs "$mode" "$log_count" "$status_json" "$incident_id"
+    fi
     return
   fi
   [ -z "$purpose_override" ] || [ "$mode" != status ] || die "--purpose is not valid with --status"
@@ -530,6 +542,7 @@ main() {
         printf '%s\n' "$status_response"
       else
         render_pool_status "$status_response"
+        render_error_summary "$status_response"
       fi
       return
       ;;

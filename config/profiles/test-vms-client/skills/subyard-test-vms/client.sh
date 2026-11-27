@@ -5,6 +5,7 @@
 CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CLIENT_SELF="$CLIENT_DIR/$(basename "${BASH_SOURCE[0]}")"
 E2E_PROGRAM="${E2E_PROGRAM:-subyard-test-vms}"
+E2E_ERRORS_HINT="${E2E_ERRORS_HINT:-subyard-test-vms errors}"
 
 client_operator_home() {
   if declare -F subyard_operator_home >/dev/null; then
@@ -1018,13 +1019,16 @@ acquire_lease() {
     fi
     if [ "$code" != busy ]; then
       reason="$(jq -r '.reason // .message // empty' <<<"$response")"
+      [ "$code" != quarantined ] || report_quarantine "$LEASE_REQUESTED_SLOT" provisioning "$LEASE_RUN" "${LEASE_EPOCH:-}"
       die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
     fi
     validate_exact_busy_response "$response" \
       || die_acquire_unknown invalid-busy-refusal
     case "$state" in
       provisioning|held|draining|recovering) ;;
-      *) die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason; operator action required" ;;
+      *)
+        [ "$state" != quarantined ] || report_quarantine "$LEASE_REQUESTED_SLOT" busy
+        die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason; operator action required" ;;
     esac
     owner_summary=''
     if [ "$state" = held ]; then
@@ -1056,6 +1060,93 @@ acquire_lease() {
     [ "$sleep_seconds" -le 5 ] || sleep_seconds=5
     sleep "$sleep_seconds"
   done
+}
+
+# One read of the pool error journal: SLOT|- COUNT [TIMEOUT]. Prints the ok reply.
+# Any controller may read it; an existing private client ID only marks its own
+# records. Returns 4 unreachable, 5 unsupported, 6 refused.
+error_journal_request() {
+  local slot="$1" count="$2" budget="${3:-}" client=- status response
+  if [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ]; then
+    read -r client < "$STATE_ROOT/client-id" || client=-
+    [[ "$client" =~ ^[0-9a-f]{32}$ ]] || client=-
+  fi
+  status="$(facade_request status "$budget")" || return 4
+  jq -e '.schema_version == 1 and .status == "ok" and
+    ((.capabilities // []) | index("error-journal-v1") != null)' <<<"$status" >/dev/null 2>&1 || return 5
+  response="$(facade_request "errors-v1 $client $slot $count" "$budget")" || return 4
+  jq -e '.schema_version == 1 and .status == "ok" and (.errors | type == "array")' \
+    <<<"$response" >/dev/null 2>&1 || return 6
+  printf '%s\n' "$response"
+}
+
+render_error_journal() {
+  jq -r '.errors[] | "\(.timestamp) \(.slot_id // "-") \(.kind)"
+    + (if .step then " step=\(.step)" else "" end)
+    + " outcome=\(.outcome)"
+    + (if .operation then " operation=\(.operation)" else "" end)
+    + (if .duration_ms then " duration_ms=\(.duration_ms)" else "" end)
+    + (if .recovery_attempt then " recovery_attempt=\(.recovery_attempt)" else "" end)
+    + (if .incident_id then " incident_id=\(.incident_id)" else "" end)
+    + (if .own then " own" else "" end)' | tr -d '\000-\010\013-\037\177'
+}
+
+read_error_journal() {
+  local count="$1" json_output="$2" response rc=0
+  command -v jq >/dev/null 2>&1 || die 'jq is required'
+  response="$(error_journal_request "${LEASE_REQUESTED_SLOT:--}" "$count")" || rc=$?
+  case "$rc" in
+    0) ;;
+    4) die 'test environment unavailable; ask the operator to run: yard test-vms status and yard test-vms logs -n 50' ;;
+    5) die 'broker does not support the error journal (error-journal-v1); operator runtime update required' ;;
+    *) die 'error journal is unavailable' ;;
+  esac
+  if [ "$json_output" = 1 ]; then
+    jq -c '.errors' <<<"$response"
+  else
+    render_error_journal <<<"$response"
+  fi
+}
+
+# One status line about recent pool failures; never fails the status command.
+render_error_summary() {
+  local status="$1" response since
+  jq -e '((.capabilities // []) | index("error-journal-v1") != null)' <<<"$status" >/dev/null 2>&1 || return 0
+  since="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+  if response="$(facade_request 'errors-v1 - - 200' 30)" &&
+    jq -e '.status == "ok" and (.errors | type == "array")' <<<"$response" >/dev/null 2>&1; then
+    jq -r --arg since "$since" --arg hint "$E2E_ERRORS_HINT" '
+      [.errors[] | select(.timestamp >= $since)] as $recent |
+      if ($recent | length) == 0 then "broker errors in the last 24 h: none"
+      else "broker errors in the last 24 h: \($recent | length); latest: \($recent[-1].timestamp) \($recent[-1].slot_id // "-") \($recent[-1].kind); details: \($hint)"
+      end' <<<"$response" | tr -d '\000-\010\013-\037\177'
+  else
+    printf 'broker errors: unavailable\n'
+  fi
+}
+
+# Tell the agent which slot was quarantined, with which incident, and the
+# command the operator runs. The incident comes from this controller's own
+# journal record; another holder's run is never printed. Never fails.
+report_quarantine() {
+  local slot="$1" context="$2" run="${3:-}" epoch="${4:-}" response incident=unavailable number
+  [[ "$slot" =~ ^slot-[0-9]{3}$ ]] || return 0
+  number="$((10#${slot#slot-}))"
+  if response="$(error_journal_request "$slot" 20 30 2>/dev/null)"; then
+    incident="$(jq -r --arg own "${run:+1}" --arg epoch "$epoch" '
+      [.errors[] | select(.kind == "slot.quarantined") |
+        select($own == "" or (.own == true and ($epoch == "" or (.lease_epoch | tostring) == $epoch)))]
+      | last | .incident_id // "unavailable"' <<<"$response" 2>/dev/null)" || incident=unavailable
+  fi
+  [[ "$incident" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || incident=unavailable
+  printf 'E2E_QUARANTINE slot=%s run=%s incident_id=%s\n' "$slot" "${run:--}" "$incident" >&2
+  if [ -n "$run" ]; then
+    printf '%s: %s was quarantined during %s of run %s (incident %s); the broker recovers it automatically.\n' \
+      "$E2E_PROGRAM" "$slot" "$context" "$run" "$incident" >&2
+  else
+    printf '%s: %s is quarantined (incident %s).\n' "$E2E_PROGRAM" "$slot" "$incident" >&2
+  fi
+  printf '%s: tell the operator and ask them to run: yard test-vms logs --slot %s\n' "$E2E_PROGRAM" "$number" >&2
 }
 
 lease_command() {
@@ -1124,6 +1215,7 @@ release_lease() {
       printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
         "$released_slot" "$released_run" "$RELEASE_CODE" >&2
       release_refusal_events || true
+      [ "$RELEASE_CODE" != quarantined ] || report_quarantine "$released_slot" release "$released_run" "$LEASE_EPOCH"
       return 1 ;;
   esac
   LEASE_ID=""
@@ -1828,7 +1920,11 @@ client_release() {
     printf 'E2E lease handle %s is not active; nothing to release\n' "$1" >&2
     return 0
   fi
-  release_handle explicit || { release_refusal_events || true; exit 1; }
+  release_handle explicit || {
+    release_refusal_events || true
+    [ "$RELEASE_CODE" != quarantined ] || report_quarantine "$LEASE_SLOT" release "$LEASE_RUN" "$LEASE_EPOCH"
+    exit 1
+  }
 }
 
 client_leases() {
@@ -1865,10 +1961,12 @@ Usage: subyard-test-vms COMMAND [OPTIONS]
   release HANDLE                        release the lease; the VM disks are deleted
   leases                                list this user's lease handles
   logs [--slot N] [-n 1..200] [--json]  this controller's broker events
+  errors [--slot N] [-n 1..200] [--json]
+                                        broker failures of the whole pool, without attribution
   incident ID                           one referenced diagnostic artifact
   prepare                               create the controller identity
 
-status, acquire, logs and incident accept --owner ID --pool ID for an exact service.
+status, acquire, logs, errors and incident accept --owner ID --pool ID for an exact service.
 A handle keeps one lease across separate commands. A detached keeper renews it every
 five minutes while the handle exists and releases it after --idle (default 20m, at
 most 2h) without exec use; `exec HANDLE -- true` resets that timer. If the keeper
@@ -1889,17 +1987,21 @@ client_main() {
     ssh) client_exec 1 "$@"; return ;;
     release) client_release "$@"; return ;;
     leases) client_leases "$@"; return ;;
-    status|logs|incident|prepare) ;;
+    status|logs|errors|incident|prepare) ;;
     *) die "unknown command '$command'; see --help" ;;
   esac
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --owner | --pool | --yard) route_option "$@"; shift 2 ;;
-      --json) [ "$command" = status ] || [ "$command" = logs ] || die '--json is valid only with status or logs'; json=1; shift ;;
-      --slot) [ "$command" = logs ] && [ "$#" -ge 2 ] || die '--slot is valid only with logs'; set_requested_slot "$2" --slot; shift 2 ;;
+      --json)
+        case "$command" in status|logs|errors) ;; *) die '--json is valid only with status, logs or errors' ;; esac
+        json=1; shift ;;
+      --slot)
+        { [ "$command" = logs ] || [ "$command" = errors ]; } && [ "$#" -ge 2 ] || die '--slot is valid only with logs or errors'
+        set_requested_slot "$2" --slot; shift 2 ;;
       -n)
-        [ "$command" = logs ] && [ "$#" -ge 2 ] && [[ "$2" =~ ^[0-9]{1,3}$ ]] \
-          && [ "$((10#$2))" -ge 1 ] && [ "$((10#$2))" -le 200 ] || die '-n needs a number from 1 to 200 with logs'
+        { [ "$command" = logs ] || [ "$command" = errors ]; } && [ "$#" -ge 2 ] && [[ "$2" =~ ^[0-9]{1,3}$ ]] \
+          && [ "$((10#$2))" -ge 1 ] && [ "$((10#$2))" -le 200 ] || die '-n needs a number from 1 to 200 with logs or errors'
         count="$((10#$2))"; shift 2 ;;
       *)
         [ "$command" = incident ] && [ -z "$incident" ] || die "unknown option '$1'"
@@ -1914,9 +2016,10 @@ client_main() {
     prepare) prepare_identity ;;
     status)
       response="$(facade_request status)" || die 'test environment unavailable'
-      if [ "$json" = 1 ]; then printf '%s\n' "$response"; else render_pool_status "$response"; fi
+      if [ "$json" = 1 ]; then printf '%s\n' "$response"; else render_pool_status "$response"; render_error_summary "$response"; fi
       ;;
     logs) read_agent_logs logs "$count" "$json" '' ;;
+    errors) read_error_journal "$count" "$json" ;;
     incident) read_agent_logs incident "$count" 0 "$incident" ;;
   esac
 }
