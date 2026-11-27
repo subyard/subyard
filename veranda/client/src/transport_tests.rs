@@ -1311,14 +1311,20 @@ fn rpc_failures_are_logged_as_closed_facts_without_values() {
     );
     let file = fixture.store_root().join(crate::diagnostics::FILE);
     let raw = fs::read_to_string(&file).unwrap();
-    for secret in [
+    for (index, marker) in [
         "SECRET",
         "hunter2",
         "/home/operator",
         "plan init",
         "HOST_LINKS",
-    ] {
-        assert!(!raw.contains(secret), "{secret} leaked: {raw}");
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            !raw.contains(marker),
+            "fixture marker {index} reached the log"
+        );
     }
     #[cfg(unix)]
     {
