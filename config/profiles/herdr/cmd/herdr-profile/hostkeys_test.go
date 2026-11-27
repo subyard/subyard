@@ -92,6 +92,8 @@ func TestHostKeysClassifyOnlyBareNonOwnerKeys(t *testing.T) {
 		certificateLine(t, publicKey(t, 8)) +
 		"garbage line\n" +
 		", " + authorizedLine(publicKey(t, 10), "", "comma") +
+		strings.Replace(authorizedLine(publicKey(t, 11), "", "tab"), " ", "\t", 1) +
+		strings.TrimSuffix(authorizedLine(publicKey(t, 12), "", "crlf"), "\n") + "\r\n" +
 		authorizedLine(duplicate, "restrict ", "first") +
 		authorizedLine(duplicate, "", "second") +
 		authorizedLine(duplicate, "", "third") +
@@ -105,7 +107,7 @@ func TestHostKeysClassifyOnlyBareNonOwnerKeys(t *testing.T) {
 	}
 	keys, unrecognized := classifyHostKeys([]byte(host), guestGrants(guest, ownerFP), ownerFP)
 	want := "subyard-owner=skipped:owner user-laptop=new desk=granted manual=unmanaged office=skipped:options " +
-		"ca=skipped:options cert=skipped:certificate second=new yubikey=new"
+		"ca=skipped:options cert=skipped:certificate tab=new crlf=new second=new yubikey=new"
 	if got := statuses(keys); got != want {
 		t.Fatalf("statuses:\n got %s\nwant %s", got, want)
 	}

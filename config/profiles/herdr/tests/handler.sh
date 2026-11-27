@@ -279,6 +279,18 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
     "${fp[office]}  user-office  skipped:options" 'line 7  unrecognized' \
     'Pair new keys with yard herdr pair --from-host --all or --from-host SHA256:FINGERPRINT...' | cmp - "$test_root/preview"
 
+  (
+    # A guest list over the helper's limit reads as unknown instead of failing the preview.
+    guest_keys="$HERDR_TEST_GUEST_HOME/.ssh/authorized_keys"
+    awk 'BEGIN { for (line = 0; line < 200000; line++) print "x" }' > "$guest_keys"
+    SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=pair-list SUBYARD_OPERATION_ID=fixture \
+      "$handler" pair --from-host > "$test_root/oversize"
+    grep -Fxq "${fp[laptop]}  user-laptop  unknown" "$test_root/oversize"
+  )
+  { cat "$test_root/keys/owner.pub"
+    printf 'from="127.0.0.1,::1",no-agent-forwarding %s subyard-herdr:desk-old\n' "$(bare desk)"
+    cat "$test_root/keys/manual.pub"; } > "$HERDR_TEST_GUEST_HOME/.ssh/authorized_keys"
+
   "$handler" pair --from-host --all | jq -e '.action == "pair-add" and .changed and
     ([.consequences[] | capture("^authorize Herdr public key fingerprint:[0-9a-f]{64} \\((?<label>[^)]+)\\) from the host account").label]
       == ["user-laptop", "user-phone"])' >/dev/null

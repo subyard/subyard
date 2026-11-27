@@ -32,6 +32,9 @@ trap 'stage "failed at line $LINENO (exit $?)" >&2' ERR
 on_exit() {
   local rc=$? log
   trap - EXIT
+  if [ -n "${host_keys:-}" ] && [ -f "$state/host-authorized-keys" ]; then
+    cat "$state/host-authorized-keys" > "$host_keys" || rc=1
+  fi
   if [ "$rc" != 0 ]; then
     for log in "$state"/*.log; do
       [ -s "$log" ] || continue
@@ -233,11 +236,12 @@ yard herdr pair --revoke "$fingerprint" --yes > "$state/revoke.log" 2>&1
 reject_key b
 
 stage 'verify pairing from the host account authorized_keys'
-# The VM account stands in for the owner host account; its file is restored afterwards.
-host_keys="$HOME/.ssh/authorized_keys"
+# The VM account stands in for the owner host account; on_exit restores its file.
 [ -d "$HOME/.ssh" ] || mkdir -m 0700 "$HOME/.ssh"
-[ -e "$host_keys" ] || install -m 0600 /dev/null "$host_keys"
-cp -p "$host_keys" "$state/host-authorized-keys"
+[ -e "$HOME/.ssh/authorized_keys" ] || install -m 0600 /dev/null "$HOME/.ssh/authorized_keys"
+cp -p "$HOME/.ssh/authorized_keys" "$state/host-authorized-keys"
+host_keys="$HOME/.ssh/authorized_keys"
+guest runuser -u dev -- sh -c 'cat -- "$HOME/.ssh/authorized_keys"' > "$state/guest-authorized-keys"
 ssh-keygen -q -t ed25519 -N '' -C host-c -f "$state/c"
 ssh-keygen -q -t ed25519 -N '' -C host-d -f "$state/d"
 ssh-keygen -q -t rsa -b 3072 -N '' -C laptop-rsa -f "$state/e"
@@ -260,7 +264,7 @@ grep -Fxq "Paired $(key_fp c)  host-c" "$state/from-host-pair.log"
 key_login c
 yard herdr pair --revoke "$(key_fp c)" --yes > "$state/from-host-revoke.log" 2>&1
 reject_key c
-cat "$state/host-authorized-keys" > "$host_keys"
+guest runuser -u dev -- sh -c 'cat > "$HOME/.ssh/authorized_keys"' < "$state/guest-authorized-keys"
 
 stage 'verify up and update hand an older Core over to the pin with a live terminal'
 terminal_pid="$(cat "$state/terminal-pid")"

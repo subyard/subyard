@@ -106,6 +106,12 @@ func parseGuestGrants(list []byte) map[string]keyLine {
 	return grants
 }
 
+// bareType reports whether a line starts with its key type and a separator, as sshd requires.
+func bareType(line []byte, keyType string) bool {
+	rest, found := bytes.CutPrefix(line, []byte(keyType))
+	return found && len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t')
+}
+
 // classifyHostKeys lists one entry per fingerprint in first-seen order. The first
 // bare line of a fingerprint wins over its lines with options. Nil grants mean the
 // guest state is unknown.
@@ -120,7 +126,7 @@ func classifyHostKeys(host []byte, grants map[string]keyLine, owner string) ([]h
 		}
 		key, comment, options, rest, err := ssh.ParseAuthorizedKey(line)
 		// sshd rejects an empty options field such as a lone comma before the key type.
-		if err != nil || len(rest) != 0 || len(options) == 0 && !bytes.HasPrefix(trimmed, []byte(key.Type()+" ")) {
+		if err != nil || len(rest) != 0 || len(options) == 0 && !bareType(trimmed, key.Type()) {
 			unrecognized = append(unrecognized, number+1)
 			continue
 		}
@@ -248,6 +254,10 @@ func hostKeys(args []string) error {
 	if args[2] == "known" {
 		list, err := io.ReadAll(io.LimitReader(os.Stdin, authorizedKeysLimit+1))
 		if err != nil {
+			return err
+		}
+		// Drain an oversize list so the writer does not fail; its guest state is unknown.
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
 			return err
 		}
 		if len(list) <= authorizedKeysLimit {
