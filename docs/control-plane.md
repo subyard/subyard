@@ -1098,7 +1098,9 @@ Live installation enables boot recovery without running it and only arms the
 shutdown service. Manual disarming refuses whole-`/tmp` deletion outside native
 shutdown. Each cleanup has a 30-second native deadline; failure, timeout or an
 unsafe traversal root fails the native unit and is visible through its Result
-and journal. The CLI's stopped message confirms physical power state, not cleanup
+and journal. Readiness does not depend on that Result: no apply can change a
+previous boot's outcome, and runtime ageing removes what an interrupted cleanup
+left. The CLI's stopped message confirms physical power state, not cleanup
 success. A hard stop provides no shutdown-cleanup guarantee; an already stopped
 yard remains stopped. Journals across reboot depend on guest journal persistence.
 
@@ -1107,24 +1109,41 @@ ages the explicit opt-in `/tmp/subyard-disposable` tree. Files and directories
 whose modification time is older than one day are eligible. Active producers
 must hold a BSD `flock` on their own descendant operation directory for the full
 operation; a lock on the configured root or an ordinary open file descriptor
-does not provide that protection. Fresh or locked data is preserved. Generic
-`/tmp` content is outside this additional timer; vendor tmpfiles rules and the
-vendor clean timer remain unchanged. Service runtime directories should normally
-use systemd `RuntimeDirectory=` instead. Cleanup refuses symlink, foreign-owned,
+does not provide that protection. Fresh or locked data is preserved. Vendor
+tmpfiles rules and the vendor clean timer remain unchanged.
+
+A separate hourly `subyard-tmp-age.timer` ages generic `/tmp` content; its first
+run is 15 minutes after boot or installation, so installation itself removes
+nothing. It invokes `systemd-tmpfiles --clean` with an explicit
+`/etc/subyard-guest-tmp-age.conf`: an entry is eligible when it is older than two
+days by its access, modification, change and birth times (directories: all but
+change time). Before each run it reads the working directory, root, executable,
+open descriptors and file mappings of every process and excludes each top-level
+`/tmp` entry they reference, with every byte outside `[A-Za-z0-9._-]` widened to a
+`?` glob; it refuses to run without that view. tmpfiles itself keeps flocked files
+and directories, bound sockets and mounts; the policy also keeps the opt-in
+disposable tree and the vendor exclusions: current-boot `systemd-private-*` service
+directories, SSH agent directories, X server locks and the X socket directories.
+A path another mount namespace maps from `/tmp` under a different name is not seen;
+it is kept only while it stays fresh. The run has a 15-minute deadline at idle I/O
+priority; an interrupted run resumes on the next hour. Service runtime directories
+should normally use systemd `RuntimeDirectory=` instead. Cleanup refuses symlink, foreign-owned,
 incorrect-mode or mounted traversal roots, including a bind mount at the opt-in
 root. A transitional live tmpfs `/tmp` also refuses whole-root cleanup until the
 requested restart activates disk backing. `/var/tmp`, `/srv`, credentials,
 workspaces and operation-owned producer scratch are outside blanket cleanup.
 
 To roll back cleanup, disable `subyard-tmp-boot.service`,
-`subyard-tmp-shutdown.service` and `subyard-tmp-clean.timer` inside the selected
-guest, then stop the timer and shutdown service. The latter reports a deliberate
-refusal when manually stopped; active temporary files remain intact. After
-verifying exact policy content, root ownership and modes, remove only those
-three unit files, `subyard-tmp-clean.service`,
-`/usr/local/lib/subyard-guest-tmp` and `/etc/subyard-guest-tmpfiles.conf`, then reload
-the manager. Keep the disk policy's `tmp.mount` mask unless separately reverting
-disk backing. Repeating initialization restores cleanup without clearing live
+`subyard-tmp-shutdown.service`, `subyard-tmp-clean.timer` and `subyard-tmp-age.timer`
+inside the selected guest, then stop the timers and shutdown service. The latter
+reports a deliberate refusal when manually stopped; active temporary files remain
+intact. After verifying exact policy content, root ownership and modes, remove only
+those four unit files, `subyard-tmp-clean.service`, `subyard-tmp-age.service`,
+`/usr/local/lib/subyard-guest-tmp`, `/usr/local/lib/subyard-guest-tmp-age`,
+`/etc/subyard-guest-tmpfiles.conf` and `/etc/subyard-guest-tmp-age.conf`, then reload
+the manager. A release rollback to 0.32.x keeps the ageing timer running: that
+release neither refuses nor manages its files, which are removed as above. Keep
+the disk policy's `tmp.mount` mask unless separately reverting disk backing. Repeating initialization restores cleanup without clearing live
 data. Foreign policy files or unit overrides are preserved and refused.
 Route-consumer ownership conflicts identify the affected yard, validated native instance
 and route device, with a read-only Incus inspection command. Configuration inspection
