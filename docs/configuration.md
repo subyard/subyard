@@ -606,9 +606,9 @@ preserved and diagnosed.
 
 Preview guidance has moved out of global instructions, and Subyard no longer copies host
 instruction files into a yard. An unchanged instruction copy that an older release made is
-removed at the next refresh, including one whose old preview block was migrated; changed or
-ambiguous content is kept and requires inspection. Agent instructions come from the opt-in
-[user-dotfiles](user-dotfiles.md) profile. See the
+removed at the next refresh; changed content is kept and requires inspection. Agent
+instructions come from the [user-dotfiles](user-dotfiles.md) profile, selected by default in the
+`default` yard. See the
 [delivery contract](../config/skills/README.md) for provider integration and ownership details.
 
 ## Coding-agent compatibility

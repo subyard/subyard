@@ -8,13 +8,16 @@ in the yard.
 
 The profile is selected by default in the yard named `default`; select it in another yard with
 `yard -Y NAME profile enable user-dotfiles`, and remove it with
-`yard -Y NAME profile disable user-dotfiles`. The shipped source is
-`https://github.com/Dmitry-Borodin/dotfiles`. To use another repository:
+`yard -Y NAME profile disable user-dotfiles`. A yard whose `ENVIRONMENT_PROFILES` is set
+explicitly uses only that list. The shipped source is
+`https://github.com/Dmitry-Borodin/dotfiles`, a private repository: the yard clones it only with
+[GitHub](github.md#ordinary-git-with-original-authentication-fallback) Git access to it, otherwise apply warns and the profile is not ready. To use
+another repository:
 
 ```sh
 yard [-Y NAME] config set USER_DOTFILES_SOURCE https://github.com/OWNER/dotfiles --scope yard
 yard [-Y NAME] config set USER_DOTFILES_SUBDIR yard --scope yard   # optional
-yard [-Y NAME] init
+yard [-Y NAME] init   # in another yard: yard -Y NAME profile enable user-dotfiles
 ```
 
 ## Layout

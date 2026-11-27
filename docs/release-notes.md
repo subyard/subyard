@@ -28,9 +28,10 @@
 - The new [`user-dotfiles`](user-dotfiles.md) profile clones one Git repository
   (`USER_DOTFILES_SOURCE`, optional `USER_DOTFILES_SUBDIR`) and links its `agents/AGENTS.md`
   to `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md`. Like
-  [user skills](user-skills.md), it is selected by default in the yard named `default`, so the
-  next init there links the shipped source `https://github.com/Dmitry-Borodin/dotfiles`; set
-  `USER_DOTFILES_SOURCE` to use another repository, or run
+  [user skills](user-skills.md), it is selected by default in the yard named `default` while its
+  `ENVIRONMENT_PROFILES` is unset, so the next init there links the shipped source
+  `https://github.com/Dmitry-Borodin/dotfiles`, a private repository that the yard clones only
+  with GitHub Git access to it; set `USER_DOTFILES_SOURCE` to use another repository, or run
   `yard -Y default profile disable user-dotfiles` to opt out. Subyard
   never updates the clone; ask an agent in the yard to run `git pull` in it. The same applies to
   [user skills](user-skills.md): no `yard init` is needed after a pull.
