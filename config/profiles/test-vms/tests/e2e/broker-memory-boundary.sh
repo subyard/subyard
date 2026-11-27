@@ -1375,6 +1375,9 @@ assert_memory_accounting
 if [ "$TELEMETRY_ONLY" = 0 ]; then
   assert_guests_outside_broker_budget
   assert_launch_memory_bound
+fi
+# The owning memory-boundary lane runs the --lease-expiry mode.
+if [ "$TELEMETRY_ONLY" = 0 ] || [ "$LEASE_EXPIRY" = 1 ]; then
   assert_guest_page_reporting
 fi
 runtime_yard -Y test-yard test-vms status --json | jq -e --arg memory "$OWNER_DIAGNOSTIC_VM_MEMORY" '
