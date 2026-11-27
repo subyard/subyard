@@ -66,9 +66,10 @@ beyond that granularity. Protected entries can keep usage above the target until
 a later run; this is a periodic limit, not a hard quota. Root permissions and other filesystems
 are preserved. Manual soft cleanup retains its existing behavior.
 
-A second dev-owned daily timer runs the shared run-root helper `dev/test-run-temp.py`,
-which the runtime package ships for it. It removes only unlocked run roots in `/tmp` with
-valid receipts that were created more than seven days ago; it touches nothing else in `/tmp`.
+A second dev-owned daily timer runs the shared run-root helper `dev/test-run-temp.py`; the
+profile ships a byte copy that its host-free test keeps identical. It removes only unlocked
+run roots in `/tmp` with valid receipts that were created more than seven days ago; it
+touches nothing else in `/tmp`.
 
 Rust runners use `dev/cargo_cache.py` before Cargo, supplying the owning manifest and a
 run-owned final output directory. For example, from the checkout root:

@@ -70,8 +70,8 @@ WantedBy=timers.target
 EOF
 }
 # Host-free runners sweep abandoned run roots on entry; the timer catches those no run followed.
-RUN_ROOTS_HELPER="$PROFILE_DIR/../../../dev/test-run-temp.py"
-[ -f "$RUN_ROOTS_HELPER" ] || { printf 'subyard-dev provision: missing %s\n' "$RUN_ROOTS_HELPER" >&2; exit 1; }
+# test-run-temp.py is a byte copy of dev/test-run-temp.py, which the yard does not receive.
+RUN_ROOTS_HELPER="$PROFILE_DIR/test-run-temp.py"
 run_roots_service() {
   cat <<EOF
 [Unit]

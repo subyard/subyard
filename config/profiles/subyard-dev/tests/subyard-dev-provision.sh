@@ -211,7 +211,9 @@ for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/
 done
 grep -Fxq 'Persistent=true' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
 grep -Fxq 'OnCalendar=*-*-* 00,06,12,18:00:00' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
-# The run-root timer runs the shared run-root helper's aged sweep.
+# The run-root timer runs the shared run-root helper's aged sweep; the profile ships its exact copy.
+cmp -s "$ROOT/dev/test-run-temp.py" "$ROOT/config/profiles/subyard-dev/test-run-temp.py" \
+  || fail "config/profiles/subyard-dev/test-run-temp.py differs from dev/test-run-temp.py; copy it again"
 cmp -s "$ROOT/dev/test-run-temp.py" "$tmp/system/usr/local/lib/subyard-dev/test-run-temp.py" \
   && grep -Fxq 'ExecStart=/usr/bin/python3 /usr/local/lib/subyard-dev/test-run-temp.py sweep 7' \
     "$tmp/system/etc/systemd/system/subyard-dev-run-roots-trim.service" \

@@ -121,7 +121,6 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
-  dev/test-run-temp.py
   internal/adapters/configmaterial/tomli_w.py
   internal/adapters/configmaterial/TOMLI_W_LICENSE
   internal/safefs/safefs.py
@@ -154,7 +153,7 @@ while IFS= read -r -d '' relative; do
     config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs) continue ;;
   esac
   case "$relative" in
-    scripts/*|config/*|completions/*|dev/test-run-temp.py|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE|internal/safefs/safefs.py) ;;
+    scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE|internal/safefs/safefs.py) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;
   esac
   case "$relative" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) printf 'package-engine: unsafe runtime path\n' >&2; exit 1 ;; esac
@@ -177,7 +176,6 @@ install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-tra
 install -m 0644 "$RELEASE_ROLLBACK_DECLARATION" "$bundle_stage/config/release-rollback.json"
 for required in config/installation-capabilities.json \
   config/retired-components.json \
-  dev/test-run-temp.py \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
   internal/safefs/safefs.py \
