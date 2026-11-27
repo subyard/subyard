@@ -267,7 +267,7 @@ fn exchange(
     {
         return Err(NativeError::new(
             "incompatible_engine",
-            "This Veranda build requires Yard RPC v1. Install the matching Yard release.",
+            "This Veranda build requires Yard RPC v1. Install a supported Subyard release.",
         ));
     }
     if !negotiation
@@ -277,7 +277,7 @@ fn exchange(
     {
         return Err(NativeError::new(
             "capability_missing",
-            "This Yard build cannot provide a local fleet. Install the matching Yard release.",
+            "This Yard build cannot provide a local fleet. Install a supported Subyard release.",
         ));
     }
     if negotiation.engine_version.is_empty() || negotiation.engine_version.len() > 128 {
@@ -313,7 +313,7 @@ fn response_result<T: DeserializeOwned>(
     if response.version != PROTOCOL_VERSION {
         return Err(NativeError::new(
             "incompatible_engine",
-            "Yard returned an incompatible RPC response. Install the matching Yard release.",
+            "Yard returned an incompatible RPC response. Install a supported Subyard release.",
         ));
     }
     if response.kind != "response" || response.id != expected_id {
@@ -333,7 +333,7 @@ fn response_result<T: DeserializeOwned>(
             "yard_rpc_failed".to_string()
         };
         let message = match expected_id {
-            "negotiate" => "Yard RPC negotiation failed. Install the matching Yard release.",
+            "negotiate" => "Yard RPC negotiation failed. Install a supported Subyard release.",
             "context" => "Yard could not report the current local yard. Run `yard status` for details.",
             "inventory" => {
                 "Yard could not provide the local fleet. Run `yard status` for details and try again."

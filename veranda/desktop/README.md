@@ -195,8 +195,8 @@ make build
 PATH="$PWD/bin:$PATH" .build/veranda-desktop/debug/veranda
 ```
 
-An explicit stable `VERANDA_PRODUCT_VERSION` at GUI build time must match the
-engine's `YARD_BUILD_VERSION`. Incompatible versions/capabilities remain errors;
+A GUI admits an engine with its own `VERANDA_PRODUCT_VERSION` or a stable release in the
+[engine window](../README.md#engine-window). Incompatible versions/capabilities remain errors;
 the shell does not parse CLI output or provide a compatibility bypass. App data
 uses `$XDG_DATA_HOME/subyard/veranda`, falling back to
 `$HOME/.local/share/subyard/veranda`.
@@ -495,8 +495,8 @@ Files/directories have fixed modes and root package ownership. System shared-lib
 dependencies come from dpkg-shlibdeps; openssh-client supplies the system SSH transport
 and agent tools. GTK/GLib and their transitive OS packages are system dependencies,
 excluded from the GUI payload. Yard/Incus/runtime are not bundled. Local owners need
-Yard installed separately; remote owners need the exact matching product release and
-an existing system SSH agent. VS Code, supported external terminals and host htop are
+Yard installed separately; remote owners need a Subyard release in the
+[engine window](../README.md#engine-window) and an existing system SSH agent. VS Code, supported external terminals and host htop are
 optional external session tools; native availability checks report missing tools.
 
 Detached SHA256, manifest and provenance bind the DEB/ELF, version, dependencies,

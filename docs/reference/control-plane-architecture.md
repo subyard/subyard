@@ -352,10 +352,10 @@ public Subyard monorepo
   provisioning/reconcile remains a separate explicit owner-side operation under the current contract.
   `Applied` comes only from an actual owner check, not selection. A missing or inapplicable check
   gives `Unavailable`/`Not applicable`; a stopped yard is not started just to read its state.
-- Incompatible product versions, RPC/profile schemas or required capabilities cause `incompatible`
-  before the corresponding mutations. The UI reports Veranda/Subyard versions and recommends
-  installing both products from one release. There is no automatic conversion or fallback through
-  human CLI output.
+- An engine outside the [Veranda engine window](decisions-and-glossary.md#veranda-engine-window),
+  incompatible RPC/profile schemas or missing required capabilities cause `incompatible` before
+  the corresponding mutations. The UI reports Veranda/Subyard versions and says which side to
+  update. There is no automatic conversion or fallback through human CLI output.
 - The Go engine and Rust client do not import each other's implementation types. The
   [versioned RPC contract](../control-plane.md#rpc) defines the engine/client boundary. Contract
   changes require conformance coverage for the engine and client, with separate typed presentation
@@ -450,14 +450,16 @@ are accepted requirements for the GUI release.
 - `subyard-install.sh` and `yard update` retain their CLI/engine-only contract. Veranda installs and
   updates separately; a common release provides matched versions rather than a transactional update
   across desktops and remote Linux owner-hosts.
-- Engine and Veranda product SemVer match; only an exact matched pair is officially supported. RPC
-  protocol versions change independently of product SemVer; capabilities extend the additive surface.
-  A missing required capability or version mismatch makes the UI `incompatible` with precise
-  update instructions.
-- Current RPC v1 remains `min=1,max=1`; there is no requirement to implement a multi-version server
-  in advance or promise N-1/N+1 compatibility. Decide whether a transitional v1+v2 release is needed
-  at the first actual breaking wire change. Until then, release acceptance includes the exact pair,
-  both mismatch directions and diagnostics.
+- A Veranda release supports its own engine line and the previous one, the
+  [engine window](decisions-and-glossary.md#veranda-engine-window). RPC protocol versions change
+  independently of product SemVer; capabilities extend the additive surface. A missing required
+  capability or an engine outside the window makes the UI `incompatible` with precise update
+  instructions.
+- Current RPC v1 remains `min=1,max=1`; there is no requirement to implement a multi-version RPC
+  server in advance or promise N-1/N+1 wire-protocol compatibility. Decide whether a transitional
+  v1+v2 release is needed at the first actual breaking wire change. Until then, release GUI
+  acceptance covers the same-version pair, the out-of-window refusal and diagnostics; host-free
+  tests cover the previous engine line and the newer-engine refusal.
 - Update/rollback support explicit config/state migration. Rollback means the previous release,
   not two production implementations in one version.
 

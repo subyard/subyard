@@ -79,6 +79,9 @@ elif mode == 'future-vocabulary':
     result['futureNegotiationField'] = {'ignored':True}
 elif mode == 'capability-missing':
     result['capabilities'].remove('owner-inventory-v1')
+elif mode == 'previous':
+    with open(os.path.join(fixtures, '..', 'release.json'), encoding='utf8') as source:
+        result['engineVersion'] = json.load(source)['version']
 # Go negotiation deliberately omits operationId; ordinary method responses
 # include the explicit operation binding or default to their request ID.
 negotiated = fixture('negotiate')
@@ -306,11 +309,14 @@ impl OwnerFixture {
         Self { root }
     }
     pub(crate) fn command(&self, mode: &str) -> Command {
+        self.command_in(mode, FIXTURE_DIR)
+    }
+    fn command_in(&self, mode: &str, fixtures: &str) -> Command {
         let mut command = Command::new(
             std::env::var_os("VERANDA_TEST_PYTHON").unwrap_or_else(|| "python3".into()),
         );
         command.args(["-u", "-c", OWNER, mode]);
-        command.arg(self.root.join("child.pid")).arg(FIXTURE_DIR);
+        command.arg(self.root.join("child.pid")).arg(fixtures);
         command
     }
     pub(crate) fn store_root(&self) -> PathBuf {
@@ -568,6 +574,22 @@ fn incompatible_negotiation_fails_closed_and_reaps_its_subprocess() {
         #[cfg(unix)]
         fixture.assert_child_reaped();
     }
+}
+
+#[test]
+fn a_release_veranda_admits_the_previous_engine_line() {
+    use crate::compatibility::{ENGINE_CURRENT_LINE, ENGINE_PREVIOUS_LINE};
+    let fixture = OwnerFixture::new();
+    let client = RpcClient::open(
+        fixture.command_in("previous", PREVIOUS_FIXTURE_DIR),
+        &format!("{ENGINE_CURRENT_LINE}.0"),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    assert_eq!(client.engine_version, format!("{ENGINE_PREVIOUS_LINE}.0"));
+    client.close();
+    #[cfg(unix)]
+    fixture.assert_child_reaped();
 }
 
 #[test]

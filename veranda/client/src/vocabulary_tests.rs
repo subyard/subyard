@@ -1,4 +1,4 @@
-use crate::compatibility::ENGINE_PREVIOUS_LINE;
+use crate::compatibility::{ENGINE_CURRENT_LINE, ENGINE_PREVIOUS_LINE};
 use crate::vocabulary::{
     Capability, ErrorCode, EventName, Method, CONTRACT_REVISION, PROTOCOL_VERSION,
 };
@@ -62,7 +62,11 @@ fn compatibility_names_known_contract_and_capabilities() {
     assert_eq!(policy["contractRevision"], CONTRACT_REVISION);
     assert_eq!(policy["rpc"]["minimum"], PROTOCOL_VERSION);
     assert_eq!(policy["rpc"]["maximum"], PROTOCOL_VERSION);
-    assert_eq!(policy["productVersionPolicy"], "exact-match");
+    assert_eq!(policy["productVersionPolicy"], "engine-window");
+    assert_eq!(
+        policy["engineLines"],
+        serde_json::json!({"current": ENGINE_CURRENT_LINE, "previous": ENGINE_PREVIOUS_LINE})
+    );
     assert_eq!(policy["productVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         policy["requiredCapabilities"],
