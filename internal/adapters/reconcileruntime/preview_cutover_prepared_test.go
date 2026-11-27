@@ -37,9 +37,11 @@ func (e *previewInventoryExecutor) Exec(ctx context.Context, project, instance s
 		command.Stdout = &stdout
 		command.Stderr = &stderr
 		err := command.Run()
-		result := ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+		// Refusals name guest paths, as the real guest reports them.
+		result := ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: bytes.ReplaceAll(stderr.Bytes(), []byte(e.home), []byte("/home/dev"))}
 		if err != nil {
 			result.ExitCode = 1
+			return result, &ports.GuestExitError{Code: 1}
 		}
 		if request.Command[4] != "observe" && err == nil {
 			e.mutations++
@@ -74,15 +76,19 @@ func (e *previewInventoryExecutor) Exec(ctx context.Context, project, instance s
 	return e.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
 }
 
+// legacyPreviewBlock is the exact managed block that older releases appended.
+const legacyPreviewBlock = "<!-- subyard-preview -->\nFor a static web preview, run `subyard-preview <relative-static-dir>` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled `yard code` SSH session. The helper must stay running for either URL.\n<!-- /subyard-preview -->\n"
+
+// preparedPreviewFixture owns a Claude instruction copy that an older release
+// recorded in the inventory; current packages no longer declare it.
 func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, *previewInventoryExecutor, string) {
 	t.Helper()
 	root := testkit.TempDir(t)
 	runtime, base := materializedIntegrationFixture(t, root, true)
-	// Current instruction selection comes from a real package declaration.
-	// Keep the existing sample lifecycle fixture while adding the instruction owner.
-	instructions := Runtime{Environment: runtime.Environment}
-	bindInstructionTestPackage(t, &instructions, root, "claude")
-	for _, definition := range instructions.Integrations {
+	// Keep the existing sample lifecycle fixture while adding a Claude package.
+	claude := Runtime{Environment: runtime.Environment}
+	bindAgentTestPackage(t, &claude, root, "claude")
+	for _, definition := range claude.Integrations {
 		if definition.Name == "claude" {
 			runtime.Integrations = append(runtime.Integrations, definition)
 		}
@@ -103,7 +109,7 @@ func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, 
 	payload, _ := json.Marshal(map[string]any{"schema": 1, "entries": []integrationArtifact{{ID: "claude", Kind: "file", Path: path, Digest: fmt.Sprintf("%x", sha256.Sum256(body))}}})
 	testkit.WriteFile(t, executor.state+"/inventory.json", payload, 0o600)
 	if selected {
-		runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS=sample claude", "HOST_CLAUDE_MD="+root+"/missing-host-source")
+		runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS=sample claude")
 	}
 	return runtime, executor, path
 }
@@ -111,9 +117,6 @@ func preparedPreviewFixture(t *testing.T, selected bool, body []byte) (Runtime, 
 func TestCurrentPreparedPreviewRefusesUnknownMarkersBeforeAnyMutation(t *testing.T) {
 	unknown := []byte("Guest text.\n<!-- subyard-preview -->\nUser-owned unknown body.\n<!-- /subyard-preview -->\n")
 	runtime, executor, path := preparedPreviewFixture(t, true, unknown)
-	host := filepath.Join(runtime.RepositoryRoot, "new-host-source")
-	testkit.WriteFile(t, host, []byte("Current host instructions.\n"), 0o600)
-	runtime.Environment = replaceTestEnvironment(runtime.Environment, "HOST_CLAUDE_MD", host)
 	// Even a valid ownership digest cannot authorize replacing an unknown block.
 	before, _ := os.ReadFile(executor.state + "/inventory.json")
 	if _, err := runtime.IntegrationPlan(context.Background()); err == nil {
@@ -126,83 +129,61 @@ func TestCurrentPreparedPreviewRefusesUnknownMarkersBeforeAnyMutation(t *testing
 	}
 }
 
-func replaceTestEnvironment(environment []string, name, value string) []string {
-	prefix := name + "="
-	for index, entry := range environment {
-		if strings.HasPrefix(entry, prefix) {
-			environment[index] = prefix + value
-			return environment
+// An unchanged instruction copy that Subyard owns is removed at the next
+// apply, also after the preview cutover migrated it, and the result converges.
+func TestRetiredInstructionCopyIsRemovedWhenUnchanged(t *testing.T) {
+	for name, body := range map[string]string{"plain": "Copied host text.\n", "preview": "Copied host text.\n\n" + legacyPreviewBlock} {
+		for _, selected := range []bool{false, true} {
+			t.Run(fmt.Sprint(name, "/selected=", selected), func(t *testing.T) {
+				runtime, executor, path := preparedPreviewFixture(t, selected, []byte(body))
+				plan, err := runtime.IntegrationPlan(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("retired instruction copy kept: %v", err)
+				}
+				data, err := os.ReadFile(executor.state + "/inventory.json")
+				if err != nil || bytes.Contains(data, []byte(path)) {
+					t.Fatalf("retired instruction copy is still recorded: %s %v", data, err)
+				}
+				verified, err := runtime.IntegrationPlan(context.Background())
+				if err != nil || verified.Changed {
+					t.Fatalf("retirement did not converge: changed=%v err=%v", verified.Changed, err)
+				}
+			})
 		}
 	}
-	return append(environment, prefix+value)
 }
 
-func TestCurrentPreviewRetirementMigratesBeforeStaticRefresh(t *testing.T) {
-	original := []byte("Retained host text.\n\n" + previewInstructions)
-	want := []byte("Retained host text.\n\n\n")
-	for _, selected := range []bool{false, true} {
-		t.Run(fmt.Sprint("selected=", selected), func(t *testing.T) {
-			runtime, executor, path := preparedPreviewFixture(t, selected, original)
-			if selected {
-				configs, err := runtime.PrepareConfigs(context.Background())
-				if err != nil || len(configs.files) != 1 {
-					t.Fatal("missing-source case did not select the instruction adapter", err)
-				}
-			}
-			plan, err := runtime.IntegrationPlan(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
-				t.Fatal(err)
-			}
-			actual, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(actual, want) {
-				t.Fatalf("unmarked text lost before core refresh: %q %v", actual, err)
-			}
-			data, err := os.ReadFile(executor.state + "/inventory.json")
-			if err != nil || !bytes.Contains(data, []byte(path)) {
-				t.Fatal("retained instruction ownership was not released", err)
-			}
-			verified, err := runtime.IntegrationPlan(context.Background())
-			if err != nil || verified.Changed {
-				t.Fatalf("retained text prevented repeat convergence: changed=%v err=%v", verified.Changed, err)
-			}
-			// This test never invokes static skill refresh or its migration script.
-		})
+// A copy edited in the yard is not Subyard's to delete: the plan refuses it by
+// path and nothing changes.
+func TestRetiredInstructionCopyEditedInTheYardIsKept(t *testing.T) {
+	runtime, executor, path := preparedPreviewFixture(t, true, []byte("Copied host text.\n"))
+	edited := []byte("Copied host text.\nEdited in the yard.\n")
+	testkit.WriteFile(t, path, edited, 0o644)
+	before, _ := os.ReadFile(executor.state + "/inventory.json")
+	_, err := runtime.IntegrationPlan(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "owned artifact drift") || !strings.Contains(err.Error(), `"/home/dev/.claude/CLAUDE.md"`) {
+		t.Fatalf("edited copy was not refused by path: %v", err)
+	}
+	after, _ := os.ReadFile(executor.state + "/inventory.json")
+	actual, _ := os.ReadFile(path)
+	if executor.mutations != 0 || !bytes.Equal(before, after) || !bytes.Equal(actual, edited) {
+		t.Fatal("refused retirement changed files")
 	}
 }
 
-func TestCurrentConfigRefreshMigratesWithMissingHostSource(t *testing.T) {
-	runtime, _, path := preparedPreviewFixture(t, true, []byte("Retained config-only text.\n"+previewInstructions))
+func TestCurrentConfigRefreshMigratesOwnedPreviewBlock(t *testing.T) {
+	runtime, _, path := preparedPreviewFixture(t, true, []byte("Retained config-only text.\n"+legacyPreviewBlock))
 	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(path)
 	if err != nil || string(actual) != "Retained config-only text.\n\n" {
 		t.Fatalf("config-only current migration: %q %v", actual, err)
-	}
-}
-
-func TestCurrentSelectedHostSourceMigratesBeforeConfigWrite(t *testing.T) {
-	runtime, _, path := preparedPreviewFixture(t, true, []byte("Prior host text.\n"+previewInstructions))
-	source := filepath.Join(runtime.RepositoryRoot, "current-host-source")
-	want := []byte("Current source-owned instructions.\n")
-	testkit.WriteFile(t, source, want, 0o600)
-	runtime.Environment = replaceTestEnvironment(runtime.Environment, "HOST_CLAUDE_MD", source)
-	plan, err := runtime.IntegrationPlan(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.ApplyIntegrations(context.Background(), plan); err != nil {
-		t.Fatal(err)
-	}
-	actual, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(actual, want) {
-		t.Fatalf("selected source migration: %q %v", actual, err)
-	}
-	original, err := os.ReadFile(source)
-	if err != nil || !bytes.Equal(original, want) {
-		t.Fatal("host source changed")
 	}
 }

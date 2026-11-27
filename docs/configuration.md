@@ -364,8 +364,8 @@ For a coding-agent `CONFIG` whose destination ends in `.json` or `.toml`, Subyar
 selected template and preserves fields added by the running tool. This includes Orca's Claude
 `hooks` and `statusLine`, and Codex's `hooks`, `projects` and `tui`, when the template does not define
 them. The destination selects this policy;
-importing a template from a renamed source does not change it. `RULES`, instruction files, JSONC
-and other formats keep exact byte replacement and comparison.
+importing a template from a renamed source does not change it. `RULES`, JSONC and other formats
+keep exact byte replacement and comparison.
 
 JSON objects merge recursively. Arrays, scalars and `null` replace the whole value at their path;
 an empty object requires an object but preserves added children. A later template removes fields
@@ -604,9 +604,11 @@ skill drift can require a fresh assessed repair: run `yard migrate --check`, the
 ordinary initialization to repair core runtime drift. Foreign skills and conflicting paths are
 preserved and diagnosed.
 
-Preview guidance has moved out of global instructions. Recognized old inventory-owned blocks are
-removed during refresh while retaining other text; changed/ambiguous content requires inspection.
-Host instruction sources and frozen historical recovery recipes remain intact. See the
+Preview guidance has moved out of global instructions, and Subyard no longer copies host
+instruction files into a yard. An unchanged instruction copy that an older release made is
+removed at the next refresh, including one whose old preview block was migrated; changed or
+ambiguous content is kept and requires inspection. Agent instructions come from the opt-in
+[user-dotfiles](user-dotfiles.md) profile. See the
 [delivery contract](../config/skills/README.md) for provider integration and ownership details.
 
 ## Coding-agent compatibility
@@ -716,7 +718,7 @@ that operation and is not pending configuration. A repeated run without changes 
 The destination JSON settings retain foreign fields, including Orca hooks, model
 and theme, while Subyard applies `autoMemoryDirectory` and its `permissions` fields.
 A document containing only foreign fields can be adopted without a historical
-baseline. Unknown plain instruction files, unsafe metadata and changed ownership
+baseline. Invalid foreign documents, unsafe metadata and changed ownership
 evidence still require explicit inspection or moving the foreign file aside.
 
 Orca's agent-view command (`claude --plugin-dir …/orca-agent-view`) uses the same

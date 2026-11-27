@@ -50,15 +50,11 @@ manifest schema, global registry or storage format.
 
 Config materialization also separates desired artifacts and observations from
 source reads and guest execution. `SelectMaterializationSources` takes an explicit
-`config-assets` or `runtime` scope, operation-local integration declarations and
-optional adapter instruction declarations for compatibility fixtures. Shipped
-Claude, Codex, OpenCode and pi consumers use their package artifacts.
-Config status checks CONFIG/RULES only; runtime additionally selects allowed host
-instructions and generated preview content. `PrepareMaterializationContent`
-preserves strict missing sources for status, optional missing raw sources for
-runtime, and preview fallback for missing instructions. The source adapter still
-forbids CONFIG/RULES symlinks and FIFOs while allowing explicit instruction links
-to regular files.
+`config-assets` or `runtime` scope and operation-local integration declarations. Shipped
+Claude, Codex, OpenCode and pi consumers use their package artifacts. Config status and
+runtime select the same CONFIG/RULES artifacts; runtime keeps only the selected
+integrations. `PrepareMaterializationContent` preserves strict missing sources for status
+and optional missing raw sources for runtime. The source adapter forbids symlinks and FIFOs.
 
 `AssessMaterializedArtifact` compares raw guest hash output or decoded structured
 facts. `AssessMaterialization` assembles target state and fingerprints;
@@ -110,8 +106,7 @@ requests them, preserving logical provenance and native layer grammar.
 Unconsumed archive and QA inputs are not read during activation planning.
 Captured imported assets use the ingress reader's existing per-file byte, inode,
 ownership and mode guards. Persistent settings retain their own reader limits;
-uncaptured assets retain `MaterializedAsset.ReadSource`, including its explicit
-instruction symlink policy. Planning reads captured snapshots without temporary
+uncaptured assets retain `MaterializedAsset.ReadSource`. Planning reads captured snapshots without temporary
 draft copies; native prospective snapshot bounds and identity checks still apply.
 
 For activation and reconciliation operations, the CLI retains the full projected

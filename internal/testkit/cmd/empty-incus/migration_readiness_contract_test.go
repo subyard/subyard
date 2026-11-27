@@ -79,7 +79,7 @@ func TestHistoryReadinessContract(t *testing.T) {
 	}
 	// The same public readiness boundary must observe real config drift and
 	// reach the skills probe only after the allowed fixture repair.
-	runtime.Integrations = []profile.IntegrationDefinition{{SchemaVersion: 2, Name: "fixture", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "FIXTURE_SOURCE", Destination: ".subyard-fixture/config.txt", Format: "raw"}}}}
+	runtime.Integrations = []profile.IntegrationDefinition{{SchemaVersion: 2, Name: "fixture", Artifacts: []profile.IntegrationArtifact{{ID: "config", Kind: "config", Source: "config.txt", Destination: ".subyard-fixture/config.txt", Format: "raw"}}}}
 	packagePath := filepath.Join(root, "config/agents/fixture")
 	if err := os.MkdirAll(packagePath, 0o700); err != nil {
 		t.Fatal(err)
@@ -89,11 +89,12 @@ func TestHistoryReadinessContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(packagePath, "integration.json"), declaration, 0o600)
+	testkit.WriteFile(t, filepath.Join(packagePath, "config.txt"), []byte("shipped\n"), 0o600)
 	runtime.Integrations, err = profile.LoadIntegrations(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.Environment = []string{"ENVIRONMENT_PROFILES=", "ALLOWS_CODING_TOOLS=true", "CODING_TOOL_INTEGRATIONS=fixture", "FIXTURE_SOURCE=" + value.Source}
+	runtime.Environment = []string{"ENVIRONMENT_PROFILES=", "ALLOWS_CODING_TOOLS=true", "CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + value.Source}
 	for _, payload := range []string{"prior\n", "desired\n", "changed source\n"} {
 		if payload == "changed source\n" {
 			testkit.WriteFile(t, value.Source, []byte(payload), 0o600)

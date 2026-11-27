@@ -16,7 +16,7 @@ func (catalog Catalog) IntegrationDiagnosticSetting(name string) bool {
 
 func integrationInitDefinition(name string, definition SettingDefinition) bool {
 	return definition.Application == SettingYardInit &&
-		(definition.Owner == "agent-integration" || definition.Owner == "coding-tool-integration" || definition.Owner == "host-files" ||
+		(definition.Owner == "agent-integration" || definition.Owner == "coding-tool-integration" ||
 			strings.HasPrefix(definition.Owner, "integration:") || name == "HOST_LINKS" || name == "ALLOWS_HOST_ACCESS" || name == "ALLOWS_CODING_TOOLS" || name == "DEV_USER" || name == "DEV_UID" || name == "DEV_SUDO")
 }
 

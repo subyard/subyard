@@ -400,14 +400,11 @@ func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 			_, cli, incus, _, settingsPath, _ := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 			root := cli.options.RepositoryRoot
 			writeCLIFile(t, filepath.Join(root, "config/projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
-			instructions := filepath.Join(root, "instructions.md")
-			writeCLIFile(t, instructions, "Selected instructions\n", 0o644)
-			writeCLIFile(t, filepath.Join(root, "config/host.env"), "HOST_CODEX_AGENTS_MD="+instructions+"\n", 0o600)
 			incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: incus.Instances["subyard/yard"]}
 			executor := &initAdoptionExecutor{fingerprint: strings.Repeat("a", 64), conflict: conflict}
 			cli.options.IntegrationRuntime = nil
 			cli.options.Executor = executor
-			declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
+			declareCLIRulesFixture(t, root, "codex", ".codex/rules/repo.rules")
 			catalog, err := config.LoadCatalog(root)
 			if err != nil {
 				t.Fatal(err)
@@ -422,7 +419,7 @@ func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 				t.Fatalf("status skipped initial adoption: %#v, %v", status, err)
 			}
 			if conflict {
-				if status.Observed != "conflict" || !strings.Contains(status.Detail, "/home/dev/.codex/AGENTS.md") {
+				if status.Observed != "conflict" || !strings.Contains(status.Detail, "/home/dev/.codex/rules/repo.rules") {
 					t.Fatalf("status lost adoption conflict: %#v", status)
 				}
 			} else if status.Observed != "pending" || !strings.Contains(status.Detail, "adopt existing file") {
@@ -549,7 +546,7 @@ func TestIntegrationStatusOmitsGuestText(t *testing.T) {
 	_, cli, _, runtime, _, output := newIntegrationFixture(t, "CODING_TOOL_INTEGRATIONS=codex\n")
 	root := cli.options.RepositoryRoot
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_codex_PERSIST=.codex/sessions:/mnt/host/agent-sessions/codex/sessions\n", 0o600)
-	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
+	declareCLIRulesFixture(t, root, "codex", ".codex/rules/repo.rules")
 	catalog, err := config.LoadCatalog(root)
 	if err != nil {
 		t.Fatal(err)

@@ -1312,15 +1312,15 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
-			{Result: ports.InstanceExecResult{Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"sha256:` + configHash + `"}]}`)}},
+			{Result: ports.InstanceExecResult{Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/repo.rules","token":"sha256:` + configHash + `"}]}`)}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("skills-current\n")}},
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
 		}
 	}
-	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
+	rules := filepath.Join(testkit.TempDir(t), "repo.rules")
 	payload := []byte("fixture\n")
-	testkit.WriteFile(t, instructions, payload, 0o600)
-	effective, err := (guestConfigFile{source: instructions}).readSource()
+	testkit.WriteFile(t, rules, payload, 0o600)
+	effective, err := (guestConfigFile{source: rules}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1333,16 +1333,16 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}},
 	}
 	runtime := Runtime{
-		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}}}},
+		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "rules", Kind: "config", Destination: ".config/opencode/repo.rules", Format: "raw"}}}},
 		Incus:        incus, Executor: incus,
 		RepositoryRoot: "../../..",
 		Yard:           domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 		Environment: []string{
 			"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
-			"HOST_OPENCODE_AGENTS_MD=" + instructions,
+			"AGENT_opencode_RULES=" + rules, "AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 		},
 	}
-	bindArtifactTestPackages(t, &runtime, filepath.Dir(instructions))
+	bindArtifactTestPackages(t, &runtime, filepath.Dir(rules))
 	assertStage(t, runtime, "provision", true, "matching running provision state")
 	if len(incus.ExecCalls) != 12 {
 		t.Fatalf("running provision observations = %d, want twelve including static skills and exact guest facts", len(incus.ExecCalls))
@@ -1353,8 +1353,8 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	if call := incus.ExecCalls[10].Request; len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "check" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
 		t.Fatalf("provision did not check its exact guest facts: %#v", call)
 	}
-	if command := incus.ExecCalls[4].Request.Command; !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.config/opencode/AGENTS.md"}) {
-		t.Fatalf("OpenCode instructions were not checked natively: %#v", command)
+	if command := incus.ExecCalls[4].Request.Command; !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.config/opencode/repo.rules"}) {
+		t.Fatalf("OpenCode rules were not checked natively: %#v", command)
 	}
 	transport := errors.New("native transport unavailable")
 	for _, index := range []int{1, 2, 3} {
@@ -1372,31 +1372,23 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			}
 		}
 	}
-	testkit.WriteFile(t, instructions, []byte("updated\n"), 0o600)
+	testkit.WriteFile(t, rules, []byte("updated\n"), 0o600)
 	incus.ExecSteps = steps("regular file|755|0:0", digest)
 	assertStage(t, runtime, "provision", false, "stale materialized agent config")
-	linkedInstructions := filepath.Join(filepath.Dir(instructions), "linked-AGENTS.md")
-	if err := os.Symlink(instructions, linkedInstructions); err != nil {
-		t.Fatal(err)
-	}
-	runtime.Environment = []string{
-		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
-		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
-	}
-	effective, err = (guestConfigFile{source: linkedInstructions, followSymlinks: true}).readSource()
+	effective, err = (guestConfigFile{source: rules}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
-	linkedDigest := fmt.Sprintf("%x", sha256.Sum256(effective))
-	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
-	assertStage(t, runtime, "provision", true, "symlinked host instructions")
+	updatedDigest := fmt.Sprintf("%x", sha256.Sum256(effective))
+	incus.ExecSteps = steps("regular file|755|0:0", updatedDigest)
+	assertStage(t, runtime, "provision", true, "updated agent config")
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
-		"HOST_OPENCODE_AGENTS_MD=" + instructions,
+		"AGENT_opencode_RULES=" + rules, "AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 	}
 	missing := steps("regular file|755|0:0", digest)
 	missing[4] = testkit.IncusExecStep{Result: ports.InstanceExecResult{
-		Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"absent"}]}`),
+		Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/repo.rules","token":"absent"}]}`),
 	}}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
@@ -1409,7 +1401,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 
 	incus.ExecSteps = steps("regular file|777|0:0", digest)
 	assertStage(t, runtime, "provision", false, "wrong ccusage mode")
-	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+	incus.ExecSteps = steps("regular file|755|0:0", updatedDigest)
 	assertStage(t, runtime, "provision", true, "other provisioning facts remain ready")
 
 	factsTransport := errors.New("guest facts transport unavailable")
@@ -1421,14 +1413,14 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		{"guest facts drift", testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 10}, Err: &ports.GuestExitError{Code: 10}}, nil},
 		{"guest facts unavailable", testkit.IncusExecStep{Err: factsTransport}, factsTransport},
 	} {
-		incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+		incus.ExecSteps = steps("regular file|755|0:0", updatedDigest)
 		incus.ExecSteps[10] = scenario.step
 		ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
 		if ready || !errors.Is(err, scenario.want) {
 			t.Fatalf("%s: ready=%v err=%v", scenario.name, ready, err)
 		}
 	}
-	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
+	incus.ExecSteps = steps("regular file|755|0:0", updatedDigest)
 	incus.ExecSteps[8] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1},
 		Err:    errors.New("dispatcher drift"),
@@ -1467,7 +1459,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	assertStage(t, runtime, "provision", true, "stopped Codex does not need a release pin")
 	runtime.Environment = []string{
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.4",
-		"HOST_OPENCODE_AGENTS_MD=" + instructions,
+		"AGENT_opencode_RULES=" + rules, "AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 	}
 	assertStage(t, runtime, "provision", false, "stale stopped provision marker")
 }

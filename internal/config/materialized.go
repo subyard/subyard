@@ -23,12 +23,10 @@ type MaterializedAsset struct {
 	Source          string
 	Destination     string
 	OwnedFormat     string
-	FollowSymlinks  bool
 	ApprovalSources []string
 }
 
-// MaterializedAssets resolves CONFIG and RULES assets. Host instruction files are
-// separate consumers, and deliberately do not belong to `config status`'s scope.
+// MaterializedAssets resolves CONFIG and RULES assets.
 func MaterializedAssets(values map[string]string, developer string, definitions ...profile.IntegrationDefinition) ([]MaterializedAsset, error) {
 	if !domain.SafeName(developer) {
 		return nil, errors.New("invalid developer user")
@@ -137,7 +135,7 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 // source reader. Fragments are not installed on their own: the agent reads only
 // the composed file. Key order follows the base, then each fragment in turn.
 func (asset MaterializedAsset) ReadContent(read func(MaterializedAsset) ([]byte, error)) ([]byte, error) {
-	payload, err := read(MaterializedAsset{Source: asset.Source, FollowSymlinks: asset.FollowSymlinks})
+	payload, err := read(MaterializedAsset{Source: asset.Source})
 	if err != nil || len(asset.ApprovalSources) == 0 {
 		return payload, err
 	}
@@ -270,20 +268,16 @@ func artifactDestination(developer, destination string) (string, error) {
 }
 
 // ReadSource opens the validated inode without following config symlinks or
-// blocking on a substituted FIFO. Explicit host instruction links remain supported.
+// blocking on a substituted FIFO.
 func (asset MaterializedAsset) ReadSource() ([]byte, error) {
 	info, err := os.Lstat(asset.Source)
 	if err != nil {
 		return nil, err
 	}
-	flags := os.O_RDONLY | syscall.O_NONBLOCK
-	if !asset.FollowSymlinks {
-		flags |= syscall.O_NOFOLLOW
-		if !info.Mode().IsRegular() {
-			return nil, errors.New("source is not a regular file")
-		}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("source is not a regular file")
 	}
-	file, err := os.OpenFile(asset.Source, flags, 0)
+	file, err := os.OpenFile(asset.Source, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errors.New("source is not a regular file")
@@ -295,7 +289,7 @@ func (asset MaterializedAsset) ReadSource() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !opened.Mode().IsRegular() || !asset.FollowSymlinks && !os.SameFile(info, opened) {
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil, errors.New("source is not a regular file")
 	}
 	return io.ReadAll(file)

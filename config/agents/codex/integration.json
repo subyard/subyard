@@ -18,14 +18,6 @@
       "source": "rules/repo.rules",
       "destination": ".codex/rules/repo.rules",
       "format": "raw"
-    },
-    {
-      "id": "instructions",
-      "label": "Codex instructions",
-      "kind": "instructions",
-      "source_setting": "HOST_CODEX_AGENTS_MD",
-      "destination": ".codex/AGENTS.md",
-      "format": "raw"
     }
   ]
 }

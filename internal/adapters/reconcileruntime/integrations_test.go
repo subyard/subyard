@@ -560,7 +560,7 @@ func (fixture *preparedAdoptionExecutor) Exec(_ context.Context, _, _ string, re
 	if len(request.Command) >= 5 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") && request.Command[4] == "observe" {
 		observation := integrationObservation{Fingerprint: fixture.fingerprint, Changed: fixture.initial, Initial: fixture.initial}
 		if fixture.initial {
-			observation.Adopted = []integrationArtifact{{ID: "codex", Kind: "file", Path: "/home/dev/.codex/AGENTS.md"}}
+			observation.Adopted = []integrationArtifact{{ID: "codex", Kind: "file", Path: "/home/dev/.codex/rules/repo.rules"}}
 		}
 		payload, _ := json.Marshal(observation)
 		return ports.InstanceExecResult{Stdout: payload}, nil
@@ -744,17 +744,17 @@ func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) 
 	runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Yard: domain.Context{
 		IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid(),
 	}, Environment: []string{
-		"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex-AGENTS.md"),
+		"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + filepath.Join(root, "codex-AGENTS.md"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 		"AGENT_codex_CONFIG=" + filepath.Join(root, "codex-config.json"), "AGENT_codex_CONFIG_DEST=.codex/config.json",
 	}}
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	prepared, plan, err := runtime.PrepareLegacyIntegrationAdoption(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !prepared.AdoptLegacyIntegrations || prepared.LegacyIntegrationFingerprint == "" ||
 		plan.AdoptionFingerprint != prepared.LegacyIntegrationFingerprint ||
-		len(plan.Adoption) != 2 || !slices.Contains(plan.Adoption, "/home/dev/.codex/AGENTS.md") ||
+		len(plan.Adoption) != 2 || !slices.Contains(plan.Adoption, "/home/dev/.codex/rules/repo.rules") ||
 		!slices.Contains(plan.Adoption, "/home/dev/.codex/config.json") ||
 		len(executor.configModes) == 0 || executor.configModes[0] != configmaterial.ModeAssessAdopt {
 		t.Fatalf("prepared adoption: runtime=%#v plan=%#v", prepared, plan)
@@ -790,9 +790,9 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 		testkit.WriteFile(t, filepath.Join(root, path), []byte(content), 0o644)
 	}
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{DevUser: "dev", DevUID: 1001}, Environment: []string{
-		"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "instructions.md"),
+		"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + filepath.Join(root, "instructions.md"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 	}}
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	legacy := runtime
 	legacy.Integrations = []profile.IntegrationDefinition{}
 	legacy.Environment = nil
@@ -806,7 +806,7 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/home/dev/.codex/AGENTS.md", "/etc/subyard/agent-project-hooks", "/usr/local/libexec/subyard/projects-changed"} {
+	for _, path := range []string{"/home/dev/.codex/rules/repo.rules", "/etc/subyard/agent-project-hooks", "/usr/local/libexec/subyard/projects-changed"} {
 		if !slices.Contains(paths, path) {
 			t.Fatalf("desired scope omitted %s: %#v", path, paths)
 		}

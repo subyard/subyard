@@ -217,9 +217,6 @@ export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
-export HOST_CLAUDE_MD=
-export HOST_CODEX_AGENTS_MD=
-export HOST_OPENCODE_AGENTS_MD=
 export YARD_RUNTIME_ROOT="$STATE/candidate/runtime"
 # A fresh fixture needs the same committed release epochs as an ordinary installation.
 # shellcheck source=tests/helpers/release-candidate.sh

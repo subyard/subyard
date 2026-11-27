@@ -9,10 +9,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$ROOT/config/agents/codex/integration.json"
 jq -e '.schema_version == 2 and .provision == "provision.sh" and
   .command == "codex" and .check == "codex-policy-check" and
-  (.artifacts | length) == 3 and
+  (.artifacts | length) == 2 and
   (.artifacts[0] | .source == "config.toml" and .destination == ".codex/config.toml" and .format == "destination") and
-  (.artifacts[1] | .source == "rules/repo.rules" and .destination == ".codex/rules/repo.rules" and .format == "raw") and
-  (.artifacts[2] | .source_setting == "HOST_CODEX_AGENTS_MD" and .destination == ".codex/AGENTS.md")
+  (.artifacts[1] | .source == "rules/repo.rules" and .destination == ".codex/rules/repo.rules" and .format == "raw")
 ' "$manifest" >/dev/null || fail "Codex package declaration drifted"
 [ -x "$ROOT/config/agents/codex/$(jq -r '.provision' "$manifest")" ] \
   || fail "Codex provision hook is not executable"

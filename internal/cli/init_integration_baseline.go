@@ -83,7 +83,7 @@ func captureInitIntegrationBaseline(loaded config.Loaded) (*initIntegrationBasel
 
 func initIntegrationSetting(name string) bool {
 	switch name {
-	case "CODING_TOOL_INTEGRATIONS", "ALLOWS_CODING_TOOLS", "YARD_TEMPLATE", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD":
+	case "CODING_TOOL_INTEGRATIONS", "ALLOWS_CODING_TOOLS", "YARD_TEMPLATE", "HOST_LINKS":
 		return true
 	}
 	return strings.HasPrefix(name, "AGENT_") || strings.HasPrefix(name, "CCUSAGE_")

@@ -289,15 +289,6 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 		}
 	}
 	batch.setAvailable("CODING_TOOL_INTEGRATIONS", integrationsAvailable)
-	if batch.available("ALLOWS_HOST_ACCESS") && values["ALLOWS_HOST_ACCESS"] == "false" {
-		for _, owner := range batch.catalog.Integrations() {
-			for _, artifact := range owner.Artifacts {
-				if artifact.SourceSetting != "" && batch.available(artifact.SourceSetting) && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					refusals = append(refusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, artifact.SourceSetting))
-				}
-			}
-		}
-	}
 	refusals = append(refusals, checkProfileConstraints(configDir, yard, values, batch.available, profilesAvailable))
 	if profilesAvailable {
 		refusals = append(refusals, batch.resolveProfiles(configDir, yard, values))

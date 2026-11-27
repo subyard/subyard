@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -943,6 +945,47 @@ func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Host instruction copies are retired: older configuration keeps loading, the
+// values are discarded, and each non-empty assignment gets its own notice.
+func TestLoadIgnoresRetiredHostInstructionSettings(t *testing.T) {
+	operatorHome := testkit.TempDir(t)
+	configHome := filepath.Join(operatorHome, ".config", "subyard")
+	hostFile := filepath.Join(configHome, "config.env")
+	yardFile := filepath.Join(configHome, "yards", "default", "config.env")
+	hostContent := "CODING_TOOL_INTEGRATIONS=\"claude codex opencode\"\nHOST_CLAUDE_MD=/home/operator/.claude/CLAUDE.md\nHOST_CODEX_AGENTS_MD=/home/operator/.codex/AGENTS.md\n"
+	yardContent := "SSH_PORT=2231\nHOST_OPENCODE_AGENTS_MD=/home/operator/.config/opencode/AGENTS.md\nHOST_CLAUDE_MD=\n"
+	writeFixture(t, hostFile, hostContent)
+	writeFixture(t, yardFile, yardContent)
+	loaded, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: operatorHome,
+		Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+	if err != nil {
+		t.Fatalf("retired instruction settings blocked load: %v", err)
+	}
+	for _, name := range []string{"HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD"} {
+		if _, exists := loaded.Environment[name]; exists {
+			t.Errorf("retired %s remains effective", name)
+		}
+		if _, exists := loaded.Settings[name]; exists {
+			t.Errorf("retired %s remains visible in setting provenance", name)
+		}
+		if err := ValidateSetting(ScopeHost, name, "/tmp/AGENTS.md", false); err == nil {
+			t.Errorf("new typed write to retired %s was accepted", name)
+		}
+	}
+	var notices []string
+	for _, assignment := range loaded.RetiredAssignments() {
+		if !strings.HasPrefix(assignment.Repair(), "remove line ") {
+			t.Fatalf("retired assignment repair: %s", assignment)
+		}
+		notices = append(notices, fmt.Sprintf("%s:%s:%d", assignment.Name, assignment.Path, assignment.Line))
+	}
+	want := []string{"HOST_CLAUDE_MD:" + hostFile + ":2", "HOST_CODEX_AGENTS_MD:" + hostFile + ":3", "HOST_OPENCODE_AGENTS_MD:" + yardFile + ":2"}
+	slices.Sort(notices)
+	if !slices.Equal(notices, want) {
+		t.Fatalf("notices %v, want %v", notices, want)
 	}
 }
 

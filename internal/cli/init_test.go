@@ -514,7 +514,7 @@ func TestInitTokenSources(t *testing.T) {
 // its own children; any other outcome reports nothing.
 func TestInitConfigsReportsRefusedFiles(t *testing.T) {
 	refused := domain.CollectRefusals(
-		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/a.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/a.md", Token: configmaterial.TokenUnreadable}},
 		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/b.json", Problem: configmaterial.ProblemChanged}})
 	for name, test := range map[string]struct {
 		refresh error
@@ -614,9 +614,6 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 		{name: "agents", override: "CODING_TOOL_INTEGRATIONS=claude", want: "CODING_TOOL_INTEGRATIONS"},
 		{name: "host mounts", override: "HOST_MOUNTS=/tmp:/mnt/host:ro:0755", want: "HOST_MOUNTS"},
 		{name: "host links", override: "HOST_LINKS=.claude/sessions:/mnt/host/agent-sessions/claude/sessions", want: "HOST_LINKS"},
-		{name: "Claude instructions", override: "HOST_CLAUDE_MD=/tmp/CLAUDE.md", want: "HOST_CLAUDE_MD"},
-		{name: "Codex instructions", override: "HOST_CODEX_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_CODEX_AGENTS_MD"},
-		{name: "OpenCode instructions", override: "HOST_OPENCODE_AGENTS_MD=/tmp/AGENTS.md", want: "HOST_OPENCODE_AGENTS_MD"},
 		{name: "capabilities", override: "YARD_CAPABILITIES=sample-device", want: "YARD_CAPABILITIES"},
 		{name: "SSH forwarding", override: "FORWARD_SSH_AGENT=1", want: "FORWARD_SSH_AGENT"},
 		{name: "sudo", override: "DEV_SUDO=yes", want: "DEV_SUDO"},
@@ -647,9 +644,6 @@ func TestLoadInitProfileRejectsCommandOverridesOfPresetSettings(t *testing.T) {
 CODING_TOOL_INTEGRATIONS=codex
 HOST_MOUNTS=
 HOST_LINKS=
-HOST_CLAUDE_MD=
-HOST_CODEX_AGENTS_MD=
-HOST_OPENCODE_AGENTS_MD=
 YARD_CAPABILITIES=
 FORWARD_SSH_AGENT=0
 DEV_SUDO=no

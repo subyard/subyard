@@ -229,8 +229,21 @@ type declaredArtifacts struct {
 // declaredArtifactCatalog lists what this release can declare: the desired
 // entries, the legacy destinations and persist links, and the materialized
 // destinations and owners of every catalog integration.
+// retiredInstructionCopies are where releases through 0.32.0 copied host
+// instruction files. Inventories may still record them, so their refusals and
+// retirement name these paths.
+var retiredInstructionCopies = []string{".claude/CLAUDE.md", ".codex/AGENTS.md", ".config/opencode/AGENTS.md"}
+
+func (runtime Runtime) retiredInstructionPaths() []string {
+	paths := make([]string, 0, len(retiredInstructionCopies))
+	for _, path := range retiredInstructionCopies {
+		paths = append(paths, "/home/"+runtime.devUser()+"/"+path)
+	}
+	return paths
+}
+
 func (runtime Runtime) declaredArtifactCatalog(entries []integrationArtifact, legacy []string) declaredArtifacts {
-	catalog := declaredArtifacts{desired: entries, paths: slices.Clone(legacy), owners: append([]string{"_projects"}, strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))...)}
+	catalog := declaredArtifacts{desired: entries, paths: append(slices.Clone(legacy), runtime.retiredInstructionPaths()...), owners: append([]string{"_projects"}, strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))...)}
 	for _, entry := range entries {
 		catalog.paths = append(catalog.paths, entry.Path)
 		catalog.owners = append(catalog.owners, entry.ID)
@@ -619,8 +632,7 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 			continue
 		}
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
-		entry.SourceDigest, err = file.legacySourceHash()
-		if err == nil && file.ownedFormat == "" && entry.SourceDigest == "" {
+		if file.ownedFormat == "" {
 			entry.SourceDigest, err = runtime.legacyIntegrationConfigDigest(file)
 		}
 		if err != nil {
@@ -798,7 +810,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 		}
 	}
-	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions, "persist": runtime.persistProjection}
+	request := map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": true, "persist": runtime.persistProjection}
 	if evidence != nil {
 		request["config_diagnostics"] = evidence
 	}
@@ -842,7 +854,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			if !ok || definition.Sensitive || definition.Kind != config.SettingFile || definition.Application != config.SettingConfigApply {
 				continue
 			}
-			payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
+			payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source})
 			if err != nil {
 				continue
 			}
@@ -877,7 +889,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
 		// Only declared paths are rendered: the legacy catalog and the desired entries.
-		declared := slices.Clone(legacy)
+		declared := append(slices.Clone(legacy), runtime.retiredInstructionPaths()...)
 		for _, entry := range entries {
 			declared = append(declared, entry.Path)
 		}
@@ -952,8 +964,12 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			return observed, errors.New("invalid integration ownership observation")
 		}
 		catalog := runtime.declaredArtifactCatalog(entries, legacy)
+		// Snapshots from older releases may record retired settings; they are not inputs.
+		if wire.Diagnostics != nil {
+			wire.Diagnostics.Digests = withoutRetiredSettings(wire.Diagnostics.Digests)
+		}
 		observed = integrationObservation{Fingerprint: wire.Fingerprint, Changed: wire.Changed, Pending: wire.Pending, Initial: wire.Initial,
-			Installed: wire.Installed, Selected: wire.Selected, AppliedSettings: wire.AppliedSettings, Diagnostics: wire.Diagnostics,
+			Installed: wire.Installed, Selected: wire.Selected, AppliedSettings: withoutRetiredSettings(wire.AppliedSettings), Diagnostics: wire.Diagnostics,
 			Retired: catalog.retired(wire.Retired)}
 		observed.Facts = catalog.facts(wire.Facts, observed.Retired)
 		if observed.Adopted, err = catalog.adopted(wire.Adopted); err != nil {
@@ -977,6 +993,19 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		}
 	}
 	return observed, nil
+}
+
+func withoutRetiredSettings[V any](values map[string]V) map[string]V {
+	if values == nil {
+		return nil
+	}
+	return maps.Collect(func(yield func(string, V) bool) {
+		for name, value := range values {
+			if !config.IsRetiredSetting(name) && !yield(name, value) {
+				return
+			}
+		}
+	})
 }
 
 func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan, integrationObservation, error) {
@@ -1919,7 +1948,7 @@ func newDiagnosticSourceSnapshot(reader func(config.MaterializedAsset) ([]byte, 
 }
 
 func (snapshot *diagnosticSourceSnapshot) read(asset config.MaterializedAsset) ([]byte, error) {
-	key := configSourceKey{path: asset.Source, follow: asset.FollowSymlinks}
+	key := configSourceKey{path: asset.Source}
 	if value, ok := snapshot.values[key]; ok {
 		return slices.Clone(value.payload), value.err
 	}
@@ -1940,7 +1969,7 @@ func (snapshot *diagnosticSourceSnapshot) verify() error {
 		if old.err != nil {
 			continue
 		}
-		asset := config.MaterializedAsset{Source: key.path, FollowSymlinks: key.follow}
+		asset := config.MaterializedAsset{Source: key.path}
 		var fresh []byte
 		var err error
 		if snapshot.reader == nil {

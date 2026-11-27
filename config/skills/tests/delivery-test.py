@@ -256,14 +256,14 @@ class PreviewMigration(unittest.TestCase):
         self.inventory.write_text(json.dumps(dict(schema=1,entries=[self.record])))
         self.inventory.chmod(0o600)
 
-    def test_strip_and_repeat_preserve_text_and_retirement_without_host_source(self):
+    def test_strip_and_repeat_preserve_text_then_retirement_removes_the_copy(self):
         migration.migrate(self.home,os.getuid(),self.inventory)
         self.assertEqual(self.path.read_bytes(),b'Unmarked instructions.\n\n\n')
         once = self.inventory.read_bytes()
         migration.migrate(self.home,os.getuid(),self.inventory)
         self.assertEqual(self.inventory.read_bytes(),once)
-        # Run the actual owning inventory program through full retirement: a
-        # missing host source must not delete the retained unmarked guest text.
+        # Run the actual owning inventory program through full retirement: the
+        # unchanged migrated copy is removed and no longer recorded.
         state = self.root/'inventory'
         state.mkdir(mode=0o700)
         (state/'inventory.json').write_bytes(once)
@@ -273,8 +273,10 @@ class PreviewMigration(unittest.TestCase):
         for mode in ('observe','apply','commit'):
             result = subprocess.run([sys.executable,'-B','-c',program,mode],input=request,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,mode+": "+result.stderr)
-        self.assertEqual(self.path.read_bytes(),b'Unmarked instructions.\n\n\n')
-        self.assertIn(str(self.path),json.loads((state/'inventory.json').read_bytes())['released'])
+        self.assertFalse(os.path.lexists(self.path))
+        recorded = json.loads((state/'inventory.json').read_bytes())
+        self.assertNotIn(str(self.path),[entry['path'] for entry in recorded['entries']])
+        self.assertNotIn(str(self.path),recorded.get('released',[]))
 
     def test_unsafe_inventory_directory_refuses_without_writes(self):
         before = self.inventory.read_bytes()

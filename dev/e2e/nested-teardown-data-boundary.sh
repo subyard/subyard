@@ -632,9 +632,6 @@ export STORAGE_PATH="$STATE/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
-export HOST_CLAUDE_MD=
-export HOST_CODEX_AGENTS_MD=
-export HOST_OPENCODE_AGENTS_MD=
 install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD"
 
 # Commit the current release's protected reader boundary before any yard effects.
@@ -775,7 +772,6 @@ outer_dev bash -euc '
   export HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=no
   export NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1
   export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
-  export HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD=
   # The synced source carries the same authenticated prebuilt candidate archive.
   jq -e --arg sha "$2" ".runtime_sha256 == \$sha" \
     "$source/.subyard-acceptance/candidate.json" >/dev/null

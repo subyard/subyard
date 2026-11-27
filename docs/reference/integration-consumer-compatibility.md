@@ -1,6 +1,6 @@
 # Integration consumer compatibility
 
-Artifact declarations own config and instruction delivery. These existing
+Artifact declarations own config delivery. These existing
 consumers have separate policies; new integrations need no common-code branches.
 
 Package `persist` metadata projects into `AGENT_<id>_PERSIST` and selection-derived

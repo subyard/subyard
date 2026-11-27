@@ -26,18 +26,17 @@ func materializedBlobPath(content []byte) string {
 // executable path authority. Bind compares them with the current closed selector
 // before attaching any source reader or permitting a guest mutation.
 type materializedConfigFile struct {
-	Integration, Label, OwnedFormat     string
-	Source, Destination, PreviewSource  []byte
-	FollowSymlinks, PreviewInstructions bool
-	Payload                             string
+	Integration, Label, OwnedFormat string
+	Source, Destination             []byte
+	Payload                         string
 }
 
 type materializedSourceGuard struct {
-	Path           []byte
-	Identity       string
-	Payload        string
-	Follow, Exists bool
-	Projected      bool
+	Path      []byte
+	Identity  string
+	Payload   string
+	Exists    bool
+	Projected bool
 }
 
 type materializedConfigs struct {
@@ -45,7 +44,6 @@ type materializedConfigs struct {
 	Files                      []materializedConfigFile
 	Entries                    []materializedArtifact
 	Sources                    []materializedSourceGuard
-	PreviewSkillCutover        bool `json:",omitempty"`
 }
 
 func (d materializedConfigs) semantic() materializedConfigs {
@@ -142,9 +140,9 @@ func materializedSourceIdentity(path string) (string, error) {
 }
 
 func (runtime Runtime) materializedConfigDescription(p *PreparedConfigs) (materializedConfigs, error) {
-	d := materializedConfigs{PreviewSkillCutover: p.previewSkillCutover, Binding: p.binding, Runtime: p.runtime, Instance: p.instance, Entries: describeMaterializedArtifacts(p.entries)}
+	d := materializedConfigs{Binding: p.binding, Runtime: p.runtime, Instance: p.instance, Entries: describeMaterializedArtifacts(p.entries)}
 	for _, f := range p.files {
-		file := materializedConfigFile{Integration: f.integration, Label: f.label, Source: []byte(runtime.bindingPath(f.source)), Destination: []byte(f.destination), PreviewSource: []byte(runtime.bindingPath(f.previewSource)), OwnedFormat: f.ownedFormat, FollowSymlinks: f.followSymlinks, PreviewInstructions: f.previewInstructions}
+		file := materializedConfigFile{Integration: f.integration, Label: f.label, Source: []byte(runtime.bindingPath(f.source)), Destination: []byte(f.destination), OwnedFormat: f.ownedFormat}
 		if payload, exists := p.payloads[f.destination]; exists {
 			file.Payload = materializedBlobPath(payload)
 		}
@@ -166,20 +164,9 @@ func (runtime Runtime) materializedConfigDescription(p *PreparedConfigs) (materi
 		if err != nil {
 			return d, err
 		}
-		d.Sources = append(d.Sources, materializedSourceGuard{[]byte(runtime.bindingPath(key.path)), identity, payload, key.follow, value.exists, projected})
+		d.Sources = append(d.Sources, materializedSourceGuard{[]byte(runtime.bindingPath(key.path)), identity, payload, value.exists, projected})
 	}
-	slices.SortFunc(d.Sources, func(a, b materializedSourceGuard) int {
-		if result := bytes.Compare(a.Path, b.Path); result != 0 {
-			return result
-		}
-		if a.Follow == b.Follow {
-			return 0
-		}
-		if a.Follow {
-			return 1
-		}
-		return -1
-	})
+	slices.SortFunc(d.Sources, func(a, b materializedSourceGuard) int { return bytes.Compare(a.Path, b.Path) })
 	return d, nil
 }
 

@@ -104,8 +104,7 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 	desired := map[string][]byte{"": []byte("desired\n"), "json": []byte(`{"managed":true}`), "toml": []byte("sandbox_mode = 'danger-full-access'\n")}
 	other := map[string]string{"": "old\n", "json": `{"other":1}`, "toml": "other = 1\n"}
 	invalid := map[string]string{"": "not a document {", "json": "{invalid", "toml": "= invalid"}
-	// A step names %s: config apply for the config set, init --configs for
-	// a file only the runtime refreshes.
+	// A step names %s: config apply for the config set.
 	replace := "replace it with a regular file or remove it, then run %s"
 	for _, format := range []string{"", "json", "toml"} {
 		for _, test := range []struct {
@@ -173,17 +172,15 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 				}
 				before, stateBefore := entry(local), entry(guest.state)
 				var observed File
-				for command, initOnly := range map[string]bool{"yard -Y named config apply": false, "yard -Y named init --configs": true} {
-					file.InitOnly = initOnly
-					observed = guest.observe(t, file)
-					if observed.State() != test.state || observed.InitOnly != initOnly {
-						t.Fatalf("state %s (%#v), want %s", observed.State(), observed, test.state)
-					}
-					refusals := Refusals("named", []File{observed})
-					if test.step == "" && len(refusals) != 0 || test.step != "" && (len(refusals) != 1 ||
-						!strings.Contains(refusals[0].Error(), file.Destination) || !strings.HasSuffix(refusals[0].Error(), "; next: "+fmt.Sprintf(test.step, command))) {
-						t.Fatalf("refusals %v, want step %q for %s", refusals, test.step, command)
-					}
+				command := "yard -Y named config apply"
+				observed = guest.observe(t, file)
+				if observed.State() != test.state {
+					t.Fatalf("state %s (%#v), want %s", observed.State(), observed, test.state)
+				}
+				refusals := Refusals("named", []File{observed})
+				if test.step == "" && len(refusals) != 0 || test.step != "" && (len(refusals) != 1 ||
+					!strings.Contains(refusals[0].Error(), file.Destination) || !strings.HasSuffix(refusals[0].Error(), "; next: "+fmt.Sprintf(test.step, command))) {
+					t.Fatalf("refusals %v, want step %q for %s", refusals, test.step, command)
 				}
 				token := observed.Token
 				if !ValidToken(token) {
@@ -311,25 +308,25 @@ func TestCompareAndWriteRequests(t *testing.T) {
 	}
 }
 
-// A refusal report carries each file's destination, state and InitOnly; the
+// A refusal report carries each file's destination and state; the
 // decoded refusal renders as the writer's. Anything else relays nothing.
 func TestRefusalReportRoundTripsOnlyTheClosedVocabulary(t *testing.T) {
 	files := []File{
 		{Label: "private-label", Destination: "/home/dev/.config/agent.md", Token: TokenUnreadable},
 		{Destination: "/home/dev/.config/a.json", Token: PayloadToken([]byte("x")), Problem: ProblemChanged},
-		{Destination: "/home/dev/.config/b.json", Problem: ProblemUnownedInvalid, InitOnly: true},
+		{Destination: "/home/dev/.config/b.json", Problem: ProblemUnownedInvalid},
 		{Destination: "/home/dev/.config/c.toml", Problem: ProblemUnassessed},
 	}
 	written := domain.CollectRefusals(Refusals("named", files)...)
 	payload := EncodeRefusals(written)
-	if !bytes.Contains(payload, []byte(`{"destination":"/home/dev/.config/b.json","state":"unowned-invalid","init_only":true}`)) || bytes.Contains(payload, []byte("private-label")) {
+	if !bytes.Contains(payload, []byte(`{"destination":"/home/dev/.config/b.json","state":"unowned-invalid"}`)) || bytes.Contains(payload, []byte("private-label")) {
 		t.Fatalf("report %s", payload)
 	}
 	if relayed := domain.CollectRefusals(DecodeRefusals("named", payload)...); relayed == nil || relayed.Error() != written.Error() {
 		t.Fatalf("relayed %v, written %v", relayed, written)
 	}
 	for _, state := range []string{"unreadable", "changed", "unowned-invalid", "unassessed"} {
-		single := []byte(`{"files":[{"destination":"/home/dev/a","state":"` + state + `","init_only":false}]}`)
+		single := []byte(`{"files":[{"destination":"/home/dev/a","state":"` + state + `"}]}`)
 		if relayed := DecodeRefusals("named", single); len(relayed) != 1 || relayed[0].(FileRefusal).File.State() != state {
 			t.Fatalf("%s relayed as %v", state, relayed)
 		}
@@ -343,14 +340,14 @@ func TestRefusalReportRoundTripsOnlyTheClosedVocabulary(t *testing.T) {
 	for name, payload := range map[string]string{
 		"empty":             ``,
 		"no files":          `{"files":[]}`,
-		"unknown state":     `{"files":[{"destination":"/home/dev/a","state":"drift","init_only":false}]}`,
-		"unknown field":     `{"files":[{"destination":"/home/dev/a","state":"changed","init_only":false,"message":"guest text"}]}`,
-		"outside the home":  `{"files":[{"destination":"/etc/passwd","state":"changed","init_only":false}]}`,
-		"unclean path":      `{"files":[{"destination":"/home/dev/../root/a","state":"changed","init_only":false}]}`,
+		"unknown state":     `{"files":[{"destination":"/home/dev/a","state":"drift"}]}`,
+		"unknown field":     `{"files":[{"destination":"/home/dev/a","state":"changed","message":"guest text"}]}`,
+		"outside the home":  `{"files":[{"destination":"/etc/passwd","state":"changed"}]}`,
+		"unclean path":      `{"files":[{"destination":"/home/dev/../root/a","state":"changed"}]}`,
 		"trailing value":    `{"files":[]} {}`,
 		"garbage":           `not json`,
-		"oversized":         `{"files":[` + strings.Repeat(`{"destination":"/home/dev/a","state":"changed","init_only":false},`, MaxRefusalReport/60) + `{"destination":"/home/dev/a","state":"changed","init_only":false}]}`,
-		"one invalid entry": `{"files":[{"destination":"/home/dev/a","state":"changed","init_only":false},{"destination":"/home/dev/b","state":"other","init_only":false}]}`,
+		"oversized":         `{"files":[` + strings.Repeat(`{"destination":"/home/dev/a","state":"changed"},`, MaxRefusalReport/40) + `{"destination":"/home/dev/a","state":"changed"}]}`,
+		"one invalid entry": `{"files":[{"destination":"/home/dev/a","state":"changed"},{"destination":"/home/dev/b","state":"other"}]}`,
 	} {
 		if relayed := DecodeRefusals("named", []byte(payload)); len(relayed) != 0 {
 			t.Fatalf("%s relayed %v", name, relayed)

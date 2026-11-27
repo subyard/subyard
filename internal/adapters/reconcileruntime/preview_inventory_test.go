@@ -22,7 +22,7 @@ func TestPreviewInstructionAdoptionAndUnownedRefresh(t *testing.T) {
 	}
 	path := filepath.Join(home, "AGENTS.md")
 	raw := []byte("Keep the host instructions.\n")
-	payload := append(append([]byte(nil), raw...), []byte("\n\n"+previewInstructions)...)
+	payload := append(append([]byte(nil), raw...), []byte("\n\n"+legacyPreviewBlock)...)
 	hash := func(value []byte) string { return fmt.Sprintf("%x", sha256.Sum256(value)) }
 	entry := integrationArtifact{ID: "synthetic", Kind: "file", Path: path,
 		Digest: hash(payload), SourceDigest: hash(raw), Content: base64.StdEncoding.EncodeToString(payload)}

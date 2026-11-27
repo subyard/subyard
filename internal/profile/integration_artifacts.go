@@ -21,9 +21,10 @@ type IntegrationArtifact struct {
 	Kind            string            `json:"kind"`
 	Source          string            `json:"source,omitempty"`
 	ApprovalSources map[string]string `json:"approval_sources,omitempty"`
-	SourceSetting   string            `json:"source_setting,omitempty"`
-	Destination     string            `json:"destination"`
-	Format          string            `json:"format"`
+	// SourceSetting exists only to decode retired instruction artifacts.
+	SourceSetting string `json:"source_setting,omitempty"`
+	Destination   string `json:"destination"`
+	Format        string `json:"format"`
 }
 
 // PackageSources lists the shipped variants that must be validated and bound.
@@ -69,15 +70,19 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 			if (artifact.ID != "config" && artifact.ID != "rules") || (!textSafe(artifact.Source) || !relative(artifact.Source)) || artifact.SourceSetting != "" {
 				return errors.New("invalid config artifact source")
 			}
-		case "instructions":
-			if artifact.ID != "instructions" || artifact.Source != "" || !settingNamePattern.MatchString(artifact.SourceSetting) || artifact.Format != "raw" {
-				return errors.New("invalid instruction artifact source")
-			}
 		default:
 			return errors.New("unsupported integration artifact kind")
 		}
 	}
 	return nil
+}
+
+// retiredInstructionArtifact is a host instruction copy that published releases
+// through 0.32.0 declare. Rollback preparation reads those target declarations,
+// so decoding drops the exact retired shape instead of refusing it.
+func retiredInstructionArtifact(artifact IntegrationArtifact) bool {
+	return artifact.Kind == "instructions" && artifact.ID == "instructions" && artifact.Source == "" &&
+		len(artifact.ApprovalSources) == 0 && settingNamePattern.MatchString(artifact.SourceSetting) && artifact.Format == "raw"
 }
 
 // ArtifactSourcePath rechecks the physical package boundary before source use.

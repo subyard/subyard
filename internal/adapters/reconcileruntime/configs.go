@@ -1,7 +1,6 @@
 package reconcileruntime
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -24,40 +23,32 @@ import (
 )
 
 type guestConfigFile struct {
-	readAsset           func(config.MaterializedAsset) ([]byte, error)
-	integration         string
-	setting             string
-	label               string
-	source              string
-	destination         string
-	followSymlinks      bool
-	approvalSources     []string
-	previewInstructions bool
-	previewSource       string
-	ownedFormat         string
-	// initOnly is an instruction file: config status and config apply do
-	// not cover it, so its refusals name init --configs.
-	initOnly bool
+	readAsset       func(config.MaterializedAsset) ([]byte, error)
+	integration     string
+	setting         string
+	label           string
+	source          string
+	destination     string
+	approvalSources []string
+	ownedFormat     string
 }
 
 // PreparedConfigs retains the exact component source/payload/destination set.
 // Its private fields cannot be reconstructed from a binding supplied over IPC.
 type PreparedConfigs struct {
-	previewSkillCutover bool
-	files               []guestConfigFile
-	payloads            map[string][]byte
-	entries             []integrationArtifact
-	binding             string
-	runtime             string
-	instance            string
-	sources             map[configSourceKey]configSourceBytes
-	packageSources      []config.MaterializedAsset
-	packageIdentities   map[string]string
+	files             []guestConfigFile
+	payloads          map[string][]byte
+	entries           []integrationArtifact
+	binding           string
+	runtime           string
+	instance          string
+	sources           map[configSourceKey]configSourceBytes
+	packageSources    []config.MaterializedAsset
+	packageIdentities map[string]string
 }
 
 type configSourceKey struct {
-	path   string
-	follow bool
+	path string
 }
 type configSourceBytes struct {
 	payload []byte
@@ -90,15 +81,13 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context, consent *ports.Config
 	if err != nil {
 		return err
 	}
-	if !runtime.legacyPreviewInstructions {
-		paths, err := runtime.agentSkillSources()
-		if err != nil {
+	paths, err := runtime.agentSkillSources()
+	if err != nil {
+		return err
+	}
+	if len(paths) != 0 {
+		if err := runtime.runScript(ctx, runtime.Stderr, "refresh-agent-skills.sh", "apply"); err != nil {
 			return err
-		}
-		if len(paths) != 0 {
-			if err := runtime.runScript(ctx, runtime.Stderr, "refresh-agent-skills.sh", "apply"); err != nil {
-				return err
-			}
 		}
 	}
 	return runtime.applyPreparedConfigs(ctx, prepared, consent)
@@ -129,7 +118,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	}
 	sources := map[configSourceKey]configSourceBytes{}
 	reader := func(asset config.MaterializedAsset) ([]byte, error) {
-		key := configSourceKey{asset.Source, asset.FollowSymlinks}
+		key := configSourceKey{asset.Source}
 		if value, exists := sources[key]; exists {
 			if !value.exists {
 				return nil, os.ErrNotExist
@@ -171,7 +160,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	if output == nil {
 		output = io.Discard
 	}
-	fmt.Fprintf(output, "Refresh agent instructions and configs in %s\n", runtime.Yard.YardInstanceName)
+	fmt.Fprintf(output, "Refresh agent configs in %s\n", runtime.Yard.YardInstanceName)
 	// Read once so the inventory intent describes exactly the bytes applied.
 	payloads := make(map[string][]byte)
 	entries := []integrationArtifact{}
@@ -209,15 +198,14 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		bindings[destination] = fmt.Sprintf("%x", sha256.Sum256(payload))
 	}
 	for _, source := range packageSources {
-		bindings["package:"+runtime.bindingPath(source.Source)] = fmt.Sprintf("%x", sha256.Sum256(sources[configSourceKey{source.Source, false}].payload))
+		bindings["package:"+runtime.bindingPath(source.Source)] = fmt.Sprintf("%x", sha256.Sum256(sources[configSourceKey{source.Source}].payload))
 	}
 	type sourceBinding struct {
-		Integration, Label, Source, Destination, PreviewSource, OwnedFormat string
-		FollowSymlinks, PreviewInstructions                                 bool
+		Integration, Label, Source, Destination, OwnedFormat string
 	}
 	bindingsSources := make([]sourceBinding, 0, len(files))
 	for _, file := range files {
-		bindingsSources = append(bindingsSources, sourceBinding{file.integration, file.label, runtime.bindingPath(file.source), file.destination, runtime.bindingPath(file.previewSource), file.ownedFormat, file.followSymlinks, file.previewInstructions})
+		bindingsSources = append(bindingsSources, sourceBinding{file.integration, file.label, runtime.bindingPath(file.source), file.destination, file.ownedFormat})
 	}
 	raw, err := json.Marshal(struct {
 		Payloads map[string]string
@@ -229,13 +217,12 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
+	return &PreparedConfigs{files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
 // configFiles are the guest files a refresh compares with: each file's
 // confirmed consent token, and for a refresh that plans itself, or a file the
-// confirmation did not cover (instruction files), the bytes this writer
-// observes right before it writes.
+// confirmation did not cover, the bytes this writer observes right before it writes.
 func (runtime Runtime) configFiles(ctx context.Context, prepared *PreparedConfigs, consent *ports.ConfigConsent) (map[string]configmaterial.File, error) {
 	files := map[string]configmaterial.File{}
 	if consent != nil {
@@ -277,7 +264,7 @@ func (runtime Runtime) observeConfigFiles(ctx context.Context, files []guestConf
 			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 			continue
 		}
-		desired = append(desired, configmaterial.Desired{Label: file.label, Destination: file.destination, Format: file.ownedFormat, Payload: payload, InitOnly: file.initOnly})
+		desired = append(desired, configmaterial.Desired{Label: file.label, Destination: file.destination, Format: file.ownedFormat, Payload: payload})
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil || len(desired) == 0 {
 		return nil, err
@@ -301,7 +288,6 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
-	runtime.legacyPreviewInstructions = !prepared.previewSkillCutover
 	files, payloads, entries := prepared.files, prepared.payloads, prepared.entries
 	evidence, err := runtime.prepareConfigDiagnostics(ctx, prepared)
 	if err != nil {
@@ -315,10 +301,8 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if err != nil {
 		return err
 	}
-	if len(entries) != 0 || prepared.previewSkillCutover {
-		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
-			return err
-		}
+	if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
+		return err
 	}
 	// Each file is its own compare-and-write: a refused file keeps the others
 	// going, and only a yard whose every file converged commits the inventory.
@@ -330,14 +314,13 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			continue
 		}
 		guest := observed[file.destination]
-		guest.Label, guest.InitOnly = file.label, file.initOnly
+		guest.Label = file.label
 		if state := guest.State(); state != "converged" && state != "drift" {
 			err = configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: guest}
 		} else {
 			err = runtime.applyGuestConfig(ctx, file, payload, guest.Token)
 		}
 		if refusal := new(configmaterial.FileRefusal); errors.As(err, refusal) {
-			refusal.File.InitOnly = file.initOnly
 			refusals = append(refusals, *refusal)
 			continue
 		}
@@ -351,17 +334,15 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
-	if len(entries) != 0 || prepared.previewSkillCutover {
-		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, "", integrationInventoryCapture{config: evidence}); err != nil {
-			return err
-		}
+	if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, "", integrationInventoryCapture{config: evidence}); err != nil {
+		return err
 	}
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if !copied[agent+" config"] && !copied[agent+" rules"] {
 			fmt.Fprintf(output, "  [ ok ] %s: no default config — skipping\n", agent)
 		}
 	}
-	fmt.Fprintln(output, "  [ ok ] Agent instructions and configs refreshed.")
+	fmt.Fprintln(output, "  [ ok ] Agent configs refreshed.")
 	return nil
 }
 
@@ -397,7 +378,7 @@ func (runtime Runtime) prepareConfigDiagnostics(ctx context.Context, prepared *P
 		if !ok || definition.Sensitive || definition.Kind != config.SettingFile || definition.Application != config.SettingConfigApply {
 			continue
 		}
-		source, ok := prepared.sources[configSourceKey{file.source, file.followSymlinks}]
+		source, ok := prepared.sources[configSourceKey{file.source}]
 		if !ok || !source.exists {
 			continue
 		}
@@ -425,7 +406,7 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	ready, err := runtime.guestConfigsConverged(ctx, files)
-	if err != nil || !ready || runtime.legacyPreviewInstructions {
+	if err != nil || !ready {
 		return ready, err
 	}
 	paths, err := runtime.agentSkillSources()
@@ -512,11 +493,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, approvalSources: asset.ApprovalSources, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat, initOnly: source.PreviewInstructions}
-		if file.previewInstructions {
-			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
-		}
-		files = append(files, file)
+		files = append(files, guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, approvalSources: asset.ApprovalSources, ownedFormat: asset.OwnedFormat})
 	}
 
 	return files, nil
@@ -530,29 +507,12 @@ func (file guestConfigFile) readSourceAsset(asset config.MaterializedAsset) ([]b
 }
 
 func (file guestConfigFile) readSource() ([]byte, error) {
-	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks, ApprovalSources: file.approvalSources}
+	asset := config.MaterializedAsset{Source: file.source, ApprovalSources: file.approvalSources}
 	payload, sourceErr := asset.ReadContent(file.readSourceAsset)
 	if sourceErr != nil && !os.IsNotExist(sourceErr) {
 		return nil, sourceErr
 	}
-	// Current instruction delivery omits only exact historical managed blocks.
-	// Frozen recipes retain the original composition path below.
-	// The artifact resolver grants source symlink following only to instructions;
-	// diagnostic labels are package-owned text, not a policy discriminator.
-	if !file.previewInstructions && file.followSymlinks && sourceErr == nil {
-		payload = stripLegacyPreviewBlock(payload)
-	}
-	// Older published runtimes lack this asset; preserve their exact desired bytes.
-	preview := []byte(previewInstructions)
-	if file.previewInstructions && file.previewSource != "" {
-		asset, err := file.readSourceAsset(config.MaterializedAsset{Source: file.previewSource})
-		if err == nil {
-			preview = asset
-		} else if !os.IsNotExist(err) {
-			return nil, err
-		}
-	}
-	payload, present, err := config.PrepareMaterializationContent(config.MaterializationRuntime, file.previewInstructions, config.MaterializationContent{Present: sourceErr == nil, Payload: payload}, preview)
+	payload, present, err := config.PrepareMaterializationContent(config.MaterializationRuntime, config.MaterializationContent{Present: sourceErr == nil, Payload: payload})
 	if err != nil {
 		return nil, err
 	}
@@ -560,27 +520,6 @@ func (file guestConfigFile) readSource() ([]byte, error) {
 		return nil, sourceErr
 	}
 	return payload, nil
-}
-
-const previewInstructions = `<!-- subyard-preview -->
-For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` from the Git workspace and keep it running with your background/async process mechanism. Share the printed URL. An owner Tailscale URL requires device reachability and Tailnet policy access; a loopback URL requires an active preview-enabled ` + "`yard code`" + ` SSH session. The helper must stay running for either URL.
-<!-- /subyard-preview -->
-`
-
-// The unchanged host digest is evidence for consented initial legacy adoption;
-// the effective payload remains the desired managed identity.
-func (file guestConfigFile) legacySourceHash() (string, error) {
-	if !file.previewInstructions && !file.followSymlinks {
-		return "", nil
-	}
-	payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
@@ -760,23 +699,4 @@ func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, err
 		}
 	}
 	return sources, nil
-}
-
-// Unrecognized or ambiguous markers are user content, never removal authority.
-func stripLegacyPreviewBlock(payload []byte) []byte {
-	start, end := []byte("<!-- subyard-preview -->"), []byte("<!-- /subyard-preview -->")
-	if bytes.Count(payload, start) != 1 || bytes.Count(payload, end) != 1 {
-		return payload
-	}
-	begin, finish := bytes.Index(payload, start), bytes.Index(payload, end)
-	if finish < begin {
-		return payload
-	}
-	finish += len(end)
-	block := payload[begin:finish]
-	if !bytes.Equal(block, bytes.TrimSuffix([]byte(previewInstructions), []byte("\n"))) && fmt.Sprintf("%x", sha256.Sum256(block)) != "2de48bed4c984591e976f396432ff7758f4df3ca24e0b55fc90bf1fb0a5aeb48" {
-		return payload
-	}
-	result := append([]byte(nil), payload[:begin]...)
-	return append(result, payload[finish:]...)
 }

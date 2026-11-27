@@ -536,15 +536,6 @@ func load(
 		values["CODING_TOOL_INTEGRATIONS"] = ""
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
-	if values["ALLOWS_HOST_ACCESS"] == "false" {
-		for _, owner := range tracker.catalog.Integrations() {
-			for _, artifact := range owner.Artifacts {
-				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
-					roleRefusals = append(roleRefusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, artifact.SourceSetting))
-				}
-			}
-		}
-	}
 	// Role, profile and context checks read independent settings, so each stage
 	// runs and every refusal is reported. Edge D6: any earlier refusal (command
 	// override, asset source, integration, role or profile constraint) skips
@@ -1231,12 +1222,19 @@ func isRetiredSetting(name string) bool {
 	switch name {
 	case "CODEX_VERSION", "CODEX_SHA256_AMD64", "CODEX_SHA256_ARM64":
 		return true
+	case "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD":
+		// Host instruction files are no longer copied; the user-dotfiles profile links them.
+		return true
 	default:
 		// The explicit integration cleanup hook no longer exists.
 		agent, cleanup := strings.CutSuffix(strings.TrimPrefix(name, "AGENT_"), "_CLEANUP")
 		return cleanup && strings.HasPrefix(name, "AGENT_") && domain.SafeName(agent)
 	}
 }
+
+// IsRetiredSetting reports a core setting that older releases may have
+// recorded and current code ignores.
+func IsRetiredSetting(name string) bool { return isRetiredSetting(name) }
 
 func discardRetiredSettings(values environment) {
 	for name := range values {

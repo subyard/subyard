@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"reflect"
 	"strings"
@@ -13,21 +12,17 @@ import (
 
 func TestMaterializationScopeSelectsOnlyDeclaredConsumers(t *testing.T) {
 	values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample other", "AGENT_sample_CONFIG": "source-label", "AGENT_sample_CONFIG_DEST": "config.json", "AGENT_sample_RULES": "rules-label", "AGENT_sample_RULES_DEST": "rules"}
-	instruction := profile.IntegrationDefinition{Name: "sample", Root: "/immutable/package", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "SAMPLE_INSTRUCTIONS", Destination: "instructions", Format: "raw"}}}
-	values["SAMPLE_INSTRUCTIONS"] = "instruction-label"
+	definition := profile.IntegrationDefinition{Name: "sample", Root: "/immutable/package"}
 	for _, test := range []struct {
-		name   string
-		scope  MaterializationScope
-		allows string
-		want   []string
+		name  string
+		scope MaterializationScope
+		want  []string
 	}{
-		{"status", MaterializationConfigAssets, "", []string{"sample.config", "sample.rules"}},
-		{"runtime", MaterializationRuntime, "", []string{"sample.instructions", "sample.config", "sample.rules"}},
-		{"disallowed instructions", MaterializationRuntime, "false", []string{"sample.config", "sample.rules"}},
+		{"status", MaterializationConfigAssets, []string{"sample.config", "sample.rules"}},
+		{"runtime", MaterializationRuntime, []string{"sample.config", "sample.rules"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			values["ALLOWS_CODING_TOOLS"] = test.allows
-			selected, err := SelectMaterializationSources(values, "dev", test.scope, instruction)
+			selected, err := SelectMaterializationSources(values, "dev", test.scope, definition)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,44 +33,34 @@ func TestMaterializationScopeSelectsOnlyDeclaredConsumers(t *testing.T) {
 			if !reflect.DeepEqual(names, test.want) {
 				t.Fatalf("selection=%v", names)
 			}
-			if test.name == "runtime" && (!selected[0].Asset.FollowSymlinks || selected[1].Asset.FollowSymlinks || selected[1].Asset.OwnedFormat != "json") {
-				t.Fatal("physical source and owned-format policies changed")
+			if selected[0].Asset.OwnedFormat != "json" || selected[1].Asset.OwnedFormat != "" {
+				t.Fatal("owned-format policy changed")
 			}
 		})
 	}
 	values["CODING_TOOL_INTEGRATIONS"] = "other"
-	selected, err := SelectMaterializationSources(values, "dev", MaterializationRuntime, instruction)
+	selected, err := SelectMaterializationSources(values, "dev", MaterializationRuntime, definition)
 	if err != nil || len(selected) != 0 {
 		t.Fatal("unselected consumer escaped scope")
 	}
 }
 
-func TestMaterializationContentPreservesMissingAndPreviewPolicy(t *testing.T) {
-	preview := []byte("<!-- subyard-preview -->\nCurrent.\n<!-- /subyard-preview -->\n")
-	host := []byte("Host text.")
-	legacy := "Before.\n<!-- subyard-preview -->\nOld.\n<!-- /subyard-preview -->\nAfter.\n"
+func TestMaterializationContentPreservesMissingPolicy(t *testing.T) {
 	for _, test := range []struct {
-		name                  string
-		scope                 MaterializationScope
-		instructions, present bool
-		source, want          string
-		include               bool
-		fail                  bool
+		name          string
+		scope         MaterializationScope
+		present       bool
+		source, want  string
+		include, fail bool
 	}{
 		{name: "status missing", scope: MaterializationConfigAssets, fail: true},
 		{name: "runtime missing", scope: MaterializationRuntime},
-		{name: "raw present", scope: MaterializationRuntime, present: true, source: string(host), want: string(host), include: true},
+		{name: "raw present", scope: MaterializationRuntime, present: true, source: "Host text.", want: "Host text.", include: true},
 		{name: "present empty", scope: MaterializationConfigAssets, present: true, include: true},
-		{name: "instruction missing", scope: MaterializationRuntime, instructions: true, want: string(preview), include: true},
-		{name: "instruction empty", scope: MaterializationRuntime, instructions: true, present: true, want: string(preview), include: true},
-		{name: "instruction append", scope: MaterializationRuntime, instructions: true, present: true, source: string(host), want: string(host) + "\n\n" + string(preview), include: true},
-		{name: "instruction refresh", scope: MaterializationRuntime, instructions: true, present: true, source: legacy, want: "Before.\n" + string(preview) + "After.\n", include: true},
-		{name: "ambiguous", scope: MaterializationRuntime, instructions: true, present: true, source: legacy + legacy, fail: true},
-		{name: "unterminated", scope: MaterializationRuntime, instructions: true, present: true, source: "<!-- subyard-preview -->", fail: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := []byte(test.source)
-			content, include, err := PrepareMaterializationContent(test.scope, test.instructions, MaterializationContent{Present: test.present, Payload: source}, preview)
+			content, include, err := PrepareMaterializationContent(test.scope, MaterializationContent{Present: test.present, Payload: source})
 			if (err != nil) != test.fail || err == nil && (include != test.include || string(content) != test.want) {
 				t.Fatalf("content=%q include=%v error=%v", content, include, err)
 			}
@@ -85,8 +70,8 @@ func TestMaterializationContentPreservesMissingAndPreviewPolicy(t *testing.T) {
 			if len(content) > 0 {
 				content[0] = 'X'
 			}
-			if string(source) != test.source || !bytes.HasPrefix(preview, []byte("<!--")) {
-				t.Fatal("composition changed supplied bytes")
+			if string(source) != test.source {
+				t.Fatal("preparation changed supplied bytes")
 			}
 		})
 	}

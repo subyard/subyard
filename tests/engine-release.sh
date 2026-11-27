@@ -44,7 +44,6 @@ ROOT="$TMP/source"
 cd "$ROOT"
 # A restrictive checkout must still produce public executable runtime assets.
 chmod 0700 "$ROOT/config/preview/subyard-preview"
-chmod 0600 "$ROOT/config/preview/instructions.md"
 
 release="$TMP/release"
 # Release activation observes a reachable native API with an absent instance,
@@ -213,7 +212,6 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
   && grep -Fxq './config/release-rollback.json' "$bundle_list" \
   && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
-  && grep -Fxq './config/preview/instructions.md' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
   && grep -Fxq './scripts/lib/preview-proxy.sh' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
@@ -257,9 +255,6 @@ done
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
   || fail 'runtime bundle changed preview helper bytes or executable mode'
-[ "$(stat -c '%a' "$bundle_extract/config/preview/instructions.md")" = 644 ] \
-  && cmp -s "$ROOT/config/preview/instructions.md" "$bundle_extract/config/preview/instructions.md" \
-  || fail 'runtime bundle changed preview instruction bytes or public data mode'
 [ "$(stat -c '%a' "$bundle_extract/scripts/prepare-preview-route.sh")" = 755 ] \
   && cmp -s "$ROOT/scripts/prepare-preview-route.sh" "$bundle_extract/scripts/prepare-preview-route.sh" \
   && [ "$(stat -c '%a' "$bundle_extract/config/profiles/package-fixture/asset.txt")" = 644 ] \

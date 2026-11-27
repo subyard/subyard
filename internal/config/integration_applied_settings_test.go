@@ -10,9 +10,9 @@ func TestAppliedIntegrationSettingsKeepOnlyValidatedInitInputs(t *testing.T) {
 			t.Fatalf("init setting omitted: %s", name)
 		}
 	}
-	values := map[string]string{"AGENT_sample_COMMAND": "sample", "AGENT_sample_CHECK": "sample-check", "HOST_CODEX_AGENTS_MD": "/tmp/rules", "DEV_USER": "dev", "AGENT_sample_CONFIG": "/tmp/config", "UNRELATED": "private", "SECRET_TOKEN": "private"}
+	values := map[string]string{"AGENT_sample_COMMAND": "sample", "AGENT_sample_CHECK": "sample-check", "HOST_CODEX_AGENTS_MD": "/tmp/retired", "DEV_USER": "dev", "AGENT_sample_CONFIG": "/tmp/config", "UNRELATED": "private", "SECRET_TOKEN": "private"}
 	settings := catalog.IntegrationInitSettings(values)
-	if len(settings) != 4 {
+	if len(settings) != 3 {
 		t.Fatalf("unexpected input count: %d", len(settings))
 	}
 	if err := catalog.ValidateIntegrationInitSettings(settings); err != nil {

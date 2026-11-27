@@ -10,7 +10,7 @@ import (
 
 func (catalog Catalog) IntegrationDiagnosticFile(name string) bool {
 	definition, ok := catalog.LookupSetting(name)
-	return ok && catalog.IntegrationDiagnosticSetting(name) && (definition.Kind == SettingFile || definition.Type == SettingRegularFilePath || name == "HOST_CLAUDE_MD" || name == "HOST_CODEX_AGENTS_MD" || name == "HOST_OPENCODE_AGENTS_MD")
+	return ok && catalog.IntegrationDiagnosticSetting(name) && (definition.Kind == SettingFile || definition.Type == SettingRegularFilePath)
 }
 
 // IntegrationDiagnosticDigests computes keyed evidence without retaining the
@@ -24,7 +24,7 @@ func (catalog Catalog) IntegrationDiagnosticDigests(values map[string]string, ke
 		}
 		payload := []byte(value)
 		if catalog.IntegrationDiagnosticFile(name) {
-			asset := MaterializedAsset{Source: value, FollowSymlinks: strings.HasPrefix(name, "HOST_")}
+			asset := MaterializedAsset{Source: value}
 			var err error
 			if read == nil {
 				payload, err = asset.ReadSource()

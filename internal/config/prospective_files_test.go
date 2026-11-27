@@ -57,7 +57,7 @@ func TestProspectiveFilesPreservesNormalAssetPolicies(t *testing.T) {
 	root, outside := testkit.TempDir(t), testkit.TempDir(t)
 	path := filepath.Join(outside, "rules")
 	testkit.WriteFile(t, path, []byte("external\n"), 0o644)
-	link := filepath.Join(outside, "instructions")
+	link := filepath.Join(outside, "link")
 	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +67,6 @@ func TestProspectiveFilesPreservesNormalAssetPolicies(t *testing.T) {
 	}}
 	if _, err := files.ReadAsset(MaterializedAsset{Source: link}); err == nil {
 		t.Fatal("ordinary non-symlink policy lost")
-	}
-	if data, err := files.ReadAsset(MaterializedAsset{Source: link, FollowSymlinks: true}); err != nil || string(data) != "external\n" {
-		t.Fatalf("external instruction policy: %q %v", data, err)
 	}
 	var ordinary *ProspectiveFiles
 	if data, err := ordinary.ReadAsset(MaterializedAsset{Source: path}); err != nil || string(data) != "external\n" {

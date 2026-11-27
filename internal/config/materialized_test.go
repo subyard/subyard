@@ -48,7 +48,6 @@ func TestPublishedOpenCodeApprovalVariants(t *testing.T) {
 			}
 			for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
 				sources, err := SelectMaterializationSources(loaded.Environment, "dev", scope, loaded.Catalog.Integrations()...)
-				sources = slices.DeleteFunc(sources, func(source MaterializationSource) bool { return source.PreviewInstructions })
 				if err != nil || len(sources) != 1 {
 					t.Fatalf("%s: sources=%#v, %v", scope, sources, err)
 				}
@@ -248,9 +247,5 @@ func TestMaterializedAssetReadRejectsSymlinkConfig(t *testing.T) {
 	asset := MaterializedAsset{Source: link}
 	if _, err := asset.ReadSource(); err == nil {
 		t.Fatal("followed config symlink")
-	}
-	asset.FollowSymlinks = true
-	if _, err := asset.ReadSource(); err != nil {
-		t.Fatal(err)
 	}
 }

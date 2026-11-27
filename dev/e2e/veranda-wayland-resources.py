@@ -258,8 +258,7 @@ def platform_environment(state):
     probe.private_file(yard / 'config.env',
                        'YARD_KIND=container\nSSH_PORT=64996\nLIMITS_MEMORY=512MiB\n'
                        f'HOST_BASE={state}/prepare-host\nRESTRICTED_DISK_PATHS={state}/prepare-host\n'
-                       'FORWARD_SSH_AGENT=0\nENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n'
-                       'HOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n')
+                       'FORWARD_SSH_AGENT=0\nENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n')
     env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(home),
            'SUBYARD_OPERATOR_HOME': str(home), 'SUBYARD_CONFIG_HOME': str(config), 'SUBYARD_HOME': str(data),
            'SUBYARD_REPOSITORY_ROOT': str(ROOT), 'STORAGE_PATH': str(platform / 'incus/incus/storage'),

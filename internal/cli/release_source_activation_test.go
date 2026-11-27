@@ -270,7 +270,7 @@ func TestPreparedActivationDoesNotReadUnrelatedLargeInventory(t *testing.T) {
 	}
 }
 
-func TestPreparedActivationPreservesUncapturedNativeInstructionSymlinkAndLargeAsset(t *testing.T) {
+func TestPreparedActivationRefusesUncapturedSymlinkAndKeepsLargeAsset(t *testing.T) {
 	fixture := newSourceScopeFixture(t)
 	testkit.WriteFile(t, filepath.Join(fixture.root, "config", "projects-changed.sh"), []byte("#!/bin/sh\n"), 0755)
 	fixture.program.options.InitPlatform = nil
@@ -286,12 +286,6 @@ func TestPreparedActivationPreservesUncapturedNativeInstructionSymlinkAndLargeAs
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	host := filepath.Join(fixture.configHome, "config.env")
-	settings, err := os.ReadFile(host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, host, append(settings, []byte("HOST_CLAUDE_MD='"+link+"'\n")...), 0600)
 	reconciler := fixture.reconciler(false).materializedConfigActivationReconciler
 	releases := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
 	native, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
@@ -350,7 +344,7 @@ func checkPreparedMaterializedActivation(t *testing.T, native bool) {
 	t.Helper()
 	fixture := newSourceScopeFixture(t)
 	testkit.WriteFile(t, filepath.Join(fixture.root, "config", "projects-changed.sh"), []byte("#!/bin/sh\n"), 0755)
-	declareCLIInstructionFixture(t, fixture.root, "claude", "HOST_CLAUDE_MD", ".claude/CLAUDE.md", "Claude instructions")
+	declareCLIRulesFixture(t, fixture.root, "claude", ".claude/rules/repo.rules")
 	catalog, catalogErr := config.LoadCatalog(fixture.root)
 	if catalogErr != nil {
 		t.Fatal(catalogErr)

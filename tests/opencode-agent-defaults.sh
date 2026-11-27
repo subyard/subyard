@@ -25,12 +25,10 @@ done
 manifest="$dir/integration.json"
 jq -e '
   .schema_version == 2 and .command == "opencode" and .provision == "provision.sh" and
-  (.artifacts | length) == 2 and
+  (.artifacts | length) == 1 and
   (.artifacts[0] | .id == "config" and .source == "opencode.jsonc" and
     .approval_sources == {"git": "50-subyard-git-approval.jsonc", "sudo": "51-subyard-sudo-approval.jsonc"} and
-    .destination == ".config/opencode/opencode.jsonc" and .format == "destination") and
-  (.artifacts[1] | .kind == "instructions" and .source_setting == "HOST_OPENCODE_AGENTS_MD" and
-    .destination == ".config/opencode/AGENTS.md")
+    .destination == ".config/opencode/opencode.jsonc" and .format == "destination")
 ' "$manifest" >/dev/null || fail "OpenCode declaration drifted"
 AGENT_opencode_PERSIST="$(jq -r '.persist' "$manifest")"
 [ -x "$ROOT/config/agents/opencode/$(jq -r '.provision' "$manifest")" ] \
@@ -47,8 +45,5 @@ case "$AGENT_opencode_PERSIST" in
   *'.local/share/opencode/opencode.db:/mnt/host/agent-sessions/opencode/opencode.db:file'*) ;;
   *) fail "OpenCode SQLite session database is not persisted" ;;
 esac
-
-grep -Fq 'HOST_OPENCODE_AGENTS_MD=' "$ROOT/config/host.env" \
-  || fail "OpenCode host instructions are not configurable"
 
 printf 'ok: OpenCode agent defaults\n'

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installed-candidate clone/link: nonfatal source failure, retry on the next init, links every
-# agent reads, and disable.
+# Installed-candidate clone/link: no host instruction copy, nonfatal source failure, retry on
+# the next init, links every agent reads, and disable.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
@@ -135,9 +135,17 @@ links=(/home/dev/.claude/CLAUDE.md /home/dev/.codex/AGENTS.md /home/dev/.config/
 
 printf 'user-dotfiles_e2e_stage=create\n'
 YARDS+=("$first")
+# Host instructions are never copied into the yard; the disposable VM keeps this file.
+if [ ! -e "$HOME/.claude/CLAUDE.md" ]; then
+  install -d -m 0700 "$HOME/.claude"
+  printf 'Host instructions.\n' > "$HOME/.claude/CLAUDE.md"
+fi
 yard "$first" init --yes
 # Init preserves desired power; guest-side checks require a running yard.
 yard "$first" start --yes
+for link in "${links[@]}"; do
+  ! as_dev "$first" test -e "$link" -o -L "$link" || die "$link exists before the profile is enabled"
+done
 # shellcheck disable=SC2016
 as_dev "$first" sh -euc '
 work="$(mktemp -d)"
@@ -185,4 +193,4 @@ for link in "${links[@]}"; do
   ! as_dev "$first" test -L "$link" || die "disable kept link $link"
 done
 as_dev "$first" test -f "$clone/yard/agents/AGENTS.md" || die 'disable removed the clone'
-printf 'ok: user-dotfiles unavailable source warning, retry, readable links and disable\n'
+printf 'ok: user-dotfiles no host copy, unavailable source warning, retry, readable links and disable\n'

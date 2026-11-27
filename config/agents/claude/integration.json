@@ -11,14 +11,6 @@
       "source": "settings.json",
       "destination": ".claude/settings.json",
       "format": "destination"
-    },
-    {
-      "id": "instructions",
-      "label": "Claude instructions",
-      "kind": "instructions",
-      "source_setting": "HOST_CLAUDE_MD",
-      "destination": ".claude/CLAUDE.md",
-      "format": "raw"
     }
   ]
 }

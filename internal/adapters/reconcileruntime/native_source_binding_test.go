@@ -29,7 +29,7 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(root, "config", "AGENTS.md"), []byte("approved instructions\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "config", "repo.rules"), []byte("approved rules\n"), 0o600)
 	first, err := os.Open(root)
 	if err != nil {
 		t.Fatal(err)
@@ -40,15 +40,15 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 		t.Fatal(err)
 	}
 	defer second.Close()
-	fixtureRuntime := Runtime{}
-	bindInstructionTestPackage(t, &fixtureRuntime, root, "codex")
+	fixtureRuntime := Runtime{Environment: []string{"AGENT_codex_RULES=" + filepath.Join(root, "config", "repo.rules"), "AGENT_codex_RULES_DEST=.codex/rules/repo.rules"}}
+	bindAgentTestPackage(t, &fixtureRuntime, root, "codex")
 	logical := "/approved/artifact"
 	makeRuntime := func(file *os.File) Runtime {
 		physical := fmt.Sprintf("/proc/self/fd/%d", file.Fd())
 		hook := fmt.Sprintf("/proc/%d/fd/%d/config/profiles/synthetic/guest.sh", os.Getpid(), file.Fd())
 		incus := runningIncus(0)
 		return Runtime{RepositoryRoot: physical, LogicalRepositoryRoot: logical,
-			Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + physical + "/config/AGENTS.md", "SUBYARD_CONFIG_DIR=" + physical + "/config", "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS=" + hook},
+			Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + physical + "/config/repo.rules", "AGENT_codex_RULES_DEST=.codex/rules/repo.rules", "SUBYARD_CONFIG_DIR=" + physical + "/config", "SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS=" + hook},
 			Incus:       incus, Executor: incus, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001}}
 	}
 	a, b := makeRuntime(first), makeRuntime(second)
@@ -71,7 +71,7 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 	if err != nil || x.binding != y.binding {
 		t.Fatal("descriptor number entered prepared config recipe", err)
 	}
-	testkit.WriteFile(t, filepath.Join(root, "config", "AGENTS.md"), []byte("different actual source\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "config", "repo.rules"), []byte("different actual source\n"), 0o600)
 	right, err = b.profileRuntimeInputs(nil)
 	if err != nil || left == right {
 		t.Fatal("logical label hid changed approved bytes", err)

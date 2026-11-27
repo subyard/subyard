@@ -107,8 +107,7 @@ func checkProfileConstraints(configDir, yard string, values environment, availab
 	}
 	if noHostAccess {
 		for _, name := range []string{
-			"HOST_MOUNTS", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD",
-			"HOST_OPENCODE_AGENTS_MD", "YARD_CAPABILITIES",
+			"HOST_MOUNTS", "HOST_LINKS", "YARD_CAPABILITIES",
 		} {
 			if available(name) && strings.TrimSpace(values[name]) != "" {
 				refusals = append(refusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, name))

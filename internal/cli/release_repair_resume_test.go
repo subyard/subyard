@@ -290,13 +290,10 @@ func TestMaterializedRepairResumeConvergesInstalledConfiguration(t *testing.T) {
 			}
 			journal = publishRepairResume(t, fixture, journal, false)
 			pendingSource := filepath.Join(fixture.cli.options.RepositoryRoot, "pending.rules")
-			setting := "HOST_CODEX_AGENTS_MD"
-			if missingSource {
-				setting = "AGENT_codex_PROVISION"
-			} else {
+			if !missingSource {
 				testkit.WriteFile(t, pendingSource, []byte("pending rule\n"), 0o600)
 			}
-			writeConfigCommandFile(t, filepath.Join(request.ConfigHome, "yards/default/config.env"), "DEV_USER=edited\nDEV_UID=1003\n"+setting+"="+pendingSource+"\n")
+			writeConfigCommandFile(t, filepath.Join(request.ConfigHome, "yards/default/config.env"), "DEV_USER=edited\nDEV_UID=1003\nAGENT_codex_PROVISION="+pendingSource+"\n")
 			if missingSource {
 				if _, err := fixture.cli.loadContext("default"); err == nil {
 					t.Fatal("ordinary loading accepted a missing provisioning source")

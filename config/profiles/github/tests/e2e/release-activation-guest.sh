@@ -463,8 +463,8 @@ verify_runtime() {
   [ "$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)" = "$preview" ] || die 'preview helper differs'
   [ "$(guest stat -c '%a:%u:%g' /usr/local/bin/subyard-preview)" = 755:0:0 ] || die 'preview helper permissions differ'
   [ "$(guest stat -c '%a:%u:%g' /etc/subyard/preview.json)" = 644:0:0 ] || die 'preview metadata permissions differ'
-  [ "$(guest sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)" = "$preview_instruction_hash" ] \
-    || die 'preview migration lost unmarked instructions after their host source disappeared'
+  guest test ! -e /home/dev/.claude/CLAUDE.md \
+    || die 'activation kept the unchanged host instruction copy'
   guest test -r /home/dev/.agents/skills/subyard-preview/SKILL.md
   guest test ! -L /home/dev/.codex/skills/subyard-github
   [ "$(guest sha256sum /etc/subyard/preview.json | cut -d' ' -f1)" = \
@@ -776,8 +776,9 @@ for target in default "$NAMED"; do
   yard -Y "$target" start --yes > "$STATE/start-$target.log" 2>&1
   [ "$(incus exec "$instance" --project "$project" -- id -u dev)" = "$FIXTURE_DEV_UID" ] || die 'published baseline created an unexpected dev UID'
 done
-# The anchor already owns modern preview skills and unmarked operator instructions.
-preview_instruction_hash="$(guest sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)"
+# The anchor already owns modern preview skills and a copy of the host instructions,
+# which the candidate removes unchanged.
+guest test -f /home/dev/.claude/CLAUDE.md || die 'the anchor did not copy host instructions'
 guest_dev /usr/local/bin/subyard-github status | jq -e '.configured==false' >/dev/null
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test ! -e /usr/local/libexec/subyard/github-client
 stage synthetic-credentials-and-intent
@@ -890,8 +891,8 @@ trace_deferred_migration
 claim_units
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- runuser -u dev -- \
   /usr/local/bin/subyard-github status --runtime | jq -e --arg wanted "$wanted" '.broker_sha256==$wanted and .client_sha256==$wanted' >/dev/null
-[ "$(incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)" = "$preview_instruction_hash" ] \
-  || die 'deferred preview migration lost unmarked instructions'
+incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test ! -e /home/dev/.claude/CLAUDE.md \
+  || die 'deferred activation kept the unchanged host instruction copy'
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test -r /home/dev/.agents/skills/subyard-preview/SKILL.md
 ready
 

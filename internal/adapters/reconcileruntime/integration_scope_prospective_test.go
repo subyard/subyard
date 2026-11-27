@@ -75,8 +75,8 @@ func TestPreparedFullIntegrationPlanRetainsNativeOwnershipAndAdoption(t *testing
 	testkit.WriteFile(t, asset, []byte(`{"selected":"old"}`), 0600)
 	executor := &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64), configFingerprint: strings.Repeat("c", 64), initial: true}
 	instance := ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}
-	runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}, Executor: executor, Yard: domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + instructions, "AGENT_codex_CONFIG=" + asset, "AGENT_codex_CONFIG_DEST=.codex/config.json"}}
-	bindInstructionTestPackage(t, &runtime, root, "codex")
+	runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}, Executor: executor, Yard: domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + instructions, "AGENT_codex_RULES_DEST=.codex/rules/repo.rules", "AGENT_codex_CONFIG=" + asset, "AGENT_codex_CONFIG_DEST=.codex/config.json"}}
+	bindAgentTestPackage(t, &runtime, root, "codex")
 	oldRuntime, _, err := runtime.PrepareLegacyIntegrationAdoption(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -149,8 +149,8 @@ func TestConvergedIntegrationPlanSurvivesNativeInterfaceRestart(t *testing.T) {
 				}
 			}
 			native := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}
-			runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: native, Executor: &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64)}, Yard: domain.Context{YardKind: kind, IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + instructions}}
-			bindInstructionTestPackage(t, &runtime, root, "codex")
+			runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: native, Executor: &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64)}, Yard: domain.Context{YardKind: kind, IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + instructions, "AGENT_codex_RULES_DEST=.codex/rules/repo.rules"}}
+			bindAgentTestPackage(t, &runtime, root, "codex")
 			approved, err := runtime.IntegrationPlan(context.Background())
 			if err != nil || approved.Changed {
 				t.Fatalf("initial converged plan: changed=%t err=%v", approved.Changed, err)

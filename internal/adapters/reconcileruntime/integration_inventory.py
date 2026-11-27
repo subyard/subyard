@@ -615,10 +615,8 @@ def main():
         # Retire owned assets before forgetting them, so an interrupted commit
         # keeps the records that a retry needs to finish their removal.
         for entry in retired:
-            # Preview cutover retains unmarked instruction text when its host source
-            # disappears or its client is disabled. The tombstone releases ownership.
-            if entry.get('preview_migrated'):
-                continue
+            # An unchanged file is removed, including retired instruction copies
+            # that the preview cutover migrated; drift was refused above.
             if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
                 parent = open_parent(entry['path'])
                 try:
@@ -630,7 +628,7 @@ def main():
                     os.close(parent)
         # Structured retirement releases fields, preserving the user's document.
         # Tombstones prove why these known paths are no longer owned.
-        released += [e['path'] for e in retired if e['kind'] == 'structured' or e.get('preview_migrated')]
+        released += [e['path'] for e in retired if e['kind'] == 'structured']
         released = [p for p in released if p not in [e.get('path') for e in desired]]
         committed = [clean(e) for e in desired]
         for entry in committed:
