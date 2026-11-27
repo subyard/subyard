@@ -36,7 +36,10 @@ linters:
   exclusions:
     rules:
       - linters: [forbidigo]
-        path-except: '^internal/(adapters/(remotecontrol|credentialruntime|statusruntime|testvmsruntime|releaseruntime|sshagentruntime)|sshtrust|ownerservice|state|ownerinventory|audit|resourceendpoint|config|configsync|application|cli)/'
+        path-except: '^(internal/(adapters/(remotecontrol|credentialruntime|statusruntime|testvmsruntime|releaseruntime|sshagentruntime)|sshtrust|ownerservice|state|ownerinventory|audit|resourceendpoint|config|configsync|application|cli)|config/profiles/telemetry)/'
+      # Profile Go code is linted for the file-primitive rules only.
+      - linters: [exhaustive, staticcheck, unused, ineffassign]
+        path: '^config/'
       - linters: [forbidigo]
         path: '_test\.go$'
         text: 'publish files with safefs'
