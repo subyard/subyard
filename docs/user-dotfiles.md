@@ -1,21 +1,21 @@
 # Agent instructions from a dotfiles repository
 
-The `user-dotfiles` profile clones one Git repository of dotfiles into the yard and links its
-shared agent instruction file for Claude, Codex and OpenCode. Subyard provides the file but does
-not own or update it, and never copies host instruction files into a yard. The repository is the
-host's dotfiles repository: its one shared instruction file is written for agents on the host and
-in the yard.
+The `user-dotfiles` profile clones one Git repository of yard dotfiles into the yard and links
+its shared agent instruction file for Claude, Codex and OpenCode. Subyard provides the file but
+does not own or update it. The yard has its own minimal instruction repository, written for
+agents in the yard and separate from host dotfiles, which carry host configuration a yard does
+not need; Subyard never copies host instruction files into a yard.
 
 The profile is selected by default in the yard named `default`; select it in another yard with
 `yard -Y NAME profile enable user-dotfiles`, and remove it with
 `yard -Y NAME profile disable user-dotfiles`. A yard whose `ENVIRONMENT_PROFILES` is set
 explicitly uses only that list. The shipped source is
-`https://github.com/Dmitry-Borodin/dotfiles`, a private repository: the yard clones it only with
-[GitHub](github.md#ordinary-git-with-original-authentication-fallback) Git access to it, otherwise apply warns and the profile is not ready. To use
-another repository:
+`https://github.com/Dmitry-Borodin/yard-dotfiles`, a private repository: the yard clones it only
+with [GitHub](github.md#ordinary-git-with-original-authentication-fallback) Git access to it,
+otherwise apply warns and the profile is not ready. To use another repository:
 
 ```sh
-yard [-Y NAME] config set USER_DOTFILES_SOURCE https://github.com/OWNER/dotfiles --scope yard
+yard [-Y NAME] config set USER_DOTFILES_SOURCE https://github.com/OWNER/yard-dotfiles --scope yard
 yard [-Y NAME] config set USER_DOTFILES_SUBDIR yard --scope yard   # optional
 yard [-Y NAME] init   # in another yard: yard -Y NAME profile enable user-dotfiles
 ```

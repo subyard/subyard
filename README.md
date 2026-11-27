@@ -33,7 +33,7 @@ where agents run your product, reproduce bugs, and verify changes.
   process/resource observations into SQLite for JSON/SQL inspection and export.
   [Git fetch](docs/git-fetch.md) optionally fetches managed repositories sequentially every five minutes inside the yard.
   [User skills](docs/user-skills.md) clone the operator's skill repositories, such as dev-flow, into the yard and link them for every agent.
-  [User dotfiles](docs/user-dotfiles.md) link agent instructions for Claude, Codex and OpenCode from the operator's dotfiles repository.
+  [User dotfiles](docs/user-dotfiles.md) link agent instructions for Claude, Codex and OpenCode from the operator's yard dotfiles repository.
 
 ## Getting started
 
