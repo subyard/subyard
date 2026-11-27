@@ -382,12 +382,15 @@ disable_inner_firewall() {
 remove_stale_inner_pool() {
   # A /srv volume kept by `teardown --keep-data` can still hold the inner pool from before it moved
   # to the default path. Remove that directory only while no inner pool uses it.
+  # Compare resolved paths, so another spelling or a symlink to the old pool still counts as in use.
   local pools pool source
   [ -d /srv/incus-e2e ] && [ ! -L /srv/incus-e2e ] || return 0
-  pools="$(inner_incus storage list --format csv -c n)"
+  pools="$(inner_incus storage list --format csv -c n)" || return 1
   [ -n "$pools" ] || return 0
   for pool in $pools; do
-    source="$(inner_incus storage get "$pool" source)"
+    source="$(inner_incus storage get "$pool" source)" || return 1
+    [ -n "$source" ] || return 0
+    source="$(realpath -m -- "$source")" || return 1
     case "$source" in
       /srv/incus-e2e | /srv/incus-e2e/*) return 0 ;;
     esac

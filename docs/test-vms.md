@@ -22,6 +22,9 @@ recreated with the new runtime UUID, and the next acquire builds a fresh base. A
 lease acquire a new one. The engine is the broker's sealed engine, provisioning and recipe files;
 `E2E_*` settings, a stopped broker, host units, routes and other drift are repaired in place. A
 broker stopped by the operator is not changed. Rollback updates the broker in place.
+Inner VM disks live in the default Incus pool on the yard root. Provisioning removes an earlier
+release's `/srv/incus-e2e` pool directory from a `/srv` volume kept by `teardown --keep-data` once
+no inner pool uses it.
 The pre-v0.11 name `e2e-yard` is not updated; recreate it with
 `yard -Y e2e-yard teardown --reset-config`, then `yard service install test-vms`.
 

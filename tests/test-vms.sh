@@ -586,7 +586,7 @@ stale_case() {
     case "$*" in
       'storage list --format csv -c n') [ "$sources" != fail ] || return 7; printf 'default\nextra\n' ;;
       'storage get default source') printf '/var/lib/incus/storage-pools/default\n' ;;
-      'storage get extra source') printf '%s\n' "$sources" ;;
+      'storage get extra source') [ "$sources" != fail-get ] || return 7; printf '%s\n' "$sources" ;;
       *) return 64 ;;
     esac
   }
@@ -596,15 +596,22 @@ stale_case /var/lib/incus/storage-pools/extra directory
 [ ! -e "$STALE/incus-e2e" ] && [ -e "$STALE/keep/data" ] \
   && grep -Fq 'removed the stale inner pool' "$INNER_FIXTURE/stale-output" \
   || fail "unused stale inner pool directory was not removed"
-stale_case "$STALE/incus-e2e/storage" directory
-[ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed a live inner pool"
+for live in "$STALE/incus-e2e/storage" "$STALE/./incus-e2e/storage/" "$STALE/keep/../incus-e2e/storage" ''; do
+  stale_case "$live" directory
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed a live inner pool: $live"
+done
 stale_case /var/lib/incus/storage-pools/extra symlink
 [ -L "$STALE/incus-e2e" ] && [ -e "$STALE/keep/data" ] && [ ! -s "$INNER_FIXTURE/stale-calls" ] \
   || fail "stale cleanup followed a symlinked pool path"
 stale_case /var/lib/incus/storage-pools/extra absent
 [ ! -s "$INNER_FIXTURE/stale-calls" ] || fail "stale cleanup queried Incus without a stale directory"
-expect_failure stale_case fail directory
-[ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed data after a failed pool query"
+for query in fail fail-get; do
+  expect_failure stale_case "$query" directory
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed data after a failed pool query"
+  # Callers in a condition disable errexit; the cleanup must still refuse.
+  if stale_case "$query" directory; then fail "stale cleanup accepted a failed pool query"; fi
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed data in a condition"
+done
 unset -f incus stale_case
 
 printf 'ok: test-vms physical bootstrap is bounded and idempotent\n'
