@@ -18,6 +18,24 @@ link_text() { # <link>: the exact text; command substitution would strip trailin
   text="${text%x}"
   printf '%s' "${text%$'\n'}"
 }
+unlink_ours() { # <link> <text> <relative>: remove the link only if it is still ours when it is moved aside
+  local aside moved text
+  aside="$(mktemp -d "${1%/*}/.subyard-user-dotfiles.XXXXXX")"
+  moved="$aside/link"
+  if mv -T -- "$1" "$moved" 2>/dev/null; then
+    text="$(link_text "$moved" 2>/dev/null; printf x)"
+    if [ -L "$moved" ] && [ "${text%x}" = "$2" ]; then
+      unlink -- "$moved"
+    else
+      mv -nT -- "$moved" "$1" 2>/dev/null || :
+      if [ -e "$moved" ] || [ -L "$moved" ]; then
+        printf 'user-dotfiles: warning: ~/%s changed while it was unlinked; kept what replaced the link at %s\n' "$3" "$moved" >&2
+        return
+      fi
+    fi
+  fi
+  rmdir -- "$aside"
+}
 skipped() {
   case "$mode" in check) work=1 ;; apply) printf 'user-dotfiles: warning: %s\n' "$1" >&2 ;; esac
 }
@@ -78,7 +96,7 @@ for relative in "${links[@]}"; do
   text="${text%x}"
   [[ "$text" =~ ^"$store"/$segment(/$segment)+/agents/AGENTS\.md$ ]] || continue
   [ -z "$target" ] || [ "$text" != "$target" ] || continue
-  if [ "$mode" = apply ]; then unlink -- "$link"; else work=1; fi
+  if [ "$mode" = apply ]; then unlink_ours "$link" "$text" "$relative"; else work=1; fi
 done
 # Pass 3: link each agent instruction path that is free.
 if [ -n "$target" ]; then

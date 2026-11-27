@@ -100,6 +100,38 @@ for link in "${links[@]}"; do [ -L "$work/home/$link" ] || fail "removed foreign
 run apply "$good" 2>"$work/stderr"
 grep -qF 'warning: left ~/.config/opencode/AGENTS.md in place' "$work/stderr" || fail 'newline spelling treated as ours'
 rm -f -- "$work/home/.claude/CLAUDE.md" "$work/home/.codex/AGENTS.md" "$work/home/.config/opencode/AGENTS.md"
+# A link replaced after the ownership check is moved back, never removed. A fake readlink
+# replaces the link right after reading it and, with RACE=reoccupy, refills the freed name too.
+mkdir -p "$work/bin"
+real_readlink="$(command -v readlink)"
+cat >"$work/bin/readlink" <<SCRIPT
+#!/usr/bin/env bash
+"$real_readlink" "\$@" && status=0 || status=\$?
+case "\${!#}" in
+  */.subyard-user-dotfiles.*) [ "\$RACE" != reoccupy ] || printf 'later\\n' >"$work/home/.claude/CLAUDE.md" ;;
+  "$work/home/.claude/CLAUDE.md") unlink -- "\${!#}"; printf 'raced\\n' >"\${!#}" ;;
+esac
+exit "\$status"
+SCRIPT
+chmod +x "$work/bin/readlink"
+race() { HOME="$work/home" PATH="$work/bin:$PATH" RACE="$1" bash "$guest" apply 2>"$work/stderr"; }
+run apply "$good"
+race back
+[ "$(cat "$work/home/.claude/CLAUDE.md")" = raced ] || fail 'a replacement of our link was not moved back'
+[ -z "$(find "$work/home/.claude" -name '.subyard-user-dotfiles.*')" ] || fail 'left a private unlink directory'
+links_are_rest() { for link in .codex/AGENTS.md .config/opencode/AGENTS.md; do [ ! -L "$work/home/$link" ] || fail "kept $link"; done; }
+links_are_rest
+rm -f -- "$work/home/.claude/CLAUDE.md"
+run apply "$good"
+race reoccupy
+[ "$(cat "$work/home/.claude/CLAUDE.md")" = later ] || fail 'overwrote a re-created path'
+kept="$(find "$work/home/.claude" -path '*/.subyard-user-dotfiles.*/link')"
+[ -n "$kept" ] && [ "$(cat "$kept")" = raced ] || fail 'lost the replacement of our link'
+grep -qF "warning: ~/.claude/CLAUDE.md changed while it was unlinked; kept what replaced the link at $kept" "$work/stderr" \
+  || fail 'missing warning for a re-created path'
+links_are_rest
+rm -f -- "$kept" "$work/home/.claude/CLAUDE.md"
+rmdir -- "${kept%/link}"
 # With the store moved away, disable still removes our dangling links.
 run apply "$good"
 mv -T "$store" "$work/store-moved"
