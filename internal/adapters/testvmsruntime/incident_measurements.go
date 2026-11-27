@@ -145,12 +145,12 @@ func instanceEvidence(body string) string {
 	default:
 		missing = append(missing, "secure_boot")
 	}
-	_, policy := vmSleepPolicy(instance.Architecture)
+	_, policy := vmLowLevelPolicy(instance.Architecture)
 	observed := instance.Config["raw.qemu.conf"]
 	if observed == policy {
 		result["vm_policy"] = "incus-default"
 		if policy != "" {
-			result["vm_policy"] = "subyard-x86-s3-v1"
+			result["vm_policy"] = "subyard-x86-s3-reporting-v2"
 		}
 	} else if observed != "" {
 		result["vm_policy_sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(observed)))

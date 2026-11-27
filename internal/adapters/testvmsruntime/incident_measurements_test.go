@@ -38,7 +38,7 @@ func TestPressureEvidenceParsesOnlyBoundedNumericCounters(t *testing.T) {
 }
 
 func TestInstanceEvidenceProjectsExpandedAllowlistAndPolicyIdentity(t *testing.T) {
-	_, knownPolicy := vmSleepPolicy("x86_64")
+	_, knownPolicy := vmLowLevelPolicy("x86_64")
 	for _, policy := range []string{knownPolicy, "private unknown qemu config"} {
 		body, _ := json.Marshal(map[string]any{
 			"architecture": "x86_64", "config": map[string]string{"private": "secret"},
@@ -49,7 +49,7 @@ func TestInstanceEvidenceProjectsExpandedAllowlistAndPolicyIdentity(t *testing.T
 		if strings.Contains(got, "private") || strings.Contains(got, "secret") || !strings.Contains(got, `"memory_bytes":4294967296`) || !strings.Contains(got, `"secure_boot":false`) || !strings.Contains(got, `"root_disk_bytes":10737418240`) {
 			t.Fatalf("unsafe or incomplete projection: %s", got)
 		}
-		if policy == knownPolicy && !strings.Contains(got, "subyard-x86-s3-v1") {
+		if policy == knownPolicy && !strings.Contains(got, "subyard-x86-s3-reporting-v2") {
 			t.Fatal("known policy identity lost")
 		}
 		if policy != knownPolicy && !strings.Contains(got, "vm_policy_sha256") {

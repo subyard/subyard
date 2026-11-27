@@ -702,6 +702,47 @@ assert_held_ram_released() {
     || die 'held allocation retained a startup RAM promise'
 }
 
+guest_qemu_rss_kib() { # <guest>
+  outer_exec python3 - "e2e-vm-$1" <<'PY'
+import json, re, subprocess, sys
+state = json.loads(subprocess.check_output([
+    "incus", "query", "/1.0/instances/" + sys.argv[1] + "/state?project=subyard-e2e-vms-slot-1"
+]))
+assert state["status"] == "Running" and state["pid"] > 0
+status = open("/proc/%d/status" % state["pid"]).read()
+print(re.search(r"^VmRSS:\s+(\d+) kB$", status, re.M).group(1))
+PY
+}
+
+# Guest RAM returns to the host only when the guest negotiates the balloon's
+# Free Page Reporting feature (virtio-balloon feature bit 5).
+assert_guest_page_reporting() {
+  local guest features before filled freed attempt
+  for guest in 1 2; do
+    features="$(ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- \
+      'cat /sys/bus/virtio/drivers/virtio_balloon/virtio*/features' </dev/null)" \
+      || die "held guest $guest has no virtio balloon device"
+    [ "$(printf '%s\n' "$features" | wc -l)" = 1 ] && [ "${features:5:1}" = 1 ] \
+      || die "held guest $guest did not negotiate balloon Free Page Reporting"
+  done
+  before="$(guest_qemu_rss_kib 1)"
+  ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 e2e-vm-1 -- \
+    dd if=/dev/zero of=/dev/shm/subyard-page-reporting bs=1M count=512 status=none </dev/null \
+    || die 'held guest could not fill its shared memory probe'
+  filled="$(guest_qemu_rss_kib 1)"
+  ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 e2e-vm-1 -- \
+    rm -f /dev/shm/subyard-page-reporting </dev/null || die 'held guest kept its shared memory probe'
+  for ((attempt=0; attempt<30; attempt++)); do
+    sleep 2
+    freed="$(guest_qemu_rss_kib 1)"
+    [ "$((filled - freed))" -lt $((256 * 1024)) ] || break
+  done
+  [ "$((filled - freed))" -ge $((256 * 1024)) ] \
+    || die "freed guest RAM stayed resident in QEMU (before_kib=$before filled_kib=$filled freed_kib=$freed)"
+  printf '  [ ok ] guests negotiate Free Page Reporting; freed guest RAM returned to the host before_kib=%s filled_kib=%s freed_kib=%s\n' \
+    "$before" "$filled" "$freed"
+}
+
 assert_guests_outside_broker_budget() {
   outer_exec python3 - <<'PY'
 import json, pathlib, subprocess
@@ -1329,6 +1370,7 @@ assert_memory_accounting
 if [ "$TELEMETRY_ONLY" = 0 ]; then
   assert_guests_outside_broker_budget
   assert_launch_memory_bound
+  assert_guest_page_reporting
 fi
 runtime_yard -Y test-yard test-vms status --json | jq -e '
   .pool.slots[] | select(.slot_id == "slot-001") |

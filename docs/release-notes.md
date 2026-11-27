@@ -9,6 +9,12 @@
   after a successful install, and clears the archives that earlier provisioning kept.
   Rollback leaves the file in place; delete it in the yard to keep archives again.
 
+### Test VM memory
+
+- On x86_64, test-vms broker VMs enable Free Page Reporting on their virtio balloon, so RAM
+  a guest frees returns to the host instead of staying resident in QEMU. A VM that is
+  running during the update gets the setting when it next starts.
+
 ### Claude managed instructions
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by
