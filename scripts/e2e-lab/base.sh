@@ -17,6 +17,11 @@ base_finalize_image() {
   install -d -o dev -g dev /home/dev/.cache /home/dev/.cache/subyard-e2e-platform
   printf '%s\n' subyard-e2e-platform-v1 > /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
   chown dev:dev /home/dev/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker
+  # Leased guests must not update themselves: a timer-started unattended upgrade changes the
+  # system under test and holds guest shutdown past the broker's release stop. A mask also
+  # survives the preset pass of a published image's first boot.
+  systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+  systemctl mask apt-daily.timer apt-daily-upgrade.timer
   install -d -m 0755 /var/lib/subyard
   {
     printf 'environment=%s\n' "$SUBYARD_BASE_ENVIRONMENT"
