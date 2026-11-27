@@ -1545,8 +1545,10 @@ that history and `yard logs --audit [-n N]` reads the current command audit file
 1 MiB rotations without loading yard configuration or Incus. Each `yard rpc --stdio` owner also
 appends one record per failed request (time, request and operation ID, method, code and the full
 local error text) to the private `$SUBYARD_HOME/logs/rpc-errors.log`, keeping one previous
-256 KiB generation; `yard logs --rpc [-n N]` shows the newest records. Explicit yard selectors
-continue through normal owner routing.
+256 KiB generation; `yard logs --rpc [-n N]` shows the newest records. Records are best effort:
+the session queues at most 64 and writes them after the response under the owner barrier of the
+installation generation it started in, dropping the rest and those still blocked when it ends.
+Explicit yard selectors continue through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.
 Only a subsequent release may replace the default protocol with owners that support it. An optional

@@ -41,6 +41,7 @@ func TestLateAuditWriterCannotRecreateOrEnterNewInstallation(t *testing.T) {
 			}
 			cli := &CLI{}
 			admission := cli.auditWriteAdmission(home)
+			session := cli.sessionLogAdmission(home)
 			if replacement {
 				// Retain the old inode so the replacement cannot immediately reuse it.
 				if err := os.Rename(home, filepath.Join(base, "original-data")); err != nil {
@@ -58,8 +59,8 @@ func TestLateAuditWriterCannotRecreateOrEnterNewInstallation(t *testing.T) {
 			if err := audit.WriteInvocation(audit.Invocation{Home: home, Command: "late.finish", BeforeWrite: admission}); err != nil {
 				t.Fatal(err)
 			}
-			// A long-lived RPC session admits its error log the same way.
-			if err := (audit.RPCErrorLog{Home: home, BeforeWrite: admission}).Append(audit.RPCError{
+			// A long-lived RPC session fences its error log the same way.
+			if err := (audit.RPCErrorLog{Home: home, BeforeWrite: session}).Append(context.Background(), audit.RPCError{
 				Request: "late", Method: "operation.plan", Code: "internal", Error: "late failure"}); err != nil {
 				t.Fatal(err)
 			}
@@ -85,8 +86,17 @@ func TestLateAuditEpochFencesRetainedForeignRoot(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(home, uninstall.ManifestName), body, 0600)
 	cli := &CLI{}
 	admission := cli.auditWriteAdmission(home)
+	session := cli.sessionLogAdmission(home)
 	if err := audit.WriteInvocation(audit.Invocation{Home: home, Command: "status", BeforeWrite: admission}); err != nil {
 		t.Fatal(err)
+	}
+	sessionLog := audit.RPCErrorLog{Home: home, BeforeWrite: session}
+	failure := audit.RPCError{Request: "r", Method: "operation.plan", Code: "internal", Error: "failed"}
+	if err := sessionLog.Append(context.Background(), failure); err != nil {
+		t.Fatal(err)
+	}
+	if records, err := sessionLog.Read(5); err != nil || len(records) != 1 {
+		t.Fatal("the session log was not admitted in its installation", records, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "logs")); err != nil {
 		t.Fatal("existing installation audit was not admitted", err)
@@ -111,8 +121,23 @@ func TestLateAuditEpochFencesRetainedForeignRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err = sessionLog.Append(context.Background(), failure); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = os.Stat(filepath.Join(home, "logs")); !os.IsNotExist(err) {
 		t.Fatal("old audit writer recreated owned logs in retained root", err)
+	}
+}
+
+// A session that started without a data home never creates one.
+func TestSessionLogAdmissionNeverCreatesTheDataHome(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "data")
+	sessionLog := audit.RPCErrorLog{Home: home, BeforeWrite: (&CLI{}).sessionLogAdmission(home)}
+	if err := sessionLog.Append(context.Background(), audit.RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatal("the session log created the data home", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -15,7 +17,7 @@ func TestRPCErrorLogKeepsPrivateBoundedRecordsNewestLast(t *testing.T) {
 	home := testkit.TempDir(t)
 	log := RPCErrorLog{Home: home, Maximum: 2048}
 	at := time.Date(2026, 11, 27, 10, 0, 0, 0, time.FixedZone("x", 3600))
-	if err := log.Append(RPCError{At: at, Request: "veranda-1", Operation: "op-1", Method: "operation.plan",
+	if err := log.Append(context.Background(), RPCError{At: at, Request: "veranda-1", Operation: "op-1", Method: "operation.plan",
 		Code: "plan_failed", Error: "plan start: line one\nline two " + strings.Repeat("x", maxRPCErrorText)}); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +31,7 @@ func TestRPCErrorLogKeepsPrivateBoundedRecordsNewestLast(t *testing.T) {
 		t.Fatalf("record = %+v", first)
 	}
 	for index := 0; index < 40; index++ {
-		if err := log.Append(RPCError{Request: fmt.Sprintf("veranda-%d", index+2), Method: "owner.inventory", Code: "internal", Error: "failed"}); err != nil {
+		if err := log.Append(context.Background(), RPCError{Request: fmt.Sprintf("veranda-%d", index+2), Method: "owner.inventory", Code: "internal", Error: "failed"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -59,7 +61,7 @@ func TestRPCErrorLogRefusesALinkedLog(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(home, "logs", rpcErrorFile)); err != nil {
 		t.Fatal(err)
 	}
-	if err := (RPCErrorLog{Home: home}).Append(RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err == nil {
+	if err := (RPCErrorLog{Home: home}).Append(context.Background(), RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err == nil {
 		t.Fatal("a linked log was written")
 	}
 	if _, err := (RPCErrorLog{Home: home}).Read(1); err == nil {
@@ -80,7 +82,7 @@ func TestRPCErrorLogNarrowsAnExistingReadableLogAndItsRotation(t *testing.T) {
 				t.Fatal(err)
 			}
 			testkit.WriteFile(t, path, []byte(strings.Repeat("x", size-1)+"\n"), 0o644)
-			if err := (RPCErrorLog{Home: home, Maximum: 32}).Append(RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err != nil {
+			if err := (RPCErrorLog{Home: home, Maximum: 32}).Append(context.Background(), RPCError{Request: "r", Method: "m", Code: "c", Error: "e"}); err != nil {
 				t.Fatal(err)
 			}
 			names := []string{path}
@@ -93,5 +95,34 @@ func TestRPCErrorLogNarrowsAnExistingReadableLogAndItsRotation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRPCErrorLogGivesUpOnAHeldLockWhenItsContextEnds(t *testing.T) {
+	home := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(home, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := safefs.Lock(context.Background(), filepath.Join(home, "logs", ".yard.lock"), false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- (RPCErrorLog{Home: home}).Append(ctx, RPCError{Request: "r", Method: "m", Code: "c", Error: "e"})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a record was written under a held lock")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Append kept waiting for the lock after its context ended")
+	}
+	if _, err := os.Stat(filepath.Join(home, "logs", rpcErrorFile)); !os.IsNotExist(err) {
+		t.Fatal("the log was written", err)
 	}
 }

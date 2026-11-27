@@ -3991,8 +3991,11 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
 	home := cli.hostDataHome()
-	session := rpc.Session{Handler: rpcErrorRecorder{handler: handler,
-		log: audit.RPCErrorLog{Home: home, BeforeWrite: cli.auditWriteAdmission(home)}},
+	recorder, closeRecorder := startRPCErrorRecorder(handler,
+		audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)})
+	// Runs after Serve has returned, so no handler sends a record any more.
+	defer closeRecorder()
+	session := rpc.Session{Handler: recorder,
 		EngineVersion: Version, Capabilities: rpc.CapabilitiesForSession("workspace"), DrainOnEOF: true}
 	if ownerServicesOnly {
 		session.Capabilities = rpc.CapabilitiesForSession("owner-services")
@@ -4006,20 +4009,47 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	return 0
 }
 
+// rpcErrorBacklog bounds the failed requests waiting for their record.
+const rpcErrorBacklog = 64
+
 // rpcErrorRecorder keeps one owner-local record per failed request, with the
-// full error text that the session sends only in part. Recording is best
-// effort and never changes the response.
+// full error text that the session sends only in part. A failed request only
+// queues its record; one writer appends it after the response, so recording
+// never delays or changes a response. Records beyond the backlog, and records
+// still blocked by the owner barrier when the session ends, are lost.
 type rpcErrorRecorder struct {
 	handler rpc.Handler
-	log     audit.RPCErrorLog
+	records chan audit.RPCError
+}
+
+// startRPCErrorRecorder starts the writer; the returned function stops it
+// after one last attempt to write the queued records.
+func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog) (rpcErrorRecorder, func()) {
+	records := make(chan audit.RPCError, rpcErrorBacklog)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for record := range records {
+			_ = log.Append(ctx, record)
+		}
+	}()
+	return rpcErrorRecorder{handler: handler, records: records}, func() {
+		close(records)
+		cancel()
+		<-done
+	}
 }
 
 func (recorder rpcErrorRecorder) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
 	result, err := recorder.handler.Handle(ctx, call, emit)
 	if err != nil {
 		if fault := rpc.FaultOf(ctx, err); fault.Code != rpc.CodeCancelled {
-			_ = recorder.log.Append(audit.RPCError{Request: call.ID, Operation: call.OperationID,
-				Method: call.Method, Code: string(fault.Code), Error: err.Error()})
+			select {
+			case recorder.records <- audit.RPCError{At: time.Now(), Request: call.ID, Operation: call.OperationID,
+				Method: call.Method, Code: string(fault.Code), Error: err.Error()}:
+			default:
+			}
 		}
 	}
 	return result, err
