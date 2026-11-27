@@ -594,12 +594,19 @@ class Runtime:
 
     def raw_refused(self):
         """Whether the collector's private marker says raw OTLP is refused for space."""
+        return self.space_marker('raw-otlp-refused', b'raw_otlp_refused_since')
+
+    def over_budget(self):
+        """Whether the collector's private marker says the store stays above its budget."""
+        return self.space_marker('over-budget', b'over_budget_since')
+
+    def space_marker(self, name, key):
         try:
             directory = os.open(self.data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except FileNotFoundError:
             return False
         try:
-            fd = os.open('raw-otlp-refused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:
             return False
         finally:
@@ -609,8 +616,8 @@ class Runtime:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
                     or not records.private_mode(info, 0o600) or info.st_size > 128):
-                raise ValueError('foreign telemetry refusal marker')
-            return re.fullmatch(rb'raw_otlp_refused_since=[0-9TZ:.-]{1,40}\n', os.pread(fd, 129, 0)) is not None
+                raise ValueError('foreign telemetry space marker')
+            return re.fullmatch(re.escape(key)+rb'=[0-9TZ:.-]{1,40}\n', os.pread(fd, 129, 0)) is not None
         finally:
             os.close(fd)
 
@@ -1176,7 +1183,7 @@ def main():
             print('telemetry-drift')
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
-        elif observation['state'] == 'current' and runtime.selected and runtime.raw_refused():
+        elif observation['state'] == 'current' and runtime.selected and (runtime.raw_refused() or runtime.over_budget()):
             print('telemetry-advisory storage-capacity')
         return
     if mode not in ('apply', 'refresh') or (mode == 'refresh' and bindings != [observation['actual'], observation['desired']]):

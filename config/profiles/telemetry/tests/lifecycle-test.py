@@ -227,7 +227,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(header, '[Service]')
         self.assertCountEqual(lines.split('|'), guest.LXC_DROPIN)
 
-    def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
+    def test_space_markers_are_read_from_private_files_without_sqlite(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             source, data = Path(name), Path(name)/'store'
@@ -264,6 +264,14 @@ class LifecycleTest(unittest.TestCase):
                     with self.subTest(unsafe=unsafe), self.assertRaises((ValueError, OSError)):
                         runtime.raw_refused()
                     target.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                over = data/'over-budget'
+                over.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00Z\n')
+                over.chmod(0o600)
+                self.assertFalse(runtime.over_budget())
+                over.write_bytes(b'over_budget_since=2026-11-19T00:00:00.000000000Z\n')
+                self.assertTrue(runtime.over_budget())
+                self.assertFalse(runtime.raw_refused())
 
     def test_cutover_receipt_reads_the_validated_inode(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

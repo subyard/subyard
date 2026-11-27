@@ -5,7 +5,7 @@
   "startup_readiness": "profile.sh",
   "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh", "format": 2, "prepares_rollback_to": 1},
   "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}],
-  "advisories": {"storage-capacity": "raw OTLP is refused for space; inside the yard run /usr/local/lib/subyard-telemetry/subyard-telemetry prune --data-dir /var/lib/subyard/telemetry --older-than 60d"},
+  "advisories": {"storage-capacity": "telemetry is short of space; inside the yard run /usr/local/lib/subyard-telemetry/subyard-telemetry stats --data-dir /var/lib/subyard/telemetry for the cause and the fix"},
   "settings": [
     {"name": "TELEMETRY_DISK_BUDGET", "type": "size", "scopes": ["shipped", "host", "yard", "command"],
      "application": "next-command", "syncable": true, "default": "30GiB"}

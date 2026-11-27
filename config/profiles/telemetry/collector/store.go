@@ -35,8 +35,9 @@ type Limits struct {
 	QueueRequests int
 	QueueBytes    int64
 	RequestBytes  int64
-	// DiskBytes is a soft budget: raw OTLP stops a tenth below it, other
-	// records continue. Nothing expires automatically; see Prune.
+	// DiskBytes is a soft budget. Above it the store automatically prunes
+	// its oldest raw records, never ones younger than MinRetention; ingestion
+	// is never refused for the store's size.
 	DiskBytes  int64
 	BatchDelay time.Duration
 	// ReserveBytes is the free space kept on the data partition, at most a
@@ -45,6 +46,13 @@ type Limits struct {
 }
 
 const DefaultDiskBytes = 30 << 30
+
+// MinRetention is the age below which the budget never prunes raw records.
+const MinRetention = 30 * 24 * time.Hour
+
+// budgetRetryDelay spaces budget prunes that could not reach the budget, so
+// a store held over it by recent records is not rescanned on every commit.
+const budgetRetryDelay = time.Hour
 
 func DefaultLimits() Limits {
 	return Limits{128, 16 << 20, 2 << 20, DefaultDiskBytes, 5 * time.Millisecond, 1 << 30}
@@ -68,9 +76,19 @@ type Store struct {
 	closed          bool
 	markerMu        sync.Mutex
 	rawRefused      bool
+	overBudget      bool
 	queue           chan writeRequest
 	done            chan struct{}
+	// The budget prune runs beside the writer, one at a time; pruneMu guards
+	// its state and Close waits for it before closing the database.
+	pruneMu       sync.Mutex
+	budgetPruning bool
+	budgetRetryAt time.Time
+	pruneDone     sync.WaitGroup
 }
+
+// budgetPruneFault is a test-only interruption hook between budget prune batches.
+var budgetPruneFault func() error
 
 // fileFault is a test-only interruption hook for safefs publications.
 var fileFault func(safefs.Point) error
@@ -227,6 +245,8 @@ func openStore(dir string, limits Limits) (*Store, error) {
 	s := &Store{db: db, dir: dir, origin: origin, limits: limits, lock: lock, queue: make(chan writeRequest, limits.QueueRequests), done: make(chan struct{})}
 	_, err = os.Lstat(filepath.Join(dir, RawRefusedMarker))
 	s.rawRefused = err == nil
+	_, err = os.Lstat(filepath.Join(dir, OverBudgetMarker))
+	s.overBudget = err == nil
 	go s.writer()
 	return s, nil
 }
@@ -473,27 +493,46 @@ func (s *Store) writer() {
 }
 
 // RawRefusedMarker names a small private file present while raw OTLP is
-// refused for space, so the profile can report it without opening SQLite.
+// refused for low partition space, so the profile can report it without
+// opening SQLite.
 const RawRefusedMarker = "raw-otlp-refused"
+
+// OverBudgetMarker names a small private file present while the store stays
+// above its budget after pruning every raw record older than MinRetention.
+const OverBudgetMarker = "over-budget"
 
 // markRawRefused publishes a changed refusal state; a failed update is retried
 // at the next commit or prune.
 func (s *Store) markRawRefused(refused bool) {
 	s.markerMu.Lock()
 	defer s.markerMu.Unlock()
-	if refused == s.rawRefused {
-		return
+	if s.publishMarker(RawRefusedMarker, "raw_otlp_refused_since=", refused, s.rawRefused) {
+		s.rawRefused = refused
 	}
-	path := filepath.Join(s.dir, RawRefusedMarker)
+}
+
+// markOverBudget publishes a changed over-budget state like markRawRefused.
+func (s *Store) markOverBudget(over bool) {
+	s.markerMu.Lock()
+	defer s.markerMu.Unlock()
+	if s.publishMarker(OverBudgetMarker, "over_budget_since=", over, s.overBudget) {
+		s.overBudget = over
+	}
+}
+
+// publishMarker reports whether the marker now matches present.
+func (s *Store) publishMarker(name, prefix string, present, current bool) bool {
+	if present == current {
+		return false
+	}
+	path := filepath.Join(s.dir, name)
 	var err error
-	if refused {
-		err = publishPrivate(path, []byte("raw_otlp_refused_since="+spoolTime()+"\n"))
+	if present {
+		err = publishPrivate(path, []byte(prefix+spoolTime()+"\n"))
 	} else if err = os.Remove(path); err == nil || os.IsNotExist(err) {
 		err = syncDirectories(s.dir)
 	}
-	if err == nil {
-		s.rawRefused = refused
-	}
+	return err == nil
 }
 
 // usedBytes counts allocated database pages, so space freed by Prune is
@@ -516,20 +555,28 @@ func (s *Store) usedBytes() (int64, error) {
 	return used, nil
 }
 
-// rawCapacity reports whether raw OTLP still fits the budget minus a tenth
-// kept for other records, and the data partition keeps its reserve.
-func (s *Store) rawCapacity(incoming int64) (bool, error) {
+// rawCapacity reports whether the data partition keeps its reserve, the only
+// space condition that refuses raw OTLP, and the store's used bytes.
+func (s *Store) rawCapacity() (bool, int64, error) {
 	used, err := s.usedBytes()
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	var fs unix.Statfs_t
-	if err = unix.Statfs(s.dir, &fs); err != nil {
-		return false, err
+	free, size, err := partitionSpace(s.dir)
+	if err != nil {
+		return false, 0, err
 	}
 	// A small partition keeps a twentieth of its size instead.
-	free, reserve := int64(fs.Bavail)*int64(fs.Bsize), min(s.limits.ReserveBytes, int64(fs.Blocks)*int64(fs.Bsize)/20)
-	return used+incoming <= s.limits.DiskBytes-s.limits.DiskBytes/10 && free >= reserve, nil
+	return free >= min(s.limits.ReserveBytes, size/20), used, nil
+}
+
+// partitionSpace reports the free and total bytes of the data partition.
+var partitionSpace = func(dir string) (int64, int64, error) {
+	var fs unix.Statfs_t
+	if err := unix.Statfs(dir, &fs); err != nil {
+		return 0, 0, err
+	}
+	return int64(fs.Bavail) * int64(fs.Bsize), int64(fs.Blocks) * int64(fs.Bsize), nil
 }
 
 // raw reports whether an entry is raw OTLP or its per-request correlation,
@@ -546,7 +593,7 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 	for _, r := range batch {
 		incoming += r.bytes
 	}
-	fits, err := s.rawCapacity(incoming)
+	fits, used, err := s.rawCapacity()
 	if err != nil {
 		return nil, ErrStorage
 	}
@@ -580,7 +627,91 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 		return nil, ErrStorage
 	}
 	s.markRawRefused(!fits)
+	if used+incoming > s.limits.DiskBytes {
+		s.startBudgetPrune()
+	} else {
+		s.markOverBudget(false)
+	}
 	return results, nil
+}
+
+// startBudgetPrune starts at most one budget prune beside the writer. Close
+// waits for it; the writer calls this before it exits.
+func (s *Store) startBudgetPrune() {
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	if s.budgetPruning || time.Now().Before(s.budgetRetryAt) {
+		return
+	}
+	s.budgetPruning = true
+	s.pruneDone.Add(1)
+	go func() {
+		defer s.pruneDone.Done()
+		over, err := s.pruneToBudget(time.Now().Add(-MinRetention))
+		s.pruneMu.Lock()
+		s.budgetPruning = false
+		if over || err != nil {
+			s.budgetRetryAt = time.Now().Add(budgetRetryDelay)
+		}
+		s.pruneMu.Unlock()
+	}()
+}
+
+// pruneToBudget removes the oldest raw records received before cutoff, in
+// the bounded transactions of Prune, until the database pages fit the
+// budget. It reports whether the store is still above the budget.
+func (s *Store) pruneToBudget(cutoff time.Time) (bool, error) {
+	limit := cutoff.UTC().Format(timestampLayout)
+	for !s.isClosed() {
+		var pages int64
+		if err := s.db.QueryRow("SELECT (page_count-freelist_count)*page_size FROM pragma_page_count(),pragma_freelist_count(),pragma_page_size()").Scan(&pages); err != nil {
+			return true, err
+		}
+		if pages <= s.limits.DiskBytes {
+			break
+		}
+		n, err := s.pruneBatch(limit, false)
+		if err != nil {
+			return true, err
+		}
+		if n == 0 {
+			break
+		}
+		if budgetPruneFault != nil {
+			if err = budgetPruneFault(); err != nil {
+				return true, err
+			}
+		}
+	}
+	if s.isClosed() {
+		return true, ErrStorage
+	}
+	return s.settleMarkers()
+}
+
+func (s *Store) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// settleMarkers truncates the WAL after a prune and publishes both space
+// markers; it reports whether the store is still above its budget.
+func (s *Store) settleMarkers() (bool, error) {
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return true, err
+	}
+	fits, used, err := s.rawCapacity()
+	if err != nil {
+		return true, err
+	}
+	over := used > s.limits.DiskBytes
+	s.markOverBudget(over)
+	// A prune that freed enough space clears the warning at once.
+	if fits {
+		s.markRawRefused(false)
+	}
+	return over, nil
 }
 
 func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
@@ -639,11 +770,7 @@ func (s *Store) Prune(cutoff time.Time, includeUsage bool) (int64, error) {
 		total += n
 		if err != nil || n == 0 {
 			if err == nil {
-				_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-			}
-			// A prune that freed enough space clears the warning at once.
-			if fits, capacityErr := s.rawCapacity(0); err == nil && capacityErr == nil && fits {
-				s.markRawRefused(false)
+				_, err = s.settleMarkers()
 			}
 			return total, err
 		}
@@ -664,7 +791,7 @@ func (s *Store) pruneBatch(cutoff string, includeUsage bool) (int64, error) {
 	res, err := tx.Exec(`WITH expired AS MATERIALIZED (
 		SELECT sequence,origin_id,event_id FROM records WHERE received_time<?
 			AND (kind='sample' OR kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation' OR (? AND source_id=?))
-			ORDER BY sequence LIMIT 1000
+			ORDER BY received_time,sequence LIMIT 1000
 	) DELETE FROM records WHERE sequence IN (SELECT sequence FROM expired)
 		OR (source_id='collector:otlp-correlation' AND (origin_id,substr(event_id,1,instr(event_id,':')-1))
 			IN (SELECT origin_id,event_id FROM expired))`, cutoff, includeUsage, usageSource)
@@ -701,6 +828,7 @@ func (s *Store) Close() error {
 	}
 	s.mu.Unlock()
 	<-s.done
+	s.pruneDone.Wait()
 	err := s.db.Close()
 	s.lock.Close()
 	return err

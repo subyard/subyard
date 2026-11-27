@@ -38,7 +38,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	includeChildren := f.Bool("include-children", false, "include explicitly related descendant runs in show-run")
 	input := f.String("input", "-", "replay JSONL file or -")
 	query := f.String("sql", "SELECT * FROM sample_values LIMIT 100", "read-only SQL")
-	disk := f.Int64("disk-bytes", DefaultDiskBytes, "soft telemetry disk budget; raw OTLP stops a tenth below it")
+	disk := f.Int64("disk-bytes", DefaultDiskBytes, "soft telemetry disk budget; above it the oldest raw records older than 30 days are pruned")
 	queue := f.Int64("queue-bytes", 16<<20, "in-memory queued sanitized bytes")
 	requests := f.Int("queue-requests", 128, "maximum queued requests")
 	olderThan := f.String("older-than", "", "prune records received before this age, such as 60d or 1440h")
@@ -178,24 +178,37 @@ func runPrune(ctx context.Context, out io.Writer, dir, olderThan string, include
 	return json.NewEncoder(out).Encode(map[string]any{"removed_records": removed})
 }
 
-// addStorageWarning names the cleanup command with this binary and data
-// directory, so it runs as printed.
+// addStorageWarning reports the collector's space markers; the cleanup
+// command names this binary and data directory, so it runs as printed.
 func addStorageWarning(stats map[string]any, dir string) {
-	marker, err := os.ReadFile(filepath.Join(dir, RawRefusedMarker))
-	since, found := strings.CutPrefix(strings.TrimSpace(string(marker)), "raw_otlp_refused_since=")
-	if err != nil || !found {
-		return
+	var warnings []string
+	if since, found := readSpaceMarker(dir, OverBudgetMarker, "over_budget_since="); found {
+		stats["over_budget_since"] = since
+		warnings = append(warnings, "store above its disk budget since "+since+" with only records younger than 30 days; it keeps growing. Raise TELEMETRY_DISK_BUDGET or remove recent data with prune --older-than")
 	}
-	stats["raw_otlp_refused_since"] = since
-	binary, err := os.Executable()
+	if since, found := readSpaceMarker(dir, RawRefusedMarker, "raw_otlp_refused_since="); found {
+		stats["raw_otlp_refused_since"] = since
+		binary, err := os.Executable()
+		if err != nil {
+			binary = "subyard-telemetry"
+		}
+		if absolute, err := filepath.Abs(dir); err == nil {
+			dir = absolute
+		}
+		warnings = append(warnings, "raw OTLP refused since "+since+": data partition reserve reached; usage is still recorded. Free space with: "+
+			shellWord(binary)+" prune --data-dir "+shellWord(dir)+" --older-than 60d")
+	}
+	if warnings != nil {
+		stats["warnings"] = warnings
+	}
+}
+
+func readSpaceMarker(dir, name, prefix string) (string, bool) {
+	marker, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
-		binary = "subyard-telemetry"
+		return "", false
 	}
-	if absolute, err := filepath.Abs(dir); err == nil {
-		dir = absolute
-	}
-	stats["warnings"] = []string{"raw OTLP refused since " + since + ": disk budget or partition reserve reached; usage is still recorded. Free space with: " +
-		shellWord(binary) + " prune --data-dir " + shellWord(dir) + " --older-than 60d"}
+	return strings.CutPrefix(strings.TrimSpace(string(marker)), prefix)
 }
 
 func shellWord(value string) string {
