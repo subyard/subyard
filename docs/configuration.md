@@ -446,8 +446,9 @@ resumes through the same command. `--profile <name>` retains its named-yard pres
 
 For registered yards, `yard init` uses the selection resolved from profiles and persistent configuration;
 no tool-selection argument or explicit per-yard assignment is required. Default and
-named yards inherit `claude codex opencode pi` unless their profiles or
-settings select another set. Init preserves inheritance, so later profile changes
+named yards inherit `claude codex pi` unless their profiles or
+settings select another set. OpenCode stays available: select it explicitly, for example
+with `yard -Y NAME integration enable opencode`. Init preserves inheritance, so later profile changes
 remain effective. It only canonicalizes an explicit local legacy `AGENTS` assignment;
 registered configuration sources are consumed without a local selection write.
 Subyard does not infer intent from installed binaries or change other yards during

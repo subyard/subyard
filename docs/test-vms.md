@@ -857,7 +857,7 @@ The `local-first` mode connects an isolated Git source to an initialized contain
 integration locally, and verifies that source pull/sync preserve the local selection and explicit
 empty override. Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
 ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
-all four fresh-default integrations and needs their normal package download access. Test config,
+the three fresh-default integrations, checks that OpenCode is absent, and needs their normal package download access. Test config,
 physical project and instance names, and teardown are isolated from the retained host baseline.
 
 The retained-lease disabled-components controller installs the published v0.28.0 baseline, updates

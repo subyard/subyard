@@ -28,6 +28,21 @@
   `stats`, `yard status` and `yard profile status telemetry` show the `storage-capacity` warning.
   See [usage and attribution](telemetry.md#usage-and-attribution).
 
+### Coding tool default
+
+- **The shipped default no longer selects OpenCode.** Yards without an explicit
+  `CODING_TOOL_INTEGRATIONS` selection now inherit `claude codex pi`. OpenCode remains available:
+  select it explicitly, for example with `yard -Y NAME integration enable opencode`.
+- **Before you update, select OpenCode explicitly to keep it.** Otherwise the update retires it in
+  running yards that inherit the default, and the next `yard init` retires it in stopped ones.
+  The plan lists each step. As with `yard integration disable opencode`, the OpenCode binary,
+  credentials and the session database in the host agent-sessions store are preserved, while
+  Subyard's OpenCode configuration fields, managed instructions and session-database link are
+  removed. To keep the previous set:
+  `yard config set CODING_TOOL_INTEGRATIONS 'claude codex opencode pi' --scope host --local`.
+- After a rollback to 0.32.0, inheriting yards select OpenCode again; run `yard init` in any yard
+  where it is not provisioned yet.
+
 ### Claude managed instructions
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by
