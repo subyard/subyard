@@ -32,11 +32,38 @@ for setup and coverage.
 ## Delivery gates
 
 Linux supports local and remote Linux owners. Windows and macOS are remote clients.
-Remote connections use the system SSH client and an existing SSH agent. Yard and Veranda
-share a product version; incompatible releases require matching installations.
+Remote connections use the system SSH client and an existing SSH agent. Veranda admits
+owners in its [engine window](#engine-window).
 
 Before shipping the native UI, complete UI/accessibility, resource, packaging and platform
 acceptance. The [UX contract](../docs/veranda/README.md) and
 [resource budgets](../docs/reference/control-plane-architecture.md#veranda-resource-budgets)
 define those requirements. Native client checks establish backend behavior; desktop delivery
 needs its own acceptance.
+
+## Engine window
+
+A Veranda release supports Subyard engines on its own release line and the previous
+published line, as the [decision](../docs/reference/decisions-and-glossary.md#veranda-engine-window)
+records. [`compatibility.json`](compatibility.json) names both lines in `engineLines`;
+`ENGINE_CURRENT_LINE` and `ENGINE_PREVIOUS_LINE` in
+[`client/src/compatibility.rs`](client/src/compatibility.rs) hold the same values.
+[`contract/previous-engine/`](contract/previous-engine/) holds the contract fixtures
+published with the first release of the previous line, and its `release.json` names that
+release. Host-free tests decode them with the current client.
+
+When the first release of a new line starts (for example 0.34.0), not at patch releases:
+
+1. Set `engineLines` and both constants to the new line and the line before it.
+2. Replace the snapshot with the fixtures of that previous line's first release:
+
+   ```sh
+   git rm -r -q veranda/contract/previous-engine/fixtures
+   git archive v0.33.0 veranda/contract/yard-rpc/v1/fixtures \
+     | tar -x --strip-components=4 -C veranda/contract/previous-engine
+   printf '{\n  "version": "0.33.0"\n}\n' > veranda/contract/previous-engine/release.json
+   ```
+
+3. Run `python3 dev/check-veranda.py --rust-only`. A required capability the previous line
+   lacks fails it; make that capability a feature capability instead.
+

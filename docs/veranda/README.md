@@ -23,8 +23,9 @@ contracts. Native UI parity and physical behavior remain qualification work. Per
 requests and ordered events; a lost or inconsistent stream triggers an authoritative refresh.
 An interrupted mutation stays unknown until the owner provides a confirmed result.
 
-The native boundary checks the exact product version, RPC v1, and required capabilities before
-exposing each surface. The language-neutral contracts and production-codec fixtures live in
+The native boundary checks the
+[engine window](../reference/decisions-and-glossary.md#veranda-engine-window), RPC v1, and
+required capabilities before exposing each surface. The language-neutral contracts and production-codec fixtures live in
 [`../../api/yard-rpc/v1/`](../../api/yard-rpc/v1/); the client requirements are recorded in
 [`../../veranda/compatibility.json`](../../veranda/compatibility.json). The frontend receives narrow
 validated DTOs and never parses human CLI output. First-use and replacement host keys require
@@ -123,9 +124,10 @@ from the owner; the UI never becomes a second desired-state authority.
 inapplicable check displays `Unavailable` or `Not applicable`. Reading status never starts a stopped
 yard. Only confirmed owner data supplies profile details and descriptions.
 
-An incompatible product version, profile/RPC schema, or required capability shows an actionable
-error before affected mutations. The message includes the Veranda and Subyard versions and recommends
-installing both from the same release. The UI does not migrate an unknown schema or fall back to
+An engine outside the window, an incompatible profile/RPC schema, or a missing required capability
+shows an actionable error before affected mutations. The message includes the Veranda version, the
+supported engine lines and the owner's Subyard version, and says whether to update Veranda or
+install a supported Subyard release on the owner. The UI does not migrate an unknown schema or fall back to
 parsing human CLI output.
 
 ## Diagnostics

@@ -1,3 +1,4 @@
+use crate::compatibility::{ENGINE_CURRENT_LINE, ENGINE_PREVIOUS_LINE};
 use crate::vocabulary::{
     Capability, ErrorCode, EventName, Method, CONTRACT_REVISION, PROTOCOL_VERSION,
 };
@@ -61,7 +62,11 @@ fn compatibility_names_known_contract_and_capabilities() {
     assert_eq!(policy["contractRevision"], CONTRACT_REVISION);
     assert_eq!(policy["rpc"]["minimum"], PROTOCOL_VERSION);
     assert_eq!(policy["rpc"]["maximum"], PROTOCOL_VERSION);
-    assert_eq!(policy["productVersionPolicy"], "exact-match");
+    assert_eq!(policy["productVersionPolicy"], "engine-window");
+    assert_eq!(
+        policy["engineLines"],
+        serde_json::json!({"current": ENGINE_CURRENT_LINE, "previous": ENGINE_PREVIOUS_LINE})
+    );
     assert_eq!(policy["productVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         policy["requiredCapabilities"],
@@ -89,4 +94,27 @@ fn compatibility_names_known_contract_and_capabilities() {
         "orderedEvents": ["ordered-events"]
     });
     assert_eq!(policy["featureCapabilities"], expected);
+}
+
+// A new engine line moves the window; veranda/README.md#engine-window has the refresh step.
+#[test]
+fn previous_engine_snapshot_is_the_oldest_admitted_release() {
+    const STEP: &str = "refresh the previous-engine snapshot: veranda/README.md#engine-window";
+    let release: Value =
+        serde_json::from_str(include_str!("../../contract/previous-engine/release.json")).unwrap();
+    assert_eq!(
+        release,
+        serde_json::json!({"version": format!("{ENGINE_PREVIOUS_LINE}.0")}),
+        "{STEP}"
+    );
+    let negotiate: Value = serde_json::from_str(include_str!(
+        "../../contract/previous-engine/fixtures/negotiate.json"
+    ))
+    .unwrap();
+    let advertised = negotiate["result"]["capabilities"].as_array().unwrap();
+    let policy: Value = serde_json::from_str(include_str!("../../compatibility.json")).unwrap();
+    // A capability new on the current line can only be a feature capability.
+    for required in policy["requiredCapabilities"].as_array().unwrap() {
+        assert!(advertised.contains(required), "{required}: {STEP}");
+    }
 }

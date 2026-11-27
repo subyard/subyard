@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "session-shell",
+  "result": {
+    "schemaVersion": 1,
+    "kind": "shell",
+    "scope": "yard",
+    "yardName": "default",
+    "projectId": "Demo",
+    "ownerArguments": [
+      "yard",
+      "-Y",
+      "default",
+      "shell",
+      "Demo"
+    ]
+  }
+}

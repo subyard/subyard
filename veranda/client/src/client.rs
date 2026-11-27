@@ -2250,25 +2250,51 @@ fn validate_execution(value: &Value, operation: &str) -> Result<(), NativeError>
 mod tests {
     use super::*;
     fn fixture(name: &str) -> Value {
+        fixture_in("yard-rpc/v1", name)
+    }
+    fn fixture_in(set: &str, name: &str) -> Value {
         let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../contract/yard-rpc/v1/fixtures")
+            .join("../contract")
+            .join(set)
+            .join("fixtures")
             .join(format!("{name}.json"));
         serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()).unwrap()["result"].clone()
     }
+    /// The previous engine line's published results must still decode.
     #[test]
     fn shared_query_results_match_native_boundary() {
-        decode::<ProfileList>(fixture("profile-list"))
-            .unwrap()
-            .validate("default")
-            .unwrap();
-        decode::<SettingsList>(fixture("settings-list"))
-            .unwrap()
-            .validate("default")
-            .unwrap();
-        decode::<HostSyncStatus>(fixture("host-sync-status"))
-            .unwrap()
-            .validate("example-owner")
-            .unwrap();
+        for set in ["yard-rpc/v1", "previous-engine"] {
+            let fixture = |name| fixture_in(set, name);
+            decode::<ProfileList>(fixture("profile-list"))
+                .unwrap()
+                .validate("default")
+                .unwrap();
+            decode::<SettingsList>(fixture("settings-list"))
+                .unwrap()
+                .validate("default")
+                .unwrap();
+            decode::<HostSyncStatus>(fixture("host-sync-status"))
+                .unwrap()
+                .validate("example-owner")
+                .unwrap();
+            decode::<ExactPlan>(fixture("operation-exact"))
+                .unwrap()
+                .validate("selection-1", "config")
+                .unwrap();
+            decode::<CurrentContext>(fixture("context"))
+                .unwrap()
+                .validate(None)
+                .unwrap();
+            decode::<OwnerInventory>(fixture("owner-inventory"))
+                .unwrap()
+                .into_snapshot("0.32.0".into(), "default".into())
+                .unwrap();
+            assert!(!decode::<YardStatus>(fixture("yard-status"))
+                .unwrap()
+                .facts()
+                .unwrap()
+                .is_empty());
+        }
     }
     #[test]
     fn profile_selection_preserves_owner_list_whitespace() {

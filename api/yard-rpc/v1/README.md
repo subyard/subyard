@@ -65,9 +65,9 @@ Call `rpc.negotiate` before other methods, with `{}` params. The result follows
 `protocolMax`, `engineVersion`, and `capabilities`. Product version compatibility
 and wire compatibility are separate checks. A client requiring a capability must
 reject its absence; it must not infer support from a version or attempt a human
-CLI fallback. Veranda's release policy additionally requires the matched product
-version. Unsupported profile descriptors fail through the existing catalog
-loader, rather than being translated into another profile schema.
+CLI fallback. Veranda additionally admits only engines in its release window
+(`veranda/compatibility.json`). Unsupported profile descriptors fail through the
+existing catalog loader, rather than being translated into another profile schema.
 
 Requests may include an RFC 3339 `deadline`. Cancellation sends a `type:"cancel"`
 frame with the active operation ID; it carries no deadline. Explicit cancellation
@@ -137,8 +137,8 @@ engine compatibility surface, not a client fallback.
 summary. The full warnings remain in
 `yard migrate --check`. This optional response member preserves the core readiness
 fields for older Go clients, which ignore unknown members and omit the new details.
-Clients validating an older closed schema need the updated contract; the matched
-Veranda product-version policy still applies.
+Clients validating an older closed schema need the updated contract; Veranda's
+engine window still applies.
 
 `profile.list` includes unselected profiles. Its `eligibility` reason can be
 `allowed`, `dedicated-role-required`, `exclusive-role`, `lifecycle-only` or

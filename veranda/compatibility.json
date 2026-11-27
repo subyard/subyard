@@ -1,7 +1,11 @@
 {
   "schemaVersion": 1,
   "productVersion": "0.1.0",
-  "productVersionPolicy": "exact-match",
+  "productVersionPolicy": "engine-window",
+  "engineLines": {
+    "current": "0.33",
+    "previous": "0.32"
+  },
   "rpc": {
     "minimum": 1,
     "maximum": 1

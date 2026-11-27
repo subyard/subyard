@@ -817,7 +817,30 @@ def validate_summary(result, rc, growth=False, wayland=False, requested_cycles=N
         assert result['failedCase'] is not None or set(result['passed']) == expected
 
 
+def refusal_text(root, version, engine):
+    """The admission refusal Veranda shows (veranda/client/src/compatibility.rs), from its window."""
+    lines = json.loads((root / 'veranda/compatibility.json').read_text(encoding='utf8'))['engineLines']
+    current, previous = lines['current'], lines['previous']
+    parts = engine.split('.')
+    stable = len(parts) == 3 and all(p.isascii() and p.isdigit() and (p == '0' or not p.startswith('0'))
+                                     and int(p) < 2 ** 64 for p in parts)
+    newer = stable and (int(parts[0]), int(parts[1])) > tuple(int(part) for part in current.split('.'))
+    remedy = 'Update Veranda.' if newer else 'Install a supported Subyard release on the owner.'
+    return f'Veranda {version} supports Subyard {current} and {previous}; this owner runs Subyard {engine}. {remedy}'
+
+
+def refusal_self_test():
+    root = Path(__file__).resolve().parents[2]
+    lines = json.loads((root / 'veranda/compatibility.json').read_text(encoding='utf8'))['engineLines']
+    major, minor = map(int, lines['current'].split('.'))
+    window = f"supports Subyard {lines['current']} and {lines['previous']}; this owner runs Subyard"
+    assert refusal_text(root, '0.1.1', '0.1.0') == f'Veranda 0.1.1 {window} 0.1.0. Install a supported Subyard release on the owner.'
+    assert refusal_text(root, '0.1.0', f'{major}.{minor + 1}.0').endswith('. Update Veranda.')
+    assert refusal_text(root, '0.1.0', f'{major}.{minor + 1}.0-dev').endswith('on the owner.')
+
+
 def summary_self_test():
+    refusal_self_test()
     import gi
     gi.require_version('Atspi', '2.0')
     from gi.repository import Atspi, GLib, GObject
@@ -1873,7 +1896,7 @@ def main():
             wait(lambda: reconcile_ready(lambda: find('Reconcile yard', buttons), Atspi.StateType.ENABLED, reconcile_checkpoint))
 
     def mismatch(version, engine):
-        expected = f'Veranda {version} and Subyard {engine} are incompatible. Install both from the same release.'
+        expected = refusal_text(root, version, engine)
         boundary('mismatch.message')
         wait(lambda: expected in text())
         boundary('mismatch.mutations')

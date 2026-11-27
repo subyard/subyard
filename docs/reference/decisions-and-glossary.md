@@ -866,16 +866,33 @@ Windows/macOS are intended to reach Linux owners remotely. Minimize resources ac
 
 The accepted distribution contract keeps Yard/Veranda in one public monorepo/product SemVer
 release with separate artifacts. Core bootstrap/update remains CLI/engine-only; GUI installation
-is separate. Official pair compatibility requires matching product version; RPC
-versions/capabilities negotiate independently, without a promised arbitrary adjacent-version
-matrix. Shared behavior must have conformance coverage against the [RPC
+is separate. Veranda supports the engine window below; RPC protocol versions negotiate
+independently. Shared behavior must have conformance coverage against the [RPC
 contract](../control-plane.md#rpc); GUI source lives in `veranda/`.
+
+<a id="veranda-engine-window"></a>**Veranda engine window.** A Veranda release supports two
+Subyard engine release lines: its own line N and the previous published line N−1. A line is
+`MAJOR.MINOR`, and every patch release belongs to its line. `veranda/compatibility.json` names
+both lines. Veranda admits an owner when its negotiated engine version is a stable release on
+one of them, or equals Veranda's own version (same-build development and test pairs), and the
+owner advertises every required capability. Inside the window only capabilities gate features;
+Veranda never infers support from a version. A required capability must already exist on N−1;
+a capability new in N is a feature capability, whose absence hides that feature or refuses it
+by name. Outside the window Veranda refuses the connection as `incompatible_engine` before any
+owner call, names its own version, the supported lines and the owner's version, and says to
+update Veranda for a newer stable engine and to install a supported Subyard release otherwise.
+The window is strict: Veranda N refuses N+1. The engine stays client-agnostic: negotiation
+parameters stay empty and Go keeps no Veranda version list. Tests cover the N−1 line through
+fixtures published with its first release `N−1.0`; later patch releases of both lines are
+admitted untested and rely on the additive v1 contract. The window moves when a new line
+starts, not at patch releases; a release gate is to check that it names the release's own
+line. There is no wider matrix and no fallback through CLI output.
 
 Profile editing uses current shipped optional schema 1
 and descriptorless/resource-only profiles without depending on a future registry. Owner
 projection must separate selection from observed provision; deselection does not delete
-artifacts. Product/schema/capability mismatch must give actionable same-release guidance rather
-than frontend migration/fallback.
+artifacts. Product/schema/capability mismatch must give actionable guidance toward a supported
+release rather than frontend migration/fallback.
 
 The native connection/trust requirement assigns an app-local store to the Rust shell on every
 OS: authoritative HostID, destination, credential references, and pinned public keys. CLI

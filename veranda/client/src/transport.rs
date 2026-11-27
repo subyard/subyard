@@ -185,32 +185,28 @@ struct Negotiation {
 
 impl RpcClient {
     #[cfg(test)]
-    pub fn open(
-        command: Command,
-        expected_version: &str,
-        notify: Notify,
-    ) -> Result<Self, NativeError> {
-        Self::open_tracked(command, expected_version, notify, None)
+    pub fn open(command: Command, own_version: &str, notify: Notify) -> Result<Self, NativeError> {
+        Self::open_tracked(command, own_version, notify, None)
     }
     pub fn open_tracked(
         command: Command,
-        expected_version: &str,
+        own_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
     ) -> Result<Self, NativeError> {
-        Self::open_tracked_attempt(command, expected_version, notify, processes, None)
+        Self::open_tracked_attempt(command, own_version, notify, processes, None)
     }
 
     pub(crate) fn open_tracked_attempt(
         command: Command,
-        expected_version: &str,
+        own_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         attempt: Option<&Processes>,
     ) -> Result<Self, NativeError> {
         Self::open_tracked_attempt_usage(
             command,
-            expected_version,
+            own_version,
             notify,
             processes,
             attempt,
@@ -220,7 +216,7 @@ impl RpcClient {
     }
     pub(crate) fn open_tracked_attempt_usage(
         command: Command,
-        expected_version: &str,
+        own_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         attempt: Option<&Processes>,
@@ -229,7 +225,7 @@ impl RpcClient {
     ) -> Result<Self, NativeError> {
         Self::open_with_observation(
             command,
-            expected_version,
+            own_version,
             notify,
             processes,
             attempt,
@@ -243,7 +239,7 @@ impl RpcClient {
     }
     pub(crate) fn open_observed(
         command: Command,
-        expected_version: &str,
+        own_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         observation: Option<Source>,
@@ -252,7 +248,7 @@ impl RpcClient {
         let usage = observation.as_ref().and_then(Source::child_usage_context);
         Self::open_with_observation(
             command,
-            expected_version,
+            own_version,
             notify,
             processes,
             None,
@@ -266,7 +262,7 @@ impl RpcClient {
     }
     fn open_with_observation(
         mut command: Command,
-        expected_version: &str,
+        own_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         attempt: Option<&Processes>,
@@ -464,31 +460,21 @@ impl RpcClient {
             );
             return Err(invalid());
         }
-        if negotiation.engine_version != expected_version {
+        crate::compatibility::admit(
+            own_version,
+            &negotiation.engine_version,
+            &negotiation.capabilities,
+        )
+        .inspect_err(|error| {
             client.shared.record(
                 Class::IncompatibleEngine,
                 "rpc.negotiate",
-                "incompatible_engine",
-                &request,
-            );
-            return Err(NativeError::new(
-                "incompatible_engine",
-                format!(
-                    "Veranda {expected_version} and Subyard {} are incompatible. Install both from the same release.",
-                    negotiation.engine_version
-                ),
-            ));
-        }
-        client.engine_version = negotiation.engine_version;
-        client.capabilities = negotiation.capabilities;
-        client.require("owner-inventory-v1").inspect_err(|_| {
-            client.shared.record(
-                Class::IncompatibleEngine,
-                "rpc.negotiate",
-                "capability_missing",
+                &error.code,
                 &request,
             );
         })?;
+        client.engine_version = negotiation.engine_version;
+        client.capabilities = negotiation.capabilities;
         Ok(client)
     }
 
@@ -499,7 +485,7 @@ impl RpcClient {
             Err(NativeError::new(
                 "capability_missing",
                 format!(
-                    "Subyard {} does not support {capability}. Install Veranda and Subyard from the same release.",
+                    "Subyard {} does not support {capability}. Install a supported Subyard release on the owner.",
                     self.engine_version
                 ),
             ))
@@ -838,7 +824,7 @@ fn version(value: &str) -> bool {
 pub(crate) fn invalid() -> NativeError {
     NativeError::new(
         "invalid_response",
-        "Subyard returned an unsupported response. Install Veranda and Subyard from the same release.",
+        "Subyard returned an unsupported response. Install a supported Subyard release on the owner.",
     )
 }
 fn disconnected() -> NativeError {
@@ -885,7 +871,7 @@ fn public_fault(code: &str) -> NativeError {
         ),
         Some(ErrorCode::OperationStepsUnsupported) | Some(ErrorCode::MethodNotFound) | Some(ErrorCode::IncompatibleVersion) => (
             "incompatible_engine",
-            "This Subyard release does not support the requested schema or operation. Install Veranda and Subyard from the same release.",
+            "This Subyard release does not support the requested schema or operation. Install a supported Subyard release on the owner.",
         ),
         Some(ErrorCode::SecretForbidden) | Some(ErrorCode::InteractiveOrPayloadCommand) => (
             "protected_operation",
@@ -913,11 +899,11 @@ fn public_fault(code: &str) -> NativeError {
         ),
         Some(ErrorCode::ProfileCatalogInvalid) => (
             "incompatible_engine",
-            "The owner profile catalog is incompatible or invalid. Install Veranda and Subyard from the same release.",
+            "The owner profile catalog is incompatible or invalid. Install a supported Subyard release on the owner.",
         ),
         Some(ErrorCode::OwnerConfigurationInvalid) => (
             "owner_configuration_invalid",
-            "The owner configuration or profile catalog is invalid. Review owner diagnostics and install Veranda and Subyard from the same release.",
+            "The owner configuration or profile catalog is invalid. Review owner diagnostics and install a supported Subyard release on the owner.",
         ),
         Some(ErrorCode::OwnerContextChanged) => (
             "owner_context_changed",

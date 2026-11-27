@@ -1,6 +1,7 @@
 //! Native presentation clients share RPC, trust storage and fixed session launches.
 pub mod child_usage;
 pub mod client;
+pub mod compatibility;
 pub mod connections;
 pub mod diagnostics;
 pub mod local_fleet;

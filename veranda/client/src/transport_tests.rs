@@ -11,6 +11,11 @@ const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../contract/yard-rpc/v1/fixtures"
 );
+/// The previous engine line's published fixtures; `release.json` beside them names its version.
+const PREVIOUS_FIXTURE_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../contract/previous-engine/fixtures"
+);
 const OWNER: &str = r#"
 import datetime, json, os, struct, subprocess, sys, time
 mode, pid_file, fixtures = sys.argv[1:]
@@ -74,6 +79,9 @@ elif mode == 'future-vocabulary':
     result['futureNegotiationField'] = {'ignored':True}
 elif mode == 'capability-missing':
     result['capabilities'].remove('owner-inventory-v1')
+elif mode == 'previous':
+    with open(os.path.join(fixtures, '..', 'release.json'), encoding='utf8') as source:
+        result['engineVersion'] = json.load(source)['version']
 # Go negotiation deliberately omits operationId; ordinary method responses
 # include the explicit operation binding or default to their request ID.
 negotiated = fixture('negotiate')
@@ -301,11 +309,14 @@ impl OwnerFixture {
         Self { root }
     }
     pub(crate) fn command(&self, mode: &str) -> Command {
+        self.command_in(mode, FIXTURE_DIR)
+    }
+    fn command_in(&self, mode: &str, fixtures: &str) -> Command {
         let mut command = Command::new(
             std::env::var_os("VERANDA_TEST_PYTHON").unwrap_or_else(|| "python3".into()),
         );
         command.args(["-u", "-c", OWNER, mode]);
-        command.arg(self.root.join("child.pid")).arg(FIXTURE_DIR);
+        command.arg(self.root.join("child.pid")).arg(fixtures);
         command
     }
     pub(crate) fn store_root(&self) -> PathBuf {
@@ -399,7 +410,7 @@ fn event_bursts_keep_order_and_do_not_starve_the_method_response() {
 }
 #[test]
 fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
-    for name in [
+    for (dir, name) in [
         "negotiate",
         "owner-inventory",
         "yard-status",
@@ -411,11 +422,13 @@ fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
         "snapshot-ready",
         "session-shell",
         "session-vscode",
-    ] {
-        let bytes = fs::read(format!("{FIXTURE_DIR}/{name}.frame")).unwrap();
+    ]
+    .into_iter()
+    .flat_map(|name| [(FIXTURE_DIR, name), (PREVIOUS_FIXTURE_DIR, name)])
+    {
+        let bytes = fs::read(format!("{dir}/{name}.frame")).unwrap();
         let expected: Value =
-            serde_json::from_slice(&fs::read(format!("{FIXTURE_DIR}/{name}.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&fs::read(format!("{dir}/{name}.json")).unwrap()).unwrap();
         let mut input = Cursor::new(&bytes);
         let decoded: Value = read_frame(&mut input).unwrap();
         assert_eq!(decoded, expected, "golden {name}");
@@ -561,6 +574,22 @@ fn incompatible_negotiation_fails_closed_and_reaps_its_subprocess() {
         #[cfg(unix)]
         fixture.assert_child_reaped();
     }
+}
+
+#[test]
+fn a_release_veranda_admits_the_previous_engine_line() {
+    use crate::compatibility::{ENGINE_CURRENT_LINE, ENGINE_PREVIOUS_LINE};
+    let fixture = OwnerFixture::new();
+    let client = RpcClient::open(
+        fixture.command_in("previous", PREVIOUS_FIXTURE_DIR),
+        &format!("{ENGINE_CURRENT_LINE}.0"),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    assert_eq!(client.engine_version, format!("{ENGINE_PREVIOUS_LINE}.0"));
+    client.close();
+    #[cfg(unix)]
+    fixture.assert_child_reaped();
 }
 
 #[test]
