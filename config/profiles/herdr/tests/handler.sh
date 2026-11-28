@@ -36,6 +36,10 @@ case "$1" in
       loginctl) printf 'yes\n' ;;
       journalctl) printf '%s\n' "$@" ;;
       sh)
+        if [ "$2:$3" = '-eu:-c' ]; then
+          printf 'guest file %s %s\n' "$6" "$7" >> "$HERDR_TEST_CALLS"
+          if [ -n "${HERDR_TEST_FILES:-}" ]; then cat > "$HERDR_TEST_FILES/${6##*/}"; fi
+        fi
         cat >/dev/null
         if [ "$2:$3:$4" = '-eu:-s:--' ]; then
           case "$5" in
@@ -52,7 +56,14 @@ case "$1" in
             *) exit 85 ;;
           esac
         fi ;;
-      systemctl) printf '%s\n' "$*" >> "$HERDR_TEST_CALLS" ;;
+      systemctl)
+        printf '%s\n' "$*" >> "$HERDR_TEST_CALLS"
+        case "$2:${4:-}" in
+          is-enabled:subyard-herdr-core.service) [ "${HERDR_TEST_CORE_UNIT:-enabled}" = enabled ] ;;
+          is-enabled:subyard-herdr-discovery.timer) [ "${HERDR_TEST_TIMER:-active}" != disabled ] ;;
+          is-active:subyard-herdr-discovery.timer) [ "${HERDR_TEST_TIMER:-active}" = active ] ;;
+          is-active:subyard-herdr-discovery.service) [ "${HERDR_TEST_DISCOVERY:-idle}" = running ] ;;
+        esac ;;
       runuser)
         shift 4
         case "$1:$2" in
@@ -83,6 +94,7 @@ case "$1" in
             printf 'stop Core\n' >> "$HERDR_TEST_CALLS"
             [ "${HERDR_TEST_CORE:-up}" = stopped ] ;;
           */herdr-profile:sync) printf 'sync projects\n' >> "$HERDR_TEST_CALLS" ;;
+          env:SUBYARD_HERDR_MINIMUM=*) printf 'Core: fixture\n' ;;
           */herdr-profile:registration-ready) [ "${HERDR_TEST_REGISTRATION:-ready}" = ready ] ;;
           */herdr-profile:keys)
             case "$3:$4" in
@@ -125,6 +137,7 @@ printf '#!/bin/sh\nprintf "100.100.100.100 STREAM fixture.ts.net\\n"\n' > "$test
 printf '#!/bin/sh\nprintf "1: tailscale0 inet 100.100.100.100/32 scope global\\n"\n' > "$test_root/bin/ip"
 printf '#!/bin/sh\nexit 0\n' > "$test_root/bin/ss"
 printf '#!/bin/sh\nexit 0\n' > "$test_root/bin/sleep"
+printf '#!/bin/sh\nprintf "Fixture-Host.\\n"\n' > "$test_root/bin/hostname"
 chmod 0755 "$test_root/bin/"* "$test_root/fixture/config/profiles/herdr/bin/herdr-profile"
 
 for setting in SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_CONFIG_HOME SUBYARD_HOME \
@@ -147,8 +160,10 @@ if result=$(YARD_KIND=vm NESTED_E2E_VMS=1 "$handler" up 2>&1); then exit 1; fi
 export HERDR_TEST_RUNNING=yes HERDR_ADVERTISE_HOST=fixture.ts.net HERDR_HOST_PORT=6768
 profile="$test_root/fixture/config/profiles/herdr"
 config="$profile/resources/herdr"
+library="$test_root/fixture/scripts/lib/checkout-discovery"
 HERDR_TEST_DIGEST=$(sha256sum "$profile/bin/herdr-profile" "$config/login.sh" "$config/handler.sh" \
-  "$config/install-core.sh" "$config/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" |
+  "$config/install-core.sh" "$config/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" \
+  "$library/checkouts.py" "$library/discovery.py" "$library/inventory.py" |
   awk '{print $1}' | sha256sum | cut -d ' ' -f1)
 export HERDR_TEST_DIGEST
 token="v1:$(printf 'v1\nbind=host\nconnect=tcp:127.0.0.1:22\nlisten=tcp:100.100.100.100:6768\ntype=proxy\n' | sha256sum | cut -d ' ' -f1)"
@@ -158,6 +173,8 @@ HERDR_TEST_ROUTE=$(jq -cn --arg token "$token" '{devices:{"herdr-ssh":{bind:"hos
 "$handler" up | jq -e '.changed == false' >/dev/null
 HERDR_TEST_REGISTRATION=missing "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_HOOK=missing "$handler" up | jq -e '.changed == true' >/dev/null
+HERDR_TEST_TIMER=disabled "$handler" up | jq -e '.changed == true' >/dev/null
+HERDR_TEST_TIMER=inactive "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_LISTENER=down "$handler" up | jq -e '.changed == true' >/dev/null
 HERDR_TEST_DROPIN=missing "$handler" up | jq -e '.changed == true' >/dev/null
 if HERDR_TEST_LISTENER=down "$handler" pair --key fixture >/dev/null 2>&1; then exit 1; fi
@@ -222,12 +239,31 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   [[ "$result" == *'Remove the overriding PasswordAuthentication directive'* ]]
   if grep -q '^config device add ' "$HERDR_TEST_CALLS"; then exit 1; fi
   : > "$HERDR_TEST_CALLS"
+  export HERDR_TEST_FILES="$test_root/guest-files"
+  mkdir "$HERDR_TEST_FILES"
   HERDR_TEST_ROUTE='{}' SUBYARD_RESOURCE_ACTION=up "$handler" up >/dev/null
   [ -f "$HERDR_TEST_DROPIN_PATH" ]
+  # The guest gets the shared library and a timer with Orca's intervals that runs discovery.
+  for name in checkouts discovery inventory; do
+    grep -Fxq "guest file /usr/local/libexec/subyard/herdr-discovery/$name.py 0644" "$HERDR_TEST_CALLS"
+    cmp "$HERDR_TEST_FILES/$name.py" "$library/$name.py"
+  done
+  grep -Fxq 'ExecStart=/usr/local/libexec/subyard/herdr-profile discover' "$HERDR_TEST_FILES/subyard-herdr-discovery.service"
+  grep -Fxq 'User=dev' "$HERDR_TEST_FILES/subyard-herdr-discovery.service"
+  grep -Fxq 'OnBootSec=15s' "$HERDR_TEST_FILES/subyard-herdr-discovery.timer"
+  grep -Fxq 'OnUnitInactiveSec=15s' "$HERDR_TEST_FILES/subyard-herdr-discovery.timer"
+  grep -n -e '^sync projects$' -e '^systemctl enable --now --quiet subyard-herdr-discovery.timer$' \
+    "$HERDR_TEST_CALLS" | cut -d: -f2- | cut -d ' ' -f1-2 > "$test_root/schedule-order"
+  printf 'sync projects\nsystemctl enable\n' | cmp - "$test_root/schedule-order"
+  unset HERDR_TEST_FILES
   grep -E '^(install SSH drop-in|config device add)' "$HERDR_TEST_CALLS" | cut -d ' ' -f1-3 > "$test_root/install-order"
   printf 'install SSH drop-in\nconfig device add\n' | cmp - "$test_root/install-order"
-  HERDR_TEST_CORE=stopped SUBYARD_RESOURCE_ACTION=down "$handler" down
+  : > "$HERDR_TEST_CALLS"
+  HERDR_TEST_DISCOVERY=running HERDR_TEST_CORE=stopped SUBYARD_RESOURCE_ACTION=down "$handler" down
   [ ! -e "$HERDR_TEST_DROPIN_PATH" ] && grep -Fxq 'remove SSH drop-in' "$HERDR_TEST_CALLS"
+  grep -o 'systemctl \(disable\|stop\) .*' "$HERDR_TEST_CALLS" > "$test_root/down-units"
+  printf '%s\n' 'systemctl disable --now --quiet subyard-herdr-discovery.timer' 'systemctl stop subyard-herdr-discovery.service' \
+    'systemctl disable --now subyard-herdr-core.service' | cmp - "$test_root/down-units"
 )
 
 (
@@ -301,7 +337,9 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
     cmp - "$HERDR_TEST_CALLS"
   grep -Fxq "Paired ${fp[laptop]}  user-laptop" "$test_root/granted"
   grep -Fxq "Already paired ${fp[desk]}  desk-old" "$test_root/granted"
-  grep -Fxq 'hc machine add dev@fixture.ts.net:6768' "$test_root/granted"
+  grep -Fxq 'hc machine add dev@fixture.ts.net:6768 --name fixture-host-default' "$test_root/granted"
+  printf 'SSH config:\nHost fixture-host-default\n  HostName fixture.ts.net\n  Port 6768\n  User dev\n' |
+    cmp - <(sed -n '/^SSH config:$/,$p' "$test_root/granted")
 
   "$handler" pair --from-host "${fp[desk]}" | jq -e '.action == "pair-existing" and .changed == false' >/dev/null
   : > "$HERDR_TEST_CALLS"
@@ -335,6 +373,30 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   done
 )
 
+(
+  # The machine label is <host-id>-<yard>; the persisted host ID wins over the hostname.
+  export SUBYARD_CONFIG_HOME="$test_root/label" SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=status SUBYARD_OPERATION_ID=fixture
+  mkdir -m 0700 "$SUBYARD_CONFIG_HOME"
+  printf 'Owner-Host\n' > "$SUBYARD_CONFIG_HOME/host-id"
+  "$handler" status > "$test_root/status"
+  grep -Fxq 'SSH endpoint: dev@fixture.ts.net:6768' "$test_root/status"
+  grep -Fxq 'hc machine add dev@fixture.ts.net:6768 --name owner-host-default' "$test_root/status"
+  grep -Fxq 'Host owner-host-default' "$test_root/status"
+  YARD_NAME=work "$handler" status > "$test_root/status"
+  grep -Fxq 'Host owner-host-work' "$test_root/status"
+  printf 'a-host-id-longer-than-the-limit\n' > "$SUBYARD_CONFIG_HOME/host-id"
+  "$handler" status > "$test_root/status"
+  grep -Fxq 'hc machine add dev@fixture.ts.net:6768' "$test_root/status"
+  grep -q '^Machine label unavailable' "$test_root/status"
+  if grep -q '^Host ' "$test_root/status"; then exit 1; fi
+)
+
+(
+  # Down is complete only once checkout discovery is disabled too.
+  export HERDR_TEST_CORE_UNIT=disabled HERDR_TEST_CORE=stopped HERDR_TEST_DROPIN=missing HERDR_TEST_ROUTE='{}'
+  HERDR_TEST_TIMER=disabled "$handler" down | jq -e '.changed == false' >/dev/null
+  "$handler" down | jq -e '.changed' >/dev/null
+)
 HERDR_TEST_CORE=down "$handler" down | jq -e '.changed and (.consequences[0] | contains("unavailable"))' >/dev/null
 : > "$HERDR_TEST_CALLS"
 if result=$(HERDR_TEST_CORE=down SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=fixture "$handler" down 2>&1); then exit 1; fi
@@ -348,7 +410,10 @@ old=$(printf '%064d' 0)
 [ ! -s "$HERDR_TEST_CALLS" ]
 HERDR_TEST_ACTUAL="$old" "$handler" _runtime apply fixture "$old" "$HERDR_TEST_DIGEST" > "$test_root/runtime" 2> "$test_root/runtime.log"
 jq -se --arg desired "$HERDR_TEST_DIGEST" 'length == 1 and .[0].state == "current" and .[0].actual == $desired' "$test_root/runtime" >/dev/null
-printf 'systemctl daemon-reload\n' | cmp - "$HERDR_TEST_CALLS"
+# An enabled Herdr keeps its checkout discovery timer across a runtime refresh.
+grep -o 'systemctl .*' "$HERDR_TEST_CALLS" > "$test_root/runtime-units"
+printf '%s\n' 'systemctl daemon-reload' 'systemctl is-enabled --quiet subyard-herdr-core.service' \
+  'systemctl enable --now --quiet subyard-herdr-discovery.timer' | cmp - "$test_root/runtime-units"
 empty=$(printf '' | sha256sum | cut -d ' ' -f1)
 for corrupted in stale "$(printf '%063d' 0)" "$(printf '%064d' 0 | tr 0 A)"; do
   HERDR_TEST_ACTUAL="$corrupted" "$handler" _runtime observe |

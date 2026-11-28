@@ -204,5 +204,32 @@ pair_endpoint() {
   local fingerprint
   fingerprint=$(yexec ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk 'NR == 1 {print $2}')
   printf 'User: %s\nHost: %s\nPort: %s\nEd25519 host key: %s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT" "$fingerprint"
-  printf 'hc machine add %s@%s:%s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT"
+  machine_instructions
+}
+
+# Herdr names a machine only on the client. Suggest <host-id>-<yard>, the owner
+# host identity the engine persists, falling back as it does to the hostname.
+machine_label() {
+  local host='' path="$SUBYARD_CONFIG_HOME/host-id" label
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    host=$(tr -d '[:space:]' < "$path") || return 1
+  elif [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    host="${SUBYARD_HOST_ID:-$(hostname 2>/dev/null)}" || return 1
+    host="${host%.}"
+  fi
+  label="$host-${YARD_NAME:-default}"
+  label="${label,,}"
+  [[ "$label" =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] || return 1
+  printf '%s\n' "$label"
+}
+
+machine_instructions() {
+  local label
+  if ! label=$(machine_label); then
+    printf 'hc machine add %s@%s:%s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT"
+    printf 'Machine label unavailable: the host ID and yard name do not form a Herdr machine name\n'
+    return
+  fi
+  printf 'hc machine add %s@%s:%s --name %s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT" "$label"
+  printf 'SSH config:\nHost %s\n  HostName %s\n  Port %s\n  User %s\n' "$label" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT" "$DEV_USER"
 }

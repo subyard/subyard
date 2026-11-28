@@ -26,6 +26,11 @@ helper=/usr/local/libexec/subyard/herdr-profile
 project_hook=/usr/local/libexec/subyard/projects-changed.d/herdr
 login=/usr/local/libexec/subyard/herdr-login
 unit=subyard-herdr-core.service
+discovery_unit=subyard-herdr-discovery.service
+discovery_timer=subyard-herdr-discovery.timer
+discovery_dir=/usr/local/libexec/subyard/herdr-discovery
+library="$root/scripts/lib/checkout-discovery"
+library_files=(checkouts.py discovery.py inventory.py)
 native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
@@ -61,6 +66,9 @@ running() {
   jq -e '. != null' <<< "$result" >/dev/null
 }
 enabled() { yexec systemctl is-enabled --quiet "$unit"; }
+discovery_enabled() { yexec systemctl is-enabled --quiet "$discovery_timer"; }
+discovery_scheduled() { discovery_enabled && yexec systemctl is-active --quiet "$discovery_timer"; }
+schedule_discovery() { yexec systemctl enable --now --quiet "$discovery_timer"; }
 core_release() {
   local arch digest
   arch=$(yexec uname -m)
@@ -74,7 +82,8 @@ core_release() {
 digest() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
   sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" \
-    "$here/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" |
+    "$here/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" \
+    "${library_files[@]/#/$library/}" |
     awk '{print $1}' | sha256sum | cut -d ' ' -f1
 }
 guest_file() {
@@ -96,6 +105,38 @@ install_assets() {
   guest_file "$helper" 0755 < "$native"
   guest_file "$login" 0755 < "$here/login.sh"
   guest_file "$project_hook" 0755 < "$here/projects-changed.sh"
+  yexec install -d -m 0755 "$discovery_dir"
+  local name
+  for name in "${library_files[@]}"; do
+    guest_file "$discovery_dir/$name" 0644 < "$library/$name"
+  done
+  # Orca's intervals: a new nested clone appears within about a minute.
+  guest_file "/etc/systemd/system/$discovery_unit" 0644 <<EOF
+[Unit]
+Description=Discover Herdr project checkouts and reconcile their spaces
+After=user@$DEV_UID.service
+
+[Service]
+Type=oneshot
+User=$DEV_USER
+ExecStart=$helper discover
+TimeoutStartSec=100
+UMask=0077
+Nice=10
+EOF
+  guest_file "/etc/systemd/system/$discovery_timer" 0644 <<EOF
+[Unit]
+Description=Periodically discover Herdr project checkouts
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=$discovery_unit
+
+[Install]
+WantedBy=timers.target
+EOF
   guest_file "/etc/systemd/system/$unit" 0644 <<EOF
 [Unit]
 Description=Start Herdr Core in the developer login environment
@@ -132,6 +173,7 @@ up() {
   if ! running; then yexec systemctl start "$unit"; fi
   wait_core
   as_dev "$helper" sync
+  schedule_discovery
   digest | guest_file "$helper.sha256" 0644
 }
 up_ready() {
@@ -139,7 +181,7 @@ up_ready() {
     [ "$(yexec loginctl show-user "$DEV_USER" -p Linger --value)" = yes ] &&
     [ "$(yexec cat "$helper.sha256" 2>/dev/null)" = "$(digest)" ] &&
     yexec test -x "$project_hook" && yexec cmp -s - "$project_hook" < "$here/projects-changed.sh" &&
-    as_dev "$helper" registration-ready 2>/dev/null
+    discovery_scheduled && as_dev "$helper" registration-ready 2>/dev/null
 }
 
 runtime() {
@@ -162,6 +204,8 @@ runtime() {
   if [ "$mode" = apply ]; then
     [ "$#" -eq 3 ] && [ "$installed" = true ] && [ "$actual" = "$2" ] && [ "$desired" = "$3" ] || die 'Herdr runtime plan is stale'
     install_assets >&2
+    # An enabled Herdr keeps its periodic checkout discovery across a runtime refresh.
+    if enabled; then schedule_discovery >&2; fi
     printf '%s\n' "$desired" | guest_file "$helper.sha256" 0644 >&2
     actual="$desired"
     state=current
@@ -247,8 +291,8 @@ assessment() {
     down)
       svc_require_yard_running
       result=$(observe) || result=unknown
-      if [ "$result" = null ] && ! enabled && route_absent && guest_ssh absent; then ready=true; fi
-      desired='core stopped, kick disabled, proxy and SSH drop-in absent'
+      if [ "$result" = null ] && ! enabled && ! discovery_enabled && route_absent && guest_ssh absent; then ready=true; fi
+      desired='core stopped, kick and checkout discovery disabled, proxy and SSH drop-in absent'
       count=unavailable
       if [ "$result" != unknown ]; then count=$(jq -r '.Live // 0' <<< "$result"); fi
       consequence="remove the Herdr proxy and SSH drop-in and stop all Herdr terminals, including arrivals. Observed live terminals: $count"
@@ -286,6 +330,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         printf 'Minimum Core release: %s\n' "$HERDR_VERSION"
         if route_ready 2>/dev/null; then
           printf 'SSH endpoint: %s@%s:%s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT"
+          machine_instructions
         else
           printf 'SSH endpoint: unpublished or unavailable\n'
         fi
@@ -313,6 +358,8 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         wait_core "$old" ;;
       down)
         remove_route "$(route_state)"
+        if discovery_enabled; then yexec systemctl disable --now --quiet "$discovery_timer"; fi
+        if yexec systemctl is-active --quiet "$discovery_unit"; then yexec systemctl stop "$discovery_unit"; fi
         if enabled; then yexec systemctl disable --now "$unit"; fi
         if yexec test -x "$helper"; then
           as_dev "$helper" stop || die 'Herdr ingress is closed, but Core shutdown could not be verified'
