@@ -243,7 +243,8 @@ keep_diagnostics() {
 run_collector_selection() {
   local output="$1" check_id="$2" native_status=0
   # Hosted jobs have their own time limits; keep the capacity bound well inside them.
-  SUBYARD_E2E_CAPACITY_WAIT="${SUBYARD_E2E_CAPACITY_WAIT:-30m}" \
+  # Release acceptance on hosted runners shares their Docker Hub egress, like Periodic lanes.
+  SUBYARD_E2E_CAPACITY_WAIT="${SUBYARD_E2E_CAPACITY_WAIT:-30m}" SUBYARD_E2E_DOCKER_MIRROR="$DOCKER_MIRROR" \
     python3 -B "$WORKSPACE/dev/release-acceptance.py" run --output "$output" --only "$check_id" --slots slot-1 || native_status=$?
   printf 'Native collector aggregate exit: %s\n' "$native_status"
   # Full receipt remains incomplete; only one requested terminal selection defines this job.

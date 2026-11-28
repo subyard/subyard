@@ -843,7 +843,8 @@ which the shared client sends to the hosted broker. The broker creates leases fr
 Incus VM base. Intel retries retain the original image. Lane IDs and fixture images inside the
 leased VMs are shared across the dispatch choices.
 Runners share egress addresses, so anonymous Docker Hub pulls hit its rate limit. The wrapper
-therefore names `https://mirror.gcr.io` as the Docker Hub mirror; the guest command forwards it, and
+therefore names `https://mirror.gcr.io` as the Docker Hub mirror for Periodic lanes and hosted
+release acceptance; the guest command forwards it, and
 lanes that pull images add it to their test yard's Docker before the first pull
 (`dev/e2e/lib-docker-mirror.sh`). Docker still pulls from Docker Hub when the mirror fails.
 The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log

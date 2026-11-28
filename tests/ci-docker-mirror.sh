@@ -18,6 +18,14 @@ BUNDLE="$TMP/bundle" WORKSPACE="$TMP"
 : > "$BUNDLE"
 [ "$(controller_env printenv SUBYARD_E2E_DOCKER_MIRROR)" = https://mirror.gcr.io ] \
   || fail 'hosted lane controllers do not get the Docker Hub mirror'
+# Hosted release acceptance runs its collector outside controller_env and needs the mirror too.
+eval "$(function_source "$ROOT/dev/ci/periodic-e2e.sh" run_collector_selection)"
+install -d -m 0700 "$TMP/collector-bin"
+printf '#!/bin/sh\nprintf %%s "$SUBYARD_E2E_DOCKER_MIRROR" > "$MIRROR_SEEN"\n' > "$TMP/collector-bin/python3"
+chmod 0700 "$TMP/collector-bin/python3"
+PATH="$TMP/collector-bin:$PATH" MIRROR_SEEN="$TMP/collector-mirror" run_collector_selection "$TMP/out" check >/dev/null 2>&1 || true
+[ "$(cat "$TMP/collector-mirror")" = https://mirror.gcr.io ] \
+  || fail 'hosted release acceptance does not get the Docker Hub mirror'
 
 # The guest command forwards the mirror only when the controller has one.
 eval "$(function_source "$ROOT/dev/agent-e2e.sh" write_guest_command)"
