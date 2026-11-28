@@ -7,14 +7,15 @@
 - **Yards that do not select `user-dotfiles` lose their agent instruction files.** The profile is
   selected by default only in the yard named `default`, and only while its `ENVIRONMENT_PROFILES`
   is unset at every scope. In every other yard the next init removes the unchanged host
-  instruction copies that earlier releases made and installs nothing in their place. To keep
-  instructions there, run `yard -Y NAME profile enable user-dotfiles` (set `USER_DOTFILES_SOURCE`
-  first to use your own repository); see
+  instruction copies that earlier releases made and installs nothing in their place. After
+  updating, run `yard -Y NAME profile enable user-dotfiles` there to install instructions. The
+  shipped source installs generic instructions in every selected yard, including `default`; to
+  keep your own, set `USER_DOTFILES_SOURCE` to your repository first; see
   [agent instructions from a dotfiles repository](#agent-instructions-from-a-dotfiles-repository).
 - **Some effects cannot be undone by a rollback:**
-  - Above `TELEMETRY_DISK_BUDGET` (default `30GiB`) the telemetry collector prunes raw OTLP,
-    session correlations and samples older than 30 days. Raise the budget before updating to keep
-    them.
+  - Above `TELEMETRY_DISK_BUDGET` (default `30GiB`) the telemetry collector prunes the oldest raw
+    OTLP, session correlations and samples, never ones younger than 30 days, until the store fits
+    the budget. Raise the budget before updating to keep them.
   - Running yards delete unused `/tmp` content older than two days every hour. Move anything you
     keep in a yard's `/tmp` elsewhere before updating.
   - Test yard provisioning deletes an earlier release's `/srv/incus-e2e` pool directory from a
@@ -26,11 +27,15 @@
   `/etc/apt/apt.conf.d/99subyard-no-archive-cache`, so `apt-get` removes downloaded archives
   after a successful install, and clears the archives that earlier provisioning kept.
   Rollback leaves the file in place; delete it in the yard to keep archives again.
+- An idle OpenCode session holds about 0.6 GiB of RAM and peaks at about 1.1 GiB; count that per
+  running session when you size `LIMITS_MEMORY`; see
+  [coding-agent compatibility](configuration.md#coding-agent-compatibility).
 - **Running yards age `/tmp`.** The hourly `subyard-tmp-age.timer` removes `/tmp` entries older
-  than two days by every timestamp. It skips entries any process still references,
-  `/tmp/subyard-disposable`, `systemd-private-*`, `ssh-*` and `.X*`, and its first run is 15
-  minutes after boot or install; installing it removes nothing. On `noatime` mounts, reading a
-  file does not keep it.
+  than two days by every timestamp. It skips entries any process still references, flocked files,
+  sockets and mounts, `/tmp/subyard-disposable`, and the usual system entries (current-boot
+  `systemd-private-*`, SSH agent directories, X server locks and socket directories). Its first
+  run is 15 minutes after boot or install; installing it removes nothing. On `noatime` mounts,
+  reading a file does not keep it.
 - An interrupted boot-time `/tmp` cleanup no longer blocks yard readiness; the hourly ageing
   removes what it left. Provision verification names every unmet condition, not only the first.
 
@@ -51,9 +56,9 @@
   hours, reset after a quiet day. `yard test-vms status` shows the hold, and
   `yard test-vms recover --slot N` lifts it at once.
 - The broker keeps a value-free journal of pool failures (failed or slow release steps,
-  quarantines, failed recoveries, slow Incus calls) for 30 days;
-  `dev/agent-e2e.sh --errors [--slot N] [-n N] [--json]` reads it and `--status` shows the
-  24-hour count. Clients need an updated broker for it.
+  quarantines, failed recoveries, slow Incus calls) for 30 days. The `subyard-test-vms` skill's
+  `client.sh errors [--slot N] [-n N] [--json]` (`dev/agent-e2e.sh --errors` in a Subyard
+  checkout) reads it, and status shows the 24-hour count. Clients need an updated broker for it.
 - A quarantine tells the lease owner its cause and incident ID and names
   `yard test-vms logs --slot N` for the operator. Quarantine incidents also record the guest's
   systemd jobs and recent journal.
@@ -132,13 +137,15 @@
   so these sources were skipped with a clone warning. Run `yard init` or
   `yard profile enable user-skills` after updating to clone them.
 - Apply re-checks a stale skill link after moving it aside and removes it only if it is still
-  Subyard's; anything that replaced it is kept, with a warning naming where.
+  Subyard's; anything else found there is moved back, or kept beside the path with a warning
+  when it cannot be.
 
 ### Herdr
 
 - `yard herdr pair --from-host [--all | SHA256:FINGERPRINT...]` offers the keys in the owner
   host account's `~/.ssh/authorized_keys`, labelled from their comments. Keys with options,
-  certificates and the owner key are never offered; pair those with `--key`. Removing a key from
+  certificates and the Subyard owner key are never offered; pair a reviewed client key (for a
+  certificate, its plain public key) with `--key`. Removing a key from
   that file does not revoke its grant; use `--revoke`.
 - Pairing suggests the machine label `<host-id>-<yard>` for `hc machine add` and an SSH `Host`
   block; `yard herdr status` shows it.
@@ -152,11 +159,13 @@
 
 - `yard logs --rpc [-n LINES]` shows the newest failed `yard rpc --stdio` requests with their
   request, operation, method, code and full error text, from `~/.subyard/logs/rpc-errors.log`
-  (two generations of 256 KiB, mode 0600).
+  (two generations of 256 KiB, mode 0600). Veranda keeps its own value-free RPC error log in its
+  private store.
 - RPC errors carry up to 32 typed, value-free refusals from configuration and release gates, and
   Veranda shows them. Older clients ignore them.
 - Veranda accepts the current and previous Subyard engine lines (0.33 and 0.32) instead of one
-  exact version, and refuses others as `incompatible_engine` with the supported lines.
+  exact version, and refuses others as `incompatible_engine` with the supported lines. A Veranda
+  built for 0.32.0 accepts only 0.32.0; update it together with the owner.
 
 ### Rollback to 0.32.0
 
@@ -166,7 +175,8 @@
   `~/.config/opencode/AGENTS.md` away. Unset `USER_DOTFILES_SOURCE` and
   `USER_DOTFILES_INSTALL_COMMAND` wherever you set them
   (`yard -Y NAME config unset SETTING --scope SCOPE`, with `--git` for a setting saved with
-  `--git`); for 0.31.0 or older, also unset `USER_SKILL_SOURCES`. A rollback to 0.31.0 or 0.32.0
+  `--git`); for 0.31.0 or older, also unset `USER_SKILL_SOURCES` and complete
+  [rollback to 0.31.0](#rollback-to-0310). A rollback to 0.31.0 or 0.32.0
   that misses a step is refused with "the retained release cannot provide a safe rollback plan"
   and this recovery, and one to 0.30.0 with a setting left with "cannot read the yard settings".
   After rollback, run `yard init`, then restart agent sessions.
@@ -175,11 +185,16 @@
     result; back it up and remove it in each affected yard if you do not want the rule.
   - `/etc/apt/apt.conf.d/99subyard-no-archive-cache` stays; delete it to keep archives again.
   - `subyard-tmp-age.timer` keeps ageing `/tmp`, because 0.32.0 neither refuses nor manages it.
-    To stop it, disable the timer, remove `subyard-tmp-age.service`,
-    `/usr/local/lib/subyard-guest-tmp-age` and `/etc/subyard-guest-tmp-age.conf`, and reload
-    systemd in the yard.
+    To stop it, run `systemctl disable --now subyard-tmp-age.timer` in the yard; after checking
+    that the files are Subyard's (exact content, root-owned), remove
+    `/etc/systemd/system/subyard-tmp-age.timer`, `/etc/systemd/system/subyard-tmp-age.service`,
+    `/usr/local/lib/subyard-guest-tmp-age` and `/etc/subyard-guest-tmp-age.conf`, then run
+    `systemctl daemon-reload`.
   - `subyard-herdr-discovery.timer` keeps firing, but its condition skips every run; checkout
     spaces remain as unmanaged spaces, and 0.32.0's `yard herdr down` leaves the timer enabled.
+    To remove it, run `systemctl disable --now subyard-herdr-discovery.timer` in the yard and
+    remove `/etc/systemd/system/subyard-herdr-discovery.timer` and
+    `/etc/systemd/system/subyard-herdr-discovery.service`.
   - `~/.subyard/logs/rpc-errors.log` stays and is ignored.
 - **After updating again,** set the unset settings again before
   `yard -Y NAME profile enable user-dotfiles`, or, if the yard inherited its selection before,
