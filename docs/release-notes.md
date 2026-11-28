@@ -21,7 +21,7 @@
   - Test yard provisioning deletes an earlier release's `/srv/incus-e2e` pool directory from a
     `/srv` volume kept by `teardown --keep-data`, once no inner pool uses it.
 
-### Yard disk use
+### Yard disk and memory use
 
 - Yards no longer keep downloaded APT packages. Provisioning writes
   `/etc/apt/apt.conf.d/99subyard-no-archive-cache`, so `apt-get` removes downloaded archives
@@ -194,7 +194,7 @@
     spaces remain as unmanaged spaces, and 0.32.0's `yard herdr down` leaves the timer enabled.
     To remove it, run `systemctl disable --now subyard-herdr-discovery.timer` in the yard and
     remove `/etc/systemd/system/subyard-herdr-discovery.timer` and
-    `/etc/systemd/system/subyard-herdr-discovery.service`.
+    `/etc/systemd/system/subyard-herdr-discovery.service`, then run `systemctl daemon-reload`.
   - `~/.subyard/logs/rpc-errors.log` stays and is ignored.
 - **After updating again,** set the unset settings again before
   `yard -Y NAME profile enable user-dotfiles`, or, if the yard inherited its selection before,
