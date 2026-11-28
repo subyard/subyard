@@ -90,7 +90,8 @@ import re
 import sys
 
 NAMES = r"capability(?:_hash)?|private_key|controller_fingerprint|token|password|secret"
-text = sys.stdin.read()
+# Split characters from bounded reads must not depend on the locale's error handler.
+text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
 for pattern, replacement in (
     (r"\bssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+", "ssh-key [redacted]"),
     (r"(?i)\b(" + NAMES + r")(\s*=\s*)[^\s,\"']+", r"\1\2[redacted]"),
@@ -99,7 +100,7 @@ for pattern, replacement in (
     (r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "private-key [redacted]"),
 ):
     text = re.sub(pattern, replacement, text)
-sys.stdout.write(text)
+sys.stdout.buffer.write(text.encode("utf-8", "surrogateescape"))
 PY
 )"
 collect 2>&1 | python3 -I -c "$redact"
