@@ -585,10 +585,12 @@ binds whose inode can be replaced. Teardown removes rootfs-local coding credenti
 be repeated. Subyard neither seeds coding OAuth nor includes it in static encrypted ledger.
 
 Subyard provides user-owned files (skills, dotfiles) from the user's repositories but does not
-own or update them: it clones once, links or registers what it provides, removes only its own
-links, and leaves the clone to the user and the user's agents. Host instruction files are not
-copied into yards; the opt-in `user-dotfiles` profile links agent instructions from the yard's
-own dotfiles repository. Agent settings/rules use yard defaults/typed overrides.
+own or update them: it clones once and leaves the clone to the user and the user's agents. User
+skills are linked or registered, and only Subyard's own links are removed. Host instruction
+files are not copied into yards; the `user-dotfiles` profile, selected by default in the
+`default` yard, follows the Codespaces and Dev Containers dotfiles convention for the yard's own
+minimal dotfiles repository, separate from host dotfiles: after the first clone it runs the
+repository's install script once, and on disable its `uninstall.sh`. Agent settings/rules use yard defaults/typed overrides.
 Transcript/session-only mounts are separate from credentials and may survive teardown
 for usage reporting. Agent memory is not a Subyard per-agent managed object or command family;
 profiles may choose shared/dedicated mounts. Credential separation remains mandatory even when

@@ -457,6 +457,20 @@ verify_offline_activation_repair() {
 # Published releases copy the host Codex instructions into the yard; the candidate no longer
 # copies them and removes the unchanged copy it inherits.
 INSTRUCTION_COPY=/home/dev/.codex/AGENTS.md
+# On update the default yard gains the default-selected user-dotfiles profile, whose shipped
+# install.sh links the instruction paths that the instruction-copy checks and every rollback to
+# 0.32.0 and older refuse, so the lane disables the profile as the rollback recovery says; its
+# uninstall.sh removes the links. No instruction path is left behind.
+disable_user_dotfiles() {
+  local path
+  operator_yard -Y default profile disable user-dotfiles --yes >"$STATE_ROOT/user-dotfiles-disable.log" 2>&1 \
+    || die 'profile disable user-dotfiles failed'
+  for path in /home/dev/.claude/CLAUDE.md /home/dev/.codex/AGENTS.md /home/dev/.config/opencode/AGENTS.md; do
+    guest_dev sh -c 'case "$(readlink "$1")" in /home/dev/.local/share/subyard-user-dotfiles/*) exit 1 ;; esac' _ "$path" \
+      || die "disable kept the user-dotfiles link $path"
+  done
+}
+
 seed_host_instruction_copy() {
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'published-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
@@ -465,7 +479,7 @@ seed_host_instruction_copy() {
     || die 'the published release did not copy the instruction file'
 }
 
-# A symlink at the instruction path in the yard, such as a user-dotfiles link: the rollback,
+# A symlink at the instruction path in the yard, such as a user-dotfiles install link: the rollback,
 # or init after it, refuses it, keeps the link and its target, and succeeds and copies the
 # file again once the operator removes it. The candidate's inventory no longer records the
 # path, so the retained release's rollback inspection refuses it without its detail; the
@@ -486,7 +500,7 @@ verify_symlinked_instruction_file() { # <rollback command...>
       || die 'init refused the symlinked instruction file without its path and step'
   else
     for want in 'the retained release cannot provide a safe rollback plan' 'Paths: /etc/claude-code/CLAUDE.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md' \
-      'profile disable user-dotfiles in each yard that uses it (its clone is kept) or move any other file at these paths away'; do
+      'profile disable user-dotfiles (runs uninstall.sh, keeps the clone), move leftovers at these paths away'; do
       grep -Fq -- "$want" <<<"$output" || die "the rollback refusal does not name: $want"
     done
   fi
@@ -577,6 +591,7 @@ CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runti
 write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
 assert_ready
 migrate_retained_git_settings
+disable_user_dotfiles
 case " $PUBLISHED_AGENTS " in *" claude "*)
   [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
     || die 'updated Claude login-shell environment is missing'

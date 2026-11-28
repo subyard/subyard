@@ -8,10 +8,10 @@
       "application": "yard-init",
       "syncable": true,
       "optional": true,
-      "default": ""
+      "default": "https://github.com/subyard/yard-dotfiles"
     },
     {
-      "name": "USER_DOTFILES_SUBDIR",
+      "name": "USER_DOTFILES_INSTALL_COMMAND",
       "type": "string",
       "scopes": ["shipped", "shared", "host", "yard", "command"],
       "application": "yard-init",
@@ -20,5 +20,6 @@
       "default": ""
     }
   ],
+  "default_yards": ["default"],
   "owner_service": "owner.sh"
 }

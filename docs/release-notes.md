@@ -51,15 +51,32 @@
   names each line to remove. The next
   init removes an unchanged copy that an earlier release made; an edited copy is kept and its
   path is refused until you move it away.
-- The new opt-in [`user-dotfiles`](user-dotfiles.md) profile clones one Git repository
-  (`USER_DOTFILES_SOURCE`, optional `USER_DOTFILES_SUBDIR`) and links its `agents/AGENTS.md`
-  to `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md`. Subyard
-  never updates the clone; ask an agent in the yard to run `git pull` in it. The same applies to
-  [user skills](user-skills.md): no `yard init` is needed after a pull.
-- **Before rolling back to 0.32.0,** run `yard -Y NAME profile disable user-dotfiles` in each
-  yard that uses the profile, or move any other file at an instruction path away. While a file
-  or link remains there, the rollback is refused with "the retained release cannot provide a
-  safe rollback plan", the paths and this recovery. The rollback plan lists these paths.
+- The new [`user-dotfiles`](user-dotfiles.md) profile follows the dotfiles convention of GitHub
+  Codespaces and VS Code Dev Containers: it clones the yard's own minimal dotfiles repository,
+  separate from host dotfiles (`USER_DOTFILES_SOURCE`), and right after the first clone runs its
+  install script once (`USER_DOTFILES_INSTALL_COMMAND`, or the first of `install.sh`, `install`,
+  `bootstrap.sh`, `bootstrap`, `script/bootstrap`, `setup.sh`, `setup` and `script/setup`;
+  without one it links the repository's top-level dot entries into `~`). Disabling the profile
+  runs the repository's `uninstall.sh` when it has one and keeps the clone. Like
+  [user skills](user-skills.md), it is selected by default in the yard named `default` while its
+  `ENVIRONMENT_PROFILES` is unset, so the next init there installs the shipped source
+  `https://github.com/subyard/yard-dotfiles`, which links its `agents/AGENTS.md` to
+  `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md`. Set
+  `USER_DOTFILES_SOURCE` to use another repository (a private one needs Git access in the
+  yard), or run `yard -Y default profile disable user-dotfiles` to opt out. Subyard never
+  updates the clone: after `git pull` in it, run its install script again yourself. For
+  [user skills](user-skills.md), no `yard init` is needed after a pull.
+- **Before rolling back to 0.32.0 or older,** run `yard -Y NAME profile disable user-dotfiles`
+  in each yard that uses the profile, move any file or link left at an instruction path away,
+  and unset `USER_DOTFILES_SOURCE` and `USER_DOTFILES_INSTALL_COMMAND` wherever you set them
+  (`yard -Y NAME config unset SETTING --scope SCOPE`, with `--git` for a setting saved with
+  `--git`). For 0.31.0 or older, also unset `USER_SKILL_SOURCES`, which those releases do not
+  know. A rollback to 0.31.0 or 0.32.0 that misses a step is refused with "the retained release
+  cannot provide a safe rollback plan" and this recovery, and one to 0.30.0 with a setting left
+  with "cannot read the yard settings"; the rollback plan lists these steps. After updating
+  again, set the unset settings again before re-enabling the profile, or run
+  `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the default
+  selection; see [user dotfiles](user-dotfiles.md).
 
 ## 0.32.0
 

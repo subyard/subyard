@@ -6,135 +6,120 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/subyard-user-dotfiles-test.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 fail() { printf 'user-dotfiles guest test: %s\n' "$*" >&2; exit 1; }
 run() { HOME="$work/home" bash "$guest" "$@"; }
-links=(.claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md)
-repo() { # <owner/repo> <file...>: each file holds its own path
-  local dir="$work/$1"
+repo() { # <owner/repo> <file=content...>
+  local dir="$work/$1" pair
   shift
-  for file in "$@"; do mkdir -p "$(dirname "$dir/$file")" && printf '%s\n' "$file" >"$dir/$file"; done
+  for pair in "$@"; do mkdir -p "$(dirname "$dir/${pair%%=*}")" && printf '%s\n' "${pair#*=}" >"$dir/${pair%%=*}"; done
   git -C "$dir" init -q && git -C "$dir" add -A
   git -C "$dir" -c user.name=t -c user.email=t@example.org commit -qm dotfiles
 }
-repo owner/dotfiles AGENTS.md agents/AGENTS.md yard/agents/AGENTS.md
-repo owner/bare README.md
-mkdir -p "$work/home" "$work/elsewhere"
-good="file://$work/owner/dotfiles/.git" bare="file://$work/owner/bare" bad="file://$work/missing/other.git"
-store="$work/home/.local/share/subyard-user-dotfiles" clone="$work/home/.local/share/subyard-user-dotfiles/owner/dotfiles"
-links_are() { # <expected readlink of every agent path, empty for none>
-  for link in "${links[@]}"; do
-    [ "$(readlink "$work/home/$link" || :)" = "$1" ] || fail "$link is not '$1'"
-  done
-}
+# Each script appends its name to ~/runs and its output reaches a failure warning.
+script='printf "%s\n" "$0" >>"$HOME/runs"; echo "output of $0"; exit "${FAIL:-0}"'
+python=$'#!/usr/bin/env python3\nimport os\nopen(os.environ["HOME"] + "/runs", "a").write("python\\n")'
+repo owner/scripts "install.sh=$script" "setup.sh=$script" "uninstall.sh=$script" "custom/run=$script" "custom/py=$python"
+chmod +x "$work/owner/scripts/install.sh"
+git -C "$work/owner/scripts" -c user.name=t -c user.email=t@example.org commit -qam executable
+repo owner/plain "script/setup=$script" ".vimrc=vim" ".config/tool=tool" "README.md=readme"
+mkdir -p "$work/home"
+scripts="file://$work/owner/scripts/.git" plain="file://$work/owner/plain" bad="file://$work/missing/other.git"
+store="$work/home/.local/share/subyard-user-dotfiles"
+runs_are() { [ "$(cat "$work/home/runs" 2>/dev/null || :)" = "$1" ] || fail "runs are '$(cat "$work/home/runs" 2>/dev/null)', not '$1'"; }
 
 # Nothing configured is converged and touches nothing.
 [ -z "$(run check)" ] && [ -z "$(run check '' '')" ] || fail 'empty source reported drift'
 run apply '' ''
 [ ! -e "$store" ] || fail 'empty source created the store'
-# Clone once; every agent links the shared agents/AGENTS.md, never the root AGENTS.md.
-[ "$(run check "$good")" = work ] || fail 'check missed a missing clone'
-run apply "$good"
-links_are "$clone/agents/AGENTS.md"
-[ "$(cat "$work/home/.claude/CLAUDE.md")" = agents/AGENTS.md ] || fail 'link does not reach agents/AGENTS.md'
-[ -z "$(run check "$good")" ] && [ -z "$(run verify "$good")" ] || fail 'converged source reports drift'
+# The first clone runs the first existing script once, in the clone.
+[ "$(run check "$scripts")" = work ] || fail 'check missed a missing clone'
+run apply "$scripts"
+runs_are ./install.sh
+[ -z "$(run check "$scripts")" ] && [ -z "$(run verify "$scripts")" ] || fail 'installed source reports drift'
 [ -z "$(find "$store" -name '.tmp-*')" ] || fail 'left a temporary clone'
-printf 'local\n' >"$clone/agents/AGENTS.md"
-run apply "$good"
-[ "$(cat "$clone/agents/AGENTS.md")" = local ] || fail 'touched an existing clone'
-# A subdirectory moves every link in one apply.
-for subdir in yard /yard/; do
-  run apply "$good" "$subdir"
-  links_are "$clone/yard/agents/AGENTS.md"
-  [ -z "$(run check "$good" "$subdir")" ] || fail "subdirectory $subdir reports drift"
+run apply "$scripts"
+runs_are ./install.sh
+# Disable runs uninstall.sh, forgets the install and keeps the clone with local edits.
+printf 'local\n' >"$store/owner/scripts/setup.sh"
+[ "$(run check)" = work ] || fail 'check missed a pending uninstall'
+run apply
+runs_are $'./install.sh\n./uninstall.sh'
+[ -z "$(run check)" ] || fail 'disabled source reports drift'
+[ "$(cat "$store/owner/scripts/setup.sh")" = local ] || fail 'disable touched the clone'
+# Re-enable reuses the clone and installs again; a failure warns with the script output.
+: >"$work/home/runs"
+FAIL=3 run apply "$scripts" 2>"$work/stderr"
+grep -qF "warning: owner/scripts/install.sh exited with status 3; once fixed, run it again in $store/owner/scripts." "$work/stderr" \
+  || fail 'missing install failure warning'
+grep -qF '  output of ./install.sh' "$work/stderr" || fail 'the warning lacks the script output'
+[ "$(cat "$store/owner/scripts/setup.sh")" = local ] || fail 're-enable replaced the clone'
+# A failed install is not retried.
+[ -z "$(run check "$scripts")" ] || fail 'a failed install reports drift'
+run apply "$scripts"
+runs_are ./install.sh
+# A configured command replaces the list; a missing one warns and installs nothing.
+run apply
+: >"$work/home/runs"
+run apply "$scripts" custom/run
+runs_are ./custom/run
+run apply
+# A missing command is not recorded, so fixing the setting installs; #! lines are honoured.
+: >"$work/home/runs"
+for command in custom/missing ../outside; do
+  run apply "$scripts" "$command" 2>"$work/stderr"
+  grep -qF 'warning: USER_DOTFILES_INSTALL_COMMAND names no file in owner/scripts; fix it' "$work/stderr" \
+    || fail "missing warning for $command"
+  [ "$(run check "$scripts" "$command")" = work ] && [ -z "$(run verify "$scripts" "$command")" ] \
+    || fail "missing command $command handling"
 done
-run apply "$good"
-links_are "$clone/agents/AGENTS.md"
-# Invalid sources and subdirectories warn without URL text, remove our links and stay not ready.
-for args in "https://user:canary-pw@example.invalid/" "https://example.invalid?access_token=/canary/leaf" \
-  "$good ../canary" "$good yard/../canary" "$good .hidden"; do
-  read -r -a parts <<<"$args"
-  run apply "${parts[@]}" 2>"$work/stderr"
-  grep -q 'warning: skipped the source' "$work/stderr" || fail "missing warning for '$args'"
+[ ! -e "$store/.installed" ] || fail 'recorded an install for a missing command'
+run apply "$scripts" custom/py
+runs_are python
+run apply
+# A non-executable script without #! runs through bash; without uninstall.sh disable keeps its files.
+: >"$work/home/runs"
+run apply "$plain"
+runs_are ./script/setup
+run apply 2>"$work/stderr"
+grep -qF 'warning: owner/plain has no uninstall.sh; left the files it installed in place' "$work/stderr" \
+  || fail 'missing no-uninstall warning'
+# Without a script, top-level dot entries except .git are linked into home; others are left.
+git -C "$work/owner/plain" rm -q script/setup
+git -C "$work/owner/plain" -c user.name=t -c user.email=t@example.org commit -qm noscript
+mkdir -p "$work/home/.config"
+plain_clone="$store/owner/noscript"
+git clone -q "$work/owner/plain" "$work/owner/noscript"
+run apply "file://$work/owner/noscript" 2>"$work/stderr"
+[ "$(readlink "$work/home/.vimrc")" = "$plain_clone/.vimrc" ] || fail 'did not link .vimrc'
+[ ! -L "$work/home/.git" ] && [ ! -e "$work/home/README.md" ] || fail 'linked .git or a plain entry'
+[ -d "$work/home/.config" ] && [ ! -L "$work/home/.config" ] || fail 'replaced an existing ~/.config'
+grep -qF "warning: left ~/.config in place; move it away and link it to $plain_clone/.config yourself" "$work/stderr" \
+  || fail 'missing occupied warning'
+# Re-enable leaves the fallback's own links alone.
+run apply 2>/dev/null
+run apply "file://$work/owner/noscript" 2>"$work/stderr"
+! grep -qF 'left ~/.vimrc' "$work/stderr" || fail 'warned about its own fallback link'
+# Moving the source uninstalls the old clone before installing the new one.
+: >"$work/home/runs"
+run apply "$scripts" 2>"$work/stderr"
+grep -qF 'warning: owner/noscript has no uninstall.sh' "$work/stderr" || fail 'source move skipped the uninstall'
+runs_are ./install.sh
+[ "$(run check "$plain")" = work ] || fail 'check missed a source move'
+run apply
+# Invalid sources warn without URL text and install nothing.
+: >"$work/home/runs"
+for url in "https://user:canary-pw@example.invalid/" "https://example.invalid?access_token=/canary/leaf"; do
+  run apply "$url" 2>"$work/stderr"
+  grep -q 'warning: skipped the source' "$work/stderr" || fail "missing warning for '$url'"
   ! grep -q canary "$work/stderr" || fail 'a warning shows URL text'
-  links_are ''
-  [ "$(run check "${parts[@]}")" = work ] || fail "check accepted '$args'"
-  [ -z "$(run verify "${parts[@]}")" ] || fail "verify rejected '$args'"
+  [ "$(run check "$url")" = work ] || fail "check accepted '$url'"
+  [ -z "$(run verify "$url")" ] || fail "verify rejected '$url'"
 done
 [ -z "$(find "$work/home" -name '*canary*')" ] || fail 'a path contains URL text'
-# An unreachable source warns, links nothing, and check keeps retrying.
+runs_are ''
+# An unreachable source warns, installs nothing, and check keeps retrying.
 run apply "$bad" 2>"$work/stderr"
 grep -q 'warning: could not clone missing/other; .*retry yard profile enable user-dotfiles or yard init' "$work/stderr" \
   || fail 'missing clone warning'
-links_are ''
 [ "$(run check "$bad")" = work ] && [ -z "$(run verify "$bad")" ] || fail 'unreachable source handling'
 [ -z "$(find "$store" -name '.tmp-*')" ] || fail 'left a temporary clone after a failure'
-# A clone without agents/AGENTS.md warns and links nothing.
-run apply "$bare" 2>"$work/stderr"
-grep -q 'warning: owner/bare has no agents/AGENTS.md' "$work/stderr" || fail 'missing file warning'
-links_are ''
-[ "$(run check "$bare")" = work ] && [ -z "$(run verify "$bare")" ] || fail 'missing file handling'
-# Occupied paths are left alone with a warning; free paths are still linked.
-mkdir -p "$work/home/.codex" "$work/home/.config/opencode"
-printf 'mine\n' >"$work/home/.codex/AGENTS.md"
-ln -s "$work/elsewhere/AGENTS.md" "$work/home/.config/opencode/AGENTS.md"
-run apply "$good" 2>"$work/stderr"
-for relative in .codex/AGENTS.md .config/opencode/AGENTS.md; do
-  grep -qF "warning: left ~/$relative in place" "$work/stderr" || fail "missing occupied warning for $relative"
-done
-[ "$(readlink "$work/home/.claude/CLAUDE.md")" = "$clone/agents/AGENTS.md" ] || fail 'free path not linked'
-[ "$(cat "$work/home/.codex/AGENTS.md")" = mine ] || fail 'replaced a foreign file'
-[ "$(readlink "$work/home/.config/opencode/AGENTS.md")" = "$work/elsewhere/AGENTS.md" ] || fail 'replaced a foreign link'
-[ "$(run check "$good")" = work ] && [ -z "$(run verify "$good")" ] || fail 'occupied path handling'
-rm -f -- "$work/home/.codex/AGENTS.md" "$work/home/.config/opencode/AGENTS.md"
-run apply "$good"
-links_are "$clone/agents/AGENTS.md"
-# Disable unlinks only links spelled exactly as ours and keeps the clone.
-run apply
-links_are ''
-[ -f "$clone/agents/AGENTS.md" ] || fail 'disable removed the clone'
-ln -s "$store/x/agents/AGENTS.md" "$work/home/.claude/CLAUDE.md"
-ln -s ../.local/share/subyard-user-dotfiles/owner/dotfiles/agents/AGENTS.md "$work/home/.codex/AGENTS.md"
-python3 -c 'import os, sys; os.symlink(sys.argv[1] + "\n", sys.argv[2])' "$clone/agents/AGENTS.md" "$work/home/.config/opencode/AGENTS.md"
-[ -z "$(run check)" ] || fail 'foreign links reported as ours'
-run apply
-for link in "${links[@]}"; do [ -L "$work/home/$link" ] || fail "removed foreign link $link"; done
-# A trailing-newline spelling is foreign, never the configured link.
-run apply "$good" 2>"$work/stderr"
-grep -qF 'warning: left ~/.config/opencode/AGENTS.md in place' "$work/stderr" || fail 'newline spelling treated as ours'
-rm -f -- "$work/home/.claude/CLAUDE.md" "$work/home/.codex/AGENTS.md" "$work/home/.config/opencode/AGENTS.md"
-# A link replaced after the ownership check is moved back, never removed. A fake readlink
-# replaces the link right after reading it and, with RACE=reoccupy, refills the freed name too.
-mkdir -p "$work/bin"
-real_readlink="$(command -v readlink)"
-cat >"$work/bin/readlink" <<SCRIPT
-#!/usr/bin/env bash
-"$real_readlink" "\$@" && status=0 || status=\$?
-case "\${!#}" in
-  */.subyard-user-dotfiles.*) [ "\$RACE" != reoccupy ] || printf 'later\\n' >"$work/home/.claude/CLAUDE.md" ;;
-  "$work/home/.claude/CLAUDE.md") unlink -- "\${!#}"; printf 'raced\\n' >"\${!#}" ;;
-esac
-exit "\$status"
-SCRIPT
-chmod +x "$work/bin/readlink"
-race() { HOME="$work/home" PATH="$work/bin:$PATH" RACE="$1" bash "$guest" apply 2>"$work/stderr"; }
-run apply "$good"
-race back
-[ "$(cat "$work/home/.claude/CLAUDE.md")" = raced ] || fail 'a replacement of our link was not moved back'
-[ -z "$(find "$work/home/.claude" -name '.subyard-user-dotfiles.*')" ] || fail 'left a private unlink directory'
-links_are_rest() { for link in .codex/AGENTS.md .config/opencode/AGENTS.md; do [ ! -L "$work/home/$link" ] || fail "kept $link"; done; }
-links_are_rest
-rm -f -- "$work/home/.claude/CLAUDE.md"
-run apply "$good"
-race reoccupy
-[ "$(cat "$work/home/.claude/CLAUDE.md")" = later ] || fail 'overwrote a re-created path'
-kept="$(find "$work/home/.claude" -path '*/.subyard-user-dotfiles.*/link')"
-[ -n "$kept" ] && [ "$(cat "$kept")" = raced ] || fail 'lost the replacement of our link'
-grep -qF "warning: ~/.claude/CLAUDE.md changed while it was unlinked; kept what replaced the link at $kept" "$work/stderr" \
-  || fail 'missing warning for a re-created path'
-links_are_rest
-rm -f -- "$kept" "$work/home/.claude/CLAUDE.md"
-rmdir -- "${kept%/link}"
-# With the store moved away, disable still removes our dangling links.
-run apply "$good"
-mv -T "$store" "$work/store-moved"
-run apply
-links_are ''
+[ ! -e "$store/.installed" ] || fail 'recorded an install without a clone'
 printf 'ok: user-dotfiles guest hook\n'

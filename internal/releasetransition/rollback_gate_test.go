@@ -278,3 +278,73 @@ func retireGateRegistry(t *testing.T, registry rt.RegistryV2, floors map[string]
 	}
 	return retired
 }
+
+// A rollback target refuses to load a persisted setting it does not know, and published
+// releases cannot change. Each agents boundary recovery therefore unsets every setting of a
+// default-selected profile that its newest target does not ship, and no other boundary does.
+// The user-dotfiles links occupy the boundary's instruction paths, so its recovery also
+// disables that profile. Published profile lists are fixed facts.
+func TestAgentsRollbackRecoveryUnsetsSettingsOlderTargetsLack(t *testing.T) {
+	root := filepath.Join("..", "..")
+	v031 := []string{"amnezia", "android", "default", "git-fetch", "github", "hermes", "openclaw", "orca",
+		"subyard-dev", "telemetry", "test-vms-client", "test-vms"}
+	shipped := map[string][]string{"0.31.0": v031, "0.32.0": append(slices.Clone(v031), "herdr", "user-skills")}
+	data, err := os.ReadFile(filepath.Join(root, "config/release-rollback.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := rt.ParseRollbackDeclaration(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveries := map[string]string{}
+	for _, boundary := range declaration.Boundaries {
+		if boundary.Component == "agents" {
+			recoveries[boundary.ThroughVersion] = boundary.Recovery
+		}
+	}
+	if !strings.Contains(recoveries["0.32.0"], "yard -Y NAME profile disable user-dotfiles ") {
+		t.Error("the agents rollback recovery through 0.32.0 does not disable user-dotfiles")
+	}
+	definitions, err := profile.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := map[string]int{}
+	for _, definition := range definitions {
+		if len(definition.DefaultYards) == 0 {
+			continue
+		}
+		// The newest release that lacks the profile owns its steps: they then apply to every
+		// older target too, and never to a target that ships the profile.
+		owner := ""
+		for _, version := range []string{"0.32.0", "0.31.0"} {
+			if !slices.Contains(shipped[version], definition.Name) {
+				owner = version
+				break
+			}
+		}
+		if owner == "" {
+			continue
+		}
+		recovery, ok := recoveries[owner]
+		if !ok {
+			t.Fatalf("missing the agents boundary through %s", owner)
+		}
+		for _, setting := range definition.Settings {
+			checked[owner]++
+			unset := "yard -Y NAME config unset " + setting.Name + " "
+			if !strings.Contains(recovery, unset) {
+				t.Errorf("the agents rollback recovery through %s does not unset %s of %s", owner, setting.Name, definition.Name)
+			}
+			for version, other := range recoveries {
+				if version != owner && strings.Contains(other, unset) {
+					t.Errorf("the agents rollback recovery through %s unsets %s, which belongs to %s", version, setting.Name, owner)
+				}
+			}
+		}
+	}
+	if checked["0.32.0"] == 0 || checked["0.31.0"] == 0 {
+		t.Fatalf("checked settings per boundary %v; the test no longer checks both", checked)
+	}
+}
