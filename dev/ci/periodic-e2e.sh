@@ -9,6 +9,8 @@ RESULTS="${RUNNER_TEMP:-/var/tmp}/hosted-logs/results.tsv"
 LOGS="${RUNNER_TEMP:-/var/tmp}/hosted-logs"
 # Controllers attribute leases from the managed workspace path.
 WORKSPACE=/srv/workspaces/Subyard/src
+# Runners share egress addresses, so anonymous Docker Hub pulls in lane yards hit its rate limit.
+DOCKER_MIRROR=https://mirror.gcr.io
 PACKAGES=(acl build-essential ca-certificates curl expect git jq make openssh-client openssh-server ripgrep shellcheck tar xz-utils zsh)
 
 die() { printf 'periodic-e2e: %s\n' "$*" >&2; exit 2; }
@@ -206,6 +208,7 @@ controller_env() {
     SUBYARD_E2E_CANDIDATE_BUNDLE="$BUNDLE" \
     SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$BUNDLE" | awk '{print $1}')" \
     SUBYARD_E2E_CONTROLLER_WORKSPACE="$WORKSPACE" \
+    SUBYARD_E2E_DOCKER_MIRROR="$DOCKER_MIRROR" \
     PYTHONDONTWRITEBYTECODE=1 "$@"
 }
 

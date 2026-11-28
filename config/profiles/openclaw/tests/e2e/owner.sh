@@ -254,6 +254,9 @@ yard provision openclaw --yes > "$provision_first"
 grep -Fq 'provisioning openclaw' "$provision_first" \
   || die 'public provision did not apply the selected OpenClaw profile hook'
 yard start --yes
+# shellcheck source=dev/e2e/lib-docker-mirror.sh
+. "$ROOT/dev/e2e/lib-docker-mirror.sh"
+e2e_docker_mirror incus exec "$instance" --project "$project" --
 
 check_guest_state() {
   local docs_hash

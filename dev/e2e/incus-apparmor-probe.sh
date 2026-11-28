@@ -303,6 +303,9 @@ docker_probe() {
 }
 
 wait_guest_ready
+# shellcheck source=dev/e2e/lib-docker-mirror.sh
+. "$ROOT/dev/e2e/lib-docker-mirror.sh"
+e2e_docker_mirror guest
 guest docker pull alpine:3.22 >/dev/null
 guest docker run -d --name apparmor-probe-sentinel --restart unless-stopped \
   alpine:3.22 sleep infinity >/dev/null
