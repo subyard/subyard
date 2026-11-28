@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Installs Ubuntu packages on a disposable GitHub-hosted runner. Runner images ship a
 # packages.microsoft.com source that no job installs from, so its outages must not block a job.
+# Hosted runners have no IPv6 route, and apt does not retry "Network is unreachable", which
+# would also hide a retryable IPv4 failure. So every later apt call on the runner, including
+# product installs, uses IPv4 with bounded retries.
 # Any other apt failure stops this script, so the step that needs the packages fails at once.
 set -euo pipefail
 
@@ -13,6 +16,11 @@ die() { printf 'apt-install: %s\n' "$*" >&2; exit 2; }
 # Overridable only so host-free tests can use fixture directories.
 sources="${SUBYARD_CI_APT_SOURCES:-/etc/apt/sources.list.d}"
 disabled="${SUBYARD_CI_APT_DISABLED:-/etc/apt/sources.disabled-by-ci}"
+conf="${SUBYARD_CI_APT_CONF:-/etc/apt/apt.conf.d}/80-subyard-ci-network"
+
+# Apt waits 1, 2, 4, 8 and 16 seconds between attempts at one file.
+printf '%s\n' 'Acquire::ForceIPv4 "true";' 'Acquire::Retries "5";' \
+  | sudo -n install -m 0644 /dev/stdin "$conf"
 
 shopt -s nullglob
 for source in "$sources"/*.list "$sources"/*.sources; do
