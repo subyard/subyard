@@ -18,8 +18,10 @@ allowed scopes, syncability, merge mode, application mode and domain owner from 
 used by the production resolver. Optional profiles declare their typed scalar fields and defaults
 in shipped `profile.json`; these declarations join the core catalog for each operation. `config show` lists effective non-secret settings, their winning
 scope and source, and how they are consumed. Passing one setting name shows every applicable layer
-as `effective`, `overridden`, or `unset`. Unknown fields, wrong scopes and invalid values fail
-closed; secret inputs and unrelated environment variables are not settings.
+as `effective`, `overridden`, or `unset`. Wrong scopes and invalid values fail closed; an
+unknown setting fails closed in shipped defaults and authoring commands and is ignored in operator
+files ([Settings of newer releases](#settings-of-newer-releases)). Secret inputs and unrelated
+environment variables are not settings.
 
 At creation, a yard inherits the server's timezone when that zone is available in the guest, and otherwise keeps the default UTC.
 
@@ -149,6 +151,34 @@ as a warning, with its file and line and its removal:
 `yard -Y NAME config unset NAME --scope SCOPE --local` (or `--git`) when that command writes the
 file, otherwise the line to remove from that file. The JSON report of `update --check` lists
 ignored literal assignments in its `configuration` array.
+
+### Settings of newer releases
+
+A host, shared, yard or Git settings file, the Git source, and a selection can name something this
+release does not know, for example after a rollback or when hosts on different releases share Git
+settings. Loading does not refuse it:
+
+- An assignment of an unknown setting is ignored. It never reaches the evaluated environment,
+  hooks or the yard. Its value is still refused when it looks like secret material, and a name over
+  128 bytes is refused.
+- An unknown profile in `ENVIRONMENT_PROFILES`, or an unknown integration in
+  `CODING_TOOL_INTEGRATIONS` of an operator settings file or Git source, is dropped from the
+  effective selection. The rest of the selection keeps its authority: dropping a name never selects
+  a default profile or another integration. A malformed name, and an unknown integration in a
+  shipped yard template or a command override, are still refused.
+- An unknown file under a Git `overrides/agents` directory is synced unchanged and read by nothing.
+  Only its content is checked for secret material.
+- An integration that another release shipped and installed in the yard, and this one does not
+  ship, is not installed evidence: the installed view drops it with its recorded `AGENT_<id>_*`
+  settings. An installed custom integration stays in the view after it leaves the configuration.
+
+`config show`, `config validate`, `status`, `yard update --check` (also in its JSON `configuration`
+array, with `reason` and `message`) and the `init` plan list each ignored assignment, selection
+entry and file as `ignored:` configuration state with its file and line, never its value or a
+selected profile or integration name. Activation plans count the ignored selection entries. It is not a warning and changes no exit status. The
+release that defines the name reads it again without changes. `config set` and `config import`
+still refuse a name this release does not know, and `integration enable` and `disable` write the
+selection without an unknown integration.
 
 Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause
 a configuration read error under the literal-value rule. If an old profile-only assignment
@@ -430,7 +460,9 @@ yard -Y default integration status codex
 persistent configuration. Integration enable/disable writes a yard override in
 `yards/<name>/config.env`. An empty assignment explicitly selects no integrations;
 an absent assignment remains distinguishable from empty. The compatibility input
-`AGENTS=none` means empty. Unknown IDs, duplicate IDs and dependency cycles are errors.
+`AGENTS=none` means empty. Duplicate IDs and dependency cycles are errors, and so are unknown
+IDs, except in an operator settings file or Git source, which drops them
+([Settings of newer releases](#settings-of-newer-releases)).
 Dependencies declared with `AGENT_<id>_DEPENDS` are computed separately: enabling such an
 integration also makes its dependency effective, and disabling a dependency that a selected
 integration still requests is rejected. Status reports the requested
@@ -1538,8 +1570,9 @@ only the manifest is a valid empty desired state. A selected host directory may 
 `overrides/` or `yards/`; its `config.env` is optional. An existing
 `hosts/<HostID>/yards/<yard>/` entry for a non-default yard still requires `config.env`, because
 the directory declares a yard that needs an unambiguous scalar definition. Scalar assignments must be syncable in their
-exact shared, host or yard scope. Versioned file settings are regular, non-executable files at
-catalog-known paths below `overrides/agents`; path assignments in `config.env` are rejected. The
+exact shared, host or yard scope. Versioned file settings are regular, non-executable files below
+`overrides/agents`; a path no file setting maps is synced but read by nothing. Path assignments in
+`config.env` are rejected. The
 source manifest schema is
 [`config/subyard-config.schema.json`](../config/subyard-config.schema.json).
 

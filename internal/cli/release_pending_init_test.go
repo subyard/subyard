@@ -88,6 +88,12 @@ func newPendingInitFixture(t *testing.T, named bool, yards map[string]string) pe
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/skills/core/subyard-environment/facts.py"), "# identity fixture\n", 0o600)
+	for _, name := range []string{"sample", "extra"} {
+		if err := os.MkdirAll(filepath.Join(cli.options.RepositoryRoot, "config/profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/profiles", name, "profile.conf"), "", 0o644)
+	}
 	// The installed snapshot records the integration inputs init applied before
 	// the yard configuration below was authored.
 	loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", configHome)
@@ -253,6 +259,53 @@ func TestPendingInitInspectsRunningYardsAndSkipsStoppedOnes(t *testing.T) {
 	plan, err = fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
 	if err != nil || !strings.Contains(strings.Join(plan.lines(), "\n"), "yard default: installed integration settings unknown (no applied baseline)") {
 		t.Fatalf("unknown baseline listing: %v %v", plan.lines(), err)
+	}
+}
+
+// A newer release may have installed an integration this one does not ship.
+// Its record, without metadata or with shipped sources this release cannot
+// read, is not installed evidence: the installed view stays readable. A custom
+// integration removed from the configuration stays installed evidence.
+func TestPendingInitReadsInstalledIntegrationsOfNewerReleases(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, nil)
+	executor := fixture.cli.options.Executor.(installedSettingsExecutor)
+	settings := maps.Clone(executor.settings)
+	for _, metadata := range []map[string]string{
+		{},
+		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool:/srv/agents/futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "releases", "r2", "config", "agents", "futuretool", "provision.sh")},
+	} {
+		executor.settings = maps.Clone(settings)
+		maps.Copy(executor.settings, metadata)
+		// The newer release recorded its integration's persist link as well.
+		if persist := metadata["AGENT_futuretool_PERSIST"]; persist != "" {
+			for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
+				if value, ok := executor.settings[name]; ok || name == "INTEGRATION_HOST_LINKS" {
+					executor.settings[name] = strings.TrimSpace(value + " " + persist)
+				}
+			}
+		}
+		executor.selected = []string{"codex", "futuretool"}
+		fixture.cli.options.Executor = executor
+		plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
+		if err != nil || len(plan.pendingYards()) != 0 {
+			t.Fatalf("metadata %v: %v %v", metadata, plan.lines(), err)
+		}
+		loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := fixture.cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+		if err != nil || slices.Contains(target.Loaded.Integrations.Effective, "futuretool") || target.Loaded.Environment["AGENT_futuretool_COMMAND"] != "" {
+			t.Fatalf("installed view %#v %v", target.Loaded.Integrations, err)
+		}
+	}
+	executor.settings = maps.Clone(settings)
+	executor.settings["AGENT_custom_COMMAND"] = "custom"
+	executor.selected = []string{"codex", "custom"}
+	fixture.cli.options.Executor = executor
+	plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if listing := strings.Join(plan.lines(), "\n"); err != nil || !strings.Contains(listing, "CODING_TOOL_INTEGRATIONS  codex custom -> codex") {
+		t.Fatalf("removed custom integration is not pending: %s %v", listing, err)
 	}
 }
 

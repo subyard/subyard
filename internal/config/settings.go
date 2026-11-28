@@ -74,6 +74,13 @@ type settingLayer struct {
 	Names   map[string]struct{}
 }
 
+// operatorSettingsLayer reports a settings file the operator saved, locally or
+// in a Git source. Shipped defaults, yard templates and the command
+// environment are not such layers.
+func operatorSettingsLayer(layer settingLayer) bool {
+	return layer.Role == "scalar settings" || layer.Role == "Git scalar settings"
+}
+
 type settingAssignment struct {
 	Layer  settingLayerID
 	Path   string

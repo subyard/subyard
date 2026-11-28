@@ -693,7 +693,12 @@ artifact and registry. Ordinary updates and rollbacks whose source differs from 
 use desired configuration on resume. The installed view covers the integration applied snapshot,
 including identity, profiles and effective integration selection, and core-guest receipts,
 including recorded provisioning inputs such as `CCUSAGE_PROVISION`. Complete integration snapshots
-also record absence. Init-owned values without an installed record, including profile-owned
+also record absence. A snapshot name this release does not read, retired or from a newer release,
+is ignored on read, never validated, projected or rendered, and the next capture replaces it. An
+applied integration that this release neither ships nor finds defined in the desired configuration,
+and whose recorded `AGENT_<id>_*` settings are absent or name a shipped release source, such as one a
+newer release installed, is dropped from the view with those settings. A custom integration's
+record names no release source, so it stays installed evidence until init removes it. Init-owned values without an installed record, including profile-owned
 settings, remain desired in both approving and resuming processes. Repairs by their owning runtimes
 use ordinary plan steps; these values are not listed as pending init. Unavailable unrecorded
 desired inputs retain their ordinary failures. Test-yard route inspection retains its ordinary
@@ -2459,7 +2464,10 @@ discards each operator assignment, at any scope or in the command environment, i
 discards retired settings, while the file is read: its expression, and a default of the name inside
 another record's expression, is evaluated in isolation, so no later record sees it or any default
 it performs, and neither its evaluation error nor a required check of the name refuses loading.
-Such a nested default is not reported. Persistent-settings
+Such a nested default is not reported. An operator assignment of a setting the catalog does not
+know is discarded the same way and also returned by `Loaded.IgnoredAssignments`, with no repair,
+after a secret-content and name-length check. An unknown profile or integration in an operator
+selection is dropped from the effective selection and returned there too. Persistent-settings
 parsing for `config set`/`unset`, `init` and config sync discards it the same way. A non-empty one
 is returned as configuration state (`Loaded.IgnoredAssignments`) with its exact repair. It is never
 a refusal: `config show`, `status`, `update --check` and the init plan render it, `update --check`

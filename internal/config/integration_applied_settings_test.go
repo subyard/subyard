@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"slices"
+	"testing"
+)
 
 func TestAppliedIntegrationSettingsKeepOnlyValidatedInitInputs(t *testing.T) {
 	catalog := Catalog{}
@@ -113,5 +117,54 @@ func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
 		if catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": value}) == nil {
 			t.Fatalf("installed snapshot accepted unsupported DEV_SUDO=%s", value)
 		}
+	}
+}
+
+// A snapshot can record names this release does not read, such as a newer
+// release's settings or process variables; they never reach the environment.
+func TestAppliedIntegrationSettingsProjectOnlyNamesThisReleaseReads(t *testing.T) {
+	catalog := Catalog{}
+	applied := map[string]string{"DEV_USER": "dev", "FUTURE_SETTING": "x", "PATH": "/injected"}
+	environment := catalog.WithAppliedIntegrationInitSettings(map[string]string{"PATH": "/usr/bin"}, applied)
+	if environment["DEV_USER"] != "dev" || environment["PATH"] != "/usr/bin" {
+		t.Fatalf("projected environment = %#v", environment)
+	}
+	if _, present := environment["FUTURE_SETTING"]; present {
+		t.Fatal("unknown snapshot name reached the environment")
+	}
+	if readable := catalog.ReadableAppliedIntegrationInitSettings(applied); len(readable) != 1 || readable["DEV_USER"] != "dev" {
+		t.Fatalf("readable = %#v", readable)
+	}
+	if catalog.ReadableAppliedIntegrationInitSettings(nil) != nil {
+		t.Fatal("absent baseline became a snapshot")
+	}
+	if readable := catalog.ReadableAppliedIntegrationInitSettings(map[string]string{"FUTURE_SETTING": "x"}); readable == nil || len(readable) != 0 {
+		t.Fatalf("snapshot of unknown names = %#v", readable)
+	}
+	if catalog.ValidateIntegrationInitSettings(map[string]string{"FUTURE_SETTING": "x"}) == nil {
+		t.Fatal("the writer's closed domain accepted an unknown field")
+	}
+}
+
+func TestAppliedIntegrationsOfAnotherReleaseAreNotInstalledEvidence(t *testing.T) {
+	catalog, err := LoadCatalog(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := map[string]string{"AGENT_custom_COMMAND": "custom"}
+	// futuretool was shipped by another release, bare has no record, and
+	// removed is a custom integration no longer in the desired values.
+	applied := map[string]string{"AGENT_futuretool_COMMAND": "future", "AGENT_futuretool_PROVISION": "/srv/subyard/releases/r2/config/agents/futuretool/provision.sh",
+		"AGENT_futuretool_PERSIST": ".future:/srv/agents/future .shared:/srv/agents/shared", "AGENT_custom_PERSIST": ".shared:/srv/agents/shared", "AGENT_custom_DEPENDS": "futuretool removed",
+		"INTEGRATION_HOST_LINKS": ".future:/srv/agents/future .shared:/srv/agents/shared", "HOST_LINKS": ".operator:/srv/operator .future:/srv/agents/future .shared:/srv/agents/shared",
+		"AGENT_futuretool_extra_COMMAND": "kept", "AGENT_custom_COMMAND": "custom", "AGENT_removed_COMMAND": "removed", "AGENT_removed_CONFIG": "/home/dev/.config/subyard/overrides/host/agents/removed/config.toml"}
+	selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"custom", "futuretool", "bare", "removed", "bad/name"}, applied)
+	if !slices.Equal(selected, []string{"custom", "removed", "bad/name"}) || len(settings) != 8 || settings["AGENT_custom_DEPENDS"] != "removed" || settings["AGENT_custom_COMMAND"] != "custom" ||
+		settings["AGENT_removed_CONFIG"] == "" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 11 ||
+		settings["INTEGRATION_HOST_LINKS"] != ".shared:/srv/agents/shared" || settings["HOST_LINKS"] != ".operator:/srv/operator .shared:/srv/agents/shared" {
+		t.Fatalf("selected %q settings %#v applied %#v", selected, settings, applied)
+	}
+	if selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"futuretool"}, nil); len(selected) != 0 || settings != nil {
+		t.Fatalf("nil snapshot became %#v", settings)
 	}
 }

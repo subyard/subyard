@@ -14,6 +14,7 @@ import (
 
 func TestLoadDefaultYardSettingsOverrideHostWithoutAffectingNamedYards(t *testing.T) {
 	root := syntheticResourceRoot(t)
+	writeFixture(t, filepath.Join(root, "config", "profiles", "baseline", "profile.conf"), "")
 	operatorHome := testkit.TempDir(t)
 	configHome := filepath.Join(operatorHome, ".config", "subyard")
 	writeFixture(t, filepath.Join(configHome, "config.env"), "ENVIRONMENT_PROFILES=baseline\n")
