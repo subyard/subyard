@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -46,6 +47,10 @@ const (
 	UnknownSettingInput     UnknownInput = "unknown-setting"
 	UnknownProfileInput     UnknownInput = "unknown-profile"
 	UnknownIntegrationInput UnknownInput = "unknown-integration"
+	// UnknownFileInput is a file under a Git source's overrides/agents that
+	// no file setting of the loaded configuration maps; Name is its relative
+	// path.
+	UnknownFileInput UnknownInput = "unknown-file"
 )
 
 // Command reports whether the assignment came from the command environment.
@@ -86,6 +91,8 @@ func (assignment IgnoredAssignment) String() string {
 		return fmt.Sprintf("%s in %s selects a profile this release does not ship; it is ignored", assignment.Name, source)
 	case UnknownIntegrationInput:
 		return fmt.Sprintf("%s in %s selects an integration this release does not ship; it is ignored", assignment.Name, source)
+	case UnknownFileInput:
+		return fmt.Sprintf("%s is no file setting of this configuration and is ignored; a newer release may use it", assignment.Path)
 	}
 	if assignment.Retired {
 		return fmt.Sprintf("%s in %s:%d is retired and ignored; %s", assignment.Name, assignment.Path, assignment.Line, assignment.Repair())
@@ -139,6 +146,29 @@ func (tracker *settingTracker) observeUnknownSelection(name string, kind Unknown
 	assignment := tracker.ignoredInput(effective.Layer, name, effective.Path, effective.Line)
 	assignment.Unknown, assignment.Item = kind, item
 	tracker.ignored = append(tracker.ignored, assignment)
+}
+
+// observeUnknownFiles records each regular file below a Git source's agents
+// root that no file setting of this release maps, in lexical order. A read
+// failure records nothing; the file settings themselves report it.
+func (tracker *settingTracker) observeUnknownFiles(layer settingLayerID, agentsRoot string, mappings map[string]string) {
+	known := map[string]bool{}
+	for _, relative := range mappings {
+		known[filepath.ToSlash(filepath.Clean(relative))] = true
+	}
+	_ = filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return nil
+		}
+		relative, err := filepath.Rel(agentsRoot, path)
+		if err != nil || known[filepath.ToSlash(relative)] {
+			return nil
+		}
+		assignment := tracker.ignoredInput(layer, filepath.ToSlash(relative), path, 0)
+		assignment.Unknown = UnknownFileInput
+		tracker.ignored = append(tracker.ignored, assignment)
+		return nil
+	})
 }
 
 func (tracker *settingTracker) ignoredInput(layer settingLayerID, name, path string, line int) IgnoredAssignment {

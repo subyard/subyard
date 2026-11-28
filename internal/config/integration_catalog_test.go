@@ -164,3 +164,21 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 		t.Fatal("arbitrary unknown integration accepted")
 	}
 }
+
+// A shipped yard template is release content, not an operator settings file:
+// an unknown integration in it stays a refusal.
+func TestYardTemplatesStillRefuseUnknownIntegrations(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	if err := os.MkdirAll(filepath.Join(root, "config/yards/profiles"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/yards/profiles/fixture.env"), []byte("CODING_TOOL_INTEGRATIONS=futuretool\n"), 0o644)
+	configHome := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(configHome, "yards/default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(configHome, "yards/default/config.env"), []byte("YARD_TEMPLATE=fixture\n"), 0o600)
+	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}}); err == nil || !strings.Contains(err.Error(), "unknown integration") {
+		t.Fatalf("template with an unknown integration: %v", err)
+	}
+}

@@ -280,7 +280,7 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 		// above; one from another source, such as a newer release, is
 		// dropped as the loader drops it.
 		requested = slices.DeleteFunc(requested, func(id string) bool {
-			return domain.SafeName(id) && !knownIntegration(values, id) && batch.integrationMetadataKnown(values, id)
+			return batch.catalog.UnknownIntegration(values, id) && batch.integrationMetadataKnown(values, id)
 		})
 		available, dependencyErr := walkIntegrationDependencies(values, requested, nil, batch)
 		refusals = append(refusals, refusalCauses(dependencyErr)...)

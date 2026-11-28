@@ -451,6 +451,9 @@ func load(
 			excluded = options.LayerPaths.ExcludedLocalPaths
 		}
 		sourceRefusals = append(sourceRefusals, refusalCauses(applyAgentAssetLayer(values, logicalAssets, layer.assets, tracker, assetLayer, excluded))...)
+		if layer.assetRole == "Git file settings" && layer.assets != "" {
+			tracker.observeUnknownFiles(assetLayer, layer.assets, logicalAssets)
+		}
 	}
 	values["SUBYARD_CONFIG_DIR"] = configDir
 

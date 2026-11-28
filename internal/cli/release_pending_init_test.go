@@ -262,6 +262,36 @@ func TestPendingInitInspectsRunningYardsAndSkipsStoppedOnes(t *testing.T) {
 	}
 }
 
+// A newer release may have installed an integration this one does not ship.
+// Its record, with or without metadata and with sources this release cannot
+// read, is not installed evidence: the installed view stays readable.
+func TestPendingInitReadsInstalledIntegrationsOfNewerReleases(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, nil)
+	executor := fixture.cli.options.Executor.(installedSettingsExecutor)
+	settings := maps.Clone(executor.settings)
+	for _, metadata := range []map[string]string{
+		{},
+		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "gone", "provision.sh")},
+	} {
+		executor.settings = maps.Clone(settings)
+		maps.Copy(executor.settings, metadata)
+		executor.selected = []string{"codex", "futuretool"}
+		fixture.cli.options.Executor = executor
+		plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
+		if err != nil || len(plan.pendingYards()) != 0 {
+			t.Fatalf("metadata %v: %v %v", metadata, plan.lines(), err)
+		}
+		loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := fixture.cli.appliedIntegrationTarget(context.Background(), configTarget{Name: "default", Loaded: loaded})
+		if err != nil || slices.Contains(target.Loaded.Integrations.Effective, "futuretool") || target.Loaded.Environment["AGENT_futuretool_COMMAND"] != "" {
+			t.Fatalf("installed view %#v %v", target.Loaded.Integrations, err)
+		}
+	}
+}
+
 func TestPendingInitListsInstalledGuestReceipts(t *testing.T) {
 	fixture := newPendingInitFixture(t, false, map[string]string{"default": "WEB_PREVIEW_HOST_PORT=9090\nENVIRONMENT_PROFILES='sample  extra'\n"})
 	incus := fixture.cli.options.Incus.(*testkit.Incus)

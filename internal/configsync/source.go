@@ -346,15 +346,17 @@ func (snapshot *sourceSnapshot) readOverrides(
 			return nil
 		}
 		mapping, ok := allowed[filepath.ToSlash(relative)]
-		if !ok {
-			mapping = config.FileSettingMapping{Name: filepath.ToSlash(relative)}
-		}
 		content, err := readSourceFile(snapshot.root, path, maxAssetBytes)
 		if err != nil {
 			refusals = append(refusals, err)
 			return nil
 		}
-		if err := config.ValidateNonSecretContent(mapping.Name, string(content)); err != nil {
+		// An unknown file's path is no setting name: only its content is checked.
+		if !ok && config.ValidateNonSecretContent("", string(content)) != nil {
+			refusals = append(refusals, fmt.Errorf("%s appears to contain secret material; use the secret or credential store", filepath.ToSlash(relative)))
+			return nil
+		}
+		if err := config.ValidateNonSecretContent(mapping.Name, string(content)); ok && err != nil {
 			refusals = append(refusals, fmt.Errorf("%s: %w", filepath.ToSlash(relative), err))
 			return nil
 		}

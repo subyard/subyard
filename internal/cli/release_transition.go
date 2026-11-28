@@ -1471,6 +1471,9 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	if err != nil {
 		return target, false, err
 	}
+	// A newer release may have installed an integration this one does not
+	// ship; its record is not installed evidence this release can read.
+	applied.Selected, applied.Settings = target.Loaded.Catalog.ReadableAppliedIntegrations(target.Loaded.Environment, applied.Selected, applied.Settings)
 	baseline := applied.Settings != nil
 	target.installed = &installedConfigurationEvidence{applied: applied, known: map[string]bool{}}
 	for name := range applied.Identity {

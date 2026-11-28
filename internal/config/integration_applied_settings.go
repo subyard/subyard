@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"maps"
+	"slices"
+	"strings"
+)
 
 // IntegrationInitSetting identifies non-secret inputs to integration runtime
 // reconciliation. File settings contribute their configured path, never contents.
@@ -82,6 +86,32 @@ func (catalog Catalog) ReadableAppliedIntegrationInitSettings(applied map[string
 		}
 	}
 	return result
+}
+
+// ReadableAppliedIntegrations keeps the applied integrations that this release
+// ships or retired, or that the desired values define. Another release's
+// integration, such as a newer one, is dropped with its AGENT_<id>_ metadata,
+// so its recorded command and sources are never read. A malformed ID stays and
+// is refused by selection resolution.
+func (catalog Catalog) ReadableAppliedIntegrations(desired map[string]string, selected []string, applied map[string]string) ([]string, map[string]string) {
+	var dropped []string
+	kept := slices.DeleteFunc(slices.Clone(selected), func(id string) bool {
+		unknown := catalog.UnknownIntegration(desired, id)
+		if unknown {
+			dropped = append(dropped, id)
+		}
+		return unknown
+	})
+	if len(dropped) == 0 || applied == nil {
+		return kept, applied
+	}
+	readable := maps.Clone(applied)
+	for _, id := range dropped {
+		for _, suffix := range integrationMetadataSuffixes {
+			delete(readable, "AGENT_"+id+"_"+suffix)
+		}
+	}
+	return kept, readable
 }
 
 func (catalog Catalog) ValidateIntegrationInitSettings(values map[string]string) error {

@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"slices"
+	"testing"
+)
 
 func TestAppliedIntegrationSettingsKeepOnlyValidatedInitInputs(t *testing.T) {
 	catalog := Catalog{}
@@ -139,5 +143,21 @@ func TestAppliedIntegrationSettingsProjectOnlyNamesThisReleaseReads(t *testing.T
 	}
 	if catalog.ValidateIntegrationInitSettings(map[string]string{"FUTURE_SETTING": "x"}) == nil {
 		t.Fatal("the writer's closed domain accepted an unknown field")
+	}
+}
+
+func TestAppliedIntegrationsOfAnotherReleaseAreNotInstalledEvidence(t *testing.T) {
+	catalog, err := LoadCatalog(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := map[string]string{"AGENT_custom_COMMAND": "custom"}
+	applied := map[string]string{"AGENT_futuretool_COMMAND": "future", "AGENT_futuretool_PERSIST": ".future", "AGENT_futuretool_extra_COMMAND": "kept", "AGENT_custom_COMMAND": "custom"}
+	selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"custom", "futuretool", "bad/name"}, applied)
+	if !slices.Equal(selected, []string{"custom", "bad/name"}) || len(settings) != 2 || settings["AGENT_custom_COMMAND"] != "custom" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 4 {
+		t.Fatalf("selected %q settings %#v applied %#v", selected, settings, applied)
+	}
+	if selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"futuretool"}, nil); len(selected) != 0 || settings != nil {
+		t.Fatalf("nil snapshot became %#v", settings)
 	}
 }

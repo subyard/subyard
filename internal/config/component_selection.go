@@ -111,7 +111,7 @@ func (loaded Loaded) IntegrationSelectionExplanation() string {
 		explanation += "; retired and ignored [" + strings.Join(loaded.Integrations.Retired, " ") + "]"
 	}
 	if len(loaded.Integrations.Unknown) != 0 {
-		explanation += "; unknown to this release and ignored [" + strings.Join(loaded.Integrations.Unknown, " ") + "]"
+		explanation += fmt.Sprintf("; %d unknown to this release and ignored", len(loaded.Integrations.Unknown))
 	}
 	return explanation
 }
@@ -144,6 +144,13 @@ func (loaded Loaded) EnvironmentProfileSelectionExplanation() string {
 	if !loaded.EnvironmentProfiles.Present {
 		return fmt.Sprintf("yard %s: environment profiles selection absent; effective declared defaults [%s]", loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Effective, " "))
 	}
-	return fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s",
-		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), loaded.componentSelectionOrigin(source, group))
+	requested := slices.DeleteFunc(slices.Clone(loaded.EnvironmentProfiles.Requested), func(name string) bool {
+		return slices.Contains(loaded.EnvironmentProfiles.Unknown, name)
+	})
+	explanation := fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s",
+		loaded.Context.YardName, strings.Join(requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), loaded.componentSelectionOrigin(source, group))
+	if len(loaded.EnvironmentProfiles.Unknown) != 0 {
+		explanation += fmt.Sprintf("; %d unknown to this release and ignored", len(loaded.EnvironmentProfiles.Unknown))
+	}
+	return explanation
 }

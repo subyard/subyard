@@ -25,7 +25,8 @@ type IntegrationSelection struct {
 	Retired []string `json:"retired,omitempty"`
 	// Unknown lists authored IDs ignored at load because this release does
 	// not ship them and no settings define them, such as a newer release's.
-	Unknown []string `json:"unknown,omitempty"`
+	// Diagnostics count them; the IDs are not rendered.
+	Unknown []string `json:"-"`
 }
 
 var integrationMetadataSuffixes = [...]string{"COMMAND", "CHECK", "HEALTH", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"}
@@ -60,22 +61,21 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 			delete(tracker.assignments, name)
 		}
 	}
-	// A persisted operator selection may name an integration of a newer
-	// release. It is dropped like a retired one; dropping a root only removes
-	// what it and its dependencies would add, and an explicit empty selection
-	// keeps its authority. Shipped defaults and a command override still
-	// refuse an unknown one.
+	// A selection saved in an operator settings file or Git source may name
+	// an integration of a newer release. It is dropped like a retired one;
+	// dropping a root only removes what it and its dependencies would add, and
+	// an explicit empty selection keeps its authority. Shipped defaults, yard
+	// templates and a command override still refuse an unknown one.
 	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
 	var unknown []string
 	persisted := false
 	if len(assignments) != 0 {
-		scope := tracker.layers[assignments[len(assignments)-1].Layer].Scope
-		persisted = scope != "default" && scope != "command"
+		persisted = operatorSettingsLayer(tracker.layers[assignments[len(assignments)-1].Layer])
 	}
 	if persisted {
 		filtered := requested[:0]
 		for _, id := range requested {
-			if !domain.SafeName(id) || knownIntegration(values, id) || tracker.catalog.RetiredIntegration(id) {
+			if !tracker.catalog.UnknownIntegration(values, id) {
 				filtered = append(filtered, id)
 			} else if !slices.Contains(unknown, id) {
 				unknown = append(unknown, id)
@@ -225,6 +225,13 @@ func walkIntegrationDependencies(values map[string]string, requested []string, r
 		}
 	}
 	return available, domain.CollectRefusals(refusals...)
+}
+
+// UnknownIntegration reports a well-formed integration ID that this release
+// neither ships nor retired and that no setting in values defines, such as an
+// integration of a newer release.
+func (settings Catalog) UnknownIntegration(values map[string]string, id string) bool {
+	return domain.SafeName(id) && !knownIntegration(values, id) && !settings.RetiredIntegration(id)
 }
 
 func knownIntegration(values map[string]string, agent string) bool {

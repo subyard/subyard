@@ -382,6 +382,8 @@ func TestVersionedConfigSyncKeepsSettingsOfNewerReleases(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
 	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\nFUTURE_SETTING='future value'\n")
 	fixture.writeSource("hosts/owner-a/overrides/agents/future/config.json", "{\"future\": true}\n")
+	// A marker word in an unknown path is no secret; only content is checked.
+	fixture.writeSource("hosts/owner-a/overrides/agents/future/secret-policy.json", "{}\n")
 	fixture.commit("newer release settings")
 	writeSyncTestFile(t, filepath.Join(fixture.configHome, "yards", "default", "config.env"), "FUTURE_LOCAL=1\n", 0o600)
 	plan, err := BuildPlan(fixture.options(false))
@@ -399,6 +401,18 @@ func TestVersionedConfigSyncKeepsSettingsOfNewerReleases(t *testing.T) {
 	}
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, asset), "{\"future\": true}\n", 0o644)
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "DEV_UID=2233\nFUTURE_SETTING='future value'\n", 0o600)
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
+		Environment: map[string]string{"SUBYARD_CONFIG_HOME": fixture.configHome, "SUBYARD_HOME": filepath.Join(fixture.operatorHome, ".subyard"), "SUBYARD_HOST_ID": fixture.hostID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []string
+	for _, assignment := range loaded.IgnoredAssignments() {
+		notices = append(notices, string(assignment.Unknown)+" "+assignment.Name)
+	}
+	if want := []string{"unknown-file future/config.json", "unknown-file future/secret-policy.json", "unknown-setting FUTURE_LOCAL", "unknown-setting FUTURE_SETTING"}; !slices.Equal(notices, want) {
+		t.Fatalf("notices = %q, want %q", notices, want)
+	}
 	// The next plan of the same source, with the manifest naming the
 	// unknown file, changes nothing.
 	again, err := BuildPlan(fixture.options(false))
@@ -1516,7 +1530,7 @@ func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
 		t.Fatal("refused override assets were accepted")
 	}
 	for _, text := range []string{
-		"future/notes.txt: setting future/notes.txt appears to contain secret material",
+		"future/notes.txt appears to contain secret material",
 		`owner host "owner-a" overrides: codex/config.toml`,
 		"secret material",
 	} {

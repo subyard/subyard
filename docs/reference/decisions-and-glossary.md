@@ -260,8 +260,9 @@ name, a selected profile or integration, or a file setting this release does not
 a newer release added, is ignored and reported as configuration state instead of refused, so a
 rollback, or a host on an older release sharing Git settings, needs no `config unset`. The
 integration applied snapshot reads only the names this release defines. Names are shown, values
-never; the secret checks still apply. Shipped defaults, typed records and authoring commands stay
-strict, so `config set` still refuses a typo. A new setting is therefore additive: its absence keeps
+never; the secret checks still apply. Shipped defaults, yard templates, typed records and
+authoring commands stay strict, so `config set` still refuses a typo; an unknown profile is the
+exception and is dropped in every scope. A new setting is therefore additive: its absence keeps
 the previous behavior, and it must not change how an existing setting's value is read, widen an
 existing setting's scopes or syncability, or restrict a default that an older release grants. A
 rename, including an alias-only one where operators write the new name, follows the same rule: it

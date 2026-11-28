@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -147,6 +148,13 @@ func TestUnknownIntegrationsAreDroppedFromOperatorSelections(t *testing.T) {
 			if !found {
 				t.Fatalf("ignored = %#v", loaded.IgnoredAssignments())
 			}
+			// Explanations count unknown entries and the selection JSON has no
+			// list of them; only the authored value in provenance holds them.
+			explanation := loaded.IntegrationSelectionExplanation()
+			encoded, _ := json.Marshal(selection)
+			if !strings.Contains(explanation, "; 1 unknown to this release and ignored") || strings.Contains(explanation, "futuretool") || strings.Contains(string(encoded), `"unknown"`) {
+				t.Fatalf("explanation %q json %s", explanation, encoded)
+			}
 		})
 	}
 }
@@ -191,6 +199,9 @@ func TestUnknownProfilesAreNeverEffectiveAndSelectNoDefault(t *testing.T) {
 		ignored := loaded.IgnoredAssignments()
 		if len(ignored) != 1 || ignored[0].Unknown != UnknownProfileInput || ignored[0].Item != "futureprofile" || ignored[0].Path != path || ignored[0].Line != 1 {
 			t.Fatalf("ignored = %#v", ignored)
+		}
+		if explanation := loaded.EnvironmentProfileSelectionExplanation(); strings.Contains(explanation, "futureprofile") || !strings.Contains(explanation, "; 1 unknown to this release and ignored") {
+			t.Fatalf("explanation = %q", explanation)
 		}
 		planned, err := WithEnvironmentProfiles(loaded, append(slices.Clone(selection.Requested), "legacy"))
 		if err != nil || slices.Contains(planned.EnvironmentProfiles.Effective, "futureprofile") || slices.Contains(planned.EnvironmentProfiles.Effective, "declared") {

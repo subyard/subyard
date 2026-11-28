@@ -19,7 +19,8 @@ type EnvironmentProfileSelection struct {
 	Provenance SettingResolution `json:"provenance"`
 	// Unknown lists requested profiles this release does not ship, such as
 	// ones a newer release added. They stay requested and are never effective.
-	Unknown []string `json:"unknown,omitempty"`
+	// Diagnostics count them; the names are not rendered.
+	Unknown []string `json:"-"`
 }
 
 func resolveEnvironmentProfiles(configDir, yard string, values map[string]string, catalog Catalog) (EnvironmentProfileSelection, error) {

@@ -693,7 +693,9 @@ use desired configuration on resume. The installed view covers the integration a
 including identity, profiles and effective integration selection, and core-guest receipts,
 including recorded provisioning inputs such as `CCUSAGE_PROVISION`. Complete integration snapshots
 also record absence. A snapshot name this release does not read, retired or from a newer release,
-is ignored on read, never validated, projected or rendered, and the next capture replaces it. Init-owned values without an installed record, including profile-owned
+is ignored on read, never validated, projected or rendered, and the next capture replaces it. An
+applied integration that this release neither ships nor finds defined in the desired configuration,
+such as one a newer release installed, is dropped from the view with its `AGENT_<id>_*` settings. Init-owned values without an installed record, including profile-owned
 settings, remain desired in both approving and resuming processes. Repairs by their owning runtimes
 use ordinary plan steps; these values are not listed as pending init. Unavailable unrecorded
 desired inputs retain their ordinary failures. Test-yard route inspection retains its ordinary
