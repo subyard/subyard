@@ -1477,8 +1477,9 @@ Provisioning or cleanup failure quarantines only the affected slot. Before destr
 the broker fsyncs a local incident and verifies project/VM ownership, refusing foreign or ambiguous
 resources. Recovery cleans the disposable allocation and returns an empty slot to the pool; the
 next lease provisions its requested environment from a validated base. Failure to persist the
-incident or prove ownership leaves the slot quarantined without deletion; the owner's
-`slot.quarantine_incomplete` event then keeps the provisioning cause and the refusal. Ordinary resource
+incident or prove ownership leaves the slot quarantined without deletion. When acquire-time
+quarantine handling fails, the owner's `slot.quarantine_incomplete` event keeps the provisioning
+cause and the refusal. Ordinary resource
 shortage is a retryable admission refusal and does not quarantine a healthy empty slot.
 
 Guest lease-key and context cleanup shares a five-second budget per running VM before stop.

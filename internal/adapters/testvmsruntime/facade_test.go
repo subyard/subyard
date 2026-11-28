@@ -268,7 +268,8 @@ func TestFacadeKeepsCauseWhenQuarantineHandlingFails(t *testing.T) {
 			},
 		}
 		key := strings.Fields(fixturePublicKey(t))
-		command := "acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
+		owner := strings.Repeat("0a", 16)
+		command := "acquire-v3 subyard-pair " + owner + " SHA256:key default Subyard-2 run-a tests " +
 			key[0] + " " + key[1] + " slot-001"
 		if err := facade.Run(command); err != nil {
 			t.Fatal(err)
@@ -280,12 +281,13 @@ func TestFacadeKeepsCauseWhenQuarantineHandlingFails(t *testing.T) {
 		if response.Code != "quarantined" || response.Message != "slot provisioning failed" {
 			t.Fatalf("response=%s", output.String())
 		}
-		batch, err := recorder.Export()
+		// The lease owner's own log view, which the client reads after a refusal.
+		events, err := recorder.readAgentEvents(owner, "slot-001", maxAgentLogEvents)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var incomplete []BrokerEvent
-		for _, event := range batch.Events {
+		for _, event := range events {
 			if event.Kind == "slot.quarantine_incomplete" {
 				incomplete = append(incomplete, event)
 			}

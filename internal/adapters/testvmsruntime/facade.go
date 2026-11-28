@@ -323,14 +323,21 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 	}
 }
 
-// quarantineReporting keeps the cause when quarantine handling stops before its own
-// slot.quarantined event, for example when a base build failed before its builder VM existed.
-// The reply stays quarantined; the owner-visible event says why and what handling refused.
+// quarantineReporting keeps the cause when acquire-time quarantine handling fails, for example
+// when a base build failed before its builder VM existed and no slot.quarantined event follows.
+// The reply stays quarantined; the owner's event says why and what handling refused.
 func (facade Facade) quarantineReporting(grant LeaseGrant, cause error) {
-	if err := facade.quarantine(grant, cause); err != nil {
-		_ = facade.recordSlot("slot.quarantine_incomplete", grant.SlotID, SlotProvisioning, SlotQuarantined,
-			errors.Join(cause, fmt.Errorf("quarantine handling: %w", err)))
+	err := facade.quarantine(grant, cause)
+	if err == nil || facade.Events == nil {
+		return
 	}
+	// Report only to the owner of this lease, with the state the slot actually reached.
+	slot, inspectErr := storeSlot(facade.Store, grant.SlotID)
+	if inspectErr != nil || slot.LeaseEpoch != grant.LeaseEpoch {
+		return
+	}
+	_ = facade.recordSlotSnapshot("slot.quarantine_incomplete", slot, SlotProvisioning, slot.State,
+		errors.Join(fmt.Errorf("quarantine handling: %w", err), cause))
 }
 
 func (facade Facade) quarantine(grant LeaseGrant, cause error) error {
