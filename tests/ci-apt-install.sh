@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-free contract for the CI apt helper: the runner image's packages.microsoft.com source is
-# disabled before apt runs, and every apt failure stops the helper with apt's own status.
+# disabled and apt is set to IPv4 with retries before apt runs, and every apt failure stops the
+# helper with apt's own status.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 python3 -B - "$ROOT" <<'PY'
@@ -28,16 +29,22 @@ with tempfile.TemporaryDirectory(prefix="subyard-ci-apt-", dir="/tmp") as tempor
 shift
 case "$1" in
   install|mv) exec "$@" ;;
-  apt-get) printf '%s\\n' "$*" >> "$TRACE"
+  apt-get) [ -f "$CONF" ] || exit 97
+    printf '%s\\n' "$*" >> "$TRACE"
     case "$2" in update) exit "$UPDATE_EXIT" ;; install) exit "$INSTALL_EXIT" ;; esac ;;
 esac
 exit 98
 """)
     (tools / "sudo").chmod(0o700)
 
+    conf = fixture / "apt.conf.d/80-subyard-ci-network"
+
     def run(update=0, install=0, hosted=True, args=("jq", "ripgrep")):
         sources, disabled, trace = fixture / "sources", fixture / "disabled", fixture / "trace"
+        aptconf = fixture / "apt.conf.d"
         trace.unlink(missing_ok=True)
+        conf.unlink(missing_ok=True)
+        aptconf.mkdir(exist_ok=True)
         for directory in (sources, disabled):
             if directory.exists():
                 for entry in directory.iterdir():
@@ -52,7 +59,8 @@ exit 98
         (sources / "notes.txt").write_text("https://packages.microsoft.com/ is not an apt source\n")
         env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", TRACE=str(trace),
                    UPDATE_EXIT=str(update), INSTALL_EXIT=str(install),
-                   SUBYARD_CI_APT_SOURCES=str(sources), SUBYARD_CI_APT_DISABLED=str(disabled))
+                   SUBYARD_CI_APT_SOURCES=str(sources), SUBYARD_CI_APT_DISABLED=str(disabled),
+                   SUBYARD_CI_APT_CONF=str(aptconf), CONF=str(conf))
         env.pop("GITHUB_ACTIONS", None)
         env.pop("RUNNER_ENVIRONMENT", None)
         if hosted:
@@ -68,6 +76,9 @@ exit 98
     assert calls == ["apt-get update -qq", "apt-get install -y jq ripgrep"], calls
     assert left == ["notes.txt", "ubuntu.sources"], left
     assert moved == ["microsoft-edge.sources", "microsoft-prod.list"], moved
+    # Apt calls see the network settings: the fake sudo refuses apt without the file.
+    assert conf.read_text() == 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n', conf.read_text()
+    assert conf.stat().st_mode & 0o777 == 0o644, oct(conf.stat().st_mode)
 
     # A failed update stops before install with apt's status; the third-party source is already off.
     result, calls, left, moved = run(update=100)
@@ -83,8 +94,9 @@ exit 98
     result, calls, left, moved = run(hosted=False)
     assert result.returncode == 2 and "outside a disposable GitHub-hosted runner" in result.stderr, result
     assert calls == [] and moved == [] and len(left) == 4, (calls, left, moved)
+    assert not conf.exists()
 
     result, calls, _, _ = run(args=())
     assert result.returncode == 2 and "usage:" in result.stderr and calls == [], result
-print("ok: CI apt helper disables the runner's Microsoft source and fails at the failing apt step")
+print("ok: CI apt helper disables the runner's Microsoft source, sets IPv4 with retries and fails at the failing apt step")
 PY
