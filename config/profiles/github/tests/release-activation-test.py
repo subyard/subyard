@@ -133,9 +133,11 @@ yard() {
                     self.assertIn('native updater started', (root/'interrupted-update.log').read_text())
                     for name in ('probe-updater', 'probe-child'):
                         pid = int((root/name).read_text())
-                        stat = Path('/proc')/str(pid)/'stat'
-                        if stat.exists():
-                            self.assertEqual(stat.read_text().rsplit(') ', 1)[1].split()[0], 'Z', name+' survived cancellation')
+                        try:
+                            state = (Path('/proc')/str(pid)/'stat').read_text().rsplit(') ', 1)[1].split()[0]
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue  # Reaped after the drain.
+                        self.assertEqual(state, 'Z', name+' survived cancellation')
                 finally:
                     self.drain_receipt(root)
 

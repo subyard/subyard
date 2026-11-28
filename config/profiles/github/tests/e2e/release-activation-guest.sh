@@ -256,6 +256,15 @@ def same(record):
     except (ProcessLookupError,FileNotFoundError):
         return False
 
+def undrained(record):
+    # A killed process is reported as owned by root once it releases its
+    # memory, including as a zombie, so only pid and start time identify it.
+    try:
+        now=info(record['pid'])
+        return now['start']==record['start'] and now['state']!='Z'
+    except (ProcessLookupError,FileNotFoundError):
+        return False
+
 def assert_loaded_predecessor(unit, oldhash, wanted):
     command=['/usr/bin/systemctl','--user','show',unit,'-p','MainPID','--value']
     pid=int(subprocess.check_output(command,text=True,timeout=15).strip())
@@ -296,8 +305,11 @@ def cancel():
 
 def signal_owned(record, signum):
     if same(record):
-        try: os.killpg(record['pid'],signum)
+        try:
+            os.killpg(record['pid'],signum)
+            return True
         except ProcessLookupError: pass
+    return False
 
 def drain():
     global drained
@@ -315,16 +327,12 @@ def drain():
         if len(ownership['groups'])==before:
             quiescent=True
             break
-    for group in ownership['groups']:
-        signal_owned(group,signal.SIGKILL)
+    killed=[group for group in ownership['groups'] if signal_owned(group,signal.SIGKILL)]
     signal_owned(ownership,signal.SIGKILL)
     process.wait(timeout=10)
     deadline=time.monotonic()+5
     while time.monotonic()<deadline:
-        live=[]
-        for group in ownership['groups']:
-            if same(group) and info(group['pid'])['state']!='Z': live.append(group)
-        if not live: break
+        if not any(undrained(group) for group in killed): break
         time.sleep(.05)
     else: raise RuntimeError('owned native process group did not drain')
     (root/'updater.json').unlink(missing_ok=True)
@@ -383,10 +391,13 @@ except SystemExit as error:
     if not probe or error.code!=143: raise
     probe_cancelled=True
 finally:
-    if process is not None and not drained: drain()
-    if foreign is not None:
-        assert foreign.poll() is None, 'cancellation killed an unrelated process'
-        foreign.terminate(); foreign.wait(timeout=5)
+    try:
+        if process is not None and not drained: drain()
+    finally:
+        # A failed drain must still release the caller's output pipes.
+        if foreign is not None:
+            assert foreign.poll() is None, 'cancellation killed an unrelated process'
+            foreign.terminate(); foreign.wait(timeout=5)
 if probe:
     assert probe_cancelled
     print('ok: TERM before delivery marker drained separate owned child group; unrelated process survived')
