@@ -856,6 +856,10 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 	if errors.As(err.cause, &integration) {
 		message += integration.diagnostic()
 	}
+	var read installedReadError
+	if errors.As(err.cause, &read) {
+		message += " (read=" + read.read + ")"
+	}
 	return message, retry
 }
 

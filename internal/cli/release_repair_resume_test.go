@@ -826,3 +826,100 @@ func TestProspectiveRepairGuardsPendingInitRetirement(t *testing.T) {
 		t.Fatalf("retirable yard did not proceed independently: %v", err)
 	}
 }
+
+// unfinishedFactsExecutor answers the applied profile selection with the real
+// facts program over guest facts that a refresh began but never committed, as
+// a refresh stopped by a file collision leaves them.
+type unfinishedFactsExecutor struct {
+	installedSettingsExecutor
+	t       *testing.T
+	root    string
+	program string
+	// state is "current", "unfinished" or "changed".
+	state string
+}
+
+func (fixture unfinishedFactsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	const observer = "__name__ = 'subyard_profile_selection_observer'\n"
+	if len(request.Command) != 4 || !strings.HasPrefix(request.Command[3], observer) {
+		return fixture.installedSettingsExecutor.Exec(ctx, project, instance, request)
+	}
+	var target map[string]any
+	if err := json.Unmarshal(request.Stdin, &target); err != nil {
+		return ports.InstanceExecResult{}, err
+	}
+	target["selected_profiles"] = []string{}
+	pending := map[string]any{}
+	for key, value := range target {
+		pending[key] = value
+	}
+	status := "incomplete"
+	switch fixture.state {
+	case "current":
+		status = "current"
+	case "changed":
+		pending["selected_profiles"] = []string{"sample"}
+	}
+	facts, _ := json.Marshal(map[string]any{"schema": 1, "machine_id": strings.Repeat("a", 32), "status": status, "target": pending, "last_success": target, "capabilities": "unknown", "readiness": "unknown"})
+	testkit.WriteFile(fixture.t, filepath.Join(fixture.root, "etc/subyard/guest-runtime.json"), facts, 0o644)
+	// The shipped program trusts its named root and owner; the fixture owns both.
+	program := strings.TrimPrefix(request.Command[3], observer)
+	program = strings.Replace(fixture.program, "ROOT = Path('/')", "ROOT = Path('"+fixture.root+"')", 1) + program[len(fixture.program):]
+	program = strings.ReplaceAll(program, "TRUSTED_OWNER = (0, 0)", fmt.Sprintf("TRUSTED_OWNER = (%d, %d)", os.Getuid(), os.Getgid()))
+	command := exec.CommandContext(ctx, "python3", "-B", "-c", observer+program)
+	command.Stdin = strings.NewReader(string(request.Stdin))
+	output, err := command.Output()
+	result := ports.InstanceExecResult{Stdout: output}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		result.ExitCode = exit.ExitCode()
+		return result, &ports.GuestExitError{Code: result.ExitCode}
+	}
+	return result, err
+}
+
+// A release repair stopped by a guest file collision leaves the guest facts
+// incomplete. Once the collision is removed, the recovering journal prepares
+// every owner from the installed view exactly as with current facts, so the
+// repair can run again. An unfinished refresh that changed the profile
+// selection leaves the installed view unknown.
+func TestRepairRecoveryReadsUnfinishedGuestFactsThatKeepTheSelection(t *testing.T) {
+	refused := map[string][]string{}
+	for _, state := range []string{"current", "unfinished", "changed"} {
+		fixture := newPendingInitFixture(t, false, nil)
+		request, journal := repairRequest(t, fixture)
+		journal = publishRepairResume(t, fixture, journal, false)
+		program, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config/skills/core/subyard-environment/facts.py"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(fixture.cli.options.RepositoryRoot, "config/skills/core/subyard-environment/facts.py"), program, 0o600)
+		guest := testkit.TempDir(t)
+		if err := os.MkdirAll(filepath.Join(guest, "etc/subyard"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(guest, "etc/machine-id"), []byte(strings.Repeat("a", 32)), 0o644)
+		fixture.cli.options.Executor = unfinishedFactsExecutor{installedSettingsExecutor: fixture.cli.options.Executor.(installedSettingsExecutor), t: t, root: guest, program: string(program), state: state}
+		fresh, err := New(fixture.cli.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, owner := range fresh.activationReconcilers(request) {
+			recovery, ok := owner.(interface {
+				PrepareActivationRecovery(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks) (releasetransition.Fingerprint, error)
+			})
+			if !ok {
+				continue
+			}
+			if _, err := recovery.PrepareActivationRecovery(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {
+				refused[state] = append(refused[state], owner.ID()+": "+err.Error())
+			}
+		}
+	}
+	if !slices.Equal(refused["unfinished"], refused["current"]) {
+		t.Fatalf("unfinished facts refused %q, current facts %q", refused["unfinished"], refused["current"])
+	}
+	if len(refused["changed"]) <= len(refused["current"]) || !slices.ContainsFunc(refused["changed"], func(refusal string) bool { return strings.Contains(refusal, "inspect installed configuration") }) {
+		t.Fatalf("changed selection was read as installed: %q", refused["changed"])
+	}
+}

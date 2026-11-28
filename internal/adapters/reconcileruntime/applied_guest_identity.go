@@ -78,6 +78,9 @@ print(json.dumps({'DEV_USER': users[0].pw_name, 'DEV_UID': str(users[0].pw_uid)}
 
 // AppliedEnvironmentProfiles reads the provisioner's protected successful
 // selection. An explicitly empty applied list is different from missing proof.
+// An unfinished refresh that keeps that selection, such as one stopped by a
+// file collision, leaves it known, so recovery can repeat the refresh; one
+// that changes the selection leaves it unknown.
 func (runtime Runtime) AppliedEnvironmentProfiles(ctx context.Context) ([]string, bool, error) {
 	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
 		return nil, false, nil
@@ -119,8 +122,10 @@ if not FACTS.exists() and not FACTS.is_symlink():
 value = read()
 expected = snapshot(json.load(sys.stdin))
 applied = value['last_success']
-if value['status'] != 'current' or applied is None or applied['yard'] != expected['yard']:
-    raise ValueError('profile selection requires current guest facts for this yard')
+if applied is None or applied['yard'] != expected['yard']:
+    raise ValueError('profile selection requires successful guest facts for this yard')
+if value['status'] != 'current' and value['target']['selected_profiles'] != applied['selected_profiles']:
+    raise ValueError('profile selection change is unfinished')
 print(json.dumps(applied['selected_profiles']))
 `
 

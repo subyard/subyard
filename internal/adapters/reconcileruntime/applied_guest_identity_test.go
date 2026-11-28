@@ -115,7 +115,7 @@ func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
 }
 
 func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T) {
-	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete"} {
+	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete", "incomplete-change"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			for _, path := range []string{"etc/subyard", filepath.Dir(guestFactsSource)} {
@@ -135,7 +135,7 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 				t.Fatal(err)
 			}
 			selected := []string{}
-			if scenario == "retained" {
+			if scenario == "retained" || scenario == "incomplete" || scenario == "incomplete-change" {
 				selected = []string{"retained"}
 			}
 			target["selected_profiles"] = selected
@@ -145,6 +145,15 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 			facts := map[string]any{"schema": 1, "machine_id": strings.Repeat("a", 32), "status": "current", "target": target, "last_success": target, "capabilities": "unknown", "readiness": "unknown"}
 			if scenario == "incomplete" {
 				facts["status"] = "incomplete"
+			}
+			if scenario == "incomplete-change" {
+				// The unfinished refresh began installing another selection.
+				changed := map[string]any{}
+				for key, value := range target {
+					changed[key] = value
+				}
+				changed["selected_profiles"] = []string{"retained", "added"}
+				facts["status"], facts["target"] = "incomplete", changed
 			}
 			content, _ := json.Marshal(facts)
 			mode := os.FileMode(0o644)
@@ -156,7 +165,7 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 			}
 			actual, known, err := runtime.AppliedEnvironmentProfiles(context.Background())
 			switch scenario {
-			case "empty", "retained":
+			case "empty", "retained", "incomplete":
 				if err != nil || !known || strings.Join(actual, " ") != strings.Join(selected, " ") {
 					t.Fatalf("selection=%v known=%v: %v", actual, known, err)
 				}
@@ -166,7 +175,7 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 				}
 			default:
 				if err == nil {
-					t.Fatal("foreign or incomplete proof accepted")
+					t.Fatal("foreign, unsafe or changed-selection proof accepted")
 				}
 			}
 		})
