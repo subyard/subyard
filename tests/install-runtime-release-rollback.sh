@@ -7,8 +7,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-install-runtime-release-rollback.XXXXX
 trap 'rm -rf "$TMP"' EXIT
 # The installer runs against a fixture home and a private lock root, so neither
 # a direct nor a suite run coordinates the operator's real data home.
-real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "${SUBYARD_HOME:-$HOME/.subyard}" | sha256sum | cut -d ' ' -f 1).lock"
-export HOME="$TMP/operator" SUBYARD_HOME="$TMP/operator/.subyard"
+real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "$(realpath -m -s -- "${SUBYARD_HOME:-$HOME/.subyard}")" | sha256sum | cut -d ' ' -f 1).lock"
+export HOME="$TMP/operator" SUBYARD_HOME="$TMP/operator/.subyard" SUBYARD_CONFIG_HOME="$TMP/operator/.config/subyard"
+unset XDG_CONFIG_HOME
 export SUBYARD_OWNER_LOCK_ROOT="$TMP/owner-locks"
 install -d -m 0700 "$HOME" "$SUBYARD_OWNER_LOCK_ROOT"
 runtime_root="$TMP/runtime"

@@ -10,7 +10,7 @@ CLI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cli-contract.XXXXXX")"
 trap 'rm -rf "$CLI_TMP"' EXIT
 # Every command runs against fixture homes and a private lock root, so neither
 # a direct nor a suite run coordinates the operator's real data home.
-real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "${SUBYARD_HOME:-$HOME/.subyard}" | sha256sum | cut -d ' ' -f 1).lock"
+real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "$(realpath -m -s -- "${SUBYARD_HOME:-$HOME/.subyard}")" | sha256sum | cut -d ' ' -f 1).lock"
 export HOME="$CLI_TMP/operator" SUBYARD_OPERATOR_HOME="$CLI_TMP/operator"
 export SUBYARD_CONFIG_HOME="$CLI_TMP/operator/.config/subyard" SUBYARD_HOME="$CLI_TMP/operator/.subyard"
 export SUBYARD_OWNER_LOCK_ROOT="$CLI_TMP/owner-locks"
