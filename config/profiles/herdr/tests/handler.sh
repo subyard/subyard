@@ -96,7 +96,7 @@ case "$1" in
           */herdr-profile:stop)
             printf 'stop Core\n' >> "$HERDR_TEST_CALLS"
             [ "${HERDR_TEST_CORE:-up}" = stopped ] ;;
-          */herdr-profile:sync) printf 'sync projects\n' >> "$HERDR_TEST_CALLS" ;;
+          */herdr-profile:sync) printf 'sync projects\n' >> "$HERDR_TEST_CALLS"; [ "${HERDR_TEST_SYNC:-ok}" = ok ] ;;
           env:SUBYARD_HERDR_MINIMUM=*) printf 'Core: fixture\n' ;;
           */herdr-profile:registration-ready) [ "${HERDR_TEST_REGISTRATION:-ready}" = ready ] ;;
           */herdr-profile:keys)
@@ -262,6 +262,14 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
     "$HERDR_TEST_CALLS" | cut -d: -f2- | cut -d ' ' -f1-2 > "$test_root/schedule-order"
   printf 'sync projects\nsystemctl enable\n' | cmp - "$test_root/schedule-order"
   unset HERDR_TEST_FILES
+  # A checkout problem in sync still lets up finish ingress, then fails it.
+  rm -f -- "$HERDR_TEST_DROPIN_PATH"
+  : > "$HERDR_TEST_CALLS"
+  if result=$(HERDR_TEST_SYNC=fail HERDR_TEST_ROUTE='{}' SUBYARD_RESOURCE_ACTION=up "$handler" up 2>&1); then exit 1; fi
+  [[ "$result" == *'project spaces are incomplete'* ]]
+  grep -Fxq 'systemctl enable --now --quiet subyard-herdr-discovery.timer' "$HERDR_TEST_CALLS"
+  grep -Fxq 'guest file /usr/local/libexec/subyard/herdr-profile.sha256 0644' "$HERDR_TEST_CALLS"
+  [ -f "$HERDR_TEST_DROPIN_PATH" ] && grep -q '^config device add ' "$HERDR_TEST_CALLS"
   grep -E '^(install SSH drop-in|config device add)' "$HERDR_TEST_CALLS" | cut -d ' ' -f1-3 > "$test_root/install-order"
   printf 'install SSH drop-in\nconfig device add\n' | cmp - "$test_root/install-order"
   : > "$HERDR_TEST_CALLS"

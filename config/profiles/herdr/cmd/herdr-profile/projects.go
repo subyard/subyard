@@ -459,6 +459,19 @@ func registrationReady(socket, workspaces string) error {
 	if err != nil {
 		return err
 	}
+	// Hold the project lock, when sync created it, so the timer's update is never seen half applied.
+	if _, err := os.Lstat(filepath.Join(dir, "projects.lock")); err == nil {
+		lock, err := openProjectLock(dir)
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := lock.Acquire(ctx, true, 25*time.Millisecond); err != nil {
+			return err
+		}
+	}
 	state, err := loadRegistrations(dir)
 	if err != nil {
 		inventory, inventoryErr := scanCheckouts(workspaces, dir, nil)

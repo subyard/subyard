@@ -84,7 +84,7 @@ A checkout proven deleted loses its space together with its tabs once no
 terminal in it is live; until then `yard herdr status` reports pending cleanup.
 A scan error, a missing `src` or a checkout that lost its `.git` removes nothing:
 the other checkouts are still reconciled, and `sync` and readiness report the
-error.
+error. `up` still finishes Core, the timer and ingress before it reports the error.
 When a whole project is removed, its checkout spaces follow the same rule, and
 the `src` space stays while it has user layout or live terminals. No terminal is
 stopped. Closing a space in Herdr closes its terminals. Use
