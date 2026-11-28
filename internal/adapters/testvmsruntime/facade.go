@@ -222,7 +222,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 			return facade.writeError("invalid_request", err.Error())
 		}
 		if eventErr := facade.recordSlot("lease.acquire", grant.SlotID, "", SlotProvisioning, nil); eventErr != nil {
-			_ = facade.quarantine(grant, eventErr)
+			facade.quarantineReporting(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		var session *acquireSession
@@ -261,12 +261,12 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 						return facade.writeError("cancelled", "acquisition cancelled; cleanup required")
 					}
 				}
-				_ = facade.quarantine(grant, err)
+				facade.quarantineReporting(grant, err)
 				return facade.writeError("quarantined", "slot provisioning failed")
 			}
 		}
 		if eventErr := facade.recordSlot("lease.held", grant.SlotID, SlotProvisioning, SlotHeld, nil); eventErr != nil {
-			_ = facade.quarantine(grant, eventErr)
+			facade.quarantineReporting(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		if session != nil {
@@ -320,6 +320,16 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		})
 	default:
 		return facade.writeError("invalid_request", "unknown facade operation")
+	}
+}
+
+// quarantineReporting keeps the cause when quarantine handling stops before its own
+// slot.quarantined event, for example when a base build failed before its builder VM existed.
+// The reply stays quarantined; the owner-visible event says why and what handling refused.
+func (facade Facade) quarantineReporting(grant LeaseGrant, cause error) {
+	if err := facade.quarantine(grant, cause); err != nil {
+		_ = facade.recordSlot("slot.quarantine_incomplete", grant.SlotID, SlotProvisioning, SlotQuarantined,
+			errors.Join(cause, fmt.Errorf("quarantine handling: %w", err)))
 	}
 }
 

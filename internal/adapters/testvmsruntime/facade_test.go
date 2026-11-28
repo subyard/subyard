@@ -236,6 +236,74 @@ func TestFacadeRejectsAndroidOnArmBeforeLeaseMutation(t *testing.T) {
 	}
 }
 
+func TestFacadeKeepsCauseWhenQuarantineHandlingFails(t *testing.T) {
+	for _, handling := range []error{errors.New("failed builder incident unavailable before slot recovery"), nil} {
+		root := testkit.TempDir(t)
+		path := filepath.Join(root, "leases.json")
+		store := LeaseStore{Path: path, SlotCount: 1}
+		initial, err := json.Marshal(LeasePool{
+			SchemaVersion: LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
+			Slots: []LeaseSlot{{SlotID: "slot-001", ResourceGeneration: 1, State: SlotAvailable}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, initial, 0o600)
+		cfg := fixtureConfig(t)
+		recorder := &EventRecorder{StateDir: filepath.Join(root, "events"), Source: "fixture"}
+		var output bytes.Buffer
+		facade := Facade{
+			Store: store, Output: &output, Events: recorder,
+			EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
+				return cfg.environmentSpecForArch(name, "amd64")
+			},
+			OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
+				return grant, errors.New("incus init images:base e2e-base-1: download failed")
+			},
+			OnQuarantine: func(_ context.Context, grant LeaseGrant, cause error) error {
+				if err := store.Quarantine(grant, cause); err != nil {
+					return err
+				}
+				return handling
+			},
+		}
+		key := strings.Fields(fixturePublicKey(t))
+		command := "acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-a tests " +
+			key[0] + " " + key[1] + " slot-001"
+		if err := facade.Run(command); err != nil {
+			t.Fatal(err)
+		}
+		var response facadeResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != "quarantined" || response.Message != "slot provisioning failed" {
+			t.Fatalf("response=%s", output.String())
+		}
+		batch, err := recorder.Export()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var incomplete []BrokerEvent
+		for _, event := range batch.Events {
+			if event.Kind == "slot.quarantine_incomplete" {
+				incomplete = append(incomplete, event)
+			}
+		}
+		if handling == nil {
+			if len(incomplete) != 0 {
+				t.Fatalf("completed quarantine handling reported incomplete: %+v", incomplete)
+			}
+			continue
+		}
+		if len(incomplete) != 1 || incomplete[0].SlotID != "slot-001" || incomplete[0].ToState != SlotQuarantined ||
+			!strings.Contains(incomplete[0].Error, "download failed") ||
+			!strings.Contains(incomplete[0].Error, "quarantine handling: failed builder incident unavailable") {
+			t.Fatalf("lost quarantine cause: %+v", incomplete)
+		}
+	}
+}
+
 func assertMissingSlotResponse(t *testing.T, payload []byte) {
 	t.Helper()
 	var response struct {

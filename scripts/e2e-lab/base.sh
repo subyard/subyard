@@ -6,6 +6,9 @@ base_update_distro() {
   # A refreshed immutable image must contain current distro/security updates,
   # including packages already present in an unchanged upstream fingerprint.
   export DEBIAN_FRONTEND=noninteractive
+  # Like the yard, the builder's bridge has no IPv6 route. Apt does not retry an unreachable
+  # IPv6 address, which also leaves a retryable IPv4 failure unretried, so steer apt to IPv4.
+  printf 'Acquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/99force-ipv4
   apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
   apt-get -o Dpkg::Options::=--force-confold -y -qq upgrade
 }
