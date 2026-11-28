@@ -4087,7 +4087,10 @@ func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog, session d
 				continue
 			}
 			pendingMu.Lock()
-			pending[event.yard.YardName] = event.yard
+			// A name noted before its context loaded never hides a known target.
+			if known, ok := pending[event.yard.YardName]; !ok || known.IncusProject == "" || event.yard.IncusProject != "" {
+				pending[event.yard.YardName] = event.yard
+			}
 			pendingMu.Unlock()
 			select {
 			case changed <- struct{}{}:
@@ -4406,7 +4409,6 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			noteRPCYard(ctx, domain.Context{YardName: *params.TargetYard})
 			operationLoaded, bootstrap, err = operationCLI.loadInitContext(*params.TargetYard, true, params.Arguments)
 			if err != nil {
-				operationCLI.recordSetupRefusal(definition, params.Arguments, false, *params.TargetYard, "configuration_invalid", err)
 				return nil, preparationRPCError(definition, err)
 			}
 			noteRPCYard(ctx, operationLoaded.Context)
@@ -4429,7 +4431,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			})
 		}
 		if err != nil {
-			operationCLI.recordSetupRefusal(definition, params.Arguments, false, operationLoaded.Context.YardName, "preparation_failed", err)
+			// Exact plans are read-only previews; only an ordinary plan is a refused attempt.
+			operationCLI.recordSetupRefusal(definition, params.Arguments, params.Exact, operationLoaded.Context.YardName, "preparation_failed", err)
 			return nil, preparationRPCError(definition, err)
 		}
 		keep := false

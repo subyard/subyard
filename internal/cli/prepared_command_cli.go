@@ -109,9 +109,14 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
 	plan, err := prepared.Confirm(ctx, orchestrator, assumeYes)
-	if err != nil && prepared.Definition.Handler == "@init" {
+	if err != nil && prepared.Definition.Handler == "@init" && !cli.releaseTransitionChild {
 		status, code := confirmationSetupOutcome(err)
-		cli.recordSetupTerminal(prepared.Plan.OperationID, prepared.Loaded.Context.YardName, "confirmation", status, code, err)
+		// Only a failed confirmation has causes; a declined or interrupted one is complete.
+		var cause error
+		if status == "failure" {
+			cause = err
+		}
+		cli.recordSetupTerminal(prepared.Plan.OperationID, prepared.Loaded.Context.YardName, "confirmation", status, code, cause)
 	}
 	if err != nil {
 		switch {

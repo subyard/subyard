@@ -267,3 +267,38 @@ func TestPublishAfterCommandRefreshesOnlyItsTriggers(t *testing.T) {
 		}
 	}
 }
+
+// Update and migrate refresh every local yard, also from the migrate context,
+// which carries only its roots, in a shell that exports no operator home.
+func TestPublishAfterUpdateAndMigrateRefreshEveryLocalYard(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.Root, hostErrorsProgram)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(fixture.Root, hostErrorsProgram), []byte("# facts helper\n"), 0o644)
+	environment := []string{}
+	for _, entry := range fixture.Environment {
+		if !strings.HasPrefix(entry, "SUBYARD_OPERATOR_HOME=") {
+			environment = append(environment, entry)
+		}
+	}
+	probe := fixture.New(Options{Environment: environment})
+	yard, err := probe.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := config.Loaded{Context: domain.Context{YardName: "default", AccessKind: domain.AccessLocal,
+		Paths: domain.RuntimePaths{DataHome: yard.Context.Paths.DataHome, ConfigHome: yard.Context.Paths.ConfigHome}}}
+	key := yard.Context.IncusProject + "/" + yard.Context.YardInstanceName
+	for _, handler := range []string{"@update", "@current-migration"} {
+		incus := &testkit.Incus{
+			Instances: map[string]ports.InstanceInfo{key: {Name: yard.Context.YardInstanceName, Project: yard.Context.IncusProject, Status: "Running"}},
+			ExecSteps: []testkit.IncusExecStep{{}, {}},
+		}
+		program := fixture.New(Options{Environment: environment, Incus: incus, Executor: incus})
+		program.publishAfterCommand(context.Background(), command.Definition{Name: "x", Handler: handler}, roots, nil)
+		if len(incus.ExecCalls) != 1 {
+			t.Errorf("%s: %d publications, want 1", handler, len(incus.ExecCalls))
+		}
+	}
+}

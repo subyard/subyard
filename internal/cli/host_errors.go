@@ -188,6 +188,11 @@ func (cli *CLI) publishAfterCommand(ctx context.Context, definition command.Defi
 	case definition.Handler == "@init" || definition.Handler == "@lifecycle" && definition.Name == "start":
 		cli.publishHostErrors(ctx, loaded.Context)
 	case definition.Handler == "@update" || definition.Handler == "@current-migration":
+		// The migrate context carries only its roots; yards load with the
+		// operator home that ordinary commands derive.
+		if loaded.Context.Paths.OperatorHome == "" {
+			loaded.Context.Paths.OperatorHome = firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"])
+		}
 		for _, name := range cli.configSyncLocalYards(loaded) {
 			if target, err := cli.loadInventoryLoaded(name, loaded); err == nil {
 				cli.publishHostErrors(ctx, target.Context)
