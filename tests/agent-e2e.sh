@@ -827,7 +827,7 @@ direct_ssh="$(
     set -euo pipefail
     . "$ROOT/dev/agent-e2e.sh"
     CLIENT_CONFIG=/tmp/direct-ssh-config
-    printf "must-not-reach-ssh\n" | run_direct_ssh 2 0 printf "%s" "argument with spaces"
+    run_direct_ssh 2 0 printf "%s" "argument with spaces" <<<"must-not-reach-ssh"
   '
 )"
 grep -Fq -- '-T e2e-vm-2 --' <<<"$direct_ssh" \

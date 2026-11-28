@@ -168,7 +168,7 @@ if grep -Fxq -- -n "$DIRECT_SUDO_LOG"; then
 fi
 
 EXPIRED_SUDO_LOG="$TMP/expired-sudo.argv"
-if printf 'payload-must-not-be-read\n' | (
+if (
   PATH="$TMP/bin:$PATH"
   MOCK_SUDO_LOG="$EXPIRED_SUDO_LOG"
   export MOCK_SUDO_EXPIRED=1
@@ -183,7 +183,7 @@ if printf 'payload-must-not-be-read\n' | (
   # shellcheck source=scripts/lib/host.sh
   . "$ROOT/scripts/lib/host.sh"
   require_root fixture
-) >"$TMP/expired.out" 2>&1; then
+) <<<'payload-must-not-be-read' >"$TMP/expired.out" 2>&1; then
   fail 'expired preauthorized sudo credential was accepted'
 fi
 grep -Fq 'sudo authorization expired' "$TMP/expired.out" \
