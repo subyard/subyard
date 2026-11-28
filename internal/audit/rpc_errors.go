@@ -26,9 +26,11 @@ const (
 
 // RPCError is one failed Yard RPC request served by this owner. Error is the
 // full local error text, which the owner's operator may read; the log is
-// private to the owner.
+// private to the owner. Yard is the session's yard; owner-services sessions
+// and records written before it existed have none.
 type RPCError struct {
 	At        time.Time `json:"at"`
+	Yard      string    `json:"yard,omitempty"`
 	Request   string    `json:"request"`
 	Operation string    `json:"operation,omitempty"`
 	Method    string    `json:"method"`

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Owner failures readable in the yard
+
+- Agents in a yard can read a value-free summary of the owner's recent failures with
+  `python3 /usr/local/share/subyard/skills/subyard-environment/facts.py host-errors`: failed
+  RPC requests (method and code), update attempts and `yard setup` attempts with refusal codes
+  and setting names. It never holds error text, request IDs, values or paths, and never
+  another yard's records. The owner refreshes it after `init`, `start`, `update`, `migrate`
+  and RPC failures; a stopped yard keeps the previous snapshot.
+- The owner now records each `yard init`/`yard setup` attempt in `$SUBYARD_HOME/logs/setup`
+  (newest 30, an interrupted attempt stays `unfinished`). RPC error records carry the
+  session's yard. Rollback ignores both; the yard keeps the last snapshot file
+  `/etc/subyard/host-errors.json`, which older releases neither read nor refresh.
+
 ### Yard disk use
 
 - Yards no longer keep downloaded APT packages. Provisioning writes

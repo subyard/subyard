@@ -80,6 +80,35 @@ read_facts() {
 read_facts | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["last_success"]["version"] == sys.argv[1]; assert v["status"] == "current"; assert v["selected_profiles"] == []; assert v["target"]["yard"]["name"] == sys.argv[2]; assert v["capabilities"] == v["readiness"] == "unknown"' "$version" "$name"
 yard provision --yes
 read_facts >/dev/null
+# The owner's value-free failure snapshot: a refused setup reaches the yard as
+# codes and the setting name, never its value; start refreshes the snapshot.
+read_host_errors() {
+  guest runuser -u dev -- env -i HOME=/home/dev PATH=/usr/bin:/bin sh -c 'cd "$1"; python3 "$2" host-errors' _ "$app" "$reader"
+}
+read_host_errors | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["schema"] == 1 and v["yard"] == sys.argv[1]' "$name"
+config="$SUBYARD_CONFIG_HOME/yards/$name/config.env"
+cp "$config" "$state/config.env"
+sed -i 's/^SSH_PORT=.*/SSH_PORT=host-errors-sentinel/' "$config"
+if yard init --yes > "$state/setup-refusal.log" 2>&1; then
+  cat "$state/setup-refusal.log"
+  printf 'invalid setup unexpectedly succeeded\n' >&2; exit 1
+fi
+cp "$state/config.env" "$config"
+yard start --yes
+read_host_errors > "$state/host-errors.json"
+python3 - "$state/host-errors.json" <<'PYERRORS'
+import json,sys
+text=open(sys.argv[1]).read()
+value=json.loads(text)
+assert 'host-errors-sentinel' not in text, 'snapshot carries a setting value'
+refused=[entry for entry in value['setup'] if entry['code'] == 'configuration_invalid']
+assert refused and refused[0]['phase'] == 'prepare' and refused[0]['status'] == 'failure', value['setup']
+assert any(refusal['names'] == ['SSH_PORT'] for refusal in refused[0]['refusals']), refused[0]
+assert any(entry['status'] == 'success' for entry in value['setup']), value['setup']
+assert value['unavailable'] == [], value['unavailable']
+PYERRORS
+guest stat -c '%a %u %g' /etc/subyard/host-errors.json | grep -Fx '644 0 0' >/dev/null
+printf 'guest environment host_errors=PASS setup_refusal=codes_and_names\n'
 # Existing-yards refresh repairs absent facts and missing discovery links.
 guest rm /etc/subyard/guest-runtime.json /home/dev/.agents/skills/subyard-environment
 if read_facts >/dev/null; then printf 'missing facts unexpectedly readable\n' >&2; exit 1; fi

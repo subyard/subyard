@@ -846,6 +846,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 				cli.errorf("Next: %s", step)
 			}
 		}
+		if core && definition.Handler == "@init" && !readOnlyInvocation && !cli.releaseTransitionChild &&
+			!slices.Contains(commandArguments, "--check") && !commandHelpRequested(commandArguments) && domain.SafeName(yard) {
+			cli.recordSetupTerminal(cli.ensureOperationID(), yard, "prepare", "failure", "configuration_invalid", err)
+		}
 		return 2
 	}
 	if admission.ownerRecovery {
@@ -966,10 +970,26 @@ func (cli *CLI) Run(ctx context.Context) int {
 						cli.errorf("update history: %v", historyErr)
 					}
 				}
-				return cli.reportPreparationError(definition, prepareErr)
+				if definition.Handler == "@init" && !readOnlyInvocation &&
+					!slices.Contains(commandArguments, "--check") && !commandHelpRequested(commandArguments) {
+					status, code := "failure", "preparation_failed"
+					if errors.Is(prepareErr, context.Canceled) || errors.Is(prepareErr, context.DeadlineExceeded) {
+						status, code = "interrupted", "context_cancelled"
+					}
+					cli.recordSetupTerminal(cli.ensureOperationID(), loaded.Context.YardName, "prepare", status, code, prepareErr)
+				}
+				exit := cli.reportPreparationError(definition, prepareErr)
+				if !readOnlyInvocation {
+					cli.publishAfterCommand(ctx, definition, loaded, commandArguments)
+				}
+				return exit
 			}
 			defer prepared.Close()
-			return cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+			exit := cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+			if !readOnlyInvocation && !slices.Contains(commandArguments, "--check") {
+				cli.publishAfterCommand(ctx, definition, prepared.Loaded, commandArguments)
+			}
+			return exit
 		}
 	}
 	var projectRun *projectExecution
@@ -3997,8 +4017,15 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
 	home := cli.hostDataHome()
+	// Owner-services sessions serve no yard: their records carry none and
+	// reach yards with the next snapshot of another trigger.
+	recordYard, publish := "", func(context.Context) {}
+	if !ownerServicesOnly {
+		recordYard = loaded.Context.YardName
+		publish = cli.hostErrorsPublisher(loaded.Context)
+	}
 	recorder, closeRecorder := startRPCErrorRecorder(handler,
-		audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)})
+		audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)}, recordYard, publish)
 	// Runs after Serve has returned, so no handler sends a record any more.
 	defer closeRecorder()
 	session := rpc.Session{Handler: recorder,
@@ -4023,24 +4050,58 @@ const rpcErrorBacklog = 64
 // queues its record; one writer appends it after the response, so recording
 // never delays or changes a response. Records beyond the backlog, and records
 // still blocked by the owner barrier when the session ends, are lost.
+// The writer also refreshes the yard's host-errors snapshot after failures and
+// executed operations, at most once per rpcHostErrorsInterval and once more
+// when the session ends.
 type rpcErrorRecorder struct {
 	handler rpc.Handler
-	records chan audit.RPCError
+	yard    string
+	// A nil record only asks for a snapshot refresh.
+	records chan *audit.RPCError
 }
 
+// rpcHostErrorsInterval bounds how often a session refreshes the snapshot.
+const rpcHostErrorsInterval = time.Minute
+
 // startRPCErrorRecorder starts the writer; the returned function stops it
-// after one last attempt to write the queued records.
-func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog) (rpcErrorRecorder, func()) {
-	records := make(chan audit.RPCError, rpcErrorBacklog)
+// after one last attempt to write the queued records and the snapshot.
+func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog, yard string, publish func(context.Context)) (rpcErrorRecorder, func()) {
+	records := make(chan *audit.RPCError, rpcErrorBacklog)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for record := range records {
-			_ = log.Append(ctx, record)
+		var published time.Time
+		var wait <-chan time.Time
+		pending := false
+		for {
+			select {
+			case record, open := <-records:
+				if !open {
+					if pending {
+						publish(ctx)
+					}
+					return
+				}
+				if record != nil {
+					_ = log.Append(ctx, *record)
+				}
+				pending = true
+			case <-wait:
+				wait = nil
+			}
+			if !pending || wait != nil || len(records) != 0 {
+				continue
+			}
+			if since := time.Since(published); since < rpcHostErrorsInterval {
+				wait = time.After(rpcHostErrorsInterval - since)
+				continue
+			}
+			publish(ctx)
+			published, pending = time.Now(), false
 		}
 	}()
-	return rpcErrorRecorder{handler: handler, records: records}, func() {
+	return rpcErrorRecorder{handler: handler, yard: yard, records: records}, func() {
 		close(records)
 		cancel()
 		<-done
@@ -4049,13 +4110,18 @@ func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog) (rpcError
 
 func (recorder rpcErrorRecorder) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
 	result, err := recorder.handler.Handle(ctx, call, emit)
+	var record *audit.RPCError
 	if err != nil {
 		if fault := rpc.FaultOf(ctx, err); fault.Code != rpc.CodeCancelled {
-			select {
-			case recorder.records <- audit.RPCError{At: time.Now(), Request: call.ID, Operation: call.OperationID,
-				Method: call.Method, Code: string(fault.Code), Error: err.Error()}:
-			default:
-			}
+			record = &audit.RPCError{At: time.Now(), Yard: recorder.yard, Request: call.ID, Operation: call.OperationID,
+				Method: call.Method, Code: string(fault.Code), Error: err.Error()}
+		}
+	}
+	// An executed operation may have changed the setup or update history.
+	if record != nil || call.Method == rpc.MethodOperationExecute {
+		select {
+		case recorder.records <- record:
+		default:
 		}
 	}
 	return result, err

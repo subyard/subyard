@@ -12,6 +12,8 @@ import tempfile
 ROOT = Path('/')
 TRUSTED_OWNER = (0, 0)
 FACTS = ROOT / 'etc/subyard/guest-runtime.json'
+# The owner's value-free failure snapshot for this yard (host-errors).
+HOST_ERRORS = ROOT / 'etc/subyard/host-errors.json'
 MACHINE = ROOT / 'etc/machine-id'
 # check-only result: the saved helper refresh is valid, but selection awaits init.
 PROFILES_PENDING = 11
@@ -50,7 +52,7 @@ def safe(path):
         # when a read-only mount makes access(W_OK) return false. Other unmapped
         # accounts remain indistinguishable: this trusts the administrator's
         # protected system ancestry, not arbitrary overflow-owned paths.
-        if path != FACTS:
+        if path not in (FACTS, HOST_ERRORS):
             raise ValueError('unsafe yard facts directory')
         for name, current, unmapped, trusted in (('uid', os.geteuid(), root.st_uid, TRUSTED_OWNER[0]),
                                                   ('gid', os.getegid(), root.st_gid, TRUSTED_OWNER[1])):
@@ -81,16 +83,20 @@ def unique_fields(pairs):
     return value
 
 
-def read(path=FACTS, machine=MACHINE):
+def load(path, limit):
     owner = safe(path)
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644 or
             (info.st_uid, info.st_gid) != owner or info.st_nlink != 1 or
             (owner != TRUSTED_OWNER and os.access(path, os.W_OK, effective_ids=True))):
         raise ValueError('unsafe yard facts file')
-    if info.st_size > 16384:
+    if info.st_size > limit:
         raise ValueError('invalid yard facts size')
-    value = json.loads(path.read_bytes(), object_pairs_hook=unique_fields)
+    return json.loads(path.read_bytes(), object_pairs_hook=unique_fields)
+
+
+def read(path=FACTS, machine=MACHINE):
+    value = load(path, 16384)
     if not isinstance(value, dict) or set(value) != {'schema', 'machine_id', 'status', 'target', 'last_success', 'capabilities', 'readiness'} or type(value['schema']) is not int or value['schema'] != 1:
         raise ValueError('unsupported yard facts schema')
     if value['machine_id'] != identity(machine):
@@ -109,7 +115,7 @@ def read(path=FACTS, machine=MACHINE):
 
 def write(value, path=FACTS):
     safe(path)
-    fd, temporary = tempfile.mkstemp(prefix='.guest-runtime-', dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.stem + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), 0o644)
@@ -151,6 +157,80 @@ def apply(operation, target, path=FACTS, machine=MACHINE):
     write(value, path)
 
 
+# Host errors: every string is a token or a timestamp, so no error text,
+# value or path can pass, whatever the owner sends.
+TOKEN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}')
+TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+GENERATED = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z')
+HOST_ERRORS_LIMIT = 32768 + 128
+SECTIONS = ('rpc', 'updates', 'setup')
+
+
+def entries(value, fields, limit):
+    if not isinstance(value, list) or len(value) > limit:
+        raise ValueError('invalid host errors')
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != set(fields):
+            raise ValueError('invalid host errors')
+        for key, kind in fields.items():
+            item = entry[key]
+            if kind == 'count' and (type(item) is not int or item < 1):
+                raise ValueError('invalid host errors')
+            if kind == 'number' and (type(item) is not int or item < 0):
+                raise ValueError('invalid host errors')
+            if kind == 'flag' and type(item) is not bool:
+                raise ValueError('invalid host errors')
+            if kind in ('token', 'optional', 'time') and not isinstance(item, str):
+                raise ValueError('invalid host errors')
+            if (kind == 'token' and not TOKEN.fullmatch(item) or
+                    kind == 'optional' and item and not TOKEN.fullmatch(item) or
+                    kind == 'time' and not TIME.fullmatch(item)):
+                raise ValueError('invalid host errors')
+            if kind == 'refusals':
+                entries(item, {'source': 'token', 'code': 'token', 'names': 'names'}, 8)
+            if kind == 'names' and (not isinstance(item, list) or len(item) > 16 or
+                                    any(not isinstance(x, str) or not TOKEN.fullmatch(x) for x in item)):
+                raise ValueError('invalid host errors')
+
+
+def host_errors(value, stored=True, machine=MACHINE):
+    keys = {'schema', 'yard', 'generated_at', 'omitted', 'unavailable', *SECTIONS}
+    if not isinstance(value, dict) or set(value) != (keys | {'machine_id'} if stored else keys):
+        raise ValueError('unsupported host errors schema')
+    if type(value['schema']) is not int or value['schema'] != 1:
+        raise ValueError('unsupported host errors schema')
+    if stored and value['machine_id'] != identity(machine):
+        raise ValueError('host errors belong to another guest')
+    if (not isinstance(value['yard'], str) or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,62}', value['yard']) or
+            not isinstance(value['generated_at'], str) or not GENERATED.fullmatch(value['generated_at'])):
+        raise ValueError('invalid host errors')
+    entries(value['rpc'], {'at': 'time', 'last': 'time', 'count': 'count', 'method': 'token', 'code': 'token'}, 10)
+    entries(value['updates'], {'attempt': 'token', 'at': 'time', 'direction': 'token', 'phase': 'token',
+                               'status': 'token', 'code': 'optional', 'source': 'optional', 'target': 'optional'}, 10)
+    entries(value['setup'], {'attempt': 'token', 'at': 'time', 'phase': 'token', 'status': 'token', 'code': 'optional',
+                             'refusals': 'refusals', 'omitted_refusals': 'number', 'incomplete': 'flag'}, 10)
+    entries([value['omitted']], {name: 'number' for name in SECTIONS}, 1)
+    unavailable = value['unavailable']
+    if (not isinstance(unavailable, list) or len(set(unavailable)) != len(unavailable) or
+            any(x not in SECTIONS for x in unavailable)):
+        raise ValueError('invalid host errors')
+    return value
+
+
+def put_host_errors(value, path=HOST_ERRORS, machine=MACHINE):
+    host_errors(value, stored=False)
+    if path.is_symlink():
+        raise ValueError('symlinked host errors file')
+    try:
+        old = host_errors(load(path, HOST_ERRORS_LIMIT), machine=machine)
+    except (OSError, ValueError, TypeError, KeyError):
+        old = None
+    # Concurrent owners publish whole snapshots: never replace a newer one.
+    if old and old['generated_at'] > value['generated_at']:
+        return
+    write(dict(value, machine_id=identity(machine)), path)
+
+
 def main():
     if len(sys.argv) == 1:
         value = read()
@@ -171,6 +251,17 @@ def main():
                 value['target']['yard'] == target['yard']):
             return PROFILES_PENDING
         return 10
+    if sys.argv[1:] == ['host-errors']:
+        try:
+            value = host_errors(load(HOST_ERRORS, HOST_ERRORS_LIMIT), machine=MACHINE)
+        except FileNotFoundError:
+            print('subyard environment: no host errors snapshot yet; owner failures are unknown', file=sys.stderr)
+            return 1
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+    if sys.argv[1:] == ['host-errors-put'] and os.geteuid() == 0:
+        put_host_errors(json.load(sys.stdin, object_pairs_hook=unique_fields))
+        return 0
     if len(sys.argv) == 2 and sys.argv[1] in ('begin', 'commit') and os.geteuid() == 0:
         apply(sys.argv[1], json.load(sys.stdin))
         return 0

@@ -120,7 +120,16 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 					cli.errorf("update history: %v", historyErr)
 				}
 			}
+			if prepared.Definition.Handler == "@init" {
+				cli.recordSetupTerminal(prepared.Plan.OperationID, prepared.Loaded.Context.YardName,
+					"confirmation", "declined", "operator_declined", nil)
+			}
 			cli.errorf("operation declined")
+		case prepared.Definition.Handler == "@init" &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
+			cli.recordSetupTerminal(prepared.Plan.OperationID, prepared.Loaded.Context.YardName,
+				"confirmation", "interrupted", "context_cancelled", err)
+			cli.errorf("plan %s: %v", prepared.Definition.Name, err)
 		case prepared.Definition.Handler == "@update" &&
 			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
 			if historyErr := cli.recordUpdateTerminal(
