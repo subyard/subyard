@@ -2730,7 +2730,16 @@ saves the selection without touching the guest; normal `yard init` applies it an
 publishes matching facts through the existing helper-refresh begin/commit sequence.
 Version or yard-identity differences, unsafe or invalid facts, incomplete refreshes
 and unfinished release transitions retain their strict readiness checks. Other
-helper or profile runtime drift is still assessed independently.
+helper or profile runtime drift is still assessed independently. The installed
+profile selection is the last successful one; an incomplete refresh that keeps it,
+such as one stopped by a guest file collision, leaves it readable, so a recovering
+release repair can prepare and repeat the refresh. A profile operation refused by
+unfinished facts keeps its change in their target. While an unfinished target changes
+the selection, the installed view is refused; `yard init` or a release activation
+completes the refresh, and reverting the profile operation makes the view readable.
+The developer identity, read from the core skills receipt and passwd when the
+integration baseline records no identity, needs only a recorded successful refresh of
+this yard and guest; an unfinished later refresh does not refuse it.
 
 The native `internal/profile` package inventory binds shipped config, provision hooks, presets,
 resource descriptors and optional profile declarations. It includes descriptorless and resource-only

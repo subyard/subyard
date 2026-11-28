@@ -232,3 +232,35 @@ func TestMaterializedPendingListingNamesEveryYard(t *testing.T) {
 		t.Fatalf("yards=%v want %v", names, expected)
 	}
 }
+
+// A failed installed-state read of the configuration view names the read by
+// fixed text; each collected finding keeps its own read and no cause text.
+func TestConfigurationInspectionNamesTheFailedInstalledRead(t *testing.T) {
+	err := materializedConfigActivationError{
+		cause: domain.CollectRefusals(installedReadError{read: "installed-integrations", cause: errors.New("private inventory detail")},
+			installedReadError{read: "installed-guest", cause: errors.New("private guest detail")}),
+		yard: "facts", phase: "configuration", action: "inspect", command: "config status",
+	}
+	var findings *domain.Refusals
+	if !errors.As(err.collected(), &findings) || len(findings.Unwrap()) != 2 {
+		t.Fatalf("findings were not collected: %v", err.collected())
+	}
+	var messages []string
+	for _, finding := range findings.Unwrap() {
+		var activation materializedConfigActivationError
+		if !errors.As(finding, &activation) {
+			t.Fatalf("finding lost its activation wrapper: %v", finding)
+		}
+		message, retry := activation.ActivationDiagnostic()
+		if strings.Contains(message, "private") || retry != "run yard -Y facts config status" {
+			t.Fatalf("diagnostic %q retry %q", message, retry)
+		}
+		messages = append(messages, message)
+	}
+	// Collected refusals keep their stable sorted order.
+	want := []string{"yard facts: cannot inspect configuration for release activation (read=installed-guest)",
+		"yard facts: cannot inspect configuration for release activation (read=installed-integrations)"}
+	if !slices.Equal(messages, want) {
+		t.Fatalf("messages = %q", messages)
+	}
+}

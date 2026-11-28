@@ -856,6 +856,10 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 	if errors.As(err.cause, &integration) {
 		message += integration.diagnostic()
 	}
+	var read installedReadError
+	if errors.As(err.cause, &read) {
+		message += " (read=" + read.read + ")"
+	}
 	return message, retry
 }
 
@@ -1509,7 +1513,7 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	}); ok {
 		selected, known, err := profiles.AppliedEnvironmentProfiles(ctx)
 		if err != nil {
-			return target, false, err
+			return target, false, installedReadError{read: "installed-profiles", cause: err}
 		}
 		if known {
 			// This is passive installed-state inspection, not a new profile

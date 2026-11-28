@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,12 +24,17 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 		status, yard     string
 		missing, written bool
 		refused          bool
+		// unreadable: the applied selection read must refuse after the record.
+		unreadable bool
 	}{
 		{name: "disable", profile: "github", applied: []string{"a", "github", "b"}, want: []string{"a", "b"}, written: true},
 		{name: "enable", profile: "github", selected: true, applied: []string{"a"}, want: []string{"a", "github"}, written: true},
 		{name: "enable-present", profile: "github", selected: true, applied: []string{"github", "a"}, want: []string{"github", "a"}},
 		{name: "disable-absent", profile: "github", applied: []string{"a"}, want: []string{"a"}},
-		{name: "incomplete", profile: "github", applied: []string{"github"}, status: "incomplete", refused: true},
+		// A change refused by unfinished facts stays in their target, so the
+		// stale successful selection is not reported as applied.
+		{name: "incomplete", profile: "github", applied: []string{"github"}, status: "incomplete", refused: true, written: true, unreadable: true},
+		{name: "incomplete-unchanged", profile: "github", applied: []string{"a"}, want: []string{"a"}, status: "incomplete", refused: true},
 		{name: "foreign-yard", profile: "github", applied: []string{"github"}, yard: "foreign"},
 		{name: "missing", profile: "github", missing: true},
 	} {
@@ -86,6 +92,30 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 			}
 			if written := !bytes.Equal(after, content); written != scenario.written {
 				t.Fatalf("facts rewritten=%v, want %v: %s", written, scenario.written, after)
+			}
+			if scenario.unreadable {
+				var unfinished map[string]any
+				if err := json.Unmarshal(after, &unfinished); err != nil {
+					t.Fatal(err)
+				}
+				pending, _ := json.Marshal(unfinished["target"].(map[string]any)["selected_profiles"])
+				kept, _ := json.Marshal(unfinished["last_success"])
+				original, _ := json.Marshal(target)
+				if unfinished["status"] != "incomplete" || string(pending) != "[]" || string(kept) != string(original) {
+					t.Fatalf("refused record changed more than the unfinished target: %s", after)
+				}
+				if _, _, err := runtime.AppliedEnvironmentProfiles(context.Background()); err == nil {
+					t.Fatal("refused record left the stale selection readable")
+				}
+				// Reverting the operation restores the kept selection.
+				if err := runtime.RecordAppliedProfile(context.Background(), scenario.profile, true); !errors.Is(err, ErrGuestFactsUnfinished) {
+					t.Fatalf("re-enable record err=%v", err)
+				}
+				actual, known, err := runtime.AppliedEnvironmentProfiles(context.Background())
+				if err != nil || !known || strings.Join(actual, " ") != strings.Join(scenario.applied, " ") {
+					t.Fatalf("reverted selection=%v known=%v err=%v", actual, known, err)
+				}
+				return
 			}
 			if scenario.want == nil {
 				return

@@ -14,6 +14,8 @@ import (
 
 // The core receipt supplies an identity even when no coding integration has an
 // inventory. Missing evidence is distinct from corrupt or foreign evidence.
+// Facts left incomplete after a successful refresh of this yard, such as by a
+// guest file collision, still admit it, so a recovering repair can prepare.
 func (runtime Runtime) appliedGuestIdentity(ctx context.Context) (map[string]string, error) {
 	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
 		return nil, nil
@@ -57,8 +59,10 @@ if not FACTS.exists() and not FACTS.is_symlink():
     sys.exit(10)
 value = read()
 expected = snapshot(json.load(sys.stdin))
-if value['status'] != 'current' or value['last_success'] is None or value['target']['yard'] != expected['yard']:
-    raise ValueError('developer identity requires current guest facts for this yard')
+# The identity comes from the core receipt and passwd, so an unfinished refresh
+# after a successful one on this machine and yard still names the applied user.
+if value['last_success'] is None or value['last_success']['yard'] != expected['yard']:
+    raise ValueError('developer identity requires successful guest facts for this yard')
 if not core.exists() and not core.is_symlink():
     sys.exit(10)
 safe(core)
@@ -78,6 +82,10 @@ print(json.dumps({'DEV_USER': users[0].pw_name, 'DEV_UID': str(users[0].pw_uid)}
 
 // AppliedEnvironmentProfiles reads the provisioner's protected successful
 // selection. An explicitly empty applied list is different from missing proof.
+// An unfinished refresh that keeps that selection, such as one stopped by a
+// file collision, leaves it known, so recovery can repeat the refresh. One
+// whose target changes the selection, including a profile operation recorded
+// while the refresh was unfinished, refuses until init completes the refresh.
 func (runtime Runtime) AppliedEnvironmentProfiles(ctx context.Context) ([]string, bool, error) {
 	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
 		return nil, false, nil
@@ -119,8 +127,10 @@ if not FACTS.exists() and not FACTS.is_symlink():
 value = read()
 expected = snapshot(json.load(sys.stdin))
 applied = value['last_success']
-if value['status'] != 'current' or applied is None or applied['yard'] != expected['yard']:
-    raise ValueError('profile selection requires current guest facts for this yard')
+if applied is None or applied['yard'] != expected['yard']:
+    raise ValueError('profile selection requires successful guest facts for this yard')
+if value['status'] != 'current' and sorted(value['target']['selected_profiles']) != sorted(applied['selected_profiles']):
+    raise ValueError('profile selection change is unfinished')
 print(json.dumps(applied['selected_profiles']))
 `
 
@@ -132,7 +142,8 @@ var ErrGuestFactsUnfinished = errors.New("guest runtime facts refresh is unfinis
 // selection after that profile's runtime converged. Other entries keep their
 // applied value: a profile operation applies only its own profile, and init
 // still owns the whole selection snapshot. Missing facts stay with init and
-// the release refresh; unfinished facts refuse until init rewrites them.
+// the release refresh; unfinished facts refuse until init rewrites them, and
+// keep the requested change in their unfinished target.
 func (runtime Runtime) RecordAppliedProfile(ctx context.Context, name string, selected bool) error {
 	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
 		return nil
@@ -180,13 +191,20 @@ value = read()
 applied = value['last_success']
 if value['target']['yard'] != request['yard']:
     sys.exit(10)
-if value['status'] != 'current':
-    sys.exit(12)
 name = request['profile']
-profiles = [item for item in applied['selected_profiles'] if item != name]
-if request['selected']:
-    profiles = list(applied['selected_profiles']) if name in applied['selected_profiles'] else profiles + [name]
-recorded = dict(applied, selected_profiles=profiles)
+def record(base):
+    profiles = [item for item in base['selected_profiles'] if item != name]
+    if request['selected']:
+        profiles = list(base['selected_profiles']) if name in base['selected_profiles'] else profiles + [name]
+    return dict(base, selected_profiles=profiles)
+if value['status'] != 'current':
+    # Keep the change in the unfinished target, so the selection reader refuses
+    # a stale successful selection instead of reporting it as applied.
+    pending = record(value['target'])
+    if pending != value['target']:
+        apply('begin', pending)
+    sys.exit(12)
+recorded = record(applied)
 if recorded != applied:
     apply('begin', recorded)
     apply('commit', recorded)

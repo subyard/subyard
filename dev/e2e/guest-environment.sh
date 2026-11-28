@@ -118,7 +118,13 @@ PYFACTS
 printf 'guest environment authorized_refresh_exit=%s status=incomplete last_success=preserved\n' "$refresh_exit"
 guest rmdir /home/dev/.claude/skills/subyard-environment
 collision_injected=0
-command_with_group "$launcher" migrate --yes
+if ! command_with_group "$launcher" migrate --yes; then
+  # The rendered refusal is value-free; keep the full findings for diagnosis.
+  printf 'guest environment: repair after the removed collision refused; diagnostics follow\n' >&2
+  command_with_group "$launcher" migrate --check || true
+  yard config status || true
+  exit 1
+fi
 yard provision --yes
 read_facts >/dev/null
 for adapter in .agents/skills .claude/skills .config/opencode/skills .pi/agent/skills .hermes/skills; do

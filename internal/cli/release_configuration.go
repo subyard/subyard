@@ -218,10 +218,12 @@ func (cli *CLI) observeInstalledReleaseTarget(ctx context.Context, target config
 		guest, guestErr = nil, nil
 	}
 	if appliedErr != nil {
-		appliedErr = fmt.Errorf("yard %s: inspect installed configuration: %w", target.Name, appliedErr)
+		read := installedReadError{read: "installed-integrations"}
+		errors.As(appliedErr, &read)
+		appliedErr = installedReadError{read: read.read, cause: fmt.Errorf("yard %s: inspect installed configuration: %w", target.Name, appliedErr)}
 	}
 	if guestErr != nil {
-		guestErr = fmt.Errorf("yard %s: inspect installed guest configuration: %w", target.Name, guestErr)
+		guestErr = installedReadError{read: "installed-guest", cause: fmt.Errorf("yard %s: inspect installed guest configuration: %w", target.Name, guestErr)}
 	}
 	if err := domain.CollectRefusals(appliedErr, guestErr); err != nil {
 		return target, baseline, err
@@ -275,6 +277,16 @@ func (cli *CLI) observeInstalledReleaseTarget(ctx context.Context, target config
 	}
 	return installed, baseline, nil
 }
+
+// installedReadError names, by fixed text, which installed-state read of a
+// yard's configuration view failed; the cause itself is never rendered.
+type installedReadError struct {
+	read  string
+	cause error
+}
+
+func (err installedReadError) Error() string { return err.cause.Error() }
+func (err installedReadError) Unwrap() error { return err.cause }
 
 // guestExecProbe records whether the guest agent failed to run a command during
 // one installed-state read. A guest exit status is an answer, not unavailability.
