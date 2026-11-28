@@ -549,7 +549,7 @@ incus() {
     *) return 64 ;;
   esac
 }
-printf 'cat > /etc/systemd/system/subyard-test-vms-gc.service\n' | reconcile_inner_incus
+reconcile_inner_incus <<<'cat > /etc/systemd/system/subyard-test-vms-gc.service'
 reconcile_inner_incus
 [ ! -e "$INNER_FIXTURE/consumed-stdin" ] \
   || fail "inner Incus CLI consumed the remaining streamed provisioner"

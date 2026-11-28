@@ -79,7 +79,7 @@ esac
 MOCK
 chmod +x "$TMP/bin/incus"
 
-printf 'must-not-reach-incus\n' | "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
+"$ROOT/scripts/02-create-project.sh" --yes >/dev/null <<<'must-not-reach-incus'
 "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
 
 [ "$(grep -Fc 'default|project create subyard' "$MOCK_INCUS_LOG")" = 1 ] \
