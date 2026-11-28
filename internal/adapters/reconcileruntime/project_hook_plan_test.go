@@ -19,6 +19,7 @@ import (
 
 type hookPlanExecutor struct {
 	observation hookObservation
+	metadata    string
 	calls       int
 	fail        bool
 	observeFail bool
@@ -56,10 +57,22 @@ func (executor *changingNativeHookExecutor) Exec(ctx context.Context, project, n
 
 func TestPreparedProjectHooksContinuationRejectsEqualCountScopeReplacement(t *testing.T) {
 	before := &ProjectHookPlan{allowedHooks: []string{"/usr/local/libexec/subyard/owned-hook"}, approved: hookObservation{Roots: []string{"/srv/workspaces/project"}}}
+	before.CaptureOwnerProjects([]domain.ProjectRecord{{ProjectID: "project", YardPath: "/srv/workspaces/project/src"}})
 	current := *before
 	if err := before.CheckContinuationScope(&current); err != nil {
 		t.Fatal(err)
 	}
+	// An unregistered sibling in the agent-writable listing is not continuation scope.
+	current.approved.Roots = []string{"/srv/workspaces/project", "/srv/workspaces/scratch"}
+	if err := before.CheckContinuationScope(&current); err != nil {
+		t.Fatalf("unregistered sibling refused: %v", err)
+	}
+	current = *before
+	current.conditional, current.approved.Roots = true, nil
+	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), "continuation scope changed") {
+		t.Fatalf("unobserved continuation admitted or misreported: %v", err)
+	}
+	current = *before
 	current.allowedHooks = []string{"/usr/local/libexec/subyard/foreign-hook"}
 	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("replaced hook admitted: %v", err)
@@ -113,7 +126,9 @@ func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testin
 			}
 			observations := executor.observations
 			err = runtime.RunProjectHooks(context.Background())
-			if scenario == "repeat" && err != nil || scenario != "repeat" && !errors.Is(err, domain.ErrPlanStale) {
+			// Workspace digest churn is not a captured input; only the hook source is.
+			unchanged := scenario == "repeat" || scenario == "project changed"
+			if unchanged && err != nil || !unchanged && !errors.Is(err, domain.ErrPlanStale) {
 				t.Errorf("repeated plan guard: scenario=%s err=%v", scenario, err)
 			}
 			if executor.calls != 1 || executor.observations <= observations {
@@ -136,6 +151,12 @@ func (executor *hookPlanExecutor) Exec(_ context.Context, _ string, _ string, re
 		}
 		payload, _ := json.Marshal(executor.observation)
 		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
+	if request.Command[0] == "python3" && executor.metadata == "unavailable" {
+		return ports.InstanceExecResult{ExitCode: 1}, errors.New("transport failed")
+	}
+	if request.Command[0] == "python3" && executor.metadata != "" {
+		return ports.InstanceExecResult{Stdout: []byte(`{"expected":` + executor.metadata + `,"projects":"` + testRuntimeOldDigest + `"}`)}, nil
 	}
 	if len(request.Command) > 2 && request.Command[0] == "sh" && request.Command[1] == "-c" {
 		executor.calls++
@@ -179,12 +200,15 @@ func TestNoProjectHookWorkRequiresBoundReadyMetadataAndEmptyInstalledHooks(t *te
 			case "pending metadata":
 				plan.metadata.Expected = json.RawMessage(`[{"metadata":null}]`)
 			case "other projects":
+				// Sibling and working-tree churn changes both digests but not the bound scope.
 				plan.metadata.Projects = testRuntimeNewDigest
+				plan.current.Projects = testRuntimeNewDigest
 			}
-			if got := plan.NoProjectHookWork(); got != (scenario == "ready" || scenario == "empty owners") {
+			ready := scenario == "ready" || scenario == "empty owners" || scenario == "other projects"
+			if got := plan.NoProjectHookWork(); got != ready {
 				t.Fatalf("no project hook work = %t", got)
 			}
-			if (scenario == "ready" || scenario == "empty owners") && plan.OperationStep("yard").Decision != domain.StepSkip {
+			if ready && plan.OperationStep("yard").Decision != domain.StepSkip {
 				t.Fatal("empty hook step still reports work")
 			}
 		})
@@ -192,9 +216,9 @@ func TestNoProjectHookWorkRequiresBoundReadyMetadataAndEmptyInstalledHooks(t *te
 }
 
 func TestEmptyProjectHookPlanRetainsFreshDriftRefusal(t *testing.T) {
-	for _, scenario := range []string{"ready", "zero projects", "project drift", "agent hook", "resource hook"} {
+	for _, scenario := range []string{"ready", "zero projects", "project drift", "metadata drift", "metadata unavailable", "agent hook", "resource hook"} {
 		t.Run(scenario, func(t *testing.T) {
-			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}}
+			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}, metadata: `[{"metadata":[[],"fingerprint"]}]`}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
 			runtime := Runtime{RepositoryRoot: "../../..", Incus: incus, Executor: executor, Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}}
 			var err error
@@ -218,13 +242,24 @@ func TestEmptyProjectHookPlanRetainsFreshDriftRefusal(t *testing.T) {
 			switch scenario {
 			case "project drift":
 				executor.observation.Projects = testRuntimeNewDigest
+			case "metadata drift":
+				executor.metadata = `[{"metadata":[[],"changed"]}]`
+			case "metadata unavailable":
+				executor.metadata = "unavailable"
 			case "agent hook":
 				executor.observation.Hooks = []string{"agent-projects-changed"}
 			case "resource hook":
 				executor.observation.Hooks = []string{"/usr/local/libexec/subyard/projects-changed.d/resource"}
 			}
 			err = runtime.CheckProjectHookPlan(context.Background(), true)
-			ready := scenario == "ready" || scenario == "zero projects"
+			if scenario == "metadata unavailable" {
+				// A failed guest read is not a changed input.
+				if err == nil || errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
+					t.Fatalf("unavailable metadata guard: err=%v effects=%d", err, executor.calls)
+				}
+				return
+			}
+			ready := scenario == "ready" || scenario == "zero projects" || scenario == "project drift"
 			if ready && err != nil || !ready && !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
 				t.Fatalf("empty plan guard: err=%v effects=%d", err, executor.calls)
 			}
@@ -254,7 +289,7 @@ func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) 
 				executor.fail = true
 			}
 			err = runtime.CheckProjectHookPlan(context.Background(), true)
-			if scenario == "projects" || scenario == "hook" || scenario == "wiring" {
+			if scenario == "hook" || scenario == "wiring" {
 				if !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
 					t.Fatalf("new scope reached effects: calls=%d err=%v", executor.calls, err)
 				}
@@ -547,7 +582,7 @@ func TestStoppedProjectHooksSurviveApprovedTemporaryStart(t *testing.T) {
 }
 
 func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
-	for _, scenario := range []string{"success", "new hook", "new project root", "desired power changed", "unexpected pre-write start", "observation unavailable", "native source changed", "projects changed after resolution", "skip without prerequisite"} {
+	for _, scenario := range []string{"success", "unregistered sibling", "new hook", "registered root missing", "desired power changed", "unexpected pre-write start", "observation unavailable", "native source changed", "projects changed after resolution", "skip without prerequisite"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf '{\"state\":\"current\",\"actual\":\""+testRuntimeNewDigest+"\",\"desired\":\""+testRuntimeNewDigest+"\"}\\n'\n")
@@ -573,6 +608,8 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{{ProjectID: "sample", YardPath: "/srv/workspaces/sample/src"}})
+			executor.observation.Roots = []string{"/srv/workspaces/sample"}
 			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
 				t.Fatal(err)
 			}
@@ -591,7 +628,9 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 			switch scenario {
 			case "new hook":
 				executor.observation.Hooks = append(executor.observation.Hooks, hook+"-new")
-			case "new project root":
+			case "unregistered sibling":
+				executor.observation.Roots = []string{"/srv/workspaces/new", "/srv/workspaces/sample"}
+			case "registered root missing":
 				executor.observation.Roots = []string{"/srv/workspaces/new"}
 			case "desired power changed":
 				incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "running"
@@ -612,9 +651,13 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 				executor.observation.Projects = testRuntimeNewDigest
 			}
 			err = runtime.RunProjectHooks(context.Background())
-			if scenario == "success" {
+			if scenario == "success" || scenario == "unregistered sibling" {
 				if err != nil || executor.calls != 1 {
 					t.Fatalf("approved conditional hook failed: calls=%d err=%v", executor.calls, err)
+				}
+			} else if scenario == "projects changed after resolution" {
+				if err != nil || executor.calls != 0 {
+					t.Fatalf("workspace churn after resolution: calls=%d err=%v", executor.calls, err)
 				}
 			} else if err == nil || executor.calls != 0 {
 				t.Fatalf("unapproved change reached hooks: calls=%d err=%v", executor.calls, err)
