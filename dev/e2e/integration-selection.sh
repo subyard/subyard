@@ -184,9 +184,12 @@ sudo -n mv -fT -- "$platform_marker.$token" "$platform_marker"
 [ "$(cat "$platform_marker")" = subyard-e2e-platform-v1 ] || die 'unexpected platform marker'
 yard integration status --json > "$STATE/status.json"
 if [ "$KIND" = default ]; then
-  jq -e '.selection.requested == ["claude","codex","opencode","pi"] and .observed == "ready"' "$STATE/status.json" >/dev/null \
-    || die 'fresh default did not receive the four approved integrations'
-  guest sh -eu -c 'command -v codex; command -v opencode; test -f /home/dev/.claude/settings.json; test -f /home/dev/.pi/agent/settings.json'
+  jq -e '.selection.requested == ["claude","codex","pi"] and .observed == "ready"' "$STATE/status.json" >/dev/null \
+    || die 'fresh default did not receive the three approved integrations'
+  guest sh -eu -c 'command -v codex; test -f /home/dev/.claude/settings.json; test -f /home/dev/.pi/agent/settings.json'
+  # OpenCode is opt-in: the fresh default neither installs nor configures it.
+  guest sh -eu -c '! command -v opencode && [ ! -e /home/dev/.config/opencode/opencode.jsonc ]' \
+    || die 'fresh default installed OpenCode'
   [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
     || die 'Claude login-shell environment is missing'
   yard shell -- env > "$STATE/shell-environment"
@@ -194,7 +197,7 @@ if [ "$KIND" = default ]; then
   grep -Fxq 'CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1' "$STATE/shell-environment"
   yard init --yes
   yard integration status --json | jq -e '.observed == "ready"' >/dev/null
-  printf 'ok: fresh default converges four integrations without optional profiles\n'
+  printf 'ok: fresh default converges three integrations without OpenCode or optional profiles\n'
   exit 0
 fi
 if [ "$KIND" != special ]; then

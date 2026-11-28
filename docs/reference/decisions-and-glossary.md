@@ -266,7 +266,7 @@ contract, and storage roles; status/apply refers to materialized file consumers.
 ## Per-yard coding-tool selection and artifact ownership
 
 Every yard initializes without mandatory tool parameters. Default/named yards inherit active
-profile/settings selection; shipped fallback is `claude codex opencode pi`. Init does
+profile/settings selection; shipped fallback is `claude codex pi`, and OpenCode is opt-in. Init does
 not materialize inherited values or empty a fresh named yard. Remote access reaches owner
 authority; controller discovery never changes selection.
 
