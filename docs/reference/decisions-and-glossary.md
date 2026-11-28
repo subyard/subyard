@@ -255,6 +255,19 @@ ownership/digest/drift/in-use checks. Projects, desired power, observations, tru
 generated consumers, data home, support tools, and recovery/ownership records are never sync
 payload.
 
+Operator configuration is forward compatible. In operator scopes and the Git source, a setting
+name, a selected profile or integration, or a file setting this release does not know, such as one
+a newer release added, is ignored and reported as configuration state instead of refused, so a
+rollback, or a host on an older release sharing Git settings, needs no `config unset`. Names are shown, values
+never; the secret checks still apply. Shipped defaults, typed records and authoring commands stay
+strict, so `config set` still refuses a typo. A new setting is therefore additive: its absence keeps
+the previous behavior, and it must not change how an existing setting's value is read, widen an
+existing setting's scopes or syncability, or restrict a default that an older release grants. A
+rename, including an alias-only one where operators write the new name, follows the same rule: it
+needs a settings migration with a down path or a rollback boundary; no gate checks this. A new
+value of an existing setting is not additive either, except an unknown profile or integration in a
+selection list, which is dropped.
+
 Configuration root is a storage root, not one undifferentiated settings object: it also holds
 secret inputs, consumers, encrypted ledger, project state, and tools. Use precise terms; avoid
 ambiguous operator/private/machine config. Show/fields/paths distinguish effective values, typed

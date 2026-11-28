@@ -100,6 +100,9 @@ func TestEnvironmentProfileSelectionPreservesLayerPrecedence(t *testing.T) {
 		testkit.WriteFile(t, path, []byte(content), 0600)
 	}
 	write(filepath.Join(root, "config/yards/profiles/preset.env"), "ENVIRONMENT_PROFILES=preset\n")
+	for _, name := range []string{"preset", "git", "local", "command"} {
+		write(filepath.Join(root, "config/profiles", name, "profile.conf"), "")
+	}
 	write(filepath.Join(configHome, GitSettingsRelativePath, "yards/named/config.env"), "YARD_TEMPLATE=preset\nYARD_PROFILES=git\n")
 	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "named", Environment: profileSelectionTestEnvironment(home)}
 	check := func(want string) {

@@ -24,6 +24,11 @@ func newBootstrapCommandFixture(t *testing.T) (*cliFixture, string) {
 	t.Helper()
 	fixture, applyLog := newResourceCommandFixture(t, withWorkingDir(""))
 	root := fixture.Root
+	// The shipped selection names a shipped package.
+	if err := os.MkdirAll(filepath.Join(root, "config", "profiles", "existing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "profiles", "existing", "profile.conf"), "", 0o644)
 	path := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
 	content, err := os.ReadFile(path)
 	if err != nil {

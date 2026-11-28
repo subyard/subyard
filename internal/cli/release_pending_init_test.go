@@ -88,6 +88,12 @@ func newPendingInitFixture(t *testing.T, named bool, yards map[string]string) pe
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/skills/core/subyard-environment/facts.py"), "# identity fixture\n", 0o600)
+	for _, name := range []string{"sample", "extra"} {
+		if err := os.MkdirAll(filepath.Join(cli.options.RepositoryRoot, "config/profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(cli.options.RepositoryRoot, "config/profiles", name, "profile.conf"), "", 0o644)
+	}
 	// The installed snapshot records the integration inputs init applied before
 	// the yard configuration below was authored.
 	loaded, err := cli.resolveReleaseTransitionContext(context.Background(), "default", configHome)

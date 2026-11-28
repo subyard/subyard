@@ -1,10 +1,13 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 // EnvironmentProfileSelection preserves authored intent while Environment carries
@@ -14,13 +17,44 @@ type EnvironmentProfileSelection struct {
 	Effective  []string          `json:"effective"`
 	Present    bool              `json:"present"`
 	Provenance SettingResolution `json:"provenance"`
+	// Unknown lists requested profiles this release does not ship, such as
+	// ones a newer release added. They stay requested and are never effective.
+	Unknown []string `json:"unknown,omitempty"`
 }
 
 func resolveEnvironmentProfiles(configDir, yard string, values map[string]string, catalog Catalog) (EnvironmentProfileSelection, error) {
-	return resolveEnvironmentProfilesWith(yard, values, catalog, func(name string) (bool, error) {
+	var unknown []string
+	selection, err := resolveEnvironmentProfilesWith(yard, values, catalog, func(name string) (bool, error) {
+		if UnknownProfile(configDir, catalog, name) {
+			if !slices.Contains(unknown, name) {
+				unknown = append(unknown, name)
+			}
+			return false, nil
+		}
 		eligible, _, err := EnvironmentProfileEligibility(configDir, yard, values, catalog, name)
 		return eligible, err
 	})
+	selection.Unknown = unknown
+	return selection, err
+}
+
+// UnknownProfile reports a well-formed profile name that this release neither
+// ships, in its repository or the effective configuration directory, nor
+// retired. Dropping it from a selection only removes what it would add: a
+// present selection stays present, so no default profile replaces it.
+func UnknownProfile(configDir string, catalog Catalog, name string) bool {
+	if !domain.SafeName(name) || catalog.RetiredProfile(name) {
+		return false
+	}
+	if _, err := profile.ResolvePackageInConfig(configDir, name); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if catalog.root != "" {
+		if _, err := profile.ResolvePackage(catalog.root, name); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveEnvironmentProfilesWith(yard string, values map[string]string, catalog Catalog, eligibleProfile func(string) (bool, error)) (EnvironmentProfileSelection, error) {
@@ -97,6 +131,9 @@ func resolveLoadedEnvironmentProfiles(configDir, yard string, values environment
 		layer := tracker.layers[assignment.Layer]
 		selection.Provenance = SettingResolution{Scope: layer.Scope, Role: layer.Role, Path: assignment.Path,
 			Line: assignment.Line, Value: assignment.Value, Status: "effective", Detail: assignment.Detail}
+	}
+	for _, name := range selection.Unknown {
+		tracker.observeUnknownSelection("ENVIRONMENT_PROFILES", UnknownProfileInput, name)
 	}
 	tracker.environmentProfiles = selection
 	values["ENVIRONMENT_PROFILES"] = strings.Join(selection.Effective, " ")

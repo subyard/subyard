@@ -361,7 +361,6 @@ func TestConfigSyncManifestCannotOwnOtherStorageRoles(t *testing.T) {
 		{"new-local", 2, "config.env", "invalid managed path"},
 		{"new-identity", 2, gitSettingsPath("host-id"), "invalid managed path"},
 		{"new-journal", 2, gitSettingsPath(".sync/transaction.json"), "invalid managed path"},
-		{"new-unknown-asset", 2, gitSettingsPath("overrides/host/agents/unknown/config.json"), "unknown file setting"},
 		{"old-identity", 1, "host-id", "invalid managed path"},
 		{"old-registration", 1, ".sync/source.json", "invalid managed path"},
 		{"old-cache", 1, gitSettingsPath("config.env"), "invalid managed path"},

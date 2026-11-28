@@ -110,6 +110,9 @@ func (loaded Loaded) IntegrationSelectionExplanation() string {
 	if len(loaded.Integrations.Retired) != 0 {
 		explanation += "; retired and ignored [" + strings.Join(loaded.Integrations.Retired, " ") + "]"
 	}
+	if len(loaded.Integrations.Unknown) != 0 {
+		explanation += "; unknown to this release and ignored [" + strings.Join(loaded.Integrations.Unknown, " ") + "]"
+	}
 	return explanation
 }
 

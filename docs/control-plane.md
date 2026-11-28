@@ -2431,7 +2431,10 @@ discards each operator assignment, at any scope or in the command environment, i
 discards retired settings, while the file is read: its expression, and a default of the name inside
 another record's expression, is evaluated in isolation, so no later record sees it or any default
 it performs, and neither its evaluation error nor a required check of the name refuses loading.
-Such a nested default is not reported. Persistent-settings
+Such a nested default is not reported. An operator assignment of a setting the catalog does not
+know is discarded the same way and also returned by `Loaded.IgnoredAssignments`, with no repair,
+after a secret-content and name-length check. An unknown profile or integration in an operator
+selection is dropped from the effective selection and returned there too. Persistent-settings
 parsing for `config set`/`unset`, `init` and config sync discards it the same way. A non-empty one
 is returned as configuration state (`Loaded.IgnoredAssignments`) with its exact repair. It is never
 a refusal: `config show`, `status`, `update --check` and the init plan render it, `update --check`

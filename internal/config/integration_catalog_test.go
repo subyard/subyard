@@ -158,6 +158,8 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 			t.Fatal("retired setting is writable")
 		}
 	}
+	// A command override is authored now: it still refuses an unknown
+	// integration, which a persisted selection drops.
 	if _, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
 		t.Fatal("arbitrary unknown integration accepted")
 	}

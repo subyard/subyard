@@ -643,7 +643,7 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 		if err := os.MkdirAll(filepath.Dir(host), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		writeCLIFile(t, host, string(settings)+"YARD_DEVICES=fuse\n", 0o600)
+		writeCLIFile(t, host, string(settings)+"YARD_DEVICES=fuse\nFUTURE_SETTING='private value'\n", 0o600)
 		line := strings.Count(string(settings), "\n") + 1
 		// A yard that fails to load hides none of the others' state; its
 		// refusal is reported beside the report.
@@ -669,21 +669,24 @@ func TestUpdateTypedConfirmationSeparatesCheckActivationAndRollbackPreflight(t *
 			// Without --json the same state precedes the report as text lines.
 			text, payload := "", stdout.String()
 			if !slices.Contains(arguments, "--json") {
-				text, payload, _ = strings.Cut(payload, "\n")
+				start := strings.Index(payload, "\n{")
+				text, payload = payload[:start], payload[start+1:]
 			}
 			if code != 0 || json.Unmarshal([]byte(payload), &report) != nil {
 				t.Fatalf("%v refused or broke its report: code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
 			}
-			want := config.ConfigurationState{
-				Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line,
-				Repair: "yard -Y default config unset YARD_DEVICES --scope host --local",
+			repair := "yard -Y default config unset YARD_DEVICES --scope host --local"
+			message := "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with " + repair
+			unknown := "FUTURE_SETTING in " + host + ":" + strconv.Itoa(line+1) + " is not a setting of this release and is ignored; a newer release may use it"
+			want := []config.ConfigurationState{
+				{Yard: "default", Setting: "FUTURE_SETTING", Scope: "host", Path: host, Line: line + 1, Reason: "unknown-setting", Message: unknown},
+				{Yard: "default", Setting: "YARD_DEVICES", Scope: "host", Path: host, Line: line, Repair: repair, Reason: "profile-only", Message: message},
 			}
-			message := "YARD_DEVICES in " + host + ":" + strconv.Itoa(line) + " is ignored: only environment profiles declare it; remove it with " + want.Repair
-			if len(report.Configuration) != 1 || report.Configuration[0] != want {
+			if !slices.Equal(report.Configuration, want) || strings.Contains(stdout.String(), "private value") {
 				t.Fatalf("%v configuration = %#v, want %#v", arguments, report.Configuration, want)
 			}
-			if !slices.Contains(arguments, "--json") && text != "ignored: "+message {
-				t.Fatalf("check text state = %q, want %q", text, "ignored: "+message)
+			if !slices.Contains(arguments, "--json") && text != "ignored: "+unknown+"\nignored: "+message {
+				t.Fatalf("check text state = %q", text)
 			}
 			if strings.Count(stderr.String(), "configuration state: ") != 1 || !strings.Contains(stderr.String(), "broken") {
 				t.Fatalf("%v hid the yard load refusal: stderr=%q", arguments, stderr.String())

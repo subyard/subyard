@@ -45,7 +45,7 @@ func TestSourceDiagnosticDoesNotRenderMalformedInput(t *testing.T) {
 		{"required parameter", "SSH_PORT=${SSH_PORT:?" + secret + "}\n", "SSH_PORT", "only literal values"},
 		{"invalid parameter", "SSH_PORT=${" + secret + "!}\n", "SSH_PORT", "only literal values"},
 		{"invalid variable", secret + "!=value\n", "", "invalid variable name"},
-		{"unknown setting", secret + "=value\n", "", "unknown setting"},
+		{"unknown secret-like setting", "FUTURE_SETTING=password=" + secret + "\n", "FUTURE_SETTING", "secret material"},
 		{"invalid mount", "HOST_MOUNTS=" + secret + "\n", "HOST_MOUNTS", "invalid mount list"},
 		{"mixed quotes", "GIT_USER_NAME='start'$" + secret + "'end'\n", "GIT_USER_NAME", "Replace it with one literal value"},
 		{"unterminated value", "SSH_PORT='" + secret + "\n", "SSH_PORT", "unterminated quoted assignment"},
@@ -402,7 +402,7 @@ func TestLoadCollectsAssetPathAndCodingToolRoleRefusals(t *testing.T) {
 	}})
 	diagnostic := Diagnose(filepath.Join(home, ".config", "subyard"), err)
 	message := diagnostic.Message("generic")
-	for _, want := range []string{"AGENT_alpha_RULES", "AGENT_beta_CONFIG", "require YARD_KIND=vm", "yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration"} {
+	for _, want := range []string{"AGENT_alpha_RULES", "AGENT_beta_CONFIG", "require YARD_KIND=vm", "yard role forbids non-empty CODING_TOOL_INTEGRATIONS"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("load refusals lack %q: %s", want, message)
 		}

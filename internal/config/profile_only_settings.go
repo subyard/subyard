@@ -30,8 +30,8 @@ type IgnoredAssignment struct {
 	Line                    int
 	Git                     bool
 	Retired                 bool
-	// Unknown is the kind of an input this release does not know. Item names
-	// the unknown selection entry of an UnknownSelection kind.
+	// Unknown is the kind of an input this release does not know. Item is
+	// the unknown entry of a selection list; as a value, it is never rendered.
 	Unknown UnknownInput
 	Item    string
 	// authored reports that config unset at Scope writes exactly Path and
@@ -43,9 +43,9 @@ type IgnoredAssignment struct {
 type UnknownInput string
 
 const (
-	UnknownSetting     UnknownInput = "unknown-setting"
-	UnknownProfile     UnknownInput = "unknown-profile"
-	UnknownIntegration UnknownInput = "unknown-integration"
+	UnknownSettingInput     UnknownInput = "unknown-setting"
+	UnknownProfileInput     UnknownInput = "unknown-profile"
+	UnknownIntegrationInput UnknownInput = "unknown-integration"
 )
 
 // Command reports whether the assignment came from the command environment.
@@ -79,12 +79,13 @@ func (assignment IgnoredAssignment) String() string {
 		source = fmt.Sprintf("%s:%d", assignment.Path, assignment.Line)
 	}
 	switch assignment.Unknown {
-	case UnknownSetting:
+	case UnknownSettingInput:
 		return fmt.Sprintf("%s in %s is not a setting of this release and is ignored; a newer release may use it", assignment.Name, source)
-	case UnknownProfile:
-		return fmt.Sprintf("%s in %s selects profile %s, which this release does not ship; it is ignored", assignment.Name, source, assignment.Item)
-	case UnknownIntegration:
-		return fmt.Sprintf("%s in %s selects integration %s, which this release does not ship; it is ignored", assignment.Name, source, assignment.Item)
+	case UnknownProfileInput:
+		// A selected name is a value: it is never rendered.
+		return fmt.Sprintf("%s in %s selects a profile this release does not ship; it is ignored", assignment.Name, source)
+	case UnknownIntegrationInput:
+		return fmt.Sprintf("%s in %s selects an integration this release does not ship; it is ignored", assignment.Name, source)
 	}
 	if assignment.Retired {
 		return fmt.Sprintf("%s in %s:%d is retired and ignored; %s", assignment.Name, assignment.Path, assignment.Line, assignment.Repair())
@@ -122,7 +123,7 @@ func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, va
 	assignment := tracker.ignoredInput(layer, name, path, line)
 	assignment.Retired = retired
 	if unknown {
-		assignment.Unknown = UnknownSetting
+		assignment.Unknown = UnknownSettingInput
 	}
 	tracker.ignored = append(tracker.ignored, assignment)
 }
@@ -205,10 +206,8 @@ type ConfigurationState struct {
 	Path    string `json:"path,omitempty"`
 	Line    int    `json:"line,omitempty"`
 	Repair  string `json:"repair,omitempty"`
-	// Reason is "profile-only" or an UnknownInput kind; Item names an
-	// unknown selection entry.
+	// Reason is "profile-only" or an UnknownInput kind.
 	Reason  string `json:"reason"`
-	Item    string `json:"item,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -221,6 +220,6 @@ func (assignment IgnoredAssignment) ConfigurationState() ConfigurationState {
 	return ConfigurationState{
 		Yard: assignment.Yard, Setting: assignment.Name, Scope: assignment.Scope,
 		Path: assignment.Path, Line: assignment.Line, Repair: assignment.Repair(),
-		Reason: reason, Item: assignment.Item, Message: assignment.String(),
+		Reason: reason, Message: assignment.String(),
 	}
 }

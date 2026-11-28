@@ -317,8 +317,10 @@ func (snapshot *sourceSnapshot) readOverrides(
 	} else if err != nil {
 		return unexpected, err
 	}
-	// Each asset is checked independently; an unknown file is an unexpected path.
-	var unknown, refusals []error
+	// Each asset is checked independently. A file that is no file setting of
+	// this release may be one of a newer release: it is checked like a known
+	// one and kept unchanged, but no application reads it.
+	var refusals []error
 	walkFailure := filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			refusals = append(refusals, walkErr)
@@ -345,8 +347,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 		}
 		mapping, ok := allowed[filepath.ToSlash(relative)]
 		if !ok {
-			unknown = append(unknown, fmt.Errorf("unknown file setting %q", filepath.ToSlash(relative)))
-			return nil
+			mapping = config.FileSettingMapping{Name: filepath.ToSlash(relative)}
 		}
 		content, err := readSourceFile(snapshot.root, path, maxAssetBytes)
 		if err != nil {
@@ -358,9 +359,13 @@ func (snapshot *sourceSnapshot) readOverrides(
 			return nil
 		}
 		target := filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, targetRoot, relative))
+		var applications []config.SettingApplication
+		if ok {
+			applications = []config.SettingApplication{mapping.Application}
+		}
 		snapshot.files[target] = candidateFile{
 			SourcePath: path, Content: content, Digest: digestBytes(content), Mode: 0o644,
-			Applications: []config.SettingApplication{mapping.Application},
+			Applications: applications,
 		}
 		return nil
 	})
@@ -368,7 +373,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 	if err == nil {
 		snapshot.assetRoots[targetRoot] = agentsRoot
 	}
-	return domain.CollectRefusals(append([]error{unexpected}, unknown...)...), err
+	return unexpected, err
 }
 
 // skipEntry skips a refused directory's subtree and continues after a refused file.

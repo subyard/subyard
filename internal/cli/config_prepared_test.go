@@ -473,6 +473,12 @@ func TestConfigExactScalarRewritesLegacyProfileAliasWithoutConflict(t *testing.T
 	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
 	target := filepath.Join(configHome, "yards/named/config.env")
 	writeConfigCommandFile(t, target, "# retained\nYARD_PROFILES=alpha\nSSH_PORT=2290\n", 0o640)
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(root, "config", "profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeConfigCommandFile(t, filepath.Join(root, "config", "profiles", name, "profile.conf"), "", 0o644)
+	}
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	prepared := configExactPlan(t, fixture.New(configExactOptions(environment, nil, nil)), loaded, []string{"set", "ENVIRONMENT_PROFILES", "beta", "--scope", "yard"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
@@ -1009,7 +1015,7 @@ func TestConfigPreparationFailuresKeepTheirOwnDiagnostics(t *testing.T) {
 }
 
 func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
-	for _, assignment := range []string{"YARD_TEMPLATE=s3cr3tvalue\n", "CODING_TOOL_INTEGRATIONS=s3cr3tvalue\n", "export s3cr3tvalue\n", "SSH_PORT='s3cr3tvalue\n", "SSH_PORT=$(s3cr3tvalue)\n"} {
+	for _, assignment := range []string{"YARD_TEMPLATE=s3cr3tvalue\n", "CODING_TOOL_INTEGRATIONS='s3cr3tvalue bad,name'\n", "export s3cr3tvalue\n", "SSH_PORT='s3cr3tvalue\n", "SSH_PORT=$(s3cr3tvalue)\n"} {
 		fixture := newFixture(t, withCheckoutConfig())
 		configHome := fixture.ConfigHome
 		writeConfigCommandFile(t, filepath.Join(configHome, "yards", "sibling", "config.env"), assignment)

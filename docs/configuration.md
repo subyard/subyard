@@ -150,6 +150,28 @@ as a warning, with its file and line and its removal:
 file, otherwise the line to remove from that file. The JSON report of `update --check` lists
 ignored literal assignments in its `configuration` array.
 
+### Settings of newer releases
+
+A host, shared, yard or Git settings file, the Git source, and a selection can name something this
+release does not know, for example after a rollback or when hosts on different releases share Git
+settings. Loading does not refuse it:
+
+- An assignment of an unknown setting is ignored. It never reaches the evaluated environment,
+  hooks or the yard. Its value is still refused when it looks like secret material, and a name over
+  128 bytes is refused.
+- An unknown profile in `ENVIRONMENT_PROFILES`, or an unknown integration in
+  `CODING_TOOL_INTEGRATIONS`, is dropped from the effective selection. The rest of the selection
+  keeps its authority: dropping a name never selects a default profile or another integration.
+  A malformed name, and an unknown integration in a command override, are still refused.
+- An unknown file under a Git `overrides/agents` directory is synced unchanged and read by nothing.
+
+`config show`, `config validate`, `status`, `yard update --check` (also in its JSON `configuration`
+array, with `reason` and `message`) and the `init` plan list each ignored assignment and selection
+entry as `ignored:` configuration state with its file and line, never its value. It is not a warning and changes no exit status. The
+release that defines the name reads it again without changes. `config set` and `config import`
+still refuse a name this release does not know, and `integration enable` and `disable` write the
+selection without an unknown integration.
+
 Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause
 a configuration read error under the literal-value rule. If an old profile-only assignment
 supplied a device, the `init` plan names each
