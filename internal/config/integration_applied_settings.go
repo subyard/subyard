@@ -153,9 +153,30 @@ func (catalog Catalog) ReadableAppliedIntegrations(desired map[string]string, se
 		return kept, applied
 	}
 	readable := maps.Clone(applied)
+	owned := map[string]bool{}
 	for _, id := range dropped {
+		for _, link := range strings.Fields(applied["AGENT_"+id+"_PERSIST"]) {
+			owned[link] = true
+		}
 		for _, suffix := range integrationMetadataSuffixes {
 			delete(readable, "AGENT_"+id+"_"+suffix)
+		}
+	}
+	for _, id := range kept {
+		for _, link := range strings.Fields(applied["AGENT_"+id+"_PERSIST"]) {
+			delete(owned, link)
+		}
+	}
+	// The dropped integrations' persist links leave the recorded link sets too;
+	// a link without a selected owner is otherwise refused.
+	for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
+		value, ok := readable[name]
+		if !ok {
+			continue
+		}
+		links := strings.Fields(value)
+		if remaining := slices.DeleteFunc(slices.Clone(links), func(link string) bool { return owned[link] }); len(remaining) != len(links) {
+			readable[name] = strings.Join(remaining, " ")
 		}
 	}
 	return kept, readable

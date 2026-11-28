@@ -174,8 +174,8 @@ settings. Loading does not refuse it:
 
 `config show`, `config validate`, `status`, `yard update --check` (also in its JSON `configuration`
 array, with `reason` and `message`) and the `init` plan list each ignored assignment, selection
-entry and file as `ignored:` configuration state with its file and line, never its value or the
-ignored name. Activation plans count the ignored selection entries. It is not a warning and changes no exit status. The
+entry and file as `ignored:` configuration state with its file and line, never its value or a
+selected profile or integration name. Activation plans count the ignored selection entries. It is not a warning and changes no exit status. The
 release that defines the name reads it again without changes. `config set` and `config import`
 still refuse a name this release does not know, and `integration enable` and `disable` write the
 selection without an unknown integration.

@@ -272,10 +272,18 @@ func TestPendingInitReadsInstalledIntegrationsOfNewerReleases(t *testing.T) {
 	settings := maps.Clone(executor.settings)
 	for _, metadata := range []map[string]string{
 		{},
-		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "releases", "r2", "config", "agents", "futuretool", "provision.sh")},
+		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool:/srv/agents/futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "releases", "r2", "config", "agents", "futuretool", "provision.sh")},
 	} {
 		executor.settings = maps.Clone(settings)
 		maps.Copy(executor.settings, metadata)
+		// The newer release recorded its integration's persist link as well.
+		if persist := metadata["AGENT_futuretool_PERSIST"]; persist != "" {
+			for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
+				if value, ok := executor.settings[name]; ok || name == "INTEGRATION_HOST_LINKS" {
+					executor.settings[name] = strings.TrimSpace(value + " " + persist)
+				}
+			}
+		}
 		executor.selected = []string{"codex", "futuretool"}
 		fixture.cli.options.Executor = executor
 		plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
