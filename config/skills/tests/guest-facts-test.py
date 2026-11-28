@@ -184,17 +184,16 @@ class Facts(unittest.TestCase):
     def read_host(self):
         return facts.host_errors(facts.load(self.root/'host-errors.json', facts.HOST_ERRORS_LIMIT), machine=self.machine)
 
-    def test_host_errors_store_facts_for_this_guest_and_keep_the_newest(self):
+    def test_host_errors_store_facts_for_this_guest_and_replace_whole_snapshots(self):
         self.put(self.host_snapshot())
         stored = self.read_host()
         self.assertEqual(stored['machine_id'], 'a'*32)
         self.assertEqual(stored['setup'][0]['refusals'][0]['names'], ['ALLOWS_HOST_ACCESS'])
         self.assertEqual((self.root/'host-errors.json').stat().st_mode & 0o777, 0o644)
-        # A concurrent owner's older snapshot never replaces a newer one.
+        # A whole snapshot replaces the previous one, even after an owner clock step back.
         self.put(self.host_snapshot('2026-11-28T09:59:59.000000000Z', rpc=[]))
-        self.assertEqual(len(self.read_host()['rpc']), 1)
-        self.put(self.host_snapshot('2026-11-28T10:00:01.000000000Z', rpc=[]))
         self.assertEqual(self.read_host()['rpc'], [])
+        self.assertLessEqual((self.root/'host-errors.json').stat().st_size, facts.HOST_ERRORS_LIMIT)
         self.assertEqual(list(self.root.glob('.host-errors-*')), [])
         self.machine.write_text('b'*32)
         with self.assertRaisesRegex(ValueError, 'another guest'): self.read_host()

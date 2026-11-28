@@ -15,6 +15,8 @@ import (
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/audit"
+	"github.com/Subyard/Subyard/internal/command"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/hosterrors"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -141,34 +143,127 @@ func TestPublishHostErrorsWritesTheSnapshotIntoTheRunningYard(t *testing.T) {
 	}
 }
 
-// Failures carry the session's yard, and the writer refreshes the snapshot
-// after failures and executed operations, and once more at the end.
-func TestRPCRecorderKeepsSessionYardAndRefreshesTheSnapshot(t *testing.T) {
+// Failures carry the yard of the request: the session's, or the one its
+// handler resolved. The publisher refreshes each changed yard after failures
+// and executed operations, and once more at the end.
+func TestRPCRecorderKeepsTheRequestYardAndRefreshesItsSnapshot(t *testing.T) {
 	home := testkit.TempDir(t)
-	published := make(chan struct{}, 8)
+	published := make(chan string, 8)
+	other := domain.Context{YardName: "other", IncusProject: "subyard-other", YardInstanceName: "yard"}
 	recorder, closeRecorder := startRPCErrorRecorder(rpc.HandlerFunc(
-		func(_ context.Context, call rpc.Call, _ rpc.Emit) (any, error) {
-			if call.Method == rpc.MethodOperationPlan {
+		func(ctx context.Context, call rpc.Call, _ rpc.Emit) (any, error) {
+			switch call.Method {
+			case rpc.MethodOperationPlan:
 				return nil, errors.New("failed")
+			case rpc.MethodOwnerInventory:
+				noteRPCYard(ctx, other)
+				return nil, errors.New("failed for another yard")
 			}
 			return nil, nil
-		}), audit.RPCErrorLog{Home: home}, "work", func(context.Context) { published <- struct{}{} })
+		}), audit.RPCErrorLog{Home: home}, domain.Context{YardName: "work"},
+		func(_ context.Context, yard domain.Context) { published <- yard.YardName })
 	if _, err := recorder.Handle(context.Background(), rpc.Call{ID: "r1", Method: rpc.MethodOperationPlan}, nil); err == nil {
 		t.Fatal("the recorder hid the failure")
 	}
 	select {
-	case <-published:
+	case name := <-published:
+		if name != "work" {
+			t.Fatalf("published %s", name)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a failure did not refresh the snapshot")
 	}
 	_, _ = recorder.Handle(context.Background(), rpc.Call{ID: "r2", Method: rpc.MethodContextGet}, nil)
 	_, _ = recorder.Handle(context.Background(), rpc.Call{ID: "r3", Method: rpc.MethodOperationExecute}, nil)
+	_, _ = recorder.Handle(context.Background(), rpc.Call{ID: "r4", Method: rpc.MethodOwnerInventory}, nil)
 	closeRecorder()
-	if len(published) != 1 {
-		t.Fatalf("published %d more times, want one final refresh after the executed operation", len(published))
+	close(published)
+	names := []string{}
+	for name := range published {
+		names = append(names, name)
+	}
+	if strings.Join(names, ",") != "other,work" {
+		t.Fatalf("final refresh published %v, want each changed yard once", names)
 	}
 	records, err := (audit.RPCErrorLog{Home: home}).Read(10)
-	if err != nil || len(records) != 1 || records[0].Yard != "work" {
+	if err != nil || len(records) != 2 || records[0].Yard != "work" || records[1].Yard != "other" {
 		t.Fatalf("records=%#v err=%v", records, err)
+	}
+}
+
+// An executed init records its attempt: unfinished under the owner barrier,
+// then its outcome before the barrier is released.
+func TestExecutedInitRecordsItsOutcomeInSetupHistory(t *testing.T) {
+	cliFixture, root, environment, stateDirectory := newPreparationParityFixture(t)
+	environment, incus, projectData, initPlatform := preparationConvergedInit(t, root, environment, stateDirectory)
+	var stderr bytes.Buffer
+	program := cliFixture.New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"init"},
+		Environment: append(environment, "SUBYARD_OPERATION_ID=setup-history"), WorkingDir: root,
+		Prompt: &testkit.Prompt{}, AdapterRunner: &testkit.ScriptedAdapter{}, Clock: testkit.NewManualClock(time.Unix(100, 0)),
+		Incus: incus, ProjectData: projectData, InitPlatform: initPlatform, NetworkPolicy: allowTestNetworkPolicy(),
+		Stdout: &bytes.Buffer{}, Stderr: &stderr,
+	})
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("init: code=%d stderr=%s", code, stderr.String())
+	}
+	records, err := (audit.SetupHistory{Home: environmentValue(environment, "SUBYARD_HOME")}).Read(10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%#v err=%v", records, err)
+	}
+	if record := records[0]; record.OperationID != "setup-history" || record.Yard != "default" || record.Phase != "execute" ||
+		record.Status != "success" || record.ErrorCode != "" || record.FinishedAt.IsZero() {
+		t.Fatalf("record=%#v", record)
+	}
+}
+
+func TestConfirmationSetupOutcomeClassifiesEveryRefusal(t *testing.T) {
+	for _, test := range []struct {
+		err          error
+		status, code string
+	}{
+		{application.ErrDeclined, "declined", "operator_declined"},
+		{fmt.Errorf("x: %w", domain.ErrConfirmationRequired), "declined", "confirmation_required"},
+		{context.Canceled, "interrupted", "context_cancelled"},
+		{fmt.Errorf("x: %w", domain.ErrPlanStale), "failure", "plan_stale"},
+		{errors.New("prompt read failed"), "failure", "confirmation_failed"},
+	} {
+		if status, code := confirmationSetupOutcome(test.err); status != test.status || code != test.code {
+			t.Errorf("%v: %s/%s", test.err, status, code)
+		}
+	}
+}
+
+func TestPublishAfterCommandRefreshesOnlyItsTriggers(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(fixture.Root, hostErrorsProgram)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(fixture.Root, hostErrorsProgram), []byte("# facts helper\n"), 0o644)
+	loaded := config.Loaded{Context: domain.Context{YardName: "work", IncusProject: "subyard-work", YardInstanceName: "yard", AccessKind: domain.AccessLocal}}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, test := range []struct {
+		name       string
+		definition command.Definition
+		arguments  []string
+		ctx        context.Context
+		publishes  int
+	}{
+		{"start", command.Definition{Name: "start", Handler: "@lifecycle"}, nil, context.Background(), 1},
+		{"init", command.Definition{Name: "init", Handler: "@init"}, []string{"--yes"}, context.Background(), 1},
+		{"stop", command.Definition{Name: "stop", Handler: "@lifecycle"}, nil, context.Background(), 0},
+		{"help", command.Definition{Name: "init", Handler: "@init"}, []string{"--help"}, context.Background(), 0},
+		{"interrupted", command.Definition{Name: "init", Handler: "@init"}, nil, cancelled, 0},
+	} {
+		incus := &testkit.Incus{
+			Instances: map[string]ports.InstanceInfo{"subyard-work/yard": {Name: "yard", Project: "subyard-work", Status: "Running"}},
+			ExecSteps: []testkit.IncusExecStep{{}},
+		}
+		program := fixture.New(Options{Incus: incus, Executor: incus})
+		program.publishAfterCommand(test.ctx, test.definition, loaded, test.arguments)
+		if len(incus.ExecCalls) != test.publishes {
+			t.Errorf("%s: %d publications, want %d", test.name, len(incus.ExecCalls), test.publishes)
+		}
 	}
 }

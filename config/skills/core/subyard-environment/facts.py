@@ -113,14 +113,14 @@ def read(path=FACTS, machine=MACHINE):
     return value
 
 
-def write(value, path=FACTS):
+def write(value, path=FACTS, separators=None):
     safe(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.stem + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), 0o644)
             os.fchown(stream.fileno(), *TRUSTED_OWNER)
-            stream.write((json.dumps(value, sort_keys=True) + '\n').encode())
+            stream.write((json.dumps(value, sort_keys=True, separators=separators) + '\n').encode())
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -211,8 +211,8 @@ def host_errors(value, stored=True, machine=MACHINE):
                              'refusals': 'refusals', 'omitted_refusals': 'number', 'incomplete': 'flag'}, 10)
     entries([value['omitted']], {name: 'number' for name in SECTIONS}, 1)
     unavailable = value['unavailable']
-    if (not isinstance(unavailable, list) or len(set(unavailable)) != len(unavailable) or
-            any(x not in SECTIONS for x in unavailable)):
+    if (not isinstance(unavailable, list) or any(x not in SECTIONS for x in unavailable) or
+            len(set(unavailable)) != len(unavailable)):
         raise ValueError('invalid host errors')
     return value
 
@@ -221,14 +221,10 @@ def put_host_errors(value, path=HOST_ERRORS, machine=MACHINE):
     host_errors(value, stored=False)
     if path.is_symlink():
         raise ValueError('symlinked host errors file')
-    try:
-        old = host_errors(load(path, HOST_ERRORS_LIMIT), machine=machine)
-    except (OSError, ValueError, TypeError, KeyError):
-        old = None
-    # Concurrent owners publish whole snapshots: never replace a newer one.
-    if old and old['generated_at'] > value['generated_at']:
-        return
-    write(dict(value, machine_id=identity(machine)), path)
+    # Each publication is a whole snapshot; the last one wins, and the next
+    # corrects one that raced it, whatever the owner clock did.
+    # Compact like the owner's encoding, which its size bound measures.
+    write(dict(value, machine_id=identity(machine)), path, (',', ':'))
 
 
 def main():

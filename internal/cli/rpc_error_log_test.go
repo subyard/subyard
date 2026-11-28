@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/audit"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/safefs"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -33,7 +34,7 @@ func TestOwnerRPCFailuresAreKeptAndShownByLogsRPC(t *testing.T) {
 	recorder, closeRecorder := startRPCErrorRecorder(rpc.HandlerFunc(
 		func(_ context.Context, call rpc.Call, _ rpc.Emit) (any, error) {
 			return nil, failures[call.Method]
-		}), audit.RPCErrorLog{Home: home}, "", func(context.Context) {})
+		}), audit.RPCErrorLog{Home: home}, domain.Context{}, func(context.Context, domain.Context) {})
 	for index, method := range []string{"operation.plan", "owner.inventory", "operation.execute", "context.get"} {
 		id := fmt.Sprintf("veranda-%d", index+1)
 		_, err := recorder.Handle(context.Background(), rpc.Call{ID: id, OperationID: id, Method: method}, nil)
@@ -117,7 +118,7 @@ func failingRecorder(t *testing.T, failure error) (*CLI, string, rpcErrorRecorde
 		func(_ context.Context, call rpc.Call, _ rpc.Emit) (any, error) {
 			_ = cli.rpcOperation(call.OperationID)
 			return nil, failure
-		}), audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)}, "", func(context.Context) {})
+		}), audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)}, domain.Context{}, func(context.Context, domain.Context) {})
 	return cli, home, recorder, closeRecorder
 }
 

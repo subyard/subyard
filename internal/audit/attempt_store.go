@@ -80,10 +80,13 @@ func (store attemptStore[T]) read(limit int) ([]T, error) {
 	if limit < 1 {
 		return nil, errors.New(store.label + " limit must be positive")
 	}
-	records, _, err := store.list(filepath.Join(store.home, "logs", store.directory))
-	if errors.Is(err, os.ErrNotExist) {
+	directory := filepath.Join(store.home, "logs", store.directory)
+	// Only a missing directory is an empty history; a record that vanished
+	// during the read stays an error.
+	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
 		return []T{}, nil
 	}
+	records, _, err := store.list(directory)
 	if err != nil {
 		return nil, err
 	}

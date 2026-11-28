@@ -615,9 +615,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 		code, err := cli.finishRegisteredInitMigrations(ctx, yard, commandArguments, yes)
 		if err != nil {
 			cli.errorf("init compatibility migrations: %v", err)
+			cli.recordSetupRefusal(definition, commandArguments, readOnlyInvocation, yard, "init_migration_failed", err)
 			return 1
 		}
 		if code > 0 {
+			cli.recordSetupRefusal(definition, commandArguments, readOnlyInvocation, yard, "init_migration_refused", nil)
 			return code
 		}
 		if code == 0 {
@@ -628,6 +630,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 	switch {
 	case admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery:
 		if code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes); done {
+			if core && code != 0 {
+				cli.recordSetupRefusal(definition, commandArguments, readOnlyInvocation, yard, "release_gate_refused", nil)
+			}
 			return code
 		}
 	case admission.gate == gateSkipRead && admission.handler == "@client-projects":
@@ -846,9 +851,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 				cli.errorf("Next: %s", step)
 			}
 		}
-		if core && definition.Handler == "@init" && !readOnlyInvocation && !cli.releaseTransitionChild &&
-			!slices.Contains(commandArguments, "--check") && !commandHelpRequested(commandArguments) && domain.SafeName(yard) {
-			cli.recordSetupTerminal(cli.ensureOperationID(), yard, "prepare", "failure", "configuration_invalid", err)
+		if core {
+			cli.recordSetupRefusal(definition, commandArguments, readOnlyInvocation, yard, "configuration_invalid", err)
 		}
 		return 2
 	}
@@ -970,16 +974,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 						cli.errorf("update history: %v", historyErr)
 					}
 				}
-				if definition.Handler == "@init" && !readOnlyInvocation &&
-					!slices.Contains(commandArguments, "--check") && !commandHelpRequested(commandArguments) {
-					status, code := "failure", "preparation_failed"
-					if errors.Is(prepareErr, context.Canceled) || errors.Is(prepareErr, context.DeadlineExceeded) {
-						status, code = "interrupted", "context_cancelled"
-					}
-					cli.recordSetupTerminal(cli.ensureOperationID(), loaded.Context.YardName, "prepare", status, code, prepareErr)
-				}
+				cli.recordSetupRefusal(definition, commandArguments, readOnlyInvocation, loaded.Context.YardName, "preparation_failed", prepareErr)
 				exit := cli.reportPreparationError(definition, prepareErr)
-				if !readOnlyInvocation {
+				if !readOnlyInvocation && !slices.Contains(commandArguments, "--check") {
 					cli.publishAfterCommand(ctx, definition, loaded, commandArguments)
 				}
 				return exit
@@ -4017,23 +4014,22 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
 	home := cli.hostDataHome()
-	// Owner-services sessions serve no yard: their records carry none and
-	// reach yards with the next snapshot of another trigger.
-	recordYard, publish := "", func(context.Context) {}
+	// Owner-services sessions serve no yard: a request records the yard its
+	// handler resolves, and none otherwise.
+	session := domain.Context{}
 	if !ownerServicesOnly {
-		recordYard = loaded.Context.YardName
-		publish = cli.hostErrorsPublisher(loaded.Context)
+		session = loaded.Context
 	}
 	recorder, closeRecorder := startRPCErrorRecorder(handler,
-		audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)}, recordYard, publish)
+		audit.RPCErrorLog{Home: home, BeforeWrite: cli.sessionLogAdmission(home)}, session, cli.hostErrorsPublisher())
 	// Runs after Serve has returned, so no handler sends a record any more.
 	defer closeRecorder()
-	session := rpc.Session{Handler: recorder,
+	served := rpc.Session{Handler: recorder,
 		EngineVersion: Version, Capabilities: rpc.CapabilitiesForSession("workspace"), DrainOnEOF: true}
 	if ownerServicesOnly {
-		session.Capabilities = rpc.CapabilitiesForSession("owner-services")
+		served.Capabilities = rpc.CapabilitiesForSession("owner-services")
 	}
-	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
+	if err := served.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 			cli.errorf("RPC session: %v", err)
 			return 1
@@ -4050,77 +4046,115 @@ const rpcErrorBacklog = 64
 // queues its record; one writer appends it after the response, so recording
 // never delays or changes a response. Records beyond the backlog, and records
 // still blocked by the owner barrier when the session ends, are lost.
-// The writer also refreshes the yard's host-errors snapshot after failures and
-// executed operations, at most once per rpcHostErrorsInterval and once more
-// when the session ends.
+// Each record names the yard of the request (see rpcRecordTarget), and a
+// separate publisher refreshes that yard's host-errors snapshot after failures
+// and executed operations, at most once per rpcHostErrorsInterval and once
+// more when the session ends.
 type rpcErrorRecorder struct {
 	handler rpc.Handler
-	yard    string
-	// A nil record only asks for a snapshot refresh.
-	records chan *audit.RPCError
+	session domain.Context
+	records chan rpcRecorderEvent
 }
 
-// rpcHostErrorsInterval bounds how often a session refreshes the snapshot.
+// rpcRecorderEvent is a failure to append, if any, and the yard to refresh.
+type rpcRecorderEvent struct {
+	record *audit.RPCError
+	yard   domain.Context
+}
+
+// rpcHostErrorsInterval bounds how often a session refreshes snapshots.
 const rpcHostErrorsInterval = time.Minute
 
-// startRPCErrorRecorder starts the writer; the returned function stops it
-// after one last attempt to write the queued records and the snapshot.
-func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog, yard string, publish func(context.Context)) (rpcErrorRecorder, func()) {
-	records := make(chan *audit.RPCError, rpcErrorBacklog)
+// startRPCErrorRecorder starts the writer and the snapshot publisher; the
+// returned function stops them after one last attempt to write the queued
+// records and to refresh the yards changed since the last refresh.
+// Publication runs apart from the writer, so a slow yard never holds records.
+func startRPCErrorRecorder(handler rpc.Handler, log audit.RPCErrorLog, session domain.Context, publish func(context.Context, domain.Context)) (rpcErrorRecorder, func()) {
+	records := make(chan rpcRecorderEvent, rpcErrorBacklog)
+	var pendingMu sync.Mutex
+	pending := map[string]domain.Context{}
+	changed := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	written, published := make(chan struct{}), make(chan struct{})
 	go func() {
-		defer close(done)
-		var published time.Time
+		defer close(written)
+		defer close(changed)
+		for event := range records {
+			if event.record != nil {
+				_ = log.Append(ctx, *event.record)
+			}
+			if event.yard.YardName == "" {
+				continue
+			}
+			pendingMu.Lock()
+			pending[event.yard.YardName] = event.yard
+			pendingMu.Unlock()
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	flush := func() {
+		pendingMu.Lock()
+		yards := pending
+		pending = map[string]domain.Context{}
+		pendingMu.Unlock()
+		names := slices.Sorted(maps.Keys(yards))
+		for _, name := range names {
+			publish(ctx, yards[name])
+		}
+	}
+	go func() {
+		defer close(published)
+		var last time.Time
 		var wait <-chan time.Time
-		pending := false
+		dirty := false
 		for {
 			select {
-			case record, open := <-records:
+			case _, open := <-changed:
 				if !open {
-					if pending {
-						publish(ctx)
-					}
+					flush()
 					return
 				}
-				if record != nil {
-					_ = log.Append(ctx, *record)
-				}
-				pending = true
+				dirty = true
 			case <-wait:
 				wait = nil
 			}
-			if !pending || wait != nil || len(records) != 0 {
+			if !dirty || wait != nil {
 				continue
 			}
-			if since := time.Since(published); since < rpcHostErrorsInterval {
+			if since := time.Since(last); since < rpcHostErrorsInterval {
 				wait = time.After(rpcHostErrorsInterval - since)
 				continue
 			}
-			publish(ctx)
-			published, pending = time.Now(), false
+			flush()
+			last, dirty = time.Now(), false
 		}
 	}()
-	return rpcErrorRecorder{handler: handler, yard: yard, records: records}, func() {
+	return rpcErrorRecorder{handler: handler, session: session, records: records}, func() {
 		close(records)
 		cancel()
-		<-done
+		<-written
+		<-published
 	}
 }
 
 func (recorder rpcErrorRecorder) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
-	result, err := recorder.handler.Handle(ctx, call, emit)
+	target := &rpcRecordTarget{yard: recorder.session}
+	result, err := recorder.handler.Handle(context.WithValue(ctx, rpcRecordTargetKey{}, target), call, emit)
+	yard := target.get()
 	var record *audit.RPCError
 	if err != nil {
 		if fault := rpc.FaultOf(ctx, err); fault.Code != rpc.CodeCancelled {
-			record = &audit.RPCError{At: time.Now(), Yard: recorder.yard, Request: call.ID, Operation: call.OperationID,
+			record = &audit.RPCError{At: time.Now(), Yard: yard.YardName, Request: call.ID, Operation: call.OperationID,
 				Method: call.Method, Code: string(fault.Code), Error: err.Error()}
 		}
 	}
 	// An executed operation may have changed the setup or update history.
 	if record != nil || call.Method == rpc.MethodOperationExecute {
 		select {
-		case recorder.records <- record:
+		case recorder.records <- rpcRecorderEvent{record: record, yard: yard}:
 		default:
 		}
 	}
@@ -4347,6 +4381,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, preparationRPCError(definition, selectionErr)
 			}
 			params.Arguments = arguments
+			if domain.SafeName(yard) {
+				noteRPCYard(ctx, domain.Context{YardName: yard})
+			}
 			if definition.Handler == "@service" {
 				operationLoaded, bootstrap, err = operationCLI.loadServiceContext(yard, params.Arguments)
 			} else {
@@ -4355,6 +4392,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if err != nil {
 				return nil, preparationRPCError(definition, err)
 			}
+			noteRPCYard(ctx, operationLoaded.Context)
 			if operationLoaded.Context.AccessKind != domain.AccessLocal {
 				return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "request the service operation on its owner host"}
 			}
@@ -4365,10 +4403,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			operationCLI.env = maps.Clone(handler.cli.baseEnv)
 			operationCLI.env["SUBYARD_OPERATION_ID"] = call.OperationID
 			operationCLI.env["SUBYARD_YARD_EXPLICIT"] = "1"
+			noteRPCYard(ctx, domain.Context{YardName: *params.TargetYard})
 			operationLoaded, bootstrap, err = operationCLI.loadInitContext(*params.TargetYard, true, params.Arguments)
 			if err != nil {
+				operationCLI.recordSetupRefusal(definition, params.Arguments, false, *params.TargetYard, "configuration_invalid", err)
 				return nil, preparationRPCError(definition, err)
 			}
+			noteRPCYard(ctx, operationLoaded.Context)
 			if operationLoaded.Context.Paths.ConfigHome != handler.loaded.Context.Paths.ConfigHome {
 				return nil, &rpc.Error{Code: rpc.CodeOwnerContextChanged, Message: "bootstrap owner context changed; reconnect before planning"}
 			}
@@ -4388,6 +4429,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			})
 		}
 		if err != nil {
+			operationCLI.recordSetupRefusal(definition, params.Arguments, false, operationLoaded.Context.YardName, "preparation_failed", err)
 			return nil, preparationRPCError(definition, err)
 		}
 		keep := false
@@ -4458,6 +4500,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if !ok {
 			return nil, &rpc.Error{Code: rpc.CodePlanNotFound, Message: call.OperationID}
 		}
+		noteRPCYard(ctx, planned.Loaded.Context)
 		retainCopy := false
 		defer func() {
 			handler.plansMu.Lock()
