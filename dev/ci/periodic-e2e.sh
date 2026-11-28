@@ -185,9 +185,13 @@ E2E_VM_SLOT_COUNT=1
 E2E_MEMORY_RESERVE=2GiB
 E2E_DISK_RESERVE=2GiB
 CONFIG
-  if [ "$check_id" = profile:android/gradle ]; then
-    printf 'E2E_VM_CPU=3\n' >> "$HOME/.config/subyard/config.env"
-  fi
+  # Checks that boot the Android emulator. Its two vCPUs starve a 2-vCPU leased VM: the emulator's
+  # cgroup CPU pressure stays above the readiness limit and boots run into the 20-minute bound.
+  # A third vCPU lets them settle.
+  case "$check_id" in
+    profile:android/*|profile:telemetry/resources)
+      printf 'E2E_VM_CPU=3\n' >> "$HOME/.config/subyard/config.env" ;;
+  esac
   # The default 20 GiB disk needs 62 GiB to build a base; the small runner disk has less.
   free_gib="$(df --output=avail -BG "$HOME" | tail -n 1 | tr -dc 0-9)"
   if [ "$free_gib" -lt 65 ]; then
