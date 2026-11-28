@@ -916,10 +916,11 @@ func TestRepairRecoveryReadsUnfinishedGuestFactsThatKeepTheSelection(t *testing.
 			}
 		}
 	}
-	if !slices.Equal(refused["unfinished"], refused["current"]) {
+	inspection := func(refusal string) bool { return strings.Contains(refusal, "inspect installed") }
+	if slices.ContainsFunc(refused["unfinished"], inspection) || !slices.Equal(refused["unfinished"], refused["current"]) {
 		t.Fatalf("unfinished facts refused %q, current facts %q", refused["unfinished"], refused["current"])
 	}
-	if len(refused["changed"]) <= len(refused["current"]) || !slices.ContainsFunc(refused["changed"], func(refusal string) bool { return strings.Contains(refusal, "inspect installed configuration") }) {
+	if len(refused["changed"]) <= len(refused["current"]) || !slices.ContainsFunc(refused["changed"], inspection) {
 		t.Fatalf("changed selection was read as installed: %q", refused["changed"])
 	}
 }

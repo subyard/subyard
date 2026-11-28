@@ -115,7 +115,7 @@ func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
 }
 
 func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T) {
-	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete", "incomplete-change"} {
+	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete", "incomplete-reordered", "incomplete-change"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			for _, path := range []string{"etc/subyard", filepath.Dir(guestFactsSource)} {
@@ -138,6 +138,9 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 			if scenario == "retained" || scenario == "incomplete" || scenario == "incomplete-change" {
 				selected = []string{"retained"}
 			}
+			if scenario == "incomplete-reordered" {
+				selected = []string{"retained", "other"}
+			}
 			target["selected_profiles"] = selected
 			if scenario == "foreign" {
 				target["yard"].(map[string]any)["name"] = "foreign"
@@ -146,13 +149,17 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 			if scenario == "incomplete" {
 				facts["status"] = "incomplete"
 			}
-			if scenario == "incomplete-change" {
-				// The unfinished refresh began installing another selection.
+			if scenario == "incomplete-change" || scenario == "incomplete-reordered" {
+				// The unfinished refresh began installing another selection, or
+				// the same one in another order.
 				changed := map[string]any{}
 				for key, value := range target {
 					changed[key] = value
 				}
 				changed["selected_profiles"] = []string{"retained", "added"}
+				if scenario == "incomplete-reordered" {
+					changed["selected_profiles"] = []string{"other", "retained"}
+				}
 				facts["status"], facts["target"] = "incomplete", changed
 			}
 			content, _ := json.Marshal(facts)
@@ -165,7 +172,7 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 			}
 			actual, known, err := runtime.AppliedEnvironmentProfiles(context.Background())
 			switch scenario {
-			case "empty", "retained", "incomplete":
+			case "empty", "retained", "incomplete", "incomplete-reordered":
 				if err != nil || !known || strings.Join(actual, " ") != strings.Join(selected, " ") {
 					t.Fatalf("selection=%v known=%v: %v", actual, known, err)
 				}

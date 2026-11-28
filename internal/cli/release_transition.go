@@ -1513,7 +1513,7 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 	}); ok {
 		selected, known, err := profiles.AppliedEnvironmentProfiles(ctx)
 		if err != nil {
-			return target, false, err
+			return target, false, installedReadError{read: "installed-profiles", cause: err}
 		}
 		if known {
 			// This is passive installed-state inspection, not a new profile

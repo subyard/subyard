@@ -23,12 +23,17 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 		status, yard     string
 		missing, written bool
 		refused          bool
+		// unreadable: the applied selection read must refuse after the record.
+		unreadable bool
 	}{
 		{name: "disable", profile: "github", applied: []string{"a", "github", "b"}, want: []string{"a", "b"}, written: true},
 		{name: "enable", profile: "github", selected: true, applied: []string{"a"}, want: []string{"a", "github"}, written: true},
 		{name: "enable-present", profile: "github", selected: true, applied: []string{"github", "a"}, want: []string{"github", "a"}},
 		{name: "disable-absent", profile: "github", applied: []string{"a"}, want: []string{"a"}},
-		{name: "incomplete", profile: "github", applied: []string{"github"}, status: "incomplete", refused: true},
+		// A change refused by unfinished facts stays in their target, so the
+		// stale successful selection is not reported as applied.
+		{name: "incomplete", profile: "github", applied: []string{"github"}, status: "incomplete", refused: true, written: true, unreadable: true},
+		{name: "incomplete-unchanged", profile: "github", applied: []string{"a"}, want: []string{"a"}, status: "incomplete", refused: true},
 		{name: "foreign-yard", profile: "github", applied: []string{"github"}, yard: "foreign"},
 		{name: "missing", profile: "github", missing: true},
 	} {
@@ -86,6 +91,12 @@ func TestRecordAppliedProfileChangesOnlyThatProfile(t *testing.T) {
 			}
 			if written := !bytes.Equal(after, content); written != scenario.written {
 				t.Fatalf("facts rewritten=%v, want %v: %s", written, scenario.written, after)
+			}
+			if scenario.unreadable {
+				if _, _, err := runtime.AppliedEnvironmentProfiles(context.Background()); err == nil {
+					t.Fatal("refused record left the stale selection readable")
+				}
+				return
 			}
 			if scenario.want == nil {
 				return

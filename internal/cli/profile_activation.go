@@ -602,7 +602,8 @@ func (reconciler *profileRuntimeActivationReconciler) recordAppliedProfile(ctx c
 	err := recorder.RecordAppliedProfile(ctx, definition.Name, definition.Selected(target.Loaded.Context.YardName, target.Loaded.Environment))
 	if errors.Is(err, reconcileruntime.ErrGuestFactsUnfinished) {
 		// The core guest refresh of this transition rewrites unfinished facts with
-		// the whole desired selection; a release retry must still reach it.
+		// the whole selection it applies: the desired one, or in repair mode the
+		// installed one. A release retry must still reach it.
 		return nil
 	}
 	return err

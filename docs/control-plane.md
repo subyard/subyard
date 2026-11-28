@@ -2733,8 +2733,11 @@ and unfinished release transitions retain their strict readiness checks. Other
 helper or profile runtime drift is still assessed independently. The installed
 profile selection is the last successful one; an incomplete refresh that keeps it,
 such as one stopped by a guest file collision, leaves it readable, so a recovering
-release repair can prepare and repeat the refresh. One that changes the selection
-leaves it unknown.
+release repair can prepare and repeat the refresh. A profile operation refused by
+unfinished facts keeps its change in their target. An unfinished target that changes
+the selection refuses the installed view until `yard init` completes the refresh.
+The developer identity read from guest facts, used when the integration baseline
+records no identity, still requires completed facts.
 
 The native `internal/profile` package inventory binds shipped config, provision hooks, presets,
 resource descriptors and optional profile declarations. It includes descriptorless and resource-only

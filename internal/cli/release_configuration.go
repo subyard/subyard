@@ -218,7 +218,9 @@ func (cli *CLI) observeInstalledReleaseTarget(ctx context.Context, target config
 		guest, guestErr = nil, nil
 	}
 	if appliedErr != nil {
-		appliedErr = installedReadError{read: "installed-integrations", cause: fmt.Errorf("yard %s: inspect installed configuration: %w", target.Name, appliedErr)}
+		read := installedReadError{read: "installed-integrations"}
+		errors.As(appliedErr, &read)
+		appliedErr = installedReadError{read: read.read, cause: fmt.Errorf("yard %s: inspect installed configuration: %w", target.Name, appliedErr)}
 	}
 	if guestErr != nil {
 		guestErr = installedReadError{read: "installed-guest", cause: fmt.Errorf("yard %s: inspect installed guest configuration: %w", target.Name, guestErr)}
