@@ -14,6 +14,8 @@ import (
 
 // The core receipt supplies an identity even when no coding integration has an
 // inventory. Missing evidence is distinct from corrupt or foreign evidence.
+// Facts left incomplete after a successful refresh of this yard, such as by a
+// guest file collision, still admit it, so a recovering repair can prepare.
 func (runtime Runtime) appliedGuestIdentity(ctx context.Context) (map[string]string, error) {
 	if !runtime.guestFactsAvailable() || runtime.Executor == nil {
 		return nil, nil
@@ -57,8 +59,10 @@ if not FACTS.exists() and not FACTS.is_symlink():
     sys.exit(10)
 value = read()
 expected = snapshot(json.load(sys.stdin))
-if value['status'] != 'current' or value['last_success'] is None or value['target']['yard'] != expected['yard']:
-    raise ValueError('developer identity requires current guest facts for this yard')
+# The identity comes from the core receipt and passwd, so an unfinished refresh
+# after a successful one on this machine and yard still names the applied user.
+if value['last_success'] is None or value['last_success']['yard'] != expected['yard']:
+    raise ValueError('developer identity requires successful guest facts for this yard')
 if not core.exists() and not core.is_symlink():
     sys.exit(10)
 safe(core)

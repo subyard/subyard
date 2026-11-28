@@ -42,7 +42,7 @@ func (fixture appliedIdentityExecutor) Exec(ctx context.Context, _, _ string, re
 }
 
 func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
-	for _, scenario := range []string{"current", "missing", "unsafe-mode", "symlink", "foreign-yard", "ambiguous-home", "incomplete"} {
+	for _, scenario := range []string{"current", "missing", "unsafe-mode", "symlink", "foreign-yard", "ambiguous-home", "incomplete", "incomplete-without-success", "incomplete-foreign-machine"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			for _, path := range []string{"etc/subyard", "var/lib/subyard/agent-skills", filepath.Dir(guestFactsSource)} {
@@ -65,8 +65,15 @@ func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
 			if scenario == "foreign-yard" {
 				target.(map[string]any)["yard"].(map[string]any)["name"] = "foreign"
 			}
-			if scenario == "incomplete" {
+			if strings.HasPrefix(scenario, "incomplete") {
+				// A refresh after a successful one stopped before commit.
 				facts["status"] = "incomplete"
+			}
+			if scenario == "incomplete-without-success" {
+				facts["last_success"] = nil
+			}
+			if scenario == "incomplete-foreign-machine" {
+				facts["machine_id"] = strings.Repeat("c", 32)
 			}
 			payload, _ := json.Marshal(facts)
 			testkit.WriteFile(t, filepath.Join(root, "etc/subyard/guest-runtime.json"), payload, 0o644)
@@ -93,7 +100,7 @@ func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
 				}
 			}
 			applied, err := runtime.AppliedIntegrationConfiguration(context.Background())
-			if scenario == "current" {
+			if scenario == "current" || scenario == "incomplete" {
 				if err != nil || applied.Installed || applied.Settings != nil || applied.Identity["DEV_USER"] != "dev" || applied.Identity["DEV_UID"] != "1001" {
 					t.Fatalf("no-inventory identity: %#v %v", applied, err)
 				}
@@ -146,8 +153,15 @@ func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T)
 				target["yard"].(map[string]any)["name"] = "foreign"
 			}
 			facts := map[string]any{"schema": 1, "machine_id": strings.Repeat("a", 32), "status": "current", "target": target, "last_success": target, "capabilities": "unknown", "readiness": "unknown"}
-			if scenario == "incomplete" {
+			if strings.HasPrefix(scenario, "incomplete") {
+				// A refresh after a successful one stopped before commit.
 				facts["status"] = "incomplete"
+			}
+			if scenario == "incomplete-without-success" {
+				facts["last_success"] = nil
+			}
+			if scenario == "incomplete-foreign-machine" {
+				facts["machine_id"] = strings.Repeat("c", 32)
 			}
 			if scenario == "incomplete-change" || scenario == "incomplete-reordered" {
 				// The unfinished refresh began installing another selection, or
