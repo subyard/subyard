@@ -144,6 +144,7 @@ Read by task; links are relative to this skill.
 | Observer, describer, design consult | `general-purpose` agent with the role brief | `spawn_agent` with the role brief | `--role observer`, or the role brief as the task |
 
 - A brief is the loaded dev-flow skill's `roles/<role>.md` plus the role additions below.
+  Put it in every assignment, project agents included: their definitions carry no process.
 - Pass no compact limit to Codex native subagents.
 - On every bridge `start`, pass the role class's `Compact at` (integer tokens) as `--compact-window`;
   for "default" pass none. Pass it only when the installed bridge's `start --help` lists
