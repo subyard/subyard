@@ -16,6 +16,9 @@ type Catalog struct {
 	declarations []profile.Definition
 	integrations []profile.IntegrationDefinition
 	retired      []profile.RetiredComponent
+	// root is the repository root LoadCatalog read; it also ships the
+	// profile packages that carry no declaration.
+	root string
 }
 
 func LoadCatalog(root string) (Catalog, error) {
@@ -60,7 +63,7 @@ func LoadCatalog(root string) (Catalog, error) {
 			integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: 1, Name: component.ID, Retired: true, RetiredSettings: slices.Clone(component.Settings)})
 		}
 	}
-	result.declarations, result.integrations, result.retired = definitions, integrations, retired
+	result.declarations, result.integrations, result.retired, result.root = definitions, integrations, retired, root
 	return result, nil
 }
 

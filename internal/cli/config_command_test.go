@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -4395,5 +4396,63 @@ func TestConfigUnsetRemovesIgnoredProfileOnlyAssignments(t *testing.T) {
 	}
 	if code, output := run("config", "show"); code != 0 || strings.Contains(output, "environment profiles declare") {
 		t.Fatalf("observation remained after unset: code=%d %s", code, output)
+	}
+}
+
+// Settings files written by a newer release keep loading: authoring a known
+// setting beside an unknown one keeps its line byte for byte, read-only
+// commands report it as configuration state without its value, and
+// authoring an unknown name still refuses.
+func TestConfigCommandsKeepSettingsOfNewerReleases(t *testing.T) {
+	fixture := newFixture(t, withCheckoutConfig())
+	root, configHome, environment := fixture.Root, fixture.ConfigHome, fixture.Environment
+	target := filepath.Join(configHome, "config.env")
+	writeConfigCommandFile(t, target, "# kept\nFUTURE_SETTING='private value'\nSSH_PORT='2299'\nCODING_TOOL_INTEGRATIONS='futuretool'\n")
+	run := func(arguments ...string) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		program := fixture.New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{}, Config: &recordingConfigApplier{},
+			Stdout: &stdout, Stderr: &stderr,
+		})
+		return program.Run(context.Background()), stdout.String(), stderr.String()
+	}
+	setting := "ignored: FUTURE_SETTING in " + target + ":2 is not a setting of this release and is ignored; a newer release may use it"
+	integration := "ignored: CODING_TOOL_INTEGRATIONS in " + target + ":4 selects an integration this release does not ship; it is ignored"
+	for _, arguments := range [][]string{{"config", "show"}, {"config", "validate"}} {
+		code, stdout, stderr := run(arguments...)
+		if code != 0 || !strings.Contains(stdout, setting) || !strings.Contains(stdout, integration) || strings.Contains(stdout+stderr, "private value") || strings.Contains(stdout+stderr, "futuretool") {
+			t.Fatalf("%v: code=%d stdout=%s stderr=%s", arguments, code, stdout, stderr)
+		}
+	}
+	code, stdout, _ := run("config", "validate", "--json")
+	var report struct {
+		Configurations []struct {
+			Valid   bool     `json:"valid"`
+			Ignored []string `json:"ignored"`
+		} `json:"configurations"`
+	}
+	if code != 0 || json.Unmarshal([]byte(stdout), &report) != nil || len(report.Configurations) != 1 || !report.Configurations[0].Valid ||
+		!slices.Contains(report.Configurations[0].Ignored, strings.TrimPrefix(setting, "ignored: ")) {
+		t.Fatalf("validate --json: code=%d %s", code, stdout)
+	}
+	if code, stdout, stderr := run("config", "set", "SSH_PORT", "2300", "--scope", "host", "--yes"); code != 0 {
+		t.Fatalf("set beside unknown settings: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if code, stdout, stderr := run("config", "unset", "SSH_PORT", "--scope", "host", "--yes"); code != 0 {
+		t.Fatalf("unset beside unknown settings: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "# kept\nFUTURE_SETTING='private value'\nCODING_TOOL_INTEGRATIONS='futuretool'\n" {
+		t.Fatalf("authoring changed unknown lines: %q %v", content, err)
+	}
+	for _, arguments := range [][]string{
+		{"config", "set", "FUTURE_SETTING", "1", "--scope", "host", "--yes"},
+		{"config", "set", "CODING_TOOL_INTEGRATIONS", "futuretool", "--scope", "host", "--yes"},
+	} {
+		if code, stdout, stderr := run(arguments...); code == 0 {
+			t.Fatalf("%v accepted an unknown name: stdout=%s stderr=%s", arguments, stdout, stderr)
+		}
 	}
 }

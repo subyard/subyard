@@ -451,6 +451,9 @@ func load(
 			excluded = options.LayerPaths.ExcludedLocalPaths
 		}
 		sourceRefusals = append(sourceRefusals, refusalCauses(applyAgentAssetLayer(values, logicalAssets, layer.assets, tracker, assetLayer, excluded))...)
+		if layer.assetRole == "Git file settings" && layer.assets != "" {
+			tracker.observeUnknownFiles(assetLayer, layer.assets, logicalAssets)
+		}
 	}
 	values["SUBYARD_CONFIG_DIR"] = configDir
 
@@ -1096,13 +1099,16 @@ func (settings Catalog) applyEnvReaderValidated(reader io.Reader, path string, v
 	return settings.applyEnvReaderValidatedIgnoring(reader, path, values, scope, requireSyncable, observer, nil)
 }
 
-// ignoredObserver receives an ignored profile-only assignment and its line.
+// ignoredObserver receives an ignored profile-only, retired or unknown
+// assignment and its line.
 type ignoredObserver func(name, value string, line int)
 
 // applyEnvReaderValidatedIgnoring evaluates and validates one scalar layer.
-// Outside shipped scope, a profile-only assignment is ignored like a retired
-// setting while the file is read (see discardPolicy). It is reported to
-// ignored, never validated, applied or observed as a setting.
+// Outside shipped scope, a profile-only assignment and an assignment of a
+// setting this release does not know are ignored like a retired setting while
+// the file is read (see discardPolicy). They are reported to ignored, never
+// applied or observed as a setting; an unknown one is only checked for secret
+// material and name length.
 func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver) error {
 	return settings.evaluateScalarSource(reader, path, values, scope, requireSyncable, observer, ignored, nil)
 }
@@ -1113,7 +1119,7 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	var discarded []observedAssignment
 	policy := discardPolicy{retired: settings.RetiredSetting, batch: batch}
 	if scope != ScopeShipped {
-		policy.ignored = IsProfileOnlySetting
+		policy.ignored = func(name string) bool { return IsProfileOnlySetting(name) || settings.UnknownSetting(name) }
 	}
 	observe := func(name, value string, line int) {
 		unknown := batch != nil && !batch.available(name)
@@ -1181,6 +1187,18 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 			refusals = append(refusals, sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err))
 		}
 	}
+	for _, assignment := range discarded {
+		if !settings.UnknownSetting(assignment.name) {
+			continue
+		}
+		// A newer release may define the name; its content still never
+		// carries secret material in a settings file.
+		if len(assignment.name) > maxUnknownSettingName {
+			refusals = append(refusals, sourceError(path, assignment.line, "", "scalar settings", "unknown setting name is too long", nil))
+		} else if err := ValidateNonSecretContent(assignment.name, assignment.value); err != nil {
+			refusals = append(refusals, sourceError(path, assignment.line, assignment.name, "scalar settings", "appears to contain secret material; use the secret or credential store", nil))
+		}
+	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
@@ -1204,6 +1222,9 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	}
 	return nil
 }
+
+// maxUnknownSettingName bounds an ignored setting name that diagnostics render.
+const maxUnknownSettingName = 128
 
 var legacySettingNames = map[string]string{
 	"YARD_TYPE":           "ACCESS_KIND",

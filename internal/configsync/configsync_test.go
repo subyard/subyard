@@ -305,7 +305,7 @@ func TestVersionedConfigSyncPlansScalarApplicationModesFromLiveBytes(t *testing.
 func TestScalarApplicationModesUseInitForUnparseableLiveBytes(t *testing.T) {
 	path := gitSettingsPath("overrides/shared/config.env")
 	incoming := []config.SettingApplication{config.SettingNextCommand}
-	got := applicationsWithPrevious(config.Catalog{}, path, []byte("YARD_IMAGE='unterminated\n"), incoming)
+	got := applicationsWithPrevious(config.Catalog{}, nil, path, []byte("YARD_IMAGE='unterminated\n"), incoming)
 	want := []config.SettingApplication{config.SettingNextCommand, config.SettingYardInit}
 	if !slices.Equal(got, want) {
 		t.Fatalf("applications = %v, want %v", got, want)
@@ -375,20 +375,49 @@ func TestVersionedConfigSyncManagesOptionalDefaultYardSettings(t *testing.T) {
 	}
 }
 
-func TestVersionedConfigSyncRejectsInvalidLiveDefaultYardSettings(t *testing.T) {
+// Settings and file settings that this release does not know, such as a
+// newer release's, are kept unchanged in the cache and read by no
+// application; their names may be shown, their values never.
+func TestVersionedConfigSyncKeepsSettingsOfNewerReleases(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.commit("manifest only")
-	writeSyncTestFile(
-		t, filepath.Join(fixture.configHome, "yards", "default", "config.env"),
-		"NOT_A_SUBYARD_SETTING=value\n", 0o600,
-	)
-
-	_, err := BuildPlan(fixture.options(false))
-	if err == nil || !strings.Contains(err.Error(), "unknown setting") {
-		t.Fatalf("invalid default-yard candidate setting was accepted: %v", err)
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\nFUTURE_SETTING='future value'\n")
+	fixture.writeSource("hosts/owner-a/overrides/agents/future/config.json", "{\"future\": true}\n")
+	// A marker word in an unknown path is no secret; only content is checked.
+	fixture.writeSource("hosts/owner-a/overrides/agents/future/secret-policy.json", "{}\n")
+	fixture.commit("newer release settings")
+	writeSyncTestFile(t, filepath.Join(fixture.configHome, "yards", "default", "config.env"), "FUTURE_LOCAL=1\n", 0o600)
+	plan, err := BuildPlan(fixture.options(false))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(err.Error(), "NOT_A_SUBYARD_SETTING") {
-		t.Fatalf("unknown setting name leaked in diagnostic: %v", err)
+	asset := gitSettingsPath("overrides/host/agents/future/config.json")
+	for _, change := range plan.Changes {
+		if change.Path == asset && len(change.Applications) != 0 {
+			t.Fatalf("unknown file setting is read by %v", change.Applications)
+		}
+	}
+	if err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, asset), "{\"future\": true}\n", 0o644)
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "DEV_UID=2233\nFUTURE_SETTING='future value'\n", 0o600)
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
+		Environment: map[string]string{"SUBYARD_CONFIG_HOME": fixture.configHome, "SUBYARD_HOME": filepath.Join(fixture.operatorHome, ".subyard"), "SUBYARD_HOST_ID": fixture.hostID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []string
+	for _, assignment := range loaded.IgnoredAssignments() {
+		notices = append(notices, string(assignment.Unknown)+" "+assignment.Name)
+	}
+	if want := []string{"unknown-file future/config.json", "unknown-file future/secret-policy.json", "unknown-setting FUTURE_LOCAL", "unknown-setting FUTURE_SETTING"}; !slices.Equal(notices, want) {
+		t.Fatalf("notices = %q, want %q", notices, want)
+	}
+	// The next plan of the same source, with the manifest naming the
+	// unknown file, changes nothing.
+	again, err := BuildPlan(fixture.options(false))
+	if err != nil || len(again.Changes) != 0 {
+		t.Fatalf("replanned changes = %#v %v", again.Changes, err)
 	}
 }
 
@@ -460,7 +489,7 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 	for _, test := range []struct {
 		name, content, want string
 	}{
-		{"unknown", "TYPO_DEV_UID=2233\n", "unknown setting"},
+		{"unknown secret-like", "FUTURE_TOKEN=password=not-config\n", "secret material"},
 		{"secret-like", "YARD_IMAGE=password=not-config\n", "secret material"},
 		{"local-only", "STORAGE_PATH=/srv/private\n", "local-only"},
 	} {
@@ -1453,16 +1482,12 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.T) {
 	const crossSetting = "require YARD_KIND=vm"
 	const unexpected = "source entry: unexpected source path"
-	const unknown = `unknown file setting "notes.txt"`
 	for _, test := range []struct{ stray, refusal string }{
 		{"shared/notes.txt", "shared source: " + unexpected},
 		{"shared/overrides/notes.txt", "shared source: overrides: " + unexpected},
-		{"shared/overrides/agents/notes.txt", "shared source: overrides: " + unknown},
 		{"hosts/owner-a/notes.txt", `owner host "owner-a": ` + unexpected},
-		{"hosts/owner-a/overrides/agents/notes.txt", `owner host "owner-a" overrides: ` + unknown},
 		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: " + unexpected},
 		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: " + unexpected},
-		{"hosts/owner-a/yards/demo/overrides/agents/notes.txt", "yard demo overrides: " + unknown},
 	} {
 		t.Run(test.stray, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
@@ -1497,7 +1522,7 @@ func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.
 func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
 	fixture.writeSource("hosts/owner-a/config.env", "")
-	fixture.writeSource("hosts/owner-a/overrides/agents/notes.txt", "note\n")
+	fixture.writeSource("hosts/owner-a/overrides/agents/future/notes.txt", "api_key=\"must-not-be-versioned either\"\n")
 	fixture.writeSource("hosts/owner-a/overrides/agents/codex/config.toml", "api_key=\"must-not-be-versioned\"\n")
 	fixture.commit("two asset refusals")
 	_, err := BuildPlan(fixture.options(false))
@@ -1505,7 +1530,7 @@ func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
 		t.Fatal("refused override assets were accepted")
 	}
 	for _, text := range []string{
-		`owner host "owner-a" overrides: unknown file setting "notes.txt"`,
+		"future/notes.txt appears to contain secret material",
 		`owner host "owner-a" overrides: codex/config.toml`,
 		"secret material",
 	} {

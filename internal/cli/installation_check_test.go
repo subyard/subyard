@@ -103,7 +103,7 @@ func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 	root, environment := fixture.Root, fixture.Environment
 	configHome, data := filepath.Join(root, "state"), filepath.Join(root, "data")
 	fixture.Write(filepath.Join(configHome, "config.env"), "YARD_CAPS=ignored\n")
-	fixture.Write(filepath.Join(configHome, "yards", "broken", "config.env"), "UNKNOWN_SETTING=1\n")
+	fixture.Write(filepath.Join(configHome, "yards", "broken", "config.env"), "SSH_PORT=not-a-port\n")
 	for _, name := range []string{"a", "b"} {
 		fixture.Write(filepath.Join(configHome, "generated", name), "fixture\n", 0o666)
 	}
@@ -175,7 +175,7 @@ func TestInstallationCheckReportsLegacyInputsWithoutAYardLoad(t *testing.T) {
 	fixture := installationCheckFixture(t)
 	root, environment := fixture.Root, fixture.Environment
 	configHome := filepath.Join(root, "state")
-	fixture.Write(filepath.Join(configHome, "config.env"), "UNKNOWN_SETTING=1\n")
+	fixture.Write(filepath.Join(configHome, "config.env"), "SSH_PORT=not-a-port\n")
 	for _, name := range []string{"a.env", "b.env"} {
 		fixture.Write(filepath.Join(configHome, "secrets", "legacy", name), "fixture\n")
 	}

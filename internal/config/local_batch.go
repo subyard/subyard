@@ -276,6 +276,12 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 	if batch.available("CODING_TOOL_INTEGRATIONS") {
 		requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
 		requested = slices.DeleteFunc(requested, batch.catalog.RetiredIntegration)
+		// An unknown integration that an authored value requests is refused
+		// above; one from another source, such as a newer release, is
+		// dropped as the loader drops it.
+		requested = slices.DeleteFunc(requested, func(id string) bool {
+			return batch.catalog.UnknownIntegration(values, id) && batch.integrationMetadataKnown(values, id)
+		})
 		available, dependencyErr := walkIntegrationDependencies(values, requested, nil, batch)
 		refusals = append(refusals, refusalCauses(dependencyErr)...)
 		namesErr := checkUnknownIntegrations(values, requested, batch.catalog.RetiredIntegration, batch.integrationMetadataKnown)
@@ -315,6 +321,9 @@ func (batch *localBatch) integrationMetadataKnown(values map[string]string, id s
 
 func (batch *localBatch) resolveProfiles(configDir, yard string, values environment) error {
 	selection, err := resolveEnvironmentProfilesWith(yard, values, batch.catalog, func(name string) (bool, error) {
+		if UnknownProfile(configDir, batch.catalog, name) {
+			return false, nil
+		}
 		eligible, _, err := EnvironmentProfileEligibility(configDir, yard, values, batch.catalog, name)
 		if err != nil || !batch.profilePolicyAvailable(name) {
 			batch.unavailableProfiles[name] = true

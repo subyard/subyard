@@ -4,35 +4,13 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
 )
 
-var inheritedReleaseRoot = regexp.MustCompile(`^/proc/[0-9]+/fd/[0-9]+/(.+)$`)
+var inheritedReleaseRoot = config.InheritedReleaseRoot
 
-// shippedReleasePath returns the shipped config path inside a release root:
-// an inherited /proc/<pid>/fd/<n> handle or a directory under releases/<id>.
-func shippedReleasePath(path string) (string, bool) {
-	path = filepath.Clean(path)
-	relative := ""
-	if match := inheritedReleaseRoot.FindStringSubmatch(path); match != nil {
-		relative = match[1]
-	} else {
-		parts := strings.Split(path, "/")
-		for index := len(parts) - 3; index > 0; index-- {
-			if parts[index] == "releases" && parts[index+1] != "" {
-				relative = strings.Join(parts[index+2:], "/")
-				break
-			}
-		}
-	}
-	if relative == "" || !strings.HasPrefix(relative, "config/") || !filepath.IsLocal(relative) {
-		return "", false
-	}
-	return relative, true
-}
+func shippedReleasePath(path string) (string, bool) { return config.ShippedReleasePath(path) }
 
 // Applied snapshots record shipped integration sources under the root of the
 // capturing release. That root may be an ephemeral process handle or a

@@ -84,6 +84,7 @@ func TestInitEmptyNamedYardPreservesRegisteredSelectionAndUnknownModes(t *testin
 	root := fixture.Root
 	path := filepath.Join(root, "state", "yards", "saved", "config.env")
 	writeEmptyNamedFile(t, path, "SSH_PORT=2444\nENVIRONMENT_PROFILES=sample\nCODING_TOOL_INTEGRATIONS=codex\n", 0600)
+	writeEmptyNamedFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.conf"), "", 0644)
 	program := fixture.New(Options{})
 	loaded, bootstrap, err := program.loadInitContext("saved", true, nil)
 	if err != nil || bootstrap != nil || loaded.Environment["ENVIRONMENT_PROFILES"] != "sample" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {

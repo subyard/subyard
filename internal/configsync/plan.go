@@ -97,11 +97,6 @@ func BuildPlan(options Options) (Plan, error) {
 	for _, mapping := range options.FileSettings {
 		allowedAssets[filepath.ToSlash(filepath.Clean(mapping.Relative))] = true
 	}
-	for _, file := range previous.Files {
-		if asset, _ := managedSettingRole(localSettingsPath(file.Path)); asset != "" && !allowedAssets[asset] {
-			return Plan{}, errors.New("config sync manifest contains an unknown file setting")
-		}
-	}
 	localDesired, overrides, cleanup, err := prepareLocalSSHPorts(options, &source, previous, legacyContexts)
 	if err != nil {
 		return Plan{}, err
@@ -165,7 +160,7 @@ func BuildPlan(options Options) (Plan, error) {
 			}
 			plan.Changes = append(plan.Changes, Change{
 				Path: file.Path, Action: "delete", BeforeDigest: live.Digest, Mode: live.Mode,
-				Applications: applicationsWithPrevious(catalog, file.Path, live.content, nil),
+				Applications: applicationsWithPrevious(catalog, allowedAssets, file.Path, live.content, nil),
 				Detail:       "move unchanged legacy setting to Git fallback storage",
 			})
 		}
@@ -182,7 +177,7 @@ func BuildPlan(options Options) (Plan, error) {
 		if err != nil {
 			return Plan{}, err
 		}
-		applications := applicationsWithPrevious(catalog, path, live.content, desired.Applications)
+		applications := applicationsWithPrevious(catalog, allowedAssets, path, live.content, desired.Applications)
 		managed, wasManaged := previousFiles[path]
 		if !wasManaged {
 			if exists && !options.Adopt {
@@ -257,7 +252,7 @@ func BuildPlan(options Options) (Plan, error) {
 		if err := guardDeletedGitYard(options, source, previous, path); err != nil {
 			return Plan{}, err
 		}
-		applications := applicationsWithPrevious(catalog, path, live.content, nil)
+		applications := applicationsWithPrevious(catalog, allowedAssets, path, live.content, nil)
 		action, detail := "delete", ""
 		if !exists {
 			action, detail = "record-deleted", "managed live path is already missing"
@@ -669,10 +664,16 @@ func deletedYardDefinition(path string) (string, bool) {
 	return "", false
 }
 
-func applicationsWithPrevious(catalog config.Catalog, path string, live []byte, desired []config.SettingApplication) []config.SettingApplication {
+// applicationsWithPrevious names what reads a changed file. A file that is no
+// file setting of this release, such as one a newer release defines, is read
+// by no application.
+func applicationsWithPrevious(catalog config.Catalog, knownAssets map[string]bool, path string, live []byte, desired []config.SettingApplication) []config.SettingApplication {
 	if asset, _ := managedSettingRole(localSettingsPath(path)); asset != "" {
 		if len(desired) != 0 {
 			return desired
+		}
+		if !knownAssets[asset] {
+			return nil
 		}
 		return []config.SettingApplication{config.SettingConfigApply}
 	}
