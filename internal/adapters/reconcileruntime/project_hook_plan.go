@@ -385,7 +385,8 @@ func (plan *ProjectHookPlan) CheckContinuationScope(current *ProjectHookPlan) er
 	if plan == nil || current == nil {
 		return fmt.Errorf("%w: project hook continuation scope unavailable", domain.ErrPlanStale)
 	}
-	if !slices.Equal(plan.allowedHooks, current.allowedHooks) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
+	// An unobserved continuation cannot show the registered roots.
+	if current.conditional && len(plan.ownerProjects) != 0 || !slices.Equal(plan.allowedHooks, current.allowedHooks) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
 		return fmt.Errorf("%w: project hook continuation scope changed", domain.ErrPlanStale)
 	}
 	return plan.checkRegisteredRoots(current.approved.Roots)

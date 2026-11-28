@@ -68,6 +68,11 @@ func TestPreparedProjectHooksContinuationRejectsEqualCountScopeReplacement(t *te
 		t.Fatalf("unregistered sibling refused: %v", err)
 	}
 	current = *before
+	current.conditional, current.approved.Roots = true, nil
+	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), "continuation scope changed") {
+		t.Fatalf("unobserved continuation admitted or misreported: %v", err)
+	}
+	current = *before
 	current.allowedHooks = []string{"/usr/local/libexec/subyard/foreign-hook"}
 	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("replaced hook admitted: %v", err)
