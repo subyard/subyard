@@ -1656,13 +1656,13 @@ func TestProjectLimitsShrinkOnlyAfterVMReconciliation(t *testing.T) {
 	}
 }
 
-func TestVMSleepPolicyIsFixedAndArchitectureScoped(t *testing.T) {
+func TestVMLowLevelPolicyIsFixedAndArchitectureScoped(t *testing.T) {
 	for _, architecture := range []string{"x86_64", "aarch64", "unknown"} {
 		t.Run(architecture, func(t *testing.T) {
-			lowlevel, rawQEMU := vmSleepPolicy(architecture)
+			lowlevel, rawQEMU := vmLowLevelPolicy(architecture)
 			if architecture == "x86_64" {
-				if lowlevel != "allow" || rawQEMU != "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n" {
-					t.Fatalf("unexpected x86_64 sleep policy: %q, %q", lowlevel, rawQEMU)
+				if lowlevel != "allow" || rawQEMU != "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n\n[device \"qemu_balloon\"]\nfree-page-reporting = \"on\"\n" {
+					t.Fatalf("unexpected x86_64 low-level policy: %q, %q", lowlevel, rawQEMU)
 				}
 			} else if lowlevel != "" || rawQEMU != "" {
 				t.Fatalf("unsupported architecture received low-level override: %q, %q", lowlevel, rawQEMU)
@@ -1694,7 +1694,7 @@ func TestExistingVMReconcilesSleepAndDropsLegacyRawAppArmorPolicy(t *testing.T) 
 		"incus config unset "+cfg.vm(1)+" raw.apparmor --project "+cfg.Project) {
 		t.Fatal("legacy raw.apparmor was not removed")
 	}
-	rawQEMU := "incus config set " + cfg.vm(1) + " raw.qemu.conf [global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n --project " + cfg.Project
+	rawQEMU := "incus config set " + cfg.vm(1) + " raw.qemu.conf [global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n\n[device \"qemu_balloon\"]\nfree-page-reporting = \"on\"\n --project " + cfg.Project
 	if strings.Contains(callsText(runner.calls), rawQEMU) != (imageArchitecture() == "x86_64") {
 		t.Fatalf("VM sleep config does not match architecture: %s", callsText(runner.calls))
 	}

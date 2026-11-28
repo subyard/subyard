@@ -78,6 +78,11 @@ export DEBIAN_FRONTEND=noninteractive
 # The yard bridge is IPv4-only (ipv6.address=none), so steer apt to IPv4 — mirrors that
 # resolve to AAAA records would otherwise be tried over an unreachable IPv6 path first.
 printf 'Acquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/99force-ipv4
+# Provisioning does not reinstall installed packages, and a recreated yard starts
+# from a new root filesystem, so kept archives are not reused. Drop downloaded
+# archives after each successful install, and those an earlier provisioning kept.
+printf 'APT::Keep-Downloaded-Packages "false";\n' > /etc/apt/apt.conf.d/99subyard-no-archive-cache
+apt-get clean
 apt-get update -qq
 
 # Core packages; project toolchains come from profiles.

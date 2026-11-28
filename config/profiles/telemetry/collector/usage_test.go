@@ -186,12 +186,14 @@ func TestRawOTLPCompressionAndLegacyRows(t *testing.T) {
 	}
 }
 
-// Without raw capacity usage is still recorded, status names the cleanup,
-// and a manual prune keeps usage unless asked.
+// Without partition reserve usage is still recorded, status names the
+// cleanup, and a manual prune keeps usage unless asked.
 func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 	ctx := context.Background()
 	s := fixtureStore(t)
-	s.limits.DiskBytes = 1
+	statfs := partitionSpace
+	t.Cleanup(func() { partitionSpace = statfs })
+	partitionSpace = func(string) (int64, int64, error) { return 0, 1 << 40, nil }
 	logs := plogotlp.NewExportRequest()
 	if err := logs.UnmarshalJSON(readFixture(t, "claude-code-2.1.327-logs.json")); err != nil {
 		t.Fatal(err)
@@ -231,7 +233,7 @@ func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 		t.Fatalf("refusal marker: %v %v", info, err)
 	}
 	// A prune that frees enough space clears the warning before the next commit.
-	s.limits.DiskBytes = DefaultDiskBytes
+	partitionSpace = statfs
 	if _, err = s.Prune(time.Now().Add(-60*24*time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
@@ -291,8 +293,8 @@ func TestFullStoreResumesWithLargerBudget(t *testing.T) {
 	}
 }
 
-// The budget is soft: a store above a lowered budget still opens, keeps
-// lifecycle and usage, and refuses only raw OTLP.
+// The budget is soft: a store above a lowered budget still opens and keeps
+// accepting every record kind, including raw OTLP.
 func TestStoreAboveBudgetOpens(t *testing.T) {
 	ctx := context.Background()
 	s := fixtureStore(t)
@@ -328,11 +330,21 @@ func TestStoreAboveBudgetOpens(t *testing.T) {
 		{"key":"event.kind","value":{"stringValue":"response.completed"}},{"key":"conversation.id","value":{"stringValue":"late-thread"}},{"key":"input_token_count","value":{"stringValue":"7"}}]}]}]}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err == nil {
-		t.Fatalf("raw OTLP above budget: %v", err)
+	if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err != nil {
+		t.Fatalf("raw OTLP refused above budget: %v", err)
 	}
 	if after := usageSummary(t, s); after == before {
 		t.Fatal("usage above budget was not recorded")
+	}
+	// Every record is recent, so the budget prune keeps them and warns.
+	waitBudgetPrune(t, s)
+	stats, err := Stats(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addStorageWarning(stats, s.dir); stats["over_budget_since"] == nil || len(stats["warnings"].([]string)) != 1 ||
+		!strings.Contains(stats["warnings"].([]string)[0], "TELEMETRY_DISK_BUDGET") {
+		t.Fatalf("over-budget store without warning: %v", stats)
 	}
 }
 

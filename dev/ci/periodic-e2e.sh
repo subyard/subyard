@@ -173,7 +173,7 @@ install_runtime() {
   "$HOME/.local/bin/yard" version
 }
 
-# One slot per job. The reserve leaves a 9 GiB pair admissible on a 16 GiB runner.
+# One slot per job. The reserve leaves an 8.5 GiB pair admissible on a 16 GiB runner.
 # The documented path for a host without Incus: init installs it, then the service is registered.
 # This process predates the incus-admin group that init creates.
 install_pool() {

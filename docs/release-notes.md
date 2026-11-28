@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Yard disk use
+
+- Yards no longer keep downloaded APT packages. Provisioning writes
+  `/etc/apt/apt.conf.d/99subyard-no-archive-cache`, so `apt-get` removes downloaded archives
+  after a successful install, and clears the archives that earlier provisioning kept.
+  Rollback leaves the file in place; delete it in the yard to keep archives again.
+
+### Test VM memory
+
+- On x86_64, test-vms broker VMs enable Free Page Reporting on their virtio balloon, so RAM
+  a guest frees returns to the host instead of staying resident in QEMU. A VM that is
+  running during the update gets the setting when it next starts.
+- The default per-VM admission overhead `E2E_VM_OVERHEAD` is 256 MiB instead of 512 MiB; a
+  broker without its own value admits a 4 GiB pair with 12.5 GiB available instead of 13 GiB.
+  Measured QEMU memory outside guest RAM was 60–120 MiB per VM.
+
+### Telemetry disk budget
+
+- **Above `TELEMETRY_DISK_BUDGET` (default `30GiB`) the collector now prunes automatically.**
+  It removes the oldest raw OTLP, session correlations and samples first, never ones younger than
+  30 days; usage, lifecycle and resource records stay. Below the budget nothing is pruned.
+- **Raw OTLP is no longer refused near the budget.** Only a data partition short of its reserve
+  still refuses it. A store held above the budget by the last 30 days keeps growing, and
+  `stats`, `yard status` and `yard profile status telemetry` show the `storage-capacity` warning.
+  See [usage and attribution](telemetry.md#usage-and-attribution).
+
 ### Claude managed instructions
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by

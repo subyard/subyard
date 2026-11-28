@@ -566,20 +566,33 @@ The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
 and limit queued sanitized data to 16 MiB/128 requests. The profile setting
 `TELEMETRY_DISK_BUDGET` (default `30GiB`) sets the collector's soft
-`--disk-bytes` budget. Raw OTLP is accepted while allocated database pages and
-the WAL stay a tenth below it and the data partition keeps 1 GiB free, or a
-twentieth of a smaller partition. Beyond that the collector refuses raw OTLP and
-its per-request session correlations with a retryable status, still stores the
-request's usage records and bindings and all lifecycle, resource and sample
-records. The collector keeps a private `raw-otlp-refused` marker in the data
-directory while this lasts and removes it once raw OTLP fits again, including
-right after a prune. `stats` warns with the cleanup command for that store, and `yard status`
-and `yard profile status telemetry` show the `storage-capacity` warning with the
-command to run inside the yard while the profile stays ready. Those records
-are small and are not bounded by the budget, so a store above a lowered budget
-still opens. Each legacy archive uses additional disk space outside it.
-Nothing is pruned automatically. Remove old raw OTLP, per-request session
-correlations, samples and filtered-event markers manually:
+`--disk-bytes` budget, measured as allocated database pages. The WAL is outside
+the budget, because readers can hold back its checkpoints; the partition reserve
+covers it. Below the budget nothing is pruned. When a commit finds the store above it, the collector
+prunes in the background in bounded transactions: oldest first, it removes raw
+OTLP, per-request session correlations, samples and filtered-event markers
+received more than 30 days ago, until the store fits. Records younger than 30
+days stay even when the store is still above the budget; usage records and their
+bindings and all lifecycle, resource and attribution records always stay. An
+interrupted prune keeps every finished batch. A store that stays above the
+budget, or a prune that failed, is retried at most once an hour, and at the next
+collector start.
+
+The budget never refuses ingestion: such a store keeps growing, and the
+collector keeps a private `over-budget` marker in the data directory until a
+commit finds it within the budget again. A manual `prune` leaves that marker to
+the next commit. Raw OTLP and its per-request session
+correlations are refused with a retryable status only while the data partition
+has less than 1 GiB free, or a twentieth of a smaller partition; usage records
+and bindings and all lifecycle, resource and sample records are still stored.
+The collector keeps a private `raw-otlp-refused` marker while this lasts and
+removes it once the reserve is back, including right after a prune. In either
+case `stats` prints the warning with a cleanup command, and `yard status` and
+`yard profile status telemetry` show the `storage-capacity` warning, which names
+the `stats` command to run inside the yard, while the profile stays ready. A
+store above a lowered budget still opens. Each legacy archive uses additional
+disk space outside the budget. Remove data manually at any time; an age below
+30 days also removes recent raw records:
 
 ```sh
 "$collector" prune --data-dir "$data" --older-than 60d
@@ -675,7 +688,7 @@ changing bounds. Export data before pruning it when a longer history is required
 An OTLP success acknowledges a completed SQLite commit. A storage/capacity failure
 is retryable and never acknowledges an unsaved request. Admission is atomic per
 request; there is no misleading partial-success count. Only a raw OTLP refusal
-for disk budget or partition reserve keeps the request's other records, such as
+for the partition reserve keeps the request's other records, such as
 usage and bindings. Collector failure does not
 make agent commands or broker lifecycle operations wait indefinitely. If the
 bounded local spool fills, collection records a capacity gap where the reserved
@@ -771,9 +784,6 @@ resource examples and export/replay. The resource lane uses a 50 GiB `android-te
 lease for Android's short `memory-budget` exercise and the broker's
 `--telemetry-resources` mode, leaving room for the installed baseline and cold nested
 builder on Debian and Ubuntu. The default full run requests the same disk size.
-The telemetry VM pair uses 1536 MiB per guest plus 512 MiB overhead (4 GiB total),
-retaining two guests above the broker's 2 GiB process ceiling while leaving controller
-headroom; owning memory-boundary lanes keep their 2 GiB guests.
 Long renewal, requester-death natural expiry and reuse assertions run in the owning
 Android `memory-lease` and test-vms `memory-boundary` lanes. Telemetry's host-free
 `resources-test.py` replays synthetic expiry and actual-stop events for both VM guests,

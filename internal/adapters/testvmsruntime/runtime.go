@@ -22,10 +22,12 @@ const provisionedGuestCount = 2
 
 // Only the broker configures low-level VM settings. Incus disables q35 S3 by
 // default; override that fixed ICH9 setting so x86_64 guests can suspend to RAM.
-// Other architectures retain Incus's default low-level restriction.
-func vmSleepPolicy(architecture string) (lowlevel, rawQEMU string) {
+// The existing virtio balloon also offers Free Page Reporting, so guest pages
+// freed after a workload return to the host instead of staying resident in
+// QEMU. Other architectures retain Incus's default low-level restriction.
+func vmLowLevelPolicy(architecture string) (lowlevel, rawQEMU string) {
 	if architecture == "x86_64" {
-		return "allow", "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n"
+		return "allow", "[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n\n[device \"qemu_balloon\"]\nfree-page-reporting = \"on\"\n"
 	}
 	return "", ""
 }
@@ -502,7 +504,7 @@ func (runtime *Runtime) ensureProject(ctx context.Context) error {
 		{"restricted", "true"}, {"restricted.networks.access", cfg.Network},
 		{"user.subyard.managed", managedMarker},
 	}
-	if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
+	if lowlevel, _ := vmLowLevelPolicy(imageArchitecture()); lowlevel != "" {
 		settings = append(settings, [2]string{"restricted.virtual-machines.lowlevel", lowlevel})
 	}
 	for _, setting := range settings {
@@ -579,7 +581,7 @@ func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 		"false", "--project", cfg.Project); err != nil {
 		return err
 	}
-	if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+	if _, rawQEMU := vmLowLevelPolicy(imageArchitecture()); rawQEMU != "" {
 		if _, err := runtime.incus(ctx, "config", "set", vm, "raw.qemu.conf", rawQEMU,
 			"--project", cfg.Project); err != nil {
 			return err
@@ -613,7 +615,7 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 		if runtime.agentLogOwner != "" {
 			args = append(args, "-c", agentLogOwnerMarker+"="+runtime.agentLogOwner)
 		}
-		if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
+		if _, rawQEMU := vmLowLevelPolicy(imageArchitecture()); rawQEMU != "" {
 			args = append(args, "-c", "raw.qemu.conf="+rawQEMU)
 		}
 		_, err := runtime.incus(ctx, args...)
@@ -647,7 +649,7 @@ func (runtime *Runtime) tightenProject(ctx context.Context) error {
 			return err
 		}
 	}
-	if lowlevel, _ := vmSleepPolicy(imageArchitecture()); lowlevel != "" {
+	if lowlevel, _ := vmLowLevelPolicy(imageArchitecture()); lowlevel != "" {
 		return nil
 	}
 	_, err := runtime.incus(ctx, "project", "unset", cfg.Project,

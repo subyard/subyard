@@ -15,9 +15,11 @@ data=/var/lib/subyard/telemetry
 ```
 
 Model usage per request is in the `model_requests` and `tool_outputs` views;
-see the telemetry guide for the per-task query. Nothing expires automatically.
-When `stats` warns that raw OTLP is refused, free space with
-`"$collector" prune --data-dir "$data" --older-than 60d`; usage is kept.
+see the telemetry guide for the per-task query. Above `TELEMETRY_DISK_BUDGET` the
+collector prunes the oldest raw OTLP, correlations and samples, never ones younger
+than 30 days; usage is kept. `stats` warns when the store stays above the budget, or
+when raw OTLP is refused because the data partition is low on space; free space with
+`"$collector" prune --data-dir "$data" --older-than 60d`.
 
 The active database is `$data/telemetry.sqlite`. The first spool upgrade
 archives the previous store under `$data/archive`. If that name is occupied,

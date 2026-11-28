@@ -139,7 +139,7 @@ func TestNamedEnvironmentIncusResourceRequests(t *testing.T) {
 						"-c", "user.subyard.managed=" + managedMarker,
 						"-c", "user.subyard.generation=7", "-c", "user.subyard.lease-epoch=9"}
 					if imageArchitecture() == "x86_64" {
-						want = append(want, "-c", "raw.qemu.conf=[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n")
+						want = append(want, "-c", "raw.qemu.conf=[global][0]\ndriver = \"ICH9-LPC\"\nproperty = \"disable_s3\"\nvalue = \"0\"\n\n[device \"qemu_balloon\"]\nfree-page-reporting = \"on\"\n")
 					}
 					if !reflect.DeepEqual(call, want) {
 						t.Errorf("VM init request = %v, want %v", call, want)
