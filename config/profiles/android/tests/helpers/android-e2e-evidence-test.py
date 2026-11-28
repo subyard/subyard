@@ -398,23 +398,24 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
         assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))
 
 
-# Telemetry failures retain the bounded boot summary after the client released
-# its failed allocation; capture failure preserves the original test exit.
+# Every run with a yard retains the bounded boot summary, including telemetry runs
+# after the client released its failed allocation; capture failure preserves the
+# original test exit. Passing runs keep it as their boot time record.
 boot_helper = runtime_source[runtime_source.index('android_gradle_boot_evidence() {'):
                              runtime_source.index('\ncleanup() {')]
-for status, phase, capture_exit, called in (
-        (0, 'telemetry-native', 0, False), (23, 'images', 0, False),
-        (23, 'telemetry-native', 0, True), (23, 'telemetry-native', 7, True),
-        (23, 'telemetry-profile', 0, True), (23, 'telemetry-storage', 0, True),
-        (0, 'telemetry-resource-observer', 0, False),
-        (23, 'telemetry-resource-observer', 0, True), (23, 'telemetry-resource-observer', 7, True)):
+for status, phase, capture_exit, project, called in (
+        (0, '', 0, 'fixture', True), (0, '', 7, 'fixture', True), (0, '', 0, '', False),
+        (23, 'images', 0, 'fixture', True), (23, 'images', 0, '', False),
+        (23, 'telemetry-native', 0, 'fixture', True), (23, 'telemetry-native', 7, 'fixture', True),
+        (23, 'telemetry-profile', 0, 'fixture', True), (23, 'telemetry-storage', 0, 'fixture', True),
+        (23, 'telemetry-resource-observer', 7, 'fixture', True), (23, 'gradle', 0, 'fixture', True)):
     script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; journal_exit="$3"\n'
-              'lane=memory-budget; project=fixture; instance=fixture; incus_binary=(incus)\n'
+              'lane=memory-budget; project="$4"; instance=fixture; incus_binary=(incus)\n'
               'timeout() { printf "%s\\n" "$*"; '
               'printf "android boot readiness cores=2 settled=false elapsed_seconds=1200.0 first_package_seconds=None\\n"; '
               'return "$journal_exit"; }\n'
               + capture_helper + boot_helper + journal_branch + '\nexit "$status"\n')
-    result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit)],
+    result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit), project],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == status, result.stderr
     assert ('settled=false elapsed_seconds=1200.0' in result.stderr) == called
