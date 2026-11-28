@@ -51,7 +51,7 @@
       "throughVersion": "0.32.0",
       "reason": "Releases through 0.32.0 copy host instruction files to the agent instruction paths; 0.31.0 and 0.32.0 refuse a file or link there, such as a link from a user-dotfiles install script, and 0.30.0 replaces it. They do not know the user-dotfiles settings. Managed Claude instructions added after 0.32.0 remain active after rollback.",
       "recovery": "Before rollback, in each yard using user-dotfiles run yard -Y NAME profile disable user-dotfiles (runs uninstall.sh, keeps the clone), move leftovers at these paths away, and where set run yard -Y NAME config unset USER_DOTFILES_SOURCE --scope SCOPE and yard -Y NAME config unset USER_DOTFILES_INSTALL_COMMAND --scope SCOPE (with --git if saved so). After rollback, back up and remove /etc/claude-code/CLAUDE.md if unwanted, run yard init, then restart agent sessions. Account for custom installation paths.",
-      "sourceDigest": "f3b370ecc06db1dc00c6fc8d78b0bab13b53aa1dd7d749c35002b2785a3e8c40",
+      "sourceDigest": "7ac3f41f97f8be1a8222f7676d957c38419621ceb7a0a8989a19919783b4b52f",
       "files": [
         "/etc/claude-code/CLAUDE.md",
         "~/.claude/CLAUDE.md",
