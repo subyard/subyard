@@ -19,8 +19,12 @@ yard herdr up
 yard herdr pair --key 'ssh-ed25519 AAAA...' --name laptop
 ```
 
-Pairing prints the host, port, user, Ed25519 host-key fingerprint and `hc machine
-add` command. In desktop Herdr, use Add Machine with `user@host:port`. On mobile,
+Pairing prints the host, port, user, Ed25519 host-key fingerprint, an `hc machine
+add` command and an SSH config `Host` block. Herdr names a machine only on the
+client, so both suggest `<host-id>-<yard>`, lowercased, such as
+`owner-host-default`. The label is omitted when it would not be a valid Herdr
+machine name: at most 32 characters of `a-z`, `0-9`, `.`, `_` and `-`, starting
+with a letter or digit. In desktop Herdr, use Add Machine with `user@host:port`. On mobile,
 copy the public key from the app for pairing, then enter the printed host, port
 and user. Verify the host-key fingerprint when prompted. Use a separate key per
 client. `yard herdr pair --list` lists non-owner SSH grants and distinguishes
@@ -55,16 +59,33 @@ from `AuthorizedKeysCommand`, other `AuthorizedKeysFile` paths or Tailscale SSH
 are not read.
 
 The preferred owner port is `6768`. The allocator can choose a different port.
-Use `yard herdr status` to find the endpoint and grant TCP access to that port in
+Use `yard herdr status` to find the endpoint and machine label and grant TCP access to that port in
 your Tailscale policy. Restrict the grant to the clients that need yard access.
 `HERDR_ADVERTISE_HOST` and `HERDR_HOST_PORT` override discovery and allocation.
 
 ## Spaces and lifecycle
 
-Each registered project gets a named space without a waiting shell. Closing a
-space in Herdr closes its terminals. Use `yard herdr sync --restore` to reopen
-spaces for registered projects. If a removed project's space has user layout or
-live terminals, `yard herdr status` reports pending cleanup.
+Each registered project gets a named space for `src` without a waiting shell.
+Every other checkout gets its own space, named after the project and the path:
+each Git repository below `src` at any depth, including nested repositories,
+submodules and linked worktrees, as Orca finds them, as `Project/private`, and
+each Git repository directly in the project directory beside `src`, such as a
+sibling worktree, as `Project/wt-feature`. Repositories inside a sibling
+checkout get no space. Herdr's sidebar nests worktrees under the checkout they
+share a Git directory with.
+
+Project hooks, `up` and `sync` check the known checkouts without a scan. A guest
+timer resumes a bounded scan 15 seconds after boot and after each run, so a new
+nested clone appears within about a minute. Directory symlinks and `.git`
+contents are not traversed.
+
+A checkout proven deleted loses its space together with its tabs once no
+terminal in it is live; until then `yard herdr status` reports pending cleanup.
+A scan error, a missing `src` or a checkout that lost its `.git` removes nothing.
+When a whole project is removed, its checkout spaces follow the same rule, and
+the `src` space stays while it has user layout or live terminals. No terminal is
+stopped. Closing a space in Herdr closes its terminals. Use
+`yard herdr sync --restore` to reopen closed spaces for present checkouts.
 
 Core keeps terminals alive when clients disconnect. `yard herdr update` selects
 the latest supported protocol generation release and keeps live terminals across
@@ -73,8 +94,9 @@ leaves Core running as-is when Core already runs the installed selected release.
 repairs a Core below the supported minimum. The startup marker in `status` is a
 hint. Use `yard herdr restart` to refresh Core's login environment.
 
-`yard herdr down` removes the managed listener and SSH drop-in, then leaves the
-yard's SSH configuration to its remaining settings. It stops the whole Core,
+`yard herdr down` removes the managed listener and SSH drop-in, disables the
+checkout discovery timer, then leaves the yard's SSH configuration to its
+remaining settings. It stops the whole Core,
 including running programs. Project layout and authorization lines are retained.
 A local Herdr command or a separately authorized SSH connection can start Core
 again. A guest reboot loses running processes. Kept panes can return as shells.

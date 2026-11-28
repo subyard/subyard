@@ -266,6 +266,33 @@ yard herdr pair --revoke "$(key_fp c)" --yes > "$state/from-host-revoke.log" 2>&
 reject_key c
 guest runuser -u dev -- sh -c 'cat > "$HOME/.ssh/authorized_keys"' < "$state/guest-authorized-keys"
 
+stage 'verify nested checkout and sibling worktree spaces follow their folders'
+guest systemctl is-active --quiet subyard-herdr-discovery.timer
+status="$(yard herdr status)"
+grep -Eq "^hc machine add dev@$address:$port( --name [a-z0-9][a-z0-9._-]*)?\$" <<< "$status"
+workspace="$(guest_dev python3 -c 'import glob, json
+print(*[path[:-len("/.subyard-meta.json")] for path in glob.glob("/srv/workspaces/*/.subyard-meta.json")
+        if json.load(open(path))["name"] == "pristine"])')"
+[ -d "$state/host/pristine" ] && [[ "$workspace" == /srv/workspaces/* ]]
+guest_dev git -C "$workspace/src" init -q private
+guest_dev git -C "$workspace/src" worktree add -q "$workspace/wt-fixture"
+await_spaces() {
+  local attempt
+  for ((attempt=0; attempt<60; attempt++)); do
+    client spaces > "$state/spaces" && "$@" && return 0
+    sleep 2
+  done
+  cat "$state/spaces" >&2
+  fail "spaces did not converge: $*"
+}
+has_space() { grep -Fxq "$1 $2" "$state/spaces"; }
+# The nested clone appears through the periodic scan, the sibling worktree through the hook it runs.
+await_spaces has_space pristine/private "$workspace/src/private"
+await_spaces has_space pristine/wt-fixture "$workspace/wt-fixture"
+guest_dev git -C "$workspace/src" worktree remove "$workspace/wt-fixture"
+lacks_worktree() { ! grep -q '^pristine/wt-fixture ' "$state/spaces" && has_space pristine/private "$workspace/src/private"; }
+await_spaces lacks_worktree
+
 stage 'verify up and update hand an older Core over to the pin with a live terminal'
 terminal_pid="$(cat "$state/terminal-pid")"
 core_pid() { yard herdr status | sed -nE 's/^Core: .*\(PID ([0-9]+), .*/\1/p'; }

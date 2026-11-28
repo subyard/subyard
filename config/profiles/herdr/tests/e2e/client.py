@@ -150,7 +150,11 @@ def main():
             client.assert_live(json.loads((state / "terminal.json").read_text()))
         elif operation == "removed":
             spaces = client.workspaces()
-            assert "pristine" not in spaces and spaces["live"]["tabs"], spaces
+            assert not [name for name in spaces if name == "pristine" or name.startswith("pristine/")], spaces
+            assert spaces["live"]["tabs"], spaces
+        elif operation == "spaces":
+            for name, space in sorted(client.workspaces().items()):
+                print(name, space["folder"])
         elif operation == "start":
             terminal = client.start(client.workspaces()["live"], "/home/dev")
             client.await_output(terminal, f"ready:{terminal['pid']}")

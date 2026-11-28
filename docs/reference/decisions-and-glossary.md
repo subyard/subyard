@@ -713,6 +713,21 @@ lease/deadlines/marker cleanup/baseline IDs and unknown-write guards are mandato
 native CPU/RPC/worktree costs remain upstream limitation; admission is no claim to fix them. See
 [Orca](../orca.md).
 
+## Herdr project spaces
+
+Checkout discovery is one shared library, `scripts/lib/checkout-discovery`, with synthetic core
+contract tests; Orca and Herdr each install a copy and keep their own timer and state. There is no
+shared inventory service. Herdr gives each checkout Orca finds below `src` a space, and also each
+Git root directly in the project directory beside `src`; repositories inside such a sibling get
+none. The `src` space keeps its project ID; other IDs derive from the project ID and the path
+relative to the project directory. Checkout records live in a `checkouts` map of the project's
+record, which earlier releases ignore.
+
+A proven-absent checkout loses its space with its layout once no terminal in it is live; Herdr
+desktop resurrects a space with a live terminal, so it stays pending. Scan errors, a missing `src`
+or a lost `.git` remove nothing, and a removed project's terminals are never stopped. Herdr names
+machines only on the client; Subyard suggests `<host-id>-<yard>`. See [Herdr](../herdr.md).
+
 <a id="android-profile"></a>
 
 ## Android profile
