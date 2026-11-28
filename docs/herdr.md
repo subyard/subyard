@@ -74,14 +74,17 @@ sibling worktree, as `Project/wt-feature`. Repositories inside a sibling
 checkout get no space. Herdr's sidebar nests worktrees under the checkout they
 share a Git directory with.
 
-Project hooks, `up` and `sync` check the known checkouts without a scan. A guest
-timer resumes a bounded scan 15 seconds after boot and after each run, so a new
-nested clone appears within about a minute. Directory symlinks and `.git`
-contents are not traversed.
+Project hooks, `up` and `sync` recheck the known checkouts and list each project
+directory for sibling repositories, without a full scan. A guest timer resumes a
+bounded scan below `src` 15 seconds after boot and after each run, so a new
+nested clone appears within about a minute and a half. Directory symlinks and
+`.git` contents are not traversed.
 
 A checkout proven deleted loses its space together with its tabs once no
 terminal in it is live; until then `yard herdr status` reports pending cleanup.
-A scan error, a missing `src` or a checkout that lost its `.git` removes nothing.
+A scan error, a missing `src` or a checkout that lost its `.git` removes nothing:
+the other checkouts are still reconciled, and `sync` and readiness report the
+error.
 When a whole project is removed, its checkout spaces follow the same rule, and
 the `src` space stays while it has user layout or live terminals. No terminal is
 stopped. Closing a space in Herdr closes its terminals. Use

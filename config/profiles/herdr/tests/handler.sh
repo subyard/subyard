@@ -62,7 +62,10 @@ case "$1" in
           is-enabled:subyard-herdr-core.service) [ "${HERDR_TEST_CORE_UNIT:-enabled}" = enabled ] ;;
           is-enabled:subyard-herdr-discovery.timer) [ "${HERDR_TEST_TIMER:-active}" != disabled ] ;;
           is-active:subyard-herdr-discovery.timer) [ "${HERDR_TEST_TIMER:-active}" = active ] ;;
-          is-active:subyard-herdr-discovery.service) [ "${HERDR_TEST_DISCOVERY:-idle}" = running ] ;;
+          show:LoadState)
+            if [ "$6" = subyard-herdr-discovery.service ] && [ "${HERDR_TEST_DISCOVERY:-absent}" = loaded ]; then
+              printf 'loaded\n'
+            fi ;;
         esac ;;
       runuser)
         shift 4
@@ -250,6 +253,9 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   done
   grep -Fxq 'ExecStart=/usr/local/libexec/subyard/herdr-profile discover' "$HERDR_TEST_FILES/subyard-herdr-discovery.service"
   grep -Fxq 'User=dev' "$HERDR_TEST_FILES/subyard-herdr-discovery.service"
+  grep -Fxq 'ExecCondition=/usr/local/libexec/subyard/herdr-profile discover --supported' "$HERDR_TEST_FILES/subyard-herdr-discovery.service"
+  "$HERDR_TEST_NATIVE" discover --supported
+  if "$HERDR_TEST_NATIVE" discover --unknown 2>/dev/null; then exit 1; fi
   grep -Fxq 'OnBootSec=15s' "$HERDR_TEST_FILES/subyard-herdr-discovery.timer"
   grep -Fxq 'OnUnitInactiveSec=15s' "$HERDR_TEST_FILES/subyard-herdr-discovery.timer"
   grep -n -e '^sync projects$' -e '^systemctl enable --now --quiet subyard-herdr-discovery.timer$' \
@@ -259,7 +265,7 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   grep -E '^(install SSH drop-in|config device add)' "$HERDR_TEST_CALLS" | cut -d ' ' -f1-3 > "$test_root/install-order"
   printf 'install SSH drop-in\nconfig device add\n' | cmp - "$test_root/install-order"
   : > "$HERDR_TEST_CALLS"
-  HERDR_TEST_DISCOVERY=running HERDR_TEST_CORE=stopped SUBYARD_RESOURCE_ACTION=down "$handler" down
+  HERDR_TEST_DISCOVERY=loaded HERDR_TEST_CORE=stopped SUBYARD_RESOURCE_ACTION=down "$handler" down
   [ ! -e "$HERDR_TEST_DROPIN_PATH" ] && grep -Fxq 'remove SSH drop-in' "$HERDR_TEST_CALLS"
   grep -o 'systemctl \(disable\|stop\) .*' "$HERDR_TEST_CALLS" > "$test_root/down-units"
   printf '%s\n' 'systemctl disable --now --quiet subyard-herdr-discovery.timer' 'systemctl stop subyard-herdr-discovery.service' \

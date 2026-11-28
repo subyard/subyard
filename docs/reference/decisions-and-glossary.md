@@ -726,7 +726,9 @@ record, which earlier releases ignore.
 A proven-absent checkout loses its space with its layout once no terminal in it is live; Herdr
 desktop resurrects a space with a live terminal, so it stays pending. Scan errors, a missing `src`
 or a lost `.git` remove nothing, and a removed project's terminals are never stopped. Herdr names
-machines only on the client; Subyard suggests `<host-id>-<yard>`. See [Herdr](../herdr.md).
+machines only on the client; Subyard suggests `<host-id>-<yard>`. After a rollback to a release
+without checkout spaces, the discovery timer's condition skips every run, checkout spaces remain
+as unmanaged spaces, and `down` of that release leaves the timer enabled. See [Herdr](../herdr.md).
 
 <a id="android-profile"></a>
 

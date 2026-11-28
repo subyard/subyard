@@ -405,6 +405,7 @@ stage_registration_contract() {
   incus file push "$sync" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/orca-sync" \
     "${PROJ[@]}" --mode 0755 >/dev/null
   local -a sources=()
+  registration_sources_complete || return 1
   mapfile -t sources < <(registration_sources)
   for source in "${sources[@]}"; do
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" \
@@ -1014,7 +1015,7 @@ registration_files() {
   local name
   local -a names=()
   mapfile -t names < <(registration_names)
-  [ "${#names[@]}" -gt 2 ] || return 1
+  registration_sources_complete || return 1
   for name in "${names[@]}"; do
     printf '%s/%s\n' "$ORCA_REGISTRATION" "$name"
   done

@@ -265,7 +265,9 @@ func planSpaces(spaces []space, inventory inventory, state map[string]registrati
 	for key, record := range state {
 		if entry, exists := present[record.ID]; !exists || !entry.owned() {
 			if _, active := inventory.Checkouts[key]; !active {
-				delete(state, key)
+				if !inventory.retains(key) {
+					delete(state, key)
+				}
 			} else if record.Pending != "" {
 				record.Pending = ""
 				state[key] = record
@@ -305,9 +307,11 @@ func inspectRegistration(socket, workspaces string, hook bool) (string, bool, er
 	if dirErr == nil {
 		var state map[string]registration
 		state, stateErr = loadRegistrations(dir)
-		// A running Core is reconciled under the project lock, which scans again.
-		if core == nil || coreErr != nil {
-			_, inventoryErr = scanCheckouts(workspaces, dir, slices.Sorted(maps.Keys(state)))
+		// A running Core is reconciled under the project lock, which scans again
+		// unless the state is unreadable.
+		if core == nil || coreErr != nil || stateErr != nil {
+			inventory, err := scanCheckouts(workspaces, dir, slices.Sorted(maps.Keys(state)))
+			inventoryErr = domain.CollectRefusals(err, inventory.refusal())
 		}
 	}
 	return dir, core != nil, domain.CollectRefusals(coreErr, dirErr, stateErr, inventoryErr)
@@ -409,13 +413,22 @@ type registrationPlan struct {
 
 // planRegistration scans the checkouts and plans the layout. Owned spaces that the
 // state does not list, such as after a rollback dropped checkout records, are
-// scanned once more as known checkouts so their absence can be proven.
-func planRegistration(socket, workspaces, dir string, state map[string]registration, restore bool) (registrationPlan, error) {
+// scanned once more as known checkouts so their absence can be proven. Readiness
+// leaves unregistered nested checkouts to the discovery timer, which adds them
+// right after its scan caches them.
+func planRegistration(socket, workspaces, dir string, state map[string]registration, restore, readiness bool) (registrationPlan, error) {
 	known := slices.Sorted(maps.Keys(state))
 	for pass := 0; ; pass++ {
 		inventory, err := scanCheckouts(workspaces, dir, known)
 		if err != nil {
 			return registrationPlan{}, err
+		}
+		if readiness {
+			for key := range inventory.Checkouts {
+				if _, recorded := state[key]; !recorded && strings.Contains(key, "/") {
+					delete(inventory.Checkouts, key)
+				}
+			}
 		}
 		next := maps.Clone(state)
 		current, changed, err := inspectLayout(socket, inventory, next, restore)
@@ -444,22 +457,23 @@ func registrationReady(socket, workspaces string) error {
 	}
 	state, err := loadRegistrations(dir)
 	if err != nil {
-		_, inventoryErr := scanCheckouts(workspaces, dir, nil)
-		return domain.CollectRefusals(err, inventoryErr)
+		inventory, inventoryErr := scanCheckouts(workspaces, dir, nil)
+		return domain.CollectRefusals(err, inventoryErr, inventory.refusal())
 	}
-	plan, err := planRegistration(socket, workspaces, dir, state, false)
+	plan, err := planRegistration(socket, workspaces, dir, state, false, true)
 	if err != nil {
 		return err
 	}
+	var pending error
 	if plan.changed || !reflect.DeepEqual(state, plan.next) {
-		return errors.New("Herdr project registration needs reconciliation")
+		pending = errors.New("Herdr project registration needs reconciliation")
 	}
-	return nil
+	return domain.CollectRefusals(pending, plan.inventory.refusal())
 }
 
 func syncLayout(socket, workspaces, dir string, state map[string]registration, restore bool) error {
 	for range 4 {
-		plan, err := planRegistration(socket, workspaces, dir, state, restore)
+		plan, err := planRegistration(socket, workspaces, dir, state, restore, false)
 		if err != nil {
 			return err
 		}
@@ -468,7 +482,8 @@ func syncLayout(socket, workspaces, dir string, state map[string]registration, r
 			return err
 		}
 		if !reflect.DeepEqual(plan.inventory, fresh) {
-			return errors.New("project inventory changed during Herdr sync")
+			// Periodic discovery or a project change moved on; plan again.
+			continue
 		}
 		if plan.changed {
 			err = call(socket, "doc.set", map[string]any{"name": appDocument, "value": plan.document.Value, "version": plan.document.Version}, nil)
@@ -481,9 +496,12 @@ func syncLayout(socket, workspaces, dir string, state map[string]registration, r
 			}
 		}
 		if !reflect.DeepEqual(state, plan.next) {
-			return saveRegistrations(dir, plan.next)
+			if err := saveRegistrations(dir, plan.next); err != nil {
+				return err
+			}
 		}
-		return nil
+		// The present checkouts are reconciled; report what kept the rest unchanged.
+		return plan.inventory.refusal()
 	}
-	return errors.New("Herdr document kept changing; retry sync")
+	return errors.New("Herdr document or project inventory kept changing; retry sync")
 }

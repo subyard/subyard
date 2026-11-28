@@ -115,10 +115,13 @@ install_assets() {
 [Unit]
 Description=Discover Herdr project checkouts and reconcile their spaces
 After=user@$DEV_UID.service
+RequiresMountsFor=/srv/workspaces
 
 [Service]
 Type=oneshot
 User=$DEV_USER
+# An earlier helper restored by a rollback fails the condition, which skips the run.
+ExecCondition=$helper discover --supported
 ExecStart=$helper discover
 TimeoutStartSec=100
 UMask=0077
@@ -359,7 +362,10 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       down)
         remove_route "$(route_state)"
         if discovery_enabled; then yexec systemctl disable --now --quiet "$discovery_timer"; fi
-        if yexec systemctl is-active --quiet "$discovery_unit"; then yexec systemctl stop "$discovery_unit"; fi
+        # A running oneshot is activating, not active; stop it whenever the unit is loaded.
+        if [ "$(yexec systemctl show -p LoadState --value "$discovery_unit")" = loaded ]; then
+          yexec systemctl stop "$discovery_unit"
+        fi
         if enabled; then yexec systemctl disable --now "$unit"; fi
         if yexec test -x "$helper"; then
           as_dev "$helper" stop || die 'Herdr ingress is closed, but Core shutdown could not be verified'

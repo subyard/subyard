@@ -270,6 +270,9 @@ stage 'verify nested checkout and sibling worktree spaces follow their folders'
 guest systemctl is-active --quiet subyard-herdr-discovery.timer
 status="$(yard herdr status)"
 grep -Eq "^hc machine add dev@$address:$port( --name [a-z0-9][a-z0-9._-]*)?\$" <<< "$status"
+# A printed label also names the SSH config block.
+label="$(sed -nE "s/^hc machine add .* --name (.*)\$/\1/p" <<< "$status")"
+[ -z "$label" ] || grep -Fxq "Host $label" <<< "$status"
 workspace="$(guest_dev python3 -c 'import glob, json
 print(*[path[:-len("/.subyard-meta.json")] for path in glob.glob("/srv/workspaces/*/.subyard-meta.json")
         if json.load(open(path))["name"] == "pristine"])')"

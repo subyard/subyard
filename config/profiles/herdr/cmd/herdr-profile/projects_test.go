@@ -194,6 +194,18 @@ func TestSyncReportsIndependentRefusals(t *testing.T) {
 	if err == nil || err.Error() != "Core is stopped. Run yard herdr up first.; checkout discovery: Invalid project metadata: example" {
 		t.Fatalf("independent refusals: %v", err)
 	}
+	// With Core running, unreadable state still reports the inventory refusal.
+	herdr := &fakeHerdr{}
+	socket := herdr.serve(t)
+	dir, _ := stateDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(dir, "projects.json"), []byte(`invalid`), 0o600)
+	err = syncProjects(socket, root, false, false)
+	if err == nil || err.Error() != "checkout discovery: Invalid project metadata: example; invalid Herdr registration state" {
+		t.Fatalf("independent refusals with Core running: %v", err)
+	}
 }
 
 func TestProjectLockUsesExactPermissions(t *testing.T) {

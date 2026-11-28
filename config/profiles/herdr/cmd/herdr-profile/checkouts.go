@@ -20,7 +20,7 @@ import (
 const discoveryReportLimit = 8 << 20
 
 // discoveryProgram runs the shared checkout discovery CLI that the profile installs.
-var discoveryProgram = []string{"python3", "-B", "-E", "-s", "/usr/local/libexec/subyard/herdr-discovery/checkouts.py"}
+var discoveryProgram = []string{"/usr/bin/python3", "-B", "-E", "-s", "/usr/local/libexec/subyard/herdr-discovery/checkouts.py"}
 
 // checkout is the desired space of one project checkout.
 type checkout struct {
@@ -28,10 +28,30 @@ type checkout struct {
 }
 
 // inventory holds the desired checkouts of the present projects and the known
-// checkouts whose absence discovery proved.
+// checkouts whose absence discovery proved. Problems are refusals that sync
+// reports after applying the rest: a partial scan proves no absence, and a
+// project in Kept keeps the records of checkouts it no longer lists.
 type inventory struct {
 	Checkouts map[string]checkout
 	Gone      map[string]bool
+	Kept      map[string]bool
+	Partial   bool
+	Problems  []string
+}
+
+func (inventory inventory) refusal() error {
+	refusals := make([]error, 0, len(inventory.Problems))
+	for _, problem := range inventory.Problems {
+		refusals = append(refusals, errors.New(problem))
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+// retains reports whether a checkout that is neither listed nor proven absent
+// keeps its record.
+func (inventory inventory) retains(key string) bool {
+	id, _ := splitKey(key)
+	return !inventory.Gone[key] && (inventory.Partial || inventory.Kept[id])
 }
 
 // A checkout key is the project ID for src and "ID/path" for another checkout,
@@ -53,11 +73,6 @@ func validCheckoutPath(path string) bool {
 		!strings.ContainsAny(path, "\x00\r\n") && (strings.HasPrefix(path, "src/") || !strings.Contains(path, "/"))
 }
 
-func validKey(key string) bool {
-	id, path := splitKey(key)
-	return domain.SafeID(id) && (path == "" && !strings.Contains(key, "/") || validCheckoutPath(path))
-}
-
 type limitedBuffer struct {
 	bytes.Buffer
 	limit int
@@ -75,9 +90,13 @@ func runDiscovery(input []byte, args ...string) ([]byte, error) {
 	defer cancel()
 	command := exec.CommandContext(ctx, discoveryProgram[0], append(slices.Clone(discoveryProgram[1:]), args...)...)
 	command.Stdin = bytes.NewReader(input)
-	stdout := &limitedBuffer{limit: discoveryReportLimit}
-	command.Stdout = stdout
+	stdout, stderr := &limitedBuffer{limit: discoveryReportLimit}, &limitedBuffer{limit: 64 << 10}
+	command.Stdout, command.Stderr = stdout, stderr
 	if err := command.Run(); err != nil {
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		if last := strings.ToValidUTF8(lines[len(lines)-1], "?"); last != "" {
+			return nil, fmt.Errorf("checkout discovery failed: %w: %s", err, last)
+		}
 		return nil, fmt.Errorf("checkout discovery failed: %w", err)
 	}
 	return stdout.Bytes(), nil
@@ -99,11 +118,15 @@ func advanceDiscovery(workspaces, dir string) error {
 }
 
 func discoveryErrors(messages []string) error {
-	refusals := make([]error, 0, len(messages))
+	return inventory{Problems: discoveryProblems(messages)}.refusal()
+}
+
+func discoveryProblems(messages []string) []string {
+	problems := make([]string, 0, len(messages))
 	for _, message := range messages {
-		refusals = append(refusals, errors.New("checkout discovery: "+strings.ToValidUTF8(message, "?")))
+		problems = append(problems, "checkout discovery: "+strings.ToValidUTF8(message, "?"))
 	}
-	return domain.CollectRefusals(refusals...)
+	return problems
 }
 
 func knownFolder(workspaces, key string) string {
@@ -112,7 +135,8 @@ func knownFolder(workspaces, key string) string {
 }
 
 // scanCheckouts reports src, every Git root below it and the Git roots beside it
-// for each project, and which known checkouts are proven absent.
+// for each project, and which known checkouts are proven absent. Its error means
+// no inventory; findings that leave other checkouts usable are Problems.
 func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 	folders := make([]string, 0, len(known))
 	for _, key := range known {
@@ -133,13 +157,14 @@ func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 	if json.Unmarshal(output, &report) != nil || (report.Projects == nil && len(report.Errors) == 0) {
 		return inventory{}, errors.New("checkout discovery returned an invalid report")
 	}
-	// A partial scan is no evidence for retiring anything.
-	if err := discoveryErrors(report.Errors); err != nil {
-		return inventory{}, err
-	}
-	result := inventory{Checkouts: make(map[string]checkout), Gone: make(map[string]bool)}
+	// A partial scan still lists present checkouts but proves no absence.
+	result := inventory{Checkouts: make(map[string]checkout), Gone: make(map[string]bool), Kept: make(map[string]bool),
+		Partial: len(report.Errors) > 0, Problems: discoveryProblems(report.Errors)}
 	present := make(map[string]bool)
-	var refusals []error
+	problem := func(id, format string, args ...any) {
+		result.Kept[id] = true
+		result.Problems = append(result.Problems, fmt.Sprintf(format, args...))
+	}
 	for _, entry := range report.Projects {
 		workspace := filepath.Join(workspaces, entry.ProjectID)
 		if !domain.SafeID(entry.ProjectID) || entry.Root != filepath.Join(workspace, "src") {
@@ -147,7 +172,7 @@ func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 		}
 		present[entry.ProjectID] = true
 		if !slices.ContainsFunc(entry.Roots, func(root struct{ Path, Kind string }) bool { return root.Path == entry.Root }) {
-			refusals = append(refusals, fmt.Errorf("project %q has no canonical checkout directory", entry.ProjectID))
+			problem(entry.ProjectID, "project %q has no canonical checkout directory", entry.ProjectID)
 			continue
 		}
 		result.Checkouts[entry.ProjectID] = checkout{Name: entry.Name, Folder: entry.Root}
@@ -156,8 +181,13 @@ func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 				continue
 			}
 			path, err := filepath.Rel(workspace, root.Path)
+			if root.Kind == "unknown" && result.Partial {
+				// Discovery reported the unverifiable root; it is neither added nor retired.
+				result.Kept[entry.ProjectID] = true
+				continue
+			}
 			if err != nil || root.Kind != "git" || !validCheckoutPath(path) || filepath.Join(workspace, path) != root.Path {
-				refusals = append(refusals, fmt.Errorf("checkout discovery returned an invalid root for %q", entry.ProjectID))
+				problem(entry.ProjectID, "checkout discovery returned an invalid root for %q", entry.ProjectID)
 				continue
 			}
 			result.Checkouts[checkoutKey(entry.ProjectID, path)] = checkout{
@@ -165,8 +195,19 @@ func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 			}
 		}
 	}
+	if !result.Partial {
+		result.proveAbsence(workspaces, known, report.Absent, present, problem)
+	}
+	slices.Sort(result.Problems)
+	result.Problems = slices.Compact(result.Problems)
+	return result, nil
+}
+
+func (result inventory) proveAbsence(workspaces string, known, folders []string, present map[string]bool,
+	problem func(id, format string, args ...any),
+) {
 	absent := make(map[string]bool)
-	for _, folder := range report.Absent {
+	for _, folder := range folders {
 		absent[folder] = true
 	}
 	for _, key := range known {
@@ -176,11 +217,10 @@ func scanCheckouts(workspaces, dir string, known []string) (inventory, error) {
 		}
 		if id, path := splitKey(key); path == "" && !present[id] {
 			if info, err := os.Lstat(filepath.Join(workspaces, id)); err == nil && !info.IsDir() {
-				refusals = append(refusals, fmt.Errorf("workspace %q is no longer a directory", id))
+				problem(id, "workspace %q is no longer a directory", id)
 			} else {
-				refusals = append(refusals, fmt.Errorf("invalid project metadata for %q", id))
+				problem(id, "invalid project metadata for %q", id)
 			}
 		}
 	}
-	return result, domain.CollectRefusals(refusals...)
 }

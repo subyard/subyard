@@ -36,6 +36,10 @@ func run(args []string) error {
 		}
 		return syncProjects(path, "/srv/workspaces", restore, args[0] == "hook")
 	}
+	if len(args) == 2 && args[0] == "discover" && args[1] == "--supported" {
+		// The discovery unit's condition: a rolled-back helper fails it and the run is skipped.
+		return nil
+	}
 	if len(args) != 1 {
 		return errors.New("expected a guest operation")
 	}

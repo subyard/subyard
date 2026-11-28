@@ -9,6 +9,13 @@ registration_sources() {
   done | LC_ALL=C sort | cut -f 2
 }
 
+# Process substitution drops registration_sources' status; callers check the set.
+registration_sources_complete() {
+  local library="$RESOURCE_DIR/../../../../../scripts/lib/checkout-discovery"
+  [ -f "$library/discovery.py" ] && [ -f "$library/inventory.py" ] &&
+    compgen -G "$RESOURCE_DIR/registration/*.py" >/dev/null
+}
+
 registration_source() {
   local source
   while IFS= read -r source; do
@@ -25,7 +32,7 @@ registration_contract_version() {
   local digest source
   local -a sources=()
   mapfile -t sources < <(registration_sources)
-  [ "${#sources[@]}" -gt 2 ] || return 1
+  registration_sources_complete || return 1
   digest="$(for source in "${sources[@]}"; do
     printf '%s  ./%s\n' "$(sha256sum < "$source" | cut -d ' ' -f 1)" "${source##*/}"
   done | sha256sum | cut -d ' ' -f 1)" || return 1
@@ -154,7 +161,7 @@ registration_desired_digest() {
     local source
     local -a sources=()
     mapfile -t sources < <(registration_sources)
-    [ "${#sources[@]}" -gt 2 ] || return 1
+    registration_sources_complete || return 1
     for source in "${sources[@]}"; do
       printf '644 0:0 %s ' "${source##*/}"
       sha256sum "$source" | awk '{print $1}'

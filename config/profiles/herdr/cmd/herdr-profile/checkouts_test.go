@@ -56,8 +56,11 @@ func TestScanCheckoutsRefusalsAndProvenAbsence(t *testing.T) {
 	known := []string{"bare", "file", "gone", "gone/wt-y", "kept/src/old", "kept/wt-x", "lost"}
 	result, err := scanCheckouts(workspaces, "/state", known)
 	want := `invalid project metadata for "lost"; project "bare" has no canonical checkout directory; workspace "file" is no longer a directory`
-	if err == nil || err.Error() != want {
-		t.Fatalf("refusals: %v", err)
+	if err != nil || result.refusal() == nil || result.refusal().Error() != want {
+		t.Fatalf("refusals: %v, %v", err, result.refusal())
+	}
+	if fmt.Sprint(result.Kept) != "map[bare:true file:true lost:true]" || result.Partial || !result.retains("lost/wt-z") || result.retains("kept/wt-z") {
+		t.Fatalf("kept: %v", result.Kept)
 	}
 	if !result.Gone["gone"] || !result.Gone["kept/src/old"] || result.Gone["gone/wt-y"] || len(result.Gone) != 2 {
 		t.Fatalf("gone: %v", result.Gone)
@@ -73,22 +76,34 @@ func TestScanCheckoutsRefusalsAndProvenAbsence(t *testing.T) {
 		t.Fatalf("known folders: %s, %v", data, err)
 	}
 
-	// Scan errors refuse before any derived finding or proof of absence.
-	fakeDiscovery(t, `{"errors":["b failed","a failed"],"absent":["/x"]}`)
-	if _, err := scanCheckouts(workspaces, "/state", known); err == nil || err.Error() != "checkout discovery: a failed; checkout discovery: b failed" {
-		t.Fatalf("scan errors: %v", err)
+	// Scan errors keep present checkouts but prove no absence and forget no record.
+	fakeDiscovery(t, fmt.Sprintf(`{"projects":[{"projectId":"kept","name":"Kept","root":%q,"roots":[{"path":%q,"kind":"folder"},{"path":%q,"kind":"unknown"},{"path":%q,"kind":"git"}]}],"errors":["b failed","a failed"],"absent":[%q]}`,
+		w("kept/src"), w("kept/src"), w("kept/wt-stale"), w("kept/wt-x"), w("gone")))
+	result, err = scanCheckouts(workspaces, "/state", known)
+	if err != nil || result.refusal() == nil || result.refusal().Error() != "checkout discovery: a failed; checkout discovery: b failed" {
+		t.Fatalf("scan errors: %v, %v", err, result.refusal())
+	}
+	if !result.Partial || len(result.Gone) != 0 || len(result.Checkouts) != 2 || result.Checkouts["kept/wt-x"].Folder != w("kept/wt-x") || !result.retains("kept/wt-stale") {
+		t.Fatalf("partial scan: %+v", result)
 	}
 	invalidRoot := func(path, kind string) string {
 		return fmt.Sprintf(`{"projects":[{"projectId":"kept","root":%q,"roots":[{"path":%q,"kind":"folder"},{"path":%q,"kind":%q}]}]}`,
 			w("kept/src"), w("kept/src"), path, kind)
 	}
-	for _, invalid := range []string{
-		`not json`, `{}`, invalidRoot(workspaces+"/kept/src/../x", "git"), invalidRoot(w("kept/a/b"), "git"),
-		invalidRoot(w("kept/src/a"), "folder"), invalidRoot(w("other/src/a"), "git"),
-	} {
+	for _, invalid := range []string{`not json`, `{}`} {
 		fakeDiscovery(t, invalid)
 		if _, err := scanCheckouts(workspaces, "/state", nil); err == nil || !strings.Contains(err.Error(), "invalid") {
 			t.Fatalf("invalid report %s: %v", invalid, err)
+		}
+	}
+	for _, invalid := range []string{
+		invalidRoot(workspaces+"/kept/src/../x", "git"), invalidRoot(w("kept/a/b"), "git"),
+		invalidRoot(w("kept/src/a"), "folder"), invalidRoot(w("kept/src/a"), "unknown"), invalidRoot(w("other/src/a"), "git"),
+	} {
+		fakeDiscovery(t, invalid)
+		result, err := scanCheckouts(workspaces, "/state", nil)
+		if err != nil || result.refusal() == nil || !strings.Contains(result.refusal().Error(), "invalid root") || !result.Kept["kept"] {
+			t.Fatalf("invalid root %s: %v, %+v", invalid, err, result)
 		}
 	}
 }
@@ -324,6 +339,37 @@ func TestNestedCheckoutsAndWorktreesFollowTheirFolders(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// An unverifiable sibling leaves the other checkouts reconciled and retires nothing.
+	stale := filepath.Join(project, "wt-stale")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(stale, ".git"), []byte("gitdir: /nonexistent\n"), 0o644)
+	git(t, src, "worktree", "add", "-q", filepath.Join(project, "wt-extra"))
+	if err := os.RemoveAll(filepath.Join(src, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := discoverCheckouts(socket, workspaces); err == nil || !strings.Contains(err.Error(), "could not be verified: "+stale) {
+		t.Fatalf("stale sibling: %v", err)
+	}
+	want["example/wt-extra"] = "Example/wt-extra []"
+	if got := herdr.spaces(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("partial scan: %v", got)
+	}
+	if err := registrationReady(socket, workspaces); err == nil || !strings.Contains(err.Error(), "could not be verified") {
+		t.Fatalf("partial readiness: %v", err)
+	}
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncProjects(socket, workspaces, false, true); err != nil {
+		t.Fatal(err)
+	}
+	delete(want, "example/src/linked")
+	if got := herdr.spaces(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("after the stale sibling went: %v", got)
+	}
+
 	// An unsafe discovery state refuses and changes nothing.
 	if err := os.RemoveAll(filepath.Join(dir, "discovery")); err != nil {
 		t.Fatal(err)
@@ -356,5 +402,61 @@ func TestNestedCheckoutsAndWorktreesFollowTheirFolders(t *testing.T) {
 	}
 	if err := registrationReady(socket, workspaces); err != nil {
 		t.Fatal(err)
+	}
+
+	// A missing src removes nothing; a removed project's spaces go with it.
+	moved := filepath.Join(project, "src.moved")
+	if err := os.Rename(src, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncProjects(socket, workspaces, false, true); err == nil || !strings.Contains(err.Error(), "no canonical checkout directory") {
+		t.Fatalf("missing src: %v", err)
+	}
+	if got := herdr.spaces(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("after a missing src: %v", got)
+	}
+	if err := os.RemoveAll(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncProjects(socket, workspaces, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := herdr.spaces(t); len(got) != 0 {
+		t.Fatalf("after project removal: %v", got)
+	}
+}
+
+// Readiness right after up must not race the timer, which adds nested checkouts
+// once its scan caches them.
+func TestReadinessLeavesNewNestedCheckoutsToTheTimer(t *testing.T) {
+	t.Setenv("HOME", testkit.TempDir(t))
+	workspaces := testkit.TempDir(t)
+	src := filepath.Join(workspaces, "example", "src")
+	fakeDiscovery(t, fmt.Sprintf(`{"projects":[{"projectId":"example","name":"Example","root":%q,"roots":[{"path":%q,"kind":"git"},{"path":%q,"kind":"git"}]}],"absent":[],"errors":[]}`,
+		src, src, src+"/private"))
+	herdr := &fakeHerdr{}
+	socket := herdr.serve(t)
+	herdr.value = jsonValue(map[string]any{"spaces": []any{checkoutSpace("example", checkout{"Example", src})}})
+	dir, _ := stateDir()
+	if err := saveRegistrations(dir, map[string]registration{"example": {ID: spaceID("example")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registrationReady(socket, workspaces); err != nil {
+		t.Fatalf("unregistered nested checkout: %v", err)
+	}
+	if err := syncProjects(socket, workspaces, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := herdr.spaces(t); got["example/src/private"] != "Example/private []" {
+		t.Fatalf("sync did not add the nested checkout: %v", got)
+	}
+	if err := registrationReady(socket, workspaces); err != nil {
+		t.Fatal(err)
+	}
+	// A registered nested checkout still counts: a rename is drift.
+	fakeDiscovery(t, fmt.Sprintf(`{"projects":[{"projectId":"example","name":"Renamed","root":%q,"roots":[{"path":%q,"kind":"git"},{"path":%q,"kind":"git"}]}],"absent":[],"errors":[]}`,
+		src, src, src+"/private"))
+	if err := registrationReady(socket, workspaces); err == nil {
+		t.Fatal("renamed project appeared ready")
 	}
 }

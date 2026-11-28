@@ -12,6 +12,7 @@ inside them.
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 
@@ -111,6 +112,8 @@ def main():
             report = roots(arguments, known)
     except (InventoryError, ValueError) as error:
         report = {"errors": [str(error)]}
+    except sqlite3.Error:
+        report = {"errors": ["Discovery state is unavailable, unsafe or invalid"]}
     # Errors travel in the report; a caller treats a report without projects as unknown.
     print(json.dumps(report, separators=(",", ":")))
     return 0
