@@ -57,10 +57,17 @@ func (executor *changingNativeHookExecutor) Exec(ctx context.Context, project, n
 
 func TestPreparedProjectHooksContinuationRejectsEqualCountScopeReplacement(t *testing.T) {
 	before := &ProjectHookPlan{allowedHooks: []string{"/usr/local/libexec/subyard/owned-hook"}, approved: hookObservation{Roots: []string{"/srv/workspaces/project"}}}
+	before.CaptureOwnerProjects([]domain.ProjectRecord{{ProjectID: "project", YardPath: "/srv/workspaces/project/src"}})
 	current := *before
 	if err := before.CheckContinuationScope(&current); err != nil {
 		t.Fatal(err)
 	}
+	// An unregistered sibling in the agent-writable listing is not continuation scope.
+	current.approved.Roots = []string{"/srv/workspaces/project", "/srv/workspaces/scratch"}
+	if err := before.CheckContinuationScope(&current); err != nil {
+		t.Fatalf("unregistered sibling refused: %v", err)
+	}
+	current = *before
 	current.allowedHooks = []string{"/usr/local/libexec/subyard/foreign-hook"}
 	if err := before.CheckContinuationScope(&current); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("replaced hook admitted: %v", err)
@@ -570,7 +577,7 @@ func TestStoppedProjectHooksSurviveApprovedTemporaryStart(t *testing.T) {
 }
 
 func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
-	for _, scenario := range []string{"success", "new hook", "new project root", "desired power changed", "unexpected pre-write start", "observation unavailable", "native source changed", "projects changed after resolution", "skip without prerequisite"} {
+	for _, scenario := range []string{"success", "unregistered sibling", "new hook", "registered root missing", "desired power changed", "unexpected pre-write start", "observation unavailable", "native source changed", "projects changed after resolution", "skip without prerequisite"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf '{\"state\":\"current\",\"actual\":\""+testRuntimeNewDigest+"\",\"desired\":\""+testRuntimeNewDigest+"\"}\\n'\n")
@@ -596,6 +603,8 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{{ProjectID: "sample", YardPath: "/srv/workspaces/sample/src"}})
+			executor.observation.Roots = []string{"/srv/workspaces/sample"}
 			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
 				t.Fatal(err)
 			}
@@ -614,7 +623,9 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 			switch scenario {
 			case "new hook":
 				executor.observation.Hooks = append(executor.observation.Hooks, hook+"-new")
-			case "new project root":
+			case "unregistered sibling":
+				executor.observation.Roots = []string{"/srv/workspaces/new", "/srv/workspaces/sample"}
+			case "registered root missing":
 				executor.observation.Roots = []string{"/srv/workspaces/new"}
 			case "desired power changed":
 				incus.Reconcile.Instance.Config["user.subyard.desired_power"] = "running"
@@ -635,7 +646,7 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 				executor.observation.Projects = testRuntimeNewDigest
 			}
 			err = runtime.RunProjectHooks(context.Background())
-			if scenario == "success" {
+			if scenario == "success" || scenario == "unregistered sibling" {
 				if err != nil || executor.calls != 1 {
 					t.Fatalf("approved conditional hook failed: calls=%d err=%v", executor.calls, err)
 				}

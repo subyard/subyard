@@ -3033,10 +3033,11 @@ bounded installed hook inventory, source fingerprints and project-root scope bef
 then rejects expansion or changed captured inputs before invoking a hook.
 Core binds each registered project root's directory identity (mode, owner, group, device,
 inode), its `src` identity and the content of its `.subyard-meta.json`, without traversing source
-trees. For a running yard, other workspace entries are checked only for membership: a registered
-root must remain listed, while added worktrees, build outputs and unregistered siblings do not
-stale the plan. A conditional plan (stopped, never-provisioned or reconstructed yard) still
-requires the listed roots to equal the registered ones.
+trees. Other workspace entries are checked only for membership: a registered root must remain
+listed, while added worktrees, build outputs and unregistered siblings do not stale the plan.
+The same applies to a conditional plan of a stopped, never-provisioned or reconstructed yard,
+which first observes the guest after its start, and to a continuation planned after an approved
+prerequisite.
 The installed dispatcher still compares its own observation with the latest host observation
 before any hook runs; init observes again and dispatches up to three times in all when only that
 observation moved, then reports that workspace entries kept changing.

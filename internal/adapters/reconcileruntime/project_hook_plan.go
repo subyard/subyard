@@ -258,17 +258,8 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 	if beforeWrites && !plan.conditional && observation.Wiring != plan.approved.Wiring {
 		return fmt.Errorf("%w: project hook wiring changed", domain.ErrPlanStale)
 	}
-	roots := plan.ownerRoots()
-	if plan.conditional {
-		if !slices.Equal(roots, observation.Roots) {
-			return fmt.Errorf("%w: conditional guest project scope differs from captured owner records", domain.ErrPlanStale)
-		}
-	} else {
-		for _, root := range roots {
-			if !slices.Contains(observation.Roots, root) {
-				return fmt.Errorf("%w: registered project root %s is missing", domain.ErrPlanStale, root)
-			}
-		}
+	if err := plan.checkRegisteredRoots(observation.Roots); err != nil {
+		return err
 	}
 	if err := runtime.checkProjectMetadataScope(ctx); err != nil {
 		return err
@@ -361,6 +352,17 @@ func (plan *ProjectHookPlan) OperationStep(target string) domain.OperationStep {
 		Preconditions: []string{"captured project inventory and hook inputs remain unchanged", "guest hook paths remain inside the captured installed and declared scope"}, Verify: "native dispatcher exits successfully and captured project inputs remain unchanged", Consequence: "retry installed project hooks once for active resources"}
 }
 
+// checkRegisteredRoots binds the agent-writable workspace listing by membership of
+// the captured owner roots: unregistered siblings neither stale nor widen the plan.
+func (plan *ProjectHookPlan) checkRegisteredRoots(listed []string) error {
+	for _, root := range plan.ownerRoots() {
+		if !slices.Contains(listed, root) {
+			return fmt.Errorf("%w: registered project root %s is missing", domain.ErrPlanStale, root)
+		}
+	}
+	return nil
+}
+
 func (plan *ProjectHookPlan) ownerRoots() []string {
 	roots := []string{}
 	for _, record := range plan.ownerProjects {
@@ -377,20 +379,16 @@ func (plan *ProjectHookPlan) CaptureOwnerProjects(records []domain.ProjectRecord
 }
 
 // CheckContinuationScope binds a freshly observed continuation to the same
-// disclosed hooks and workspace roots while permitting their owned bytes to
-// change during an approved prerequisite.
+// disclosed hooks and registered workspace roots while permitting their owned
+// bytes to change during an approved prerequisite.
 func (plan *ProjectHookPlan) CheckContinuationScope(current *ProjectHookPlan) error {
 	if plan == nil || current == nil {
 		return fmt.Errorf("%w: project hook continuation scope unavailable", domain.ErrPlanStale)
 	}
-	roots := plan.approved.Roots
-	if plan.conditional {
-		roots = plan.ownerRoots()
-	}
-	if !slices.Equal(plan.allowedHooks, current.allowedHooks) || !slices.Equal(roots, current.approved.Roots) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
+	if !slices.Equal(plan.allowedHooks, current.allowedHooks) || installedRuntimeDigest(plan.ownerProjects) != installedRuntimeDigest(current.ownerProjects) {
 		return fmt.Errorf("%w: project hook continuation scope changed", domain.ErrPlanStale)
 	}
-	return nil
+	return plan.checkRegisteredRoots(current.approved.Roots)
 }
 
 func (plan *ProjectHookPlan) Environment() map[string]string {
