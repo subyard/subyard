@@ -81,6 +81,20 @@ subyard_instance_catalog_available() { # <reference> <image-type>, original cata
   '
 }
 
+# Classifies an `incus image list` error read on stdin as a transient cause, or unknown.
+subyard_image_metadata_cause() {
+  local error
+  error=$(LC_ALL=C tr -d '\000') || true
+  case "$(printf '%s' "$error" | LC_ALL=C tr '[:upper:]' '[:lower:]')" in
+    *'no such host'* | *'temporary failure in name resolution'* | *'server misbehaving'*) printf 'dns\n' ;;
+    *'context deadline exceeded'* | *'i/o timeout'* | *'tls handshake timeout'*) printf 'timeout\n' ;;
+    *'connection reset by peer'* | *'connection refused'* | *'network is unreachable'*) printf 'connection\n' ;;
+    *'unexpected eof'*) printf 'interrupted\n' ;;
+    *' 502 bad gateway'* | *' 503 service unavailable'* | *' 504 gateway timeout'*) printf 'server\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 subyard_instance_selected_reference() { # <present|absent>
   case "${1:?}" in
     present) selected_image=$YARD_IMAGE ;;
@@ -92,7 +106,7 @@ subyard_instance_selected_reference() { # <present|absent>
 }
 
 yard_instance_create() (
-  local reference="$YARD_IMAGE" image_type=container metadata attempt rc availability selected_image
+  local reference="$YARD_IMAGE" image_type=container metadata attempt rc cause availability selected_image
   local remote=()
   if [[ "$reference" = *:* ]]; then
     remote=("${reference%%:*}:")
@@ -118,12 +132,14 @@ yard_instance_create() (
     fi
     # Cancellation and unknown errors are terminal. Retry only bounded read-only
     # metadata requests, with at most 95 seconds across attempts and backoff.
-    if [ "$attempt" -lt 3 ] \
-      && { [ "$rc" = 124 ] || { [ "$rc" = 1 ] && LC_ALL=C grep -qiE \
-        'lookup .*: (no such host|temporary failure in name resolution|server misbehaving)|context deadline exceeded|i/o timeout|TLS handshake timeout|connection (reset by peer|refused)|network is unreachable' "$metadata/error"; }; }; then
+    cause=unknown
+    [ "$rc" != 124 ] || cause=timeout
+    [ "$rc" != 1 ] || cause=$(subyard_image_metadata_cause < "$metadata/error")
+    if [ "$attempt" -lt 3 ] && [ "$cause" != unknown ]; then
       sleep 1 || exit "$?"
     else
-      printf 'image metadata unavailable (incus image list exit %s)\n' "$rc" >&2
+      # Name only the cause class: the CLI's own stderr stays private.
+      printf 'image metadata unavailable (incus image list exit %s, cause %s)\n' "$rc" "$cause" >&2
       exit "$rc"
     fi
   done
