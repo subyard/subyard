@@ -185,6 +185,9 @@ for required in config/installation-capabilities.json \
   scripts/install-test-vms-host-sink.sh \
   scripts/reconcile-integrations.sh \
   scripts/refresh-agent-skills.sh \
+  scripts/lib/checkout-discovery/checkouts.py \
+  scripts/lib/checkout-discovery/discovery.py \
+  scripts/lib/checkout-discovery/inventory.py \
   config/skills/package.py \
   config/skills/refresh.sh \
   scripts/prepare-preview-route.sh \

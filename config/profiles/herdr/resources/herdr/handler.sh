@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Share a container yard's Herdr Core over tailnet SSH.
 # Usage: yard herdr <up|status|is-up|pair|sync|update|restart|logs|down>
-#   pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
+#   pair --key PUBKEY [--name LABEL] | --from-host [--all | FINGERPRINT...] | --list | --revoke FINGERPRINT
 #   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
 #   update [--force]  Upgrade or restore the pinned release
 #   logs [--follow]   Read Herdr logs
@@ -26,6 +26,11 @@ helper=/usr/local/libexec/subyard/herdr-profile
 project_hook=/usr/local/libexec/subyard/projects-changed.d/herdr
 login=/usr/local/libexec/subyard/herdr-login
 unit=subyard-herdr-core.service
+discovery_unit=subyard-herdr-discovery.service
+discovery_timer=subyard-herdr-discovery.timer
+discovery_dir=/usr/local/libexec/subyard/herdr-discovery
+library="$root/scripts/lib/checkout-discovery"
+library_files=(checkouts.py discovery.py inventory.py)
 native="$profile/bin/herdr-profile"
 [ -x "$native" ] || native="$root/.build/profiles/herdr/bin/herdr-profile"
 yexec() { incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- "$@"; }
@@ -39,11 +44,14 @@ yard_running() {
   command -v incus >/dev/null &&
     [ "$(power_state "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" = RUNNING ]
 }
+allowed_refusals() {
+  [ "$YARD_KIND" = container ] || printf '%s\n' 'Herdr supports container yards only'
+  [ "$NESTED_E2E_VMS" != 1 ] || printf '%s\n' 'Herdr is unavailable in nested E2E mode'
+}
 allowed() {
-  local -a refusals=()
-  [ "$YARD_KIND" = container ] || refusals+=('Herdr supports container yards only')
-  [ "$NESTED_E2E_VMS" != 1 ] || refusals+=('Herdr is unavailable in nested E2E mode')
-  [ "${#refusals[@]}" -eq 0 ] || die "$(printf '%s\n' "${refusals[@]}")"
+  local refusals
+  refusals=$(allowed_refusals)
+  [ -z "$refusals" ] || die "$refusals"
 }
 observe() {
   if yexec test -x "$helper"; then
@@ -58,6 +66,9 @@ running() {
   jq -e '. != null' <<< "$result" >/dev/null
 }
 enabled() { yexec systemctl is-enabled --quiet "$unit"; }
+discovery_enabled() { yexec systemctl is-enabled --quiet "$discovery_timer"; }
+discovery_scheduled() { discovery_enabled && yexec systemctl is-active --quiet "$discovery_timer"; }
+schedule_discovery() { yexec systemctl enable --now --quiet "$discovery_timer"; }
 core_release() {
   local arch digest
   arch=$(yexec uname -m)
@@ -71,7 +82,8 @@ core_release() {
 digest() {
   [ -x "$native" ] || die 'Herdr profile helper is missing from the built runtime'
   sha256sum "$native" "$here/login.sh" "$here/handler.sh" "$here/install-core.sh" \
-    "$here/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" |
+    "$here/projects-changed.sh" "$profile/release.env" "$profile/guest-ssh.sh" \
+    "${library_files[@]/#/$library/}" |
     awk '{print $1}' | sha256sum | cut -d ' ' -f1
 }
 guest_file() {
@@ -93,6 +105,41 @@ install_assets() {
   guest_file "$helper" 0755 < "$native"
   guest_file "$login" 0755 < "$here/login.sh"
   guest_file "$project_hook" 0755 < "$here/projects-changed.sh"
+  yexec install -d -m 0755 "$discovery_dir"
+  local name
+  for name in "${library_files[@]}"; do
+    guest_file "$discovery_dir/$name" 0644 < "$library/$name"
+  done
+  # Orca's intervals: a new nested clone appears within about a minute.
+  guest_file "/etc/systemd/system/$discovery_unit" 0644 <<EOF
+[Unit]
+Description=Discover Herdr project checkouts and reconcile their spaces
+After=user@$DEV_UID.service
+RequiresMountsFor=/srv/workspaces
+
+[Service]
+Type=oneshot
+User=$DEV_USER
+# An earlier helper restored by a rollback fails the condition, which skips the run.
+ExecCondition=$helper discover --supported
+ExecStart=$helper discover
+TimeoutStartSec=100
+UMask=0077
+Nice=10
+EOF
+  guest_file "/etc/systemd/system/$discovery_timer" 0644 <<EOF
+[Unit]
+Description=Periodically discover Herdr project checkouts
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=$discovery_unit
+
+[Install]
+WantedBy=timers.target
+EOF
   guest_file "/etc/systemd/system/$unit" 0644 <<EOF
 [Unit]
 Description=Start Herdr Core in the developer login environment
@@ -128,7 +175,9 @@ up() {
   yexec systemctl enable --quiet "$unit"
   if ! running; then yexec systemctl start "$unit"; fi
   wait_core
-  as_dev "$helper" sync
+  # A sync problem, such as an unverifiable checkout, must not leave ingress unpublished.
+  as_dev "$helper" sync || sync_failed=1
+  schedule_discovery
   digest | guest_file "$helper.sha256" 0644
 }
 up_ready() {
@@ -136,7 +185,7 @@ up_ready() {
     [ "$(yexec loginctl show-user "$DEV_USER" -p Linger --value)" = yes ] &&
     [ "$(yexec cat "$helper.sha256" 2>/dev/null)" = "$(digest)" ] &&
     yexec test -x "$project_hook" && yexec cmp -s - "$project_hook" < "$here/projects-changed.sh" &&
-    as_dev "$helper" registration-ready 2>/dev/null
+    discovery_scheduled && as_dev "$helper" registration-ready 2>/dev/null
 }
 
 runtime() {
@@ -159,6 +208,8 @@ runtime() {
   if [ "$mode" = apply ]; then
     [ "$#" -eq 3 ] && [ "$installed" = true ] && [ "$actual" = "$2" ] && [ "$desired" = "$3" ] || die 'Herdr runtime plan is stale'
     install_assets >&2
+    # An enabled Herdr keeps its periodic checkout discovery across a runtime refresh.
+    if enabled; then schedule_discovery >&2; fi
     printf '%s\n' "$desired" | guest_file "$helper.sha256" 0644 >&2
     actual="$desired"
     state=current
@@ -173,6 +224,8 @@ usage() {
   cat <<EOF
 Usage: ${PROG:-yard} herdr <up|status|is-up|pair|sync|update|restart|logs|down>
   pair --key PUBKEY [--name LABEL] | --list | --revoke FINGERPRINT
+  pair --from-host [--all | FINGERPRINT...]
+                    Preview or pair keys from the host account's authorized_keys
   sync [--restore]  Reconcile project spaces, optionally restoring closed ones
   update [--force]  Upgrade to the latest compatible release, or restore the pin
   logs [--follow]   Read Herdr logs
@@ -242,8 +295,8 @@ assessment() {
     down)
       svc_require_yard_running
       result=$(observe) || result=unknown
-      if [ "$result" = null ] && ! enabled && route_absent && guest_ssh absent; then ready=true; fi
-      desired='core stopped, kick disabled, proxy and SSH drop-in absent'
+      if [ "$result" = null ] && ! enabled && ! discovery_enabled && route_absent && guest_ssh absent; then ready=true; fi
+      desired='core stopped, kick and checkout discovery disabled, proxy and SSH drop-in absent'
       count=unavailable
       if [ "$result" != unknown ]; then count=$(jq -r '.Live // 0' <<< "$result"); fi
       consequence="remove the Herdr proxy and SSH drop-in and stop all Herdr terminals, including arrivals. Observed live terminals: $count"
@@ -271,9 +324,11 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       up)
         allowed
         svc_require_yard_running
+        sync_failed=0
         up
         guest_ssh ensure
-        if ! route_ready; then ensure_route; fi ;;
+        if ! route_ready; then ensure_route; fi
+        [ "$sync_failed" = 0 ] || die 'Herdr is up, but project sync failed; see the error above, then run yard herdr sync' ;;
       is-up) yard_running && running && route_ready ;;
       status)
         if ! yard_running; then printf 'Herdr: yard is stopped or unavailable\n'; exit; fi
@@ -281,6 +336,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         printf 'Minimum Core release: %s\n' "$HERDR_VERSION"
         if route_ready 2>/dev/null; then
           printf 'SSH endpoint: %s@%s:%s\n' "$DEV_USER" "$HERDR_ADVERTISE_HOST" "$HERDR_HOST_PORT"
+          machine_instructions
         else
           printf 'SSH endpoint: unpublished or unavailable\n'
         fi
@@ -308,6 +364,11 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         wait_core "$old" ;;
       down)
         remove_route "$(route_state)"
+        if discovery_enabled; then yexec systemctl disable --now --quiet "$discovery_timer"; fi
+        # A running oneshot is activating, not active; stop it whenever the unit is loaded.
+        if [ "$(yexec systemctl show -p LoadState --value "$discovery_unit")" = loaded ]; then
+          yexec systemctl stop "$discovery_unit"
+        fi
         if enabled; then yexec systemctl disable --now "$unit"; fi
         if yexec test -x "$helper"; then
           as_dev "$helper" stop || die 'Herdr ingress is closed, but Core shutdown could not be verified'

@@ -61,7 +61,8 @@ registration_desired_digest
 '''
     version = re.search(r'^ORCA_CONTRACT_VERSION=(\d+)$', current_handler.read_text(), re.MULTILINE).group(1)
     script = script.replace('ORCA_CONTRACT_VERSION=5', f'ORCA_CONTRACT_VERSION={version}')
-    names = sorted(p.name for p in (resource / 'registration').glob('*.py'))
+    # Orca installs the shared checkout discovery library beside its own modules.
+    names = sorted([*(p.name for p in (resource / 'registration').glob('*.py')), 'discovery.py', 'inventory.py'])
     command = ['exec', 'yard', '--project', 'subyard', '--', 'bash', '-se', '--', None,
                '/usr/local/libexec/subyard/projects-changed.d/orca',
                '/usr/local/libexec/subyard/orca-registration',

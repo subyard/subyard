@@ -1018,7 +1018,8 @@ cmp -s "$ORCA_TEST_CAPTURE/subyard-orca.service" \
 if grep -Fq -- '--no-pairing' "$ORCA_TEST_CAPTURE/subyard-orca.service"; then
   fail 'service disabled stock startup pairing'
 fi
-for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py; do
+for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py \
+  "$ROOT"/scripts/lib/checkout-discovery/discovery.py "$ROOT"/scripts/lib/checkout-discovery/inventory.py; do
   cmp -s "$source" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/${source##*/}" \
     || fail 'registration component was not installed intact'
 done
@@ -1116,6 +1117,19 @@ touch "$hook_dir/lock"
   render_registration_hook discover >"$hook_dir/discover"
 )
 chmod 0755 "$hook_dir/sync" "$hook_dir/discover"
+(
+  # Without the shared discovery library the contract has no digest and nothing to install.
+  layout="$hook_dir/layout/config/profiles/orca/resources/orca"
+  mkdir -p "$layout/registration" "$hook_dir/layout/scripts/lib/checkout-discovery"
+  cp "$ROOT"/config/profiles/orca/resources/orca/registration/*.py "$layout/registration/"
+  cp "$ROOT/scripts/lib/checkout-discovery/discovery.py" "$hook_dir/layout/scripts/lib/checkout-discovery/"
+  RESOURCE_DIR="$layout" ORCA_CONTRACT_VERSION=7
+  # shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
+  . "$ROOT/config/profiles/orca/resources/orca/registration-contract.sh"
+  if registration_contract_version >/dev/null; then fail 'contract digest accepted a missing inventory.py'; fi
+  cp "$ROOT/scripts/lib/checkout-discovery/inventory.py" "$hook_dir/layout/scripts/lib/checkout-discovery/"
+  [ "$(registration_contract_version)" = "$(cat "$hook_dir/digest")" ] || fail 'copied layout changed the contract digest'
+)
 run_hook() {
   local mode="$1" report="$2" exit_code="$3"
   rm -f "$hook_dir/settings-ran"

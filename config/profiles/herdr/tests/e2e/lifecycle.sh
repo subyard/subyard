@@ -32,6 +32,9 @@ trap 'stage "failed at line $LINENO (exit $?)" >&2' ERR
 on_exit() {
   local rc=$? log
   trap - EXIT
+  if [ -n "${host_keys:-}" ] && [ -f "$state/host-authorized-keys" ]; then
+    cat "$state/host-authorized-keys" > "$host_keys" || rc=1
+  fi
   if [ "$rc" != 0 ]; then
     for log in "$state"/*.log; do
       [ -s "$log" ] || continue
@@ -231,6 +234,67 @@ client reconnect
 fingerprint="$(ssh-keygen -E sha256 -lf "$state/b.pub" | awk '{print $2}')"
 yard herdr pair --revoke "$fingerprint" --yes > "$state/revoke.log" 2>&1
 reject_key b
+
+stage 'verify pairing from the host account authorized_keys'
+# The VM account stands in for the owner host account; on_exit restores its file.
+[ -d "$HOME/.ssh" ] || mkdir -m 0700 "$HOME/.ssh"
+[ -e "$HOME/.ssh/authorized_keys" ] || install -m 0600 /dev/null "$HOME/.ssh/authorized_keys"
+cp -p "$HOME/.ssh/authorized_keys" "$state/host-authorized-keys"
+host_keys="$HOME/.ssh/authorized_keys"
+guest runuser -u dev -- sh -c 'cat -- "$HOME/.ssh/authorized_keys"' > "$state/guest-authorized-keys"
+ssh-keygen -q -t ed25519 -N '' -C host-c -f "$state/c"
+ssh-keygen -q -t ed25519 -N '' -C host-d -f "$state/d"
+ssh-keygen -q -t rsa -b 3072 -N '' -C laptop-rsa -f "$state/e"
+{ cat "$state/a.pub" "$state/c.pub" "$state/e.pub"; printf 'restrict %s' "$(cat "$state/d.pub")"; printf '\n'; } >> "$host_keys"
+guest runuser -u dev -- sh -c 'cat >> "$HOME/.ssh/authorized_keys"' < "$state/e.pub"
+key_fp() { ssh-keygen -E sha256 -lf "$state/$1.pub" | awk '{print $2}'; }
+yard herdr pair --from-host > "$state/from-host.log" 2>&1
+for expected in "$(key_fp a)  a  granted" "$(key_fp c)  host-c  new" "$(key_fp e)  laptop-rsa  unmanaged" \
+  "$(key_fp d)  host-d  skipped:options"; do
+  grep -Fxq "$expected" "$state/from-host.log" || fail "host key preview is missing: $expected"
+done
+if yard herdr pair --from-host "$(key_fp e)" "$(key_fp d)" --yes > "$state/from-host-refused.log" 2>&1; then
+  fail 'an unmanaged or restricted host key was paired'
+fi
+grep -Fq 'already authorized in the yard outside Herdr' "$state/from-host-refused.log"
+grep -Fq 'has authorization options' "$state/from-host-refused.log"
+reject_key c
+yard herdr pair --from-host "$(key_fp c)" --yes > "$state/from-host-pair.log" 2>&1
+grep -Fxq "Paired $(key_fp c)  host-c" "$state/from-host-pair.log"
+key_login c
+yard herdr pair --revoke "$(key_fp c)" --yes > "$state/from-host-revoke.log" 2>&1
+reject_key c
+guest runuser -u dev -- sh -c 'cat > "$HOME/.ssh/authorized_keys"' < "$state/guest-authorized-keys"
+
+stage 'verify nested checkout and sibling worktree spaces follow their folders'
+guest systemctl is-active --quiet subyard-herdr-discovery.timer
+status="$(yard herdr status)"
+grep -Eq "^hc machine add dev@$address:$port( --name [a-z0-9][a-z0-9._-]*)?\$" <<< "$status"
+# A printed label also names the SSH config block.
+label="$(sed -nE "s/^hc machine add .* --name (.*)\$/\1/p" <<< "$status")"
+[ -z "$label" ] || grep -Fxq "Host $label" <<< "$status"
+workspace="$(guest_dev python3 -c 'import glob, json
+print(*[path[:-len("/.subyard-meta.json")] for path in glob.glob("/srv/workspaces/*/.subyard-meta.json")
+        if json.load(open(path))["name"] == "pristine"])')"
+[ -d "$state/host/pristine" ] && [[ "$workspace" == /srv/workspaces/* ]]
+guest_dev git -C "$workspace/src" init -q private
+guest_dev git -C "$workspace/src" worktree add -q "$workspace/wt-fixture"
+await_spaces() {
+  local attempt
+  for ((attempt=0; attempt<60; attempt++)); do
+    client spaces > "$state/spaces" && "$@" && return 0
+    sleep 2
+  done
+  cat "$state/spaces" >&2
+  fail "spaces did not converge: $*"
+}
+has_space() { grep -Fxq "$1 $2" "$state/spaces"; }
+# The nested clone appears through the periodic scan, the sibling worktree through the hook it runs.
+await_spaces has_space pristine/private "$workspace/src/private"
+await_spaces has_space pristine/wt-fixture "$workspace/wt-fixture"
+guest_dev git -C "$workspace/src" worktree remove "$workspace/wt-fixture"
+lacks_worktree() { ! grep -q '^pristine/wt-fixture ' "$state/spaces" && has_space pristine/private "$workspace/src/private"; }
+await_spaces lacks_worktree
 
 stage 'verify up and update hand an older Core over to the pin with a live terminal'
 terminal_pid="$(cat "$state/terminal-pid")"

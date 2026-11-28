@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest import mock
 
-from support import Catalog, COMPONENT, git, init_git, project
+from support import Catalog, COMPONENT, SOURCE, git, init_git, project
 
 
 class MainTests(unittest.TestCase):
@@ -143,7 +143,7 @@ class MainTests(unittest.TestCase):
                 cwd = imports
             else:
                 environment["PYTHONPATH"] = str(imports)
-        fixture = COMPONENT.parents[2] / "tests" / "orca-profile-resource.sh"
+        fixture = SOURCE.parents[2] / "tests" / "orca-profile-resource.sh"
         # This batch includes multiple observations, drift checks and helper repair.
         result = subprocess.run(["bash", str(fixture), "--source-observer-fixture", str(output)],
                                 env=environment, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)

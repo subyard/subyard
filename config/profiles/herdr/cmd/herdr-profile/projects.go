@@ -21,18 +21,25 @@ import (
 const appDocument = "herdr-app"
 const documentLimit = 1 << 20
 
-type project struct {
-	Name, Folder string
-}
-
 type registration struct {
 	ID      string `json:"id"`
 	Pending string `json:"pending,omitempty"`
 }
 
+// storedProject is one projects.json record. Releases before nested checkouts read
+// only id and pending; retired keeps the checkout records of a project whose own
+// space is gone without reading as a registered project space.
+type storedProject struct {
+	ID        string                  `json:"id"`
+	Pending   string                  `json:"pending,omitempty"`
+	Retired   bool                    `json:"retired,omitempty"`
+	Checkouts map[string]registration `json:"checkouts,omitempty"`
+}
+
 type ownership struct {
 	Schema    int    `json:"schema"`
 	ProjectID string `json:"projectId"`
+	Checkout  string `json:"checkout,omitempty"`
 	Name      string `json:"name"`
 	Folder    string `json:"folder"`
 }
@@ -47,52 +54,6 @@ type space struct {
 type document struct {
 	Value   json.RawMessage `json:"value"`
 	Version uint64          `json:"version"`
-}
-
-func projectInventory(root string, known map[string]registration) (map[string]project, error) {
-	projects := make(map[string]project)
-	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil || resolved != root {
-		return nil, errors.New("cannot inspect canonical Herdr workspaces")
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, err
-	}
-	var refusals []error
-	for _, entry := range entries {
-		id := entry.Name()
-		if !domain.SafeID(id) {
-			continue
-		}
-		workspace := filepath.Join(root, id)
-		if !entry.IsDir() {
-			if _, exists := known[id]; exists {
-				refusals = append(refusals, fmt.Errorf("workspace %q is no longer a directory", id))
-			}
-			continue
-		}
-		data, err := safefs.ReadRegular(filepath.Join(workspace, ".subyard-meta.json"), safefs.ReadOptions{MaxBytes: 65536, SingleLink: true})
-		if errors.Is(err, os.ErrNotExist) && known[id].ID == "" {
-			continue
-		}
-		var metadata struct {
-			Schema          int
-			ProjectID, Name string
-		}
-		if err != nil || json.Unmarshal(data, &metadata) != nil || metadata.Schema != 1 || metadata.ProjectID != id || strings.TrimSpace(metadata.Name) == "" {
-			refusals = append(refusals, fmt.Errorf("invalid project metadata for %q", id))
-			continue
-		}
-		folder := filepath.Join(workspace, "src")
-		info, err := os.Lstat(folder)
-		if err != nil || !info.IsDir() {
-			refusals = append(refusals, fmt.Errorf("project %q has no canonical checkout directory", id))
-			continue
-		}
-		projects[id] = project{Name: metadata.Name, Folder: folder}
-	}
-	return projects, domain.CollectRefusals(refusals...)
 }
 
 func stateDir() (string, error) {
@@ -114,19 +75,47 @@ func loadRegistrations(dir string) (map[string]registration, error) {
 	if err != nil {
 		return nil, err
 	}
-	if json.Unmarshal(data, &state) != nil || state == nil {
+	var stored map[string]storedProject
+	if json.Unmarshal(data, &stored) != nil || stored == nil {
 		return nil, errors.New("invalid Herdr registration state")
 	}
-	for id, entry := range state {
+	for id, entry := range stored {
 		if !domain.SafeID(id) || entry.ID != spaceID(id) {
 			return nil, errors.New("invalid Herdr registration identity")
+		}
+		if !entry.Retired {
+			state[id] = registration{ID: entry.ID, Pending: entry.Pending}
+		}
+		for path, record := range entry.Checkouts {
+			key := checkoutKey(id, path)
+			if !validCheckoutPath(path) || record.ID != spaceID(key) {
+				return nil, errors.New("invalid Herdr registration identity")
+			}
+			state[key] = record
 		}
 	}
 	return state, nil
 }
 
 func saveRegistrations(dir string, state map[string]registration) error {
-	data, err := json.Marshal(state)
+	stored := make(map[string]storedProject)
+	for key, record := range state {
+		id, path := splitKey(key)
+		entry, exists := stored[id]
+		if !exists {
+			entry = storedProject{ID: spaceID(id), Retired: true}
+		}
+		if path == "" {
+			entry.Pending, entry.Retired = record.Pending, false
+		} else {
+			if entry.Checkouts == nil {
+				entry.Checkouts = make(map[string]registration)
+			}
+			entry.Checkouts[path] = record
+		}
+		stored[id] = entry
+	}
+	data, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}
@@ -180,8 +169,18 @@ func loadLayout(source json.RawMessage) (map[string]json.RawMessage, []space, er
 	return fields, spaces, nil
 }
 
+func (owner ownership) key() string { return checkoutKey(owner.ProjectID, owner.Checkout) }
+
 func (entry space) owned() bool {
-	return entry.Subyard.Schema == 1 && domain.SafeID(entry.Subyard.ProjectID) && entry.ID == spaceID(entry.Subyard.ProjectID)
+	return entry.Subyard.Schema == 1 && domain.SafeID(entry.Subyard.ProjectID) &&
+		(entry.Subyard.Checkout == "" || validCheckoutPath(entry.Subyard.Checkout)) && entry.ID == spaceID(entry.Subyard.key())
+}
+
+// retirable reports whether a proven-absent checkout's space may go: a nested
+// checkout's space goes with its layout, as Orca removes its record; the project
+// space goes only while untouched.
+func (entry space) retirable() bool {
+	return entry.Subyard.Checkout != "" || entry.pristine()
 }
 
 func (entry space) pristine() bool {
@@ -194,10 +193,11 @@ func jsonValue(value any) json.RawMessage {
 	return encoded
 }
 
-func projectSpace(id string, project project) map[string]json.RawMessage {
+func checkoutSpace(key string, checkout checkout) map[string]json.RawMessage {
+	id, path := splitKey(key)
 	return map[string]json.RawMessage{
-		"id": jsonValue(spaceID(id)), "name": jsonValue(project.Name), "folder": jsonValue(project.Folder),
-		"tabs": json.RawMessage("[]"), "subyard": jsonValue(ownership{1, id, project.Name, project.Folder}),
+		"id": jsonValue(spaceID(key)), "name": jsonValue(checkout.Name), "folder": jsonValue(checkout.Folder),
+		"tabs": json.RawMessage("[]"), "subyard": jsonValue(ownership{1, id, path, checkout.Name, checkout.Folder}),
 	}
 }
 
@@ -228,7 +228,7 @@ func liveSpaces(socket string) (map[string]bool, error) {
 	return live, nil
 }
 
-func planSpaces(spaces []space, projects map[string]project, state map[string]registration,
+func planSpaces(spaces []space, inventory inventory, state map[string]registration,
 	live map[string]bool, restore bool,
 ) ([]map[string]json.RawMessage, bool, error) {
 	rows := make([]map[string]json.RawMessage, 0, len(spaces))
@@ -237,54 +237,65 @@ func planSpaces(spaces []space, projects map[string]project, state map[string]re
 	for _, entry := range spaces {
 		present[entry.ID] = entry
 		if entry.owned() {
-			id := entry.Subyard.ProjectID
+			key := entry.Subyard.key()
 			record := registration{ID: entry.ID}
-			if project, exists := projects[id]; exists {
-				if entry.Subyard.Name != project.Name || entry.Subyard.Folder != project.Folder {
-					desired := projectSpace(id, project)
+			if checkout, exists := inventory.Checkouts[key]; exists {
+				if entry.Subyard.Name != checkout.Name || entry.Subyard.Folder != checkout.Folder {
+					desired := checkoutSpace(key, checkout)
 					entry.fields["name"], entry.fields["folder"], entry.fields["subyard"] = desired["name"], desired["folder"], desired["subyard"]
 					changed = true
 				}
-			} else {
+			} else if inventory.Gone[key] {
 				switch {
-				case !entry.pristine():
+				case !entry.retirable():
 					record.Pending = "space contains user layout"
 				case live[entry.ID]:
 					record.Pending = "space has live terminals"
 				default:
-					delete(state, id)
+					delete(state, key)
 					changed = true
 					continue
 				}
 			}
-			state[id] = record
+			// A checkout that is neither present nor proven absent keeps its space,
+			// and while a scan problem hides it, its pending cleanup reason.
+			if _, desired := inventory.Checkouts[key]; !desired && inventory.retains(key) {
+				record.Pending = state[key].Pending
+			}
+			state[key] = record
 		}
 		rows = append(rows, entry.fields)
 	}
-	for id, record := range state {
+	for key, record := range state {
 		if entry, exists := present[record.ID]; !exists || !entry.owned() {
-			if _, active := projects[id]; !active {
-				delete(state, id)
+			if _, active := inventory.Checkouts[key]; !active {
+				if !inventory.retains(key) {
+					delete(state, key)
+				}
 			} else if record.Pending != "" {
 				record.Pending = ""
-				state[id] = record
+				state[key] = record
 			}
 		}
 	}
 	var refusals []error
-	for _, id := range slices.Sorted(maps.Keys(projects)) {
-		spaceID := spaceID(id)
+	for _, key := range slices.Sorted(maps.Keys(inventory.Checkouts)) {
+		spaceID := spaceID(key)
 		if entry, exists := present[spaceID]; exists {
 			if !entry.owned() {
-				refusals = append(refusals, fmt.Errorf("space identity for project %q is already in use", id))
+				kind := "project"
+				if strings.Contains(key, "/") {
+					kind = "checkout"
+				}
+				refusals = append(refusals, fmt.Errorf("space identity for %s %q is already in use", kind, key))
 			}
 			continue
 		}
-		if _, seen := state[id]; seen && !restore {
+		if _, seen := state[key]; seen && !restore {
 			continue
 		}
-		state[id] = registration{ID: spaceID}
-		rows = append(rows, projectSpace(id, projects[id]))
+		state[key] = registration{ID: spaceID}
+		rows = append(rows, checkoutSpace(key, inventory.Checkouts[key]))
 		changed = true
 	}
 	return rows, changed, domain.CollectRefusals(refusals...)
@@ -296,13 +307,25 @@ func inspectRegistration(socket, workspaces string, hook bool) (string, bool, er
 		coreErr = errors.New("Core is stopped. Run yard herdr up first.")
 	}
 	dir, dirErr := stateDir()
-	var state map[string]registration
-	var stateErr error
+	var stateErr, inventoryErr error
 	if dirErr == nil {
+		var state map[string]registration
 		state, stateErr = loadRegistrations(dir)
+		// A running Core is reconciled under the project lock, which scans again
+		// unless the state is unreadable.
+		if core == nil || coreErr != nil || stateErr != nil {
+			inventory, err := scanCheckouts(workspaces, dir, slices.Sorted(maps.Keys(state)))
+			inventoryErr = domain.CollectRefusals(err, inventory.refusal())
+		}
 	}
-	_, inventoryErr := projectInventory(workspaces, state)
 	return dir, core != nil, domain.CollectRefusals(coreErr, dirErr, stateErr, inventoryErr)
+}
+
+func ensureStateDir(dir string) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	return safefs.EnsurePrivateDir(dir)
 }
 
 func syncProjects(socket, workspaces string, restore, hook bool) error {
@@ -310,10 +333,7 @@ func syncProjects(socket, workspaces string, restore, hook bool) error {
 	if err != nil || !running {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		return err
-	}
-	if err := safefs.EnsurePrivateDir(dir); err != nil {
+	if err := ensureStateDir(dir); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -326,12 +346,24 @@ func syncProjects(socket, workspaces string, restore, hook bool) error {
 	if err := lock.Acquire(ctx, false, 25*time.Millisecond); err != nil {
 		return err
 	}
-	state, stateErr := loadRegistrations(dir)
-	projects, inventoryErr := projectInventory(workspaces, state)
-	if err := domain.CollectRefusals(stateErr, inventoryErr); err != nil {
+	state, err := loadRegistrations(dir)
+	if err != nil {
 		return err
 	}
-	return syncLayout(socket, workspaces, dir, projects, state, restore)
+	return syncLayout(socket, workspaces, dir, state, restore)
+}
+
+// discoverCheckouts advances the periodic nested checkout scan, then reconciles
+// spaces as a project hook does.
+func discoverCheckouts(socket, workspaces string) error {
+	dir, err := stateDir()
+	if err != nil {
+		return err
+	}
+	if err := ensureStateDir(dir); err != nil {
+		return err
+	}
+	return domain.CollectRefusals(advanceDiscovery(workspaces, dir), syncProjects(socket, workspaces, false, true))
 }
 
 func openProjectLock(dir string) (*safefs.LockFile, error) {
@@ -344,7 +376,7 @@ func openProjectLock(dir string) (*safefs.LockFile, error) {
 	return safefs.OpenLock(path, 0o600)
 }
 
-func inspectLayout(socket string, projects map[string]project, next map[string]registration, restore bool) (document, bool, error) {
+func inspectLayout(socket string, inventory inventory, next map[string]registration, restore bool) (document, bool, error) {
 	var current document
 	if err := call(socket, "doc.get", map[string]string{"name": appDocument}, &current); err != nil {
 		return document{}, false, err
@@ -355,7 +387,7 @@ func inspectLayout(socket string, projects map[string]project, next map[string]r
 	}
 	var live map[string]bool
 	for _, space := range spaces {
-		if _, present := projects[space.Subyard.ProjectID]; space.owned() && space.pristine() && !present {
+		if space.owned() && inventory.Gone[space.Subyard.key()] && space.retirable() {
 			live, err = liveSpaces(socket)
 			if err != nil {
 				return document{}, false, err
@@ -363,7 +395,7 @@ func inspectLayout(socket string, projects map[string]project, next map[string]r
 			break
 		}
 	}
-	rows, changed, err := planSpaces(spaces, projects, next, live, restore)
+	rows, changed, err := planSpaces(spaces, inventory, next, live, restore)
 	if err != nil {
 		return document{}, false, err
 	}
@@ -375,43 +407,103 @@ func inspectLayout(socket string, projects map[string]project, next map[string]r
 	return current, changed, nil
 }
 
+type registrationPlan struct {
+	document  document
+	next      map[string]registration
+	inventory inventory
+	known     []string
+	changed   bool
+}
+
+// planRegistration scans the checkouts and plans the layout. Owned spaces that the
+// state does not list, such as after a rollback dropped checkout records, are
+// scanned once more as known checkouts so their absence can be proven. Readiness
+// leaves unregistered nested checkouts to the discovery timer, which adds them
+// right after its scan caches them.
+func planRegistration(socket, workspaces, dir string, state map[string]registration, restore, readiness bool) (registrationPlan, error) {
+	known := slices.Sorted(maps.Keys(state))
+	for pass := 0; ; pass++ {
+		inventory, err := scanCheckouts(workspaces, dir, known)
+		if err != nil {
+			return registrationPlan{}, err
+		}
+		if readiness {
+			for key := range inventory.Checkouts {
+				if _, recorded := state[key]; !recorded && strings.Contains(key, "/") {
+					delete(inventory.Checkouts, key)
+				}
+			}
+		}
+		next := maps.Clone(state)
+		current, changed, err := inspectLayout(socket, inventory, next, restore)
+		if err != nil {
+			return registrationPlan{}, err
+		}
+		var added []string
+		for key := range next {
+			if _, recorded := state[key]; !recorded {
+				if _, desired := inventory.Checkouts[key]; !desired {
+					added = append(added, key)
+				}
+			}
+		}
+		if len(added) == 0 || pass > 0 {
+			return registrationPlan{current, next, inventory, known, changed}, nil
+		}
+		known = slices.Sorted(slices.Values(append(known, added...)))
+	}
+}
+
 func registrationReady(socket, workspaces string) error {
 	dir, err := stateDir()
 	if err != nil {
 		return err
 	}
-	state, stateErr := loadRegistrations(dir)
-	projects, inventoryErr := projectInventory(workspaces, state)
-	if err := domain.CollectRefusals(stateErr, inventoryErr); err != nil {
-		return err
+	// Hold the project lock, when sync created it, so the timer's update is never seen half applied.
+	if _, err := os.Lstat(filepath.Join(dir, "projects.lock")); err == nil {
+		lock, err := openProjectLock(dir)
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := lock.Acquire(ctx, true, 25*time.Millisecond); err != nil {
+			return err
+		}
 	}
-	next := maps.Clone(state)
-	_, changed, err := inspectLayout(socket, projects, next, false)
+	state, err := loadRegistrations(dir)
+	if err != nil {
+		inventory, inventoryErr := scanCheckouts(workspaces, dir, nil)
+		return domain.CollectRefusals(err, inventoryErr, inventory.refusal())
+	}
+	plan, err := planRegistration(socket, workspaces, dir, state, false, true)
 	if err != nil {
 		return err
 	}
-	if changed || !reflect.DeepEqual(state, next) {
-		return errors.New("Herdr project registration needs reconciliation")
+	var pending error
+	if plan.changed || !reflect.DeepEqual(state, plan.next) {
+		pending = errors.New("Herdr project registration needs reconciliation")
 	}
-	return nil
+	return domain.CollectRefusals(pending, plan.inventory.refusal())
 }
 
-func syncLayout(socket, workspaces, dir string, projects map[string]project, state map[string]registration, restore bool) error {
+func syncLayout(socket, workspaces, dir string, state map[string]registration, restore bool) error {
 	for range 4 {
-		next := maps.Clone(state)
-		current, changed, err := inspectLayout(socket, projects, next, restore)
+		plan, err := planRegistration(socket, workspaces, dir, state, restore, false)
 		if err != nil {
 			return err
 		}
-		fresh, err := projectInventory(workspaces, state)
+		fresh, err := scanCheckouts(workspaces, dir, plan.known)
 		if err != nil {
 			return err
 		}
-		if !reflect.DeepEqual(projects, fresh) {
-			return errors.New("project inventory changed during Herdr sync")
+		if !reflect.DeepEqual(plan.inventory, fresh) {
+			// Periodic discovery or a project change moved on; plan again.
+			continue
 		}
-		if changed {
-			err = call(socket, "doc.set", map[string]any{"name": appDocument, "value": current.Value, "version": current.Version}, nil)
+		if plan.changed {
+			err = call(socket, "doc.set", map[string]any{"name": appDocument, "value": plan.document.Value, "version": plan.document.Version}, nil)
 			var rejected *rpcError
 			if errors.As(err, &rejected) && rejected.Data.Kind == "conflict" {
 				continue
@@ -420,10 +512,13 @@ func syncLayout(socket, workspaces, dir string, projects map[string]project, sta
 				return err
 			}
 		}
-		if !reflect.DeepEqual(state, next) {
-			return saveRegistrations(dir, next)
+		if !reflect.DeepEqual(state, plan.next) {
+			if err := saveRegistrations(dir, plan.next); err != nil {
+				return err
+			}
 		}
-		return nil
+		// The present checkouts are reconciled; report what kept the rest unchanged.
+		return plan.inventory.refusal()
 	}
-	return errors.New("Herdr document kept changing; retry sync")
+	return errors.New("Herdr document or project inventory kept changing; retry sync")
 }

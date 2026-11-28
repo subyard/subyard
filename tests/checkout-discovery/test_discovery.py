@@ -15,7 +15,7 @@ class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         from discovery import discover
         self.discover = discover
-        self.tmp = tempfile.TemporaryDirectory(prefix="subyard-orca-discovery.", dir="/tmp")
+        self.tmp = tempfile.TemporaryDirectory(prefix="subyard-checkout-discovery.", dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.root = project(self.workspaces)
@@ -115,7 +115,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(3, sum(root.kind == "git" for root in scan.projects[0].roots))
 
     def test_broken_git_is_error_and_not_folder_transition(self):
-        (self.root / ".git").write_text("gitdir: /nonexistent/orca-fixture\n")
+        (self.root / ".git").write_text("gitdir: /nonexistent/checkout-fixture\n")
         scan = self.discover(self.workspaces)
         self.assertTrue(scan.errors)
         self.assertEqual("unknown", scan.projects[0].roots[0].kind)

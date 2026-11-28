@@ -305,7 +305,7 @@ def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):
                     try:
                         root_fd = _open_dir("src", project_fd)
                     except FileNotFoundError:
-                        scan.warnings.append("Project root is missing; existing Orca records are retained: " + root)
+                        scan.warnings.append("Project root is missing; existing records are retained: " + root)
                         continue
                     except OSError:
                         scan.errors.append("Project root is inaccessible or a symlink: " + root)

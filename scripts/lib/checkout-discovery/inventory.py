@@ -3,7 +3,7 @@
 Linux directory cookies let a new process continue a huge flat directory without
 replaying its earlier files. A FIFO of directory portions gives other trees a
 turn. Cookies are hints in a changing directory: every completed pass is followed
-by a fresh pass, and omission is never evidence for deleting an Orca record.
+by a fresh pass, and omission is never evidence for deleting a record.
 Only directory entries and Git markers are inspected; no per-file watches exist.
 """
 
