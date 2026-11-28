@@ -100,7 +100,11 @@ for pattern, replacement in (
     (r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "private-key [redacted]"),
 ):
     text = re.sub(pattern, replacement, text)
-sys.stdout.buffer.write(text.encode("utf-8", "surrogateescape"))
+# Keep the uploaded log bounded; the newest records come last, so keep the tail.
+data = text.encode("utf-8", "surrogateescape")
+if len(data) > 1 << 20:
+    data = b"[earlier output omitted]\n" + data[-(1 << 20):]
+sys.stdout.buffer.write(data)
 PY
 )"
 collect 2>&1 | python3 -I -c "$redact"

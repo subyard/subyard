@@ -234,7 +234,7 @@ keep_diagnostics() {
   timeout 20s env SUBYARD_E2E_ROUTE_REGISTRY="$HOME/.subyard/e2e/routes" dev/agent-e2e.sh --yard test-yard --logs --slot 1 -n 200 --json </dev/null > "$output/yard-events.json" 2>&1 || true
   # Lease events can lack a quarantine's cause; the broker's own state and journals keep it.
   timeout -k 5s 60s sudo -n /usr/bin/incus exec yard-test-yard --project subyard-test-yard -- bash -s \
-    < "$(dirname "${BASH_SOURCE[0]}")/test-yard-broker-state.sh" 2>&1 | head -c 1048576 > "$output/broker-state.log" || true
+    < "$(dirname "${BASH_SOURCE[0]}")/broker-state.sh" > "$output/broker-state.log" 2>&1 || true
 }
 
 run_collector_selection() {

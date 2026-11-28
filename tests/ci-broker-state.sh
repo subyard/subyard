@@ -12,11 +12,11 @@ import sys
 import tempfile
 
 root = Path(sys.argv[1])
-script = root / "dev/ci/test-yard-broker-state.sh"
+script = root / "dev/ci/broker-state.sh"
 runner = (root / "dev/ci/periodic-e2e.sh").read_text()
 keep = runner[runner.index("keep_diagnostics() {"):]
 keep = keep[:keep.index("\n}\n")]
-assert "test-yard-broker-state.sh" in keep and '"$output/broker-state.log"' in keep, keep
+assert "broker-state.sh" in keep and '"$output/broker-state.log"' in keep, keep
 assert "sudo -n /usr/bin/incus exec yard-test-yard --project subyard-test-yard -- bash -s" in keep, keep
 
 with tempfile.TemporaryDirectory(prefix="subyard-ci-broker-state-", dir="/tmp") as temporary:
