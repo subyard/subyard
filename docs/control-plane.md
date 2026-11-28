@@ -2737,8 +2737,9 @@ release repair can prepare and repeat the refresh. A profile operation refused b
 unfinished facts keeps its change in their target. While an unfinished target changes
 the selection, the installed view is refused; `yard init` or a release activation
 completes the refresh, and reverting the profile operation makes the view readable.
-The developer identity read from the core skills receipt, used when the integration
-baseline records no identity, likewise needs only a successful refresh of this yard.
+The developer identity, read from the core skills receipt and passwd when the
+integration baseline records no identity, needs only a recorded successful refresh of
+this yard and guest; an unfinished later refresh does not refuse it.
 
 The native `internal/profile` package inventory binds shipped config, provision hooks, presets,
 resource descriptors and optional profile declarations. It includes descriptorless and resource-only

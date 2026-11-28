@@ -122,7 +122,7 @@ func TestAppliedGuestIdentityWithoutIntegrationInventory(t *testing.T) {
 }
 
 func TestAppliedEnvironmentProfilesUseProtectedSuccessfulSelection(t *testing.T) {
-	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete", "incomplete-reordered", "incomplete-change"} {
+	for _, scenario := range []string{"empty", "retained", "missing", "foreign", "unsafe", "incomplete", "incomplete-reordered", "incomplete-change", "incomplete-without-success", "incomplete-foreign-machine"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			for _, path := range []string{"etc/subyard", filepath.Dir(guestFactsSource)} {
