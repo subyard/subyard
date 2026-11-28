@@ -514,9 +514,9 @@ unset -f systemctl sleep
 
 INNER_FIXTURE="$TMP/inner-incus"
 mkdir -p "$INNER_FIXTURE"
-install() {
-  [ "${*: -1}" = /srv/incus-e2e/storage ] || command install "$@"
-}
+# The production stale-pool cleanup runs below against a fixture path; keep this host's /srv out.
+STALE_POOL_CLEANUP="$(declare -f remove_stale_inner_pool)"
+remove_stale_inner_pool() { printf 'stale-pool-cleanup\n' >> "$INNER_FIXTURE/calls"; }
 incus() {
   local leaked
   if IFS= read -r leaked; then
@@ -526,7 +526,7 @@ incus() {
   printf '%s\n' "$*" >> "$INNER_FIXTURE/calls"
   case "$*" in
     'storage show default --project default') [ -f "$INNER_FIXTURE/storage" ] ;;
-    'storage create default dir source=/srv/incus-e2e/storage --project default')
+    'storage create default dir --project default')
       : > "$INNER_FIXTURE/storage" ;;
     'network show incusbr0 --project default') [ -f "$INNER_FIXTURE/network" ] ;;
     'network create incusbr0 ipv4.address=auto ipv6.address=none --project default')
@@ -559,5 +559,59 @@ reconcile_inner_incus
   || fail "inner network bootstrap did not perform one file-log fallback"
 [ "$(grep -c '^profile device add ' "$INNER_FIXTURE/calls")" -eq 2 ] \
   || fail "inner default profile bootstrap was not idempotent"
+[ "$(grep -c '^stale-pool-cleanup$' "$INNER_FIXTURE/calls")" -eq 2 ] \
+  && [ "$(grep -nm1 '^storage create ' "$INNER_FIXTURE/calls" | cut -d: -f1)" -lt \
+    "$(grep -nm1 '^stale-pool-cleanup$' "$INNER_FIXTURE/calls" | cut -d: -f1)" ] \
+  || fail "inner storage bootstrap skipped the stale pool cleanup or ran it before the pool exists"
+
+# A /srv volume kept across yard recreation may still hold the pre-move pool. Only a plain
+# directory that no inner pool uses is removed; a failed pool query keeps it.
+STALE="$TMP/stale-srv"
+STALE_POOL_CLEANUP="${STALE_POOL_CLEANUP//\/srv\/incus-e2e/"$STALE/incus-e2e"}"
+[[ "$STALE_POOL_CLEANUP" != */srv/incus-e2e* ]] || fail "stale cleanup fixture kept the host path"
+eval "$STALE_POOL_CLEANUP"
+stale_case() {
+  local sources="$1" layout="$2"
+  rm -rf -- "$STALE"
+  mkdir -p "$STALE/keep"
+  case "$layout" in
+    directory) mkdir -p "$STALE/incus-e2e/storage/virtual-machines" ;;
+    symlink) ln -s keep "$STALE/incus-e2e" ;;
+    absent) : ;;
+  esac
+  : > "$STALE/keep/data"
+  : > "$INNER_FIXTURE/stale-calls"
+  incus() {
+    printf '%s\n' "$*" >> "$INNER_FIXTURE/stale-calls"
+    case "$*" in
+      'storage list --format csv -c n') [ "$sources" != fail ] || return 7; printf 'default\nextra\n' ;;
+      'storage get default source') printf '/var/lib/incus/storage-pools/default\n' ;;
+      'storage get extra source') [ "$sources" != fail-get ] || return 7; printf '%s\n' "$sources" ;;
+      *) return 64 ;;
+    esac
+  }
+  remove_stale_inner_pool > "$INNER_FIXTURE/stale-output"
+}
+stale_case /var/lib/incus/storage-pools/extra directory
+[ ! -e "$STALE/incus-e2e" ] && [ -e "$STALE/keep/data" ] \
+  && grep -Fq 'removed the stale inner pool' "$INNER_FIXTURE/stale-output" \
+  || fail "unused stale inner pool directory was not removed"
+for live in "$STALE/incus-e2e/storage" "$STALE/./incus-e2e/storage/" "$STALE/keep/../incus-e2e/storage" ''; do
+  stale_case "$live" directory
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed a live inner pool: $live"
+done
+stale_case /var/lib/incus/storage-pools/extra symlink
+[ -L "$STALE/incus-e2e" ] && [ -e "$STALE/keep/data" ] && [ ! -s "$INNER_FIXTURE/stale-calls" ] \
+  || fail "stale cleanup followed a symlinked pool path"
+stale_case /var/lib/incus/storage-pools/extra absent
+[ ! -s "$INNER_FIXTURE/stale-calls" ] || fail "stale cleanup queried Incus without a stale directory"
+for query in fail fail-get; do
+  expect_failure stale_case "$query" directory
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed data after a failed pool query"
+  # Callers in a condition disable errexit; the cleanup must still refuse.
+  if stale_case "$query" directory; then fail "stale cleanup accepted a failed pool query"; fi
+  [ -d "$STALE/incus-e2e/storage/virtual-machines" ] || fail "stale cleanup removed data in a condition"
+done
+unset -f incus stale_case
 
 printf 'ok: test-vms physical bootstrap is bounded and idempotent\n'

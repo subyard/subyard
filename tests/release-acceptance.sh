@@ -253,12 +253,27 @@ exit "$COLLECTOR_EXIT"
             script = (root / "dev/ci/periodic-e2e.sh").read_text().split("\nrequire_runner\n")[0]
             script += '\ninstall -d -m 0700 "$LOGS"\n: > "$RESULTS"\n'
             script += "probe fixture bash -c 'echo fixture failure; exit 23'\nwrite_summary\n"
-            result = subprocess.run(["bash", "-c", script], cwd=directory,
-                env={**os.environ, "RUNNER_TEMP": str(directory), "GITHUB_STEP_SUMMARY": str(directory / "summary")},
-                text=True, capture_output=True)
+            # Exact Incus builds come from dpkg on the runner and inside the test yard.
+            tools = directory / "bin"
+            tools.mkdir()
+            (tools / "dpkg-query").write_text("#!/bin/sh\nprintf 'ii  incus=1:6.0.7-%s\\nun  incus-extra=\\n' \"${BUILD:-host}\"\n")
+            (tools / "sudo").write_text('#!/bin/sh\n[ "$1 $2 $3 $4 $5 $6" = "-n /usr/bin/incus exec yard-test-yard --project subyard-test-yard" ] || exit 9\n'
+                                        'shift 7\nexec env BUILD=yard "$@"\n')
+            for tool in tools.iterdir():
+                tool.chmod(0o700)
+            env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "RUNNER_TEMP": str(directory),
+                   "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+            result = subprocess.run(["bash", "-c", script], cwd=directory, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("fail(23)", (directory / "hosted-logs/results.tsv").read_text())
             self.assertIn("fixture failure", (directory / "hosted-logs/fixture.log").read_text())
+            summary = (directory / "summary").read_text()
+            self.assertIn("Incus on the runner: incus=1:6.0.7-host\nIncus in the test yard: incus=1:6.0.7-yard\n", summary)
+            # The builds recorded after pool installation win over a later live read.
+            (directory / "hosted-logs/incus-builds.log").write_text("recorded builds\n")
+            result = subprocess.run(["bash", "-c", script], cwd=directory, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertTrue((directory / "summary").read_text().endswith("\nrecorded builds\n"))
 
     def test_hosted_diagnostics_subcommand_reads_both_routes_without_a_candidate_bundle(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

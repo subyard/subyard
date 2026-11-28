@@ -800,10 +800,13 @@ acceptance on GitHub-hosted runners, so their failures surface between releases.
 `master` commit at 00:23 and 12:23 UTC on `debian-13` and at 06:23 and 18:23 UTC on
 `ubuntu-24.04`. The triggering cron entry determines the image even when GitHub starts the run
 late. Each slot checks coverage for its own commit and image. A completed push or scheduled run
-counts when its `pool` job succeeded and the run finished without cancellation. The workflow reads
+counts when its `pool` and `supersede` jobs succeeded and the run finished without cancellation. The workflow reads
 the scheduled run title for its image and treats older unlabelled schedules and `ci-probe/**`
 pushes as Debian runs. A failed check after pool success can be repeated with Re-run or a manual
-dispatch.
+dispatch. A scheduled slot on a covered commit still runs `candidate` and `pool` and skips the
+check matrix and supersede, so a changed upstream build fails within one slot on a commit that
+passed before. Such a pool-only run does not count as coverage. Each check job's summary names the exact Incus packages on the runner and in the
+test yard, also kept in `incus-builds.log` once the pool is installed.
 
 On `master`, a new main run replaces an earlier run for the same image and, when it proceeds to
 testing, stops its Intel retries. Main runs and retries on `master` show the image in their titles.

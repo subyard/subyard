@@ -444,11 +444,12 @@ subprocess.check_output=du
         assert row['incus_images_bytes'] is None and row['boot_bytes'] == 0, row
         assert all(value is None or type(value) is int and value >= 0 for key,value in row.items() if key.endswith('_bytes')), row
         assert directory not in result.stdout and 'private' not in result.stdout and '/usr' not in result.stdout, result
+        # The nested pool is incus_default_pool in every scope.
+        assert 'nested_storage_bytes' not in row, row
         if scope == 'outer_vm':
             assert row['source_bytes'] > 0 and row['platform_bytes'] == row['owner_state_bytes'] == 0, row
-            assert 'nested_storage_bytes' not in row, row
         else:
-            assert row['nested_storage_bytes'] == 0 and 'source_bytes' not in row, row
+            assert 'source_bytes' not in row, row
     assert (root/'foreign/keep').read_bytes() == b'private foreign content'
 print('numeric disk footprint privacy, missing, symlink and timeout checks passed')
 

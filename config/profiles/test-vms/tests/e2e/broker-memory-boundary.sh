@@ -1279,7 +1279,7 @@ fi
 
 # Free compiler cache before reserving the nested pair's disks on the allocated VM.
 p0_capacity_remove_build_cache
-nested_free="$(outer_exec df -B1 --output=avail /srv/incus-e2e/storage | awk 'NR == 2 {print $1}')"
+nested_free="$(outer_exec df -B1 --output=avail /var/lib/incus/storage-pools/default | awk 'NR == 2 {print $1}')"
 [[ "$nested_free" =~ ^[0-9]+$ ]] || die 'nested disk headroom unavailable'
 # A fresh base builder reserves 3x the 10GiB guest disk, plus the fixture reserve.
 nested_required=$((30 * 1024 * 1024 * 1024 + 512 * 1024 * 1024))

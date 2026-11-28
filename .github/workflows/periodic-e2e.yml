@@ -69,13 +69,15 @@ env:
 jobs:
   # A finished push or scheduled run with a successful pool covers its commit and lease image.
   # A cancelled run covers nothing. For failures after pool success, use Re-run or a manual dispatch.
+  # A schedule on a covered commit still runs candidate and pool, so a broken upstream build of a
+  # dependency surfaces on a commit that passed before; it skips the check matrix.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
     outputs:
-      run: ${{ steps.compare.outputs.run }}
+      matrix: ${{ steps.compare.outputs.matrix }}
     steps:
       - name: Compare with the last finished run
         id: compare
@@ -85,10 +87,11 @@ jobs:
           EVENT: ${{ github.event_name }}
           HEAD: ${{ github.sha }}
         run: |
-          run=true
+          matrix=true
           if [ "$EVENT" = schedule ]; then
-            # A run covers its commit only once its checks started: a run skipped as
-            # covered, or one that failed before its pool was ready, checked nothing.
+            # A run covers its commit only once its checks started: one that failed before its
+            # pool was ready checked nothing. A pool-only run skips supersede and covers nothing,
+            # so a cancelled Re-run of the covering run brings the full matrix back.
             runs="$(gh run list --workflow periodic-e2e.yml --commit "$HEAD" --status completed \
               --limit 1000 --json databaseId,event,conclusion,displayTitle)"
             # Look oldest first so later skipped slots do not require a pool lookup each time.
@@ -99,20 +102,21 @@ jobs:
                   (.event == "push" or (.event == "schedule" and .displayTitle == "Periodic E2E"))))
               | .databaseId' <<<"$runs")"
             for id in $ids; do
-              pool="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.name == "pool") | .conclusion')"
-              if [ "$pool" = success ]; then
-                run=false
+              started="$(gh run view "$id" --json jobs --jq '[.jobs[]
+                | select(.name == "pool" or .name == "supersede") | .conclusion] | sort | join(",")')"
+              if [ "$started" = success,success ]; then
+                matrix=false
                 break
               fi
             done
           fi
-          printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   # A main run that tests the branch cancels earlier retries in its scope. A retry dispatched
   # while that happens cancels itself. On master both checks match the lease image.
   supersede:
     needs: changes
-    if: ${{ needs.changes.outputs.run == 'true' }}
+    if: ${{ needs.changes.outputs.matrix == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -186,7 +190,6 @@ jobs:
 
   candidate:
     needs: changes
-    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -211,9 +214,13 @@ jobs:
         env:
           ONLY: ${{ inputs.checks }}
           RETRY: ${{ inputs.origin }}
+          MATRIX: ${{ needs.changes.outputs.matrix }}
         run: |
           plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"
-          if [ -n "$ONLY" ]; then
+          if [ "$MATRIX" != true ]; then
+            plan="$(jq -c 'map_values(.include = [])' <<<"$plan")"
+            echo 'Covered commit: only candidate and pool run' >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$ONLY" ]; then
             plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
               | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
             [ "$(jq '[.[].include[]] | length' <<<"$plan")" -gt 0 ] || { echo "no such checks: $ONLY"; exit 1; }
