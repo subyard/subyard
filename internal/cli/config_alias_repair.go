@@ -421,6 +421,7 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		Retry      string   `json:"retry,omitempty"`
 		Deprecated []string `json:"deprecated,omitempty"`
 		Dead       []string `json:"deadAssignments,omitempty"`
+		Ignored    []string `json:"ignored,omitempty"`
 	}
 	var rows []row
 	failed := err != nil
@@ -439,6 +440,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		}
 		for _, assignment := range loaded.DeprecatedAssignments() {
 			result.Deprecated = append(result.Deprecated, assignment.String())
+		}
+		for _, assignment := range loaded.IgnoredAssignments() {
+			result.Ignored = append(result.Ignored, assignment.String())
 		}
 		if err != nil {
 			failed = true
@@ -463,6 +467,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 				}
 				for _, note := range result.Deprecated {
 					fmt.Fprintf(cli.options.Stdout, "  deprecated: %s\n", note)
+				}
+				for _, note := range result.Ignored {
+					fmt.Fprintf(cli.options.Stdout, "  ignored: %s\n", note)
 				}
 			} else if result.Yard == "" {
 				fmt.Fprintf(cli.options.Stdout, "%s\nRetry: %s\n", result.Diagnostic, result.Retry)

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,18 +21,37 @@ var profileOnlySettings = []string{"YARD_CAPS", "YARD_DEVICES", "YARD_MOUNTS"}
 func IsProfileOnlySetting(name string) bool { return slices.Contains(profileOnlySettings, name) }
 
 // IgnoredAssignment is a non-empty operator assignment of a profile-only or
-// retired setting. The loader discards both; readiness reports profile-only
-// assignments and installation inspection also reports retired ones, each
-// with its repair. It is never a refusal.
+// retired setting, or an operator input this release does not know: an
+// assignment of an unknown setting or an unknown profile or integration in a
+// selection list. The loader discards all of them; readiness reports every one
+// except retired ones, which installation inspection also reports, each with
+// its repair. It is never a refusal.
 type IgnoredAssignment struct {
 	Yard, Name, Scope, Path string
 	Line                    int
 	Git                     bool
 	Retired                 bool
+	// Unknown is the kind of an input this release does not know. Item is
+	// the unknown entry of a selection list; as a value, it is never rendered.
+	Unknown UnknownInput
+	Item    string
 	// authored reports that config unset at Scope writes exactly Path and
 	// removes the assignment.
 	authored bool
 }
+
+// UnknownInput classifies an operator input that a newer release may define.
+type UnknownInput string
+
+const (
+	UnknownSettingInput     UnknownInput = "unknown-setting"
+	UnknownProfileInput     UnknownInput = "unknown-profile"
+	UnknownIntegrationInput UnknownInput = "unknown-integration"
+	// UnknownFileInput is a file under a Git source's overrides/agents that
+	// no file setting of the loaded configuration maps; Name is its relative
+	// path.
+	UnknownFileInput UnknownInput = "unknown-file"
+)
 
 // Command reports whether the assignment came from the command environment.
 func (assignment IgnoredAssignment) Command() bool { return assignment.Scope == "command" }
@@ -42,6 +62,9 @@ func (assignment IgnoredAssignment) Command() bool { return assignment.Scope == 
 // retired names, so their repair is always the file line.
 func (assignment IgnoredAssignment) Repair() string {
 	switch {
+	case assignment.Unknown != "":
+		// A newer release, or another host sharing Git settings, may use it.
+		return ""
 	case assignment.Command():
 		return ""
 	case assignment.authored && !assignment.Retired:
@@ -56,6 +79,21 @@ func (assignment IgnoredAssignment) Repair() string {
 }
 
 func (assignment IgnoredAssignment) String() string {
+	source := "the command environment"
+	if !assignment.Command() {
+		source = fmt.Sprintf("%s:%d", assignment.Path, assignment.Line)
+	}
+	switch assignment.Unknown {
+	case UnknownSettingInput:
+		return fmt.Sprintf("%s in %s is not a setting of this release and is ignored; a newer release may use it", assignment.Name, source)
+	case UnknownProfileInput:
+		// A selected name is a value: it is never rendered.
+		return fmt.Sprintf("%s in %s selects a profile this release does not ship; it is ignored", assignment.Name, source)
+	case UnknownIntegrationInput:
+		return fmt.Sprintf("%s in %s selects an integration this release does not ship; it is ignored", assignment.Name, source)
+	case UnknownFileInput:
+		return fmt.Sprintf("%s is no file setting of this configuration and is ignored; a newer release may use it", assignment.Path)
+	}
 	if assignment.Retired {
 		return fmt.Sprintf("%s in %s:%d is retired and ignored; %s", assignment.Name, assignment.Path, assignment.Line, assignment.Repair())
 	}
@@ -81,16 +119,76 @@ func (loaded Loaded) RetiredAssignments() []IgnoredAssignment {
 }
 
 // observeProfileOnly records a non-empty operator assignment of a
-// profile-only or retired setting; empty ones are tolerated.
+// profile-only or retired setting, and any operator assignment of an unknown
+// setting; empty profile-only and retired ones are tolerated.
 func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, value, path string, line int) {
 	retired := path != "" && (isRetiredSetting(name) || tracker.catalog.RetiredSetting(name))
-	if !retired && !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "" {
+	unknown := path != "" && !retired && tracker.catalog.UnknownSetting(name)
+	if !unknown && (!retired && !IsProfileOnlySetting(name) || strings.TrimSpace(value) == "") {
 		return
 	}
-	definition := tracker.layers[layer]
-	tracker.ignored = append(tracker.ignored, IgnoredAssignment{
-		Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git "), Retired: retired,
+	assignment := tracker.ignoredInput(layer, name, path, line)
+	assignment.Retired = retired
+	if unknown {
+		assignment.Unknown = UnknownSettingInput
+	}
+	tracker.ignored = append(tracker.ignored, assignment)
+}
+
+// observeUnknownSelection records an unknown entry of a selection list, taken
+// from the setting's effective assignment.
+func (tracker *settingTracker) observeUnknownSelection(name string, kind UnknownInput, item string) {
+	assignments := tracker.assignments[name]
+	if len(assignments) == 0 {
+		return
+	}
+	effective := assignments[len(assignments)-1]
+	assignment := tracker.ignoredInput(effective.Layer, name, effective.Path, effective.Line)
+	assignment.Unknown, assignment.Item = kind, item
+	tracker.ignored = append(tracker.ignored, assignment)
+}
+
+// observeUnknownFiles records each regular file below a Git source's agents
+// root that no file setting of this release maps, in lexical order. A read
+// failure records nothing; the file settings themselves report it.
+func (tracker *settingTracker) observeUnknownFiles(layer settingLayerID, agentsRoot string, mappings map[string]string) {
+	known := map[string]bool{}
+	for _, relative := range mappings {
+		known[filepath.ToSlash(filepath.Clean(relative))] = true
+	}
+	_ = filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return nil
+		}
+		relative, err := filepath.Rel(agentsRoot, path)
+		if err != nil || known[filepath.ToSlash(relative)] {
+			return nil
+		}
+		assignment := tracker.ignoredInput(layer, filepath.ToSlash(relative), path, 0)
+		assignment.Unknown = UnknownFileInput
+		tracker.ignored = append(tracker.ignored, assignment)
+		return nil
 	})
+}
+
+func (tracker *settingTracker) ignoredInput(layer settingLayerID, name, path string, line int) IgnoredAssignment {
+	definition := tracker.layers[layer]
+	if definition.Scope == "command" {
+		path, line = "", 0
+	}
+	return IgnoredAssignment{Name: name, Scope: definition.Scope, Path: path, Line: line, Git: strings.HasPrefix(definition.Role, "Git ")}
+}
+
+// UnknownSetting reports an operator setting name this release does not
+// define. A newer release may define it; the loader ignores such an
+// assignment in operator scopes.
+func (settings Catalog) UnknownSetting(name string) bool {
+	return !IsProfileOnlySetting(name) && !settings.IsLegacySetting(name) && !knownSetting(settings, name)
+}
+
+func knownSetting(settings Catalog, name string) bool {
+	_, ok := settings.LookupSetting(name)
+	return ok
 }
 
 func (tracker *settingTracker) ignoredAssignments(yard, configHome string) []IgnoredAssignment {
@@ -138,12 +236,20 @@ type ConfigurationState struct {
 	Path    string `json:"path,omitempty"`
 	Line    int    `json:"line,omitempty"`
 	Repair  string `json:"repair,omitempty"`
+	// Reason is "profile-only" or an UnknownInput kind.
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 // ConfigurationState returns the structured form of the ignored assignment.
 func (assignment IgnoredAssignment) ConfigurationState() ConfigurationState {
+	reason := string(assignment.Unknown)
+	if reason == "" {
+		reason = "profile-only"
+	}
 	return ConfigurationState{
 		Yard: assignment.Yard, Setting: assignment.Name, Scope: assignment.Scope,
 		Path: assignment.Path, Line: assignment.Line, Repair: assignment.Repair(),
+		Reason: reason, Message: assignment.String(),
 	}
 }

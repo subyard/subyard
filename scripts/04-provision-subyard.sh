@@ -328,7 +328,6 @@ Verify:
   incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- id $DEV_USER          # groups: yard kvm docker
   incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- /usr/local/bin/ccusage --version
   incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- su - $DEV_USER -c '/usr/local/bin/ccusage --version'
-  incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- opencode --version
   incus exec $YARD_INSTANCE_NAME "${PROJ[@]}" -- ls -la /srv
 
 Next:

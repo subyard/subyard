@@ -777,6 +777,49 @@ func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
 	}
 }
 
+// Inputs of a newer release are configuration state too: the init plan and
+// status name each setting and source, never the value or the selected name.
+func TestSettingsOfNewerReleasesAreReportedByInitAndStatus(t *testing.T) {
+	cliFixture := newFixture(t, withWorkingDir(""))
+	root, environment := cliFixture.Root, cliFixture.Environment
+	environment = slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "CODING_TOOL_INTEGRATIONS=") })
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	yard := filepath.Join(configHome, "yards", "default", "config.env")
+	if err := os.MkdirAll(filepath.Dir(yard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, yard, "FUTURE_SETTING=s3cr3tvalue\nCODING_TOOL_INTEGRATIONS='codex futuretool'\n", 0o600)
+	want := []string{
+		"ignored: FUTURE_SETTING in " + yard + ":1 is not a setting of this release and is ignored; a newer release may use it",
+		"ignored: CODING_TOOL_INTEGRATIONS in " + yard + ":2 selects an integration this release does not ship; it is ignored",
+	}
+	run := func(arguments []string, options Options) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		options.RepositoryRoot, options.Program, options.Arguments, options.WorkingDir = root, "yard", arguments, root
+		options.Stdout, options.Stderr, options.Environment = &stdout, &stderr, environment
+		code := cliFixture.New(options).Run(context.Background())
+		return code, stdout.String(), stderr.String()
+	}
+	for _, test := range []struct {
+		arguments []string
+		options   Options
+	}{
+		{[]string{"init", "--yes"}, Options{InitPlatform: newInitPlatformFixture()}},
+		{[]string{"status"}, Options{Incus: lifecycleIncus()}},
+	} {
+		code, stdout, stderr := run(test.arguments, test.options)
+		for _, line := range want {
+			if code != 0 || strings.Count(stdout, line) != 1 {
+				t.Fatalf("%v: missing %q: code=%d stdout=%q stderr=%q", test.arguments, line, code, stdout, stderr)
+			}
+		}
+		if strings.Contains(stdout+stderr, "s3cr3tvalue") || strings.Contains(stdout+stderr, "futuretool") {
+			t.Fatalf("%v rendered a value: stdout=%q stderr=%q", test.arguments, stdout, stderr)
+		}
+	}
+}
+
 func TestLoadInitProfileAllowsMatchingCommandValue(t *testing.T) {
 	cliFixture := newFixture(t, withWorkingDir(""))
 	root, environment := cliFixture.Root, cliFixture.Environment

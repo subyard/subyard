@@ -92,6 +92,9 @@ case "${1:-} ${2:-} ${3:-}" in
     printf '%s\n' "$attempts" > "$MOCK_CATALOG_ATTEMPTS"
     case "$MOCK_CATALOG_MODE:$attempts" in
       dns-first:1|dns-always:*) printf 'Error: lookup image.invalid: no such host private-sentinel\n' >&2; exit 1 ;;
+      server-first:1) printf 'Error: Unable to fetch index private-sentinel: 503 Service Unavailable\n' >&2; exit 1 ;;
+      eof-always:*) printf 'Error: Get private-sentinel: unexpected EOF\n' >&2; exit 1 ;;
+      unknown-cli:*) printf 'Error: not authorized private-sentinel\n' >&2; exit 1 ;;
       terminal:*) printf 'Error: not authorized private-sentinel\n' >&2; exit 7 ;;
       canceled:*) exit 130 ;;
     esac
@@ -363,14 +366,16 @@ grep -q 'initialization warning (incus init exit 17)' "$TMP/output" || fail 'cre
 [ "$(grep -c '^init ' "$MOCK_INCUS_LOG")" = 1 ] || fail 'warning caused a second init'
 ! grep -q private-sentinel "$TMP/output" || fail 'initialization warning stderr leaked'
 
-reset_creation
-MOCK_CATALOG_MODE=dns-first
-run_create
-[ "$(cat "$MOCK_CATALOG_ATTEMPTS")" = 2 ] || fail 'transient metadata failure was not retried'
-[ "$(grep -c '^init images:debian/13 ' "$MOCK_INCUS_LOG")" = 1 ] || fail 'recovered metadata did not retain preferred image'
-! grep -q private-sentinel "$TMP/output" || fail 'metadata stderr leaked'
+for mode in dns-first server-first; do
+  reset_creation
+  MOCK_CATALOG_MODE=$mode
+  run_create
+  [ "$(cat "$MOCK_CATALOG_ATTEMPTS")" = 2 ] || fail "transient $mode metadata failure was not retried"
+  [ "$(grep -c '^init images:debian/13 ' "$MOCK_INCUS_LOG")" = 1 ] || fail 'recovered metadata did not retain preferred image'
+  ! grep -q private-sentinel "$TMP/output" || fail 'metadata stderr leaked'
+done
 
-for mode in terminal canceled dns-always; do
+for mode in terminal unknown-cli canceled dns-always eof-always; do
   reset_creation
   MOCK_CATALOG_MODE=$mode
   rc=0
@@ -378,10 +383,16 @@ for mode in terminal canceled dns-always; do
   [ "$rc" != 0 ] || fail "$mode metadata failure was accepted"
   assert_no_init
   expected=1
-  [ "$mode" != dns-always ] || expected=3
+  case "$mode" in dns-always | eof-always) expected=3 ;; esac
   [ "$(cat "$MOCK_CATALOG_ATTEMPTS")" = "$expected" ] || fail "$mode metadata retry count changed"
   [ "$mode" != terminal ] || [ "$rc" = 7 ] || fail 'terminal metadata exit was lost'
   [ "$mode" != canceled ] || [ "$rc" = 130 ] || fail 'cancellation exit was lost'
+  case "$mode" in
+    terminal | unknown-cli) cause=unknown ;; canceled) cause=cancelled ;;
+    dns-always) cause=dns ;; eof-always) cause=interrupted ;; *) cause='' ;;
+  esac
+  [ -z "$cause" ] || grep -q "image metadata unavailable (incus image list exit [0-9]*, cause $cause)" "$TMP/output" \
+    || fail "$mode metadata failure did not name cause $cause"
   ! grep -q private-sentinel "$TMP/output" || fail 'private metadata stderr leaked'
 done
 
@@ -557,6 +568,28 @@ rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
 (
   # shellcheck source=scripts/lib/instance-create.sh
   . "$ROOT/scripts/lib/instance-create.sh"
+  while IFS='|' read -r expected error; do
+    got=$(printf '%s\n' "$error" | subyard_image_metadata_cause)
+    [ "$got" = "$expected" ] || fail "image metadata error classified as $got, not $expected: $error"
+  done <<'EOF'
+dns|Error: lookup images.example on 127.0.0.53:53: no such host
+dns|Error: lookup images.example: Temporary failure in name resolution
+dns|Error: lookup images.example on 10.0.0.2:53: server misbehaving
+unknown|Error: no such host
+timeout|Error: Get "https://images.example/streams": context deadline exceeded
+timeout|Error: read tcp 10.0.0.1:1->10.0.0.2:443: i/o timeout
+timeout|Error: net/http: TLS handshake timeout
+connection|Error: dial tcp 10.0.0.2:443: connect: connection refused
+connection|Error: read tcp: connection reset by peer
+connection|Error: dial tcp [2001:db8::1]:443: connect: network is unreachable
+interrupted|Error: Get "https://images.example/streams": unexpected EOF
+server|Error: Unable to fetch https://images.example/streams: 502 Bad Gateway
+server|Error: Unable to fetch https://images.example/streams: 503 SERVICE UNAVAILABLE
+server|Error: Unable to fetch https://images.example/streams: 504 Gateway Timeout
+unknown|Error: Unable to fetch https://images.example/streams: 500 Internal Server Error
+unknown|Error: not authorized
+unknown|
+EOF
   timezone_etc="$TMP/timezone-etc"
   install -d -m 0700 "$timezone_etc"
   ! subyard_host_timezone "$timezone_etc" || fail 'missing timezone yielded a zone'

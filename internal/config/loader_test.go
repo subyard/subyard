@@ -680,7 +680,8 @@ func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name, relative, content, want string
 	}{
-		{"unknown", "config.env", "SSHH_PORT=2222\n", "unknown setting"},
+		{"unknown secret-like", "config.env", "FUTURE_SETTING=password=hidden\n", "secret material"},
+		{"unknown name too long", "config.env", strings.Repeat("F", 129) + "=1\n", "name is too long"},
 		{"wrong shared scope", "overrides/shared/config.env", "DEV_UID=1000\n", "not allowed in shared scope"},
 		{"wrong type", "config.env", "SSH_PORT=70000\n", "must be in range"},
 		{"bad mount", "config.env", "HOST_MOUNTS=../escape:/mnt/cache:rw:0755\n", "invalid mount"},

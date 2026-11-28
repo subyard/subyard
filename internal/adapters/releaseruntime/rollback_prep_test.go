@@ -698,7 +698,7 @@ func TestRollbackPreparationCollectsEveryRefusal(t *testing.T) {
 	for _, yard := range []string{"third", "broken"} {
 		declareRollbackPrepYard(t, fixture.home, yard)
 	}
-	testkit.WriteFile(t, filepath.Join(fixture.home, "yards/broken/config.env"), []byte("NOT_A_SETTING=1\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(fixture.home, "yards/broken/config.env"), []byte("SSH_PORT=not-a-port\n"), 0o600)
 	fixture.formats = map[string]int{"default": 2, "named": 0, "third": 2}
 	observe := fixture.runtime.config.ProfileRuntimeRollbackObservation
 	fixture.runtime.config.ProfileRuntimeRollbackObservation = func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
