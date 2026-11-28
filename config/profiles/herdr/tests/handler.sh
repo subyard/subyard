@@ -266,7 +266,7 @@ SUBYARD_RESOURCE_MODE=verify SUBYARD_RESOURCE_STEPS="$steps" "$handler" restart 
   rm -f -- "$HERDR_TEST_DROPIN_PATH"
   : > "$HERDR_TEST_CALLS"
   if result=$(HERDR_TEST_SYNC=fail HERDR_TEST_ROUTE='{}' SUBYARD_RESOURCE_ACTION=up "$handler" up 2>&1); then exit 1; fi
-  [[ "$result" == *'project spaces are incomplete'* ]]
+  [[ "$result" == *'project sync failed'* ]]
   grep -Fxq 'systemctl enable --now --quiet subyard-herdr-discovery.timer' "$HERDR_TEST_CALLS"
   grep -Fxq 'guest file /usr/local/libexec/subyard/herdr-profile.sha256 0644' "$HERDR_TEST_CALLS"
   [ -f "$HERDR_TEST_DROPIN_PATH" ] && grep -q '^config device add ' "$HERDR_TEST_CALLS"

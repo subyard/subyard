@@ -175,7 +175,7 @@ up() {
   yexec systemctl enable --quiet "$unit"
   if ! running; then yexec systemctl start "$unit"; fi
   wait_core
-  # A checkout problem leaves the other spaces reconciled; up finishes, then reports it.
+  # A sync problem, such as an unverifiable checkout, must not leave ingress unpublished.
   as_dev "$helper" sync || sync_failed=1
   schedule_discovery
   digest | guest_file "$helper.sha256" 0644
@@ -328,7 +328,7 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
         up
         guest_ssh ensure
         if ! route_ready; then ensure_route; fi
-        [ "$sync_failed" = 0 ] || die 'Herdr is up, but project spaces are incomplete; fix the checkout problem above and run yard herdr sync' ;;
+        [ "$sync_failed" = 0 ] || die 'Herdr is up, but project sync failed; see the error above, then run yard herdr sync' ;;
       is-up) yard_running && running && route_ready ;;
       status)
         if ! yard_running; then printf 'Herdr: yard is stopped or unavailable\n'; exit; fi
