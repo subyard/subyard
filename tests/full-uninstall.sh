@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/subyard-full-uninstall.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture"' EXIT
+# A direct run gets its own lock root, so the fixture never coordinates in /tmp.
+if [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ]; then
+  SUBYARD_OWNER_LOCK_ROOT="$fixture/owner-locks"
+  install -d -m 0700 "$SUBYARD_OWNER_LOCK_ROOT"
+fi
+export SUBYARD_OWNER_LOCK_ROOT
 # Begin relay address selection contract.
 python3 - "$ROOT" <<'PY_RELAY_ADDRESS'
 import json,pathlib,re,subprocess,sys

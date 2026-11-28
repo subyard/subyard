@@ -74,7 +74,7 @@ cleanup() {
           systemctl show -p SystemState
           systemctl show tmp.mount -p LoadState -p ActiveState -p SubState -p Result
           systemctl show subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.service \
-            -p Id -p ActiveState -p SubState -p Result -p ExecMainStatus
+            subyard-tmp-age.service -p Id -p ActiveState -p SubState -p Result -p ExecMainStatus
           if [ -f /var/lib/subyard-tmp-fixture/shutdown.json ]; then
             head -c 2048 /var/lib/subyard-tmp-fixture/shutdown.json
           fi
@@ -214,6 +214,89 @@ while True:time.sleep(1)
     systemctl reset-failed subyard-tmp-clean.service
   '
   printf 'evidence: %s scoped_age_flock_mount_and_mode_guards=PASS\n' "$kind"
+}
+
+runtime_ageing() {
+  # Generic /tmp ageing keeps entries live processes reference and fresh data.
+  # Change times cannot be backdated, so a VM guest moves its own clock forward;
+  # a container shares the kernel clock and proves only native unit execution.
+  guest systemctl is-active --quiet subyard-tmp-age.timer || die 'runtime ageing timer is not active'
+  guest sh -eu -c '
+    for name in stale cwd open; do
+      install -d -m 0755 "/tmp/.subyard-age-$name"
+      echo "$name" > "/tmp/.subyard-age-$name/payload"
+    done
+    echo stale > /tmp/.subyard-age-stale-file
+  '
+  guest systemd-run --quiet --unit=subyard-tmp-age-cwd-fixture \
+    --property=WorkingDirectory=/tmp/.subyard-age-cwd -- sleep infinity
+  guest systemd-run --quiet --unit=subyard-tmp-age-open-fixture -- \
+    python3 -c 'import time; f = open("/tmp/.subyard-age-open/payload"); time.sleep(10**6)'
+  for _ in {1..30}; do
+    guest sh -c '[ -n "$(find /proc/[0-9]*/fd -lname /tmp/.subyard-age-open/payload 2>/dev/null)" ]' && break
+    sleep 1
+  done
+  shift_seconds=0
+  if [ "$kind" = vm ]; then
+    shift_seconds=$((3 * 86400))
+    guest sh -eu -c '
+      systemctl stop systemd-timesyncd.service 2>/dev/null || true
+      date -s "@$(( $(date +%s) + $1 ))" >/dev/null
+    ' _ "$shift_seconds"
+  fi
+  guest sh -eu -c 'echo fresh > /tmp/.subyard-age-fresh'
+  guest systemctl start subyard-tmp-age.service
+  guest sh -eu -c '
+    [ "$(systemctl show subyard-tmp-age.service -p Result --value)" = success ]
+    test -f /tmp/.subyard-age-cwd/payload
+    test -f /tmp/.subyard-age-open/payload
+    test -f /tmp/.subyard-age-fresh
+    test -d /tmp/.X11-unix
+    if [ "$1" != 0 ]; then
+      test ! -e /tmp/.subyard-age-stale
+      test ! -e /tmp/.subyard-age-stale-file
+    else
+      test -f /tmp/.subyard-age-stale/payload
+    fi
+  ' _ "$shift_seconds"
+  if [ "$kind" = vm ]; then
+    guest sh -eu -c '
+      date -s "@$(( $(date +%s) - $1 ))" >/dev/null
+      systemctl start systemd-timesyncd.service 2>/dev/null || true
+    ' _ "$shift_seconds"
+  fi
+  guest systemctl stop subyard-tmp-age-cwd-fixture subyard-tmp-age-open-fixture
+  guest rm -rf /tmp/.subyard-age-stale /tmp/.subyard-age-stale-file /tmp/.subyard-age-cwd \
+    /tmp/.subyard-age-open /tmp/.subyard-age-fresh
+  printf 'evidence: %s runtime_ageing_keeps_referenced_and_fresh=PASS\n' "$kind"
+}
+
+published_policy_transition() {
+  # The published release keeps working over the additive ageing policy, and the
+  # candidate upgrades a guest that holds only the published policy.
+  published="$ROOT/internal/adapters/reconcileruntime/testdata/v0.32.0-guest-disk-tmp.sh"
+  for mode in assess apply check; do
+    guest sh -s -- "$mode" < "$published" || die "published $mode refused the candidate policy"
+  done
+  guest systemctl is-active --quiet subyard-tmp-age.timer || die 'published apply stopped runtime ageing'
+  guest sh -eu -c '
+    systemctl disable --now subyard-tmp-age.timer
+    for file in /etc/systemd/system/subyard-tmp-age.service \
+      /etc/systemd/system/subyard-tmp-age.timer \
+      /etc/subyard-guest-tmp-age.conf /usr/local/lib/subyard-guest-tmp-age; do
+      grep -q "Subyard guest temporary ageing policy v1" "$file"
+      rm "$file"
+    done
+    systemctl daemon-reload
+  '
+  guest sh -s -- check < "$published" || die 'published policy alone is not ready'
+  rc=0
+  guest sh -s -- check < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || die 'candidate accepted a guest without runtime ageing'
+  yard init --yes
+  disk_ready
+  guest systemctl is-active --quiet subyard-tmp-age.timer || die 'upgrade did not start runtime ageing'
+  printf 'evidence: %s published_policy_transition=PASS\n' "$kind"
 }
 
 policy_refusals() {
@@ -416,8 +499,8 @@ GUEST
 
 rollback_cleanup() {
   guest sh -eu -c '
-    systemctl disable subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer
-    systemctl stop subyard-tmp-clean.timer
+    systemctl disable subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer subyard-tmp-age.timer
+    systemctl stop subyard-tmp-clean.timer subyard-tmp-age.timer
     rc=0
     systemctl stop subyard-tmp-shutdown.service >/dev/null 2>&1 || rc=$?
     [ "$(systemctl show subyard-tmp-shutdown.service -p Result --value)" = exit-code ]
@@ -429,6 +512,14 @@ rollback_cleanup() {
       test -f "$file" && test ! -L "$file"
       [ "$(stat -c %u:%g "$file")" = 0:0 ]
       grep -q "Subyard guest temporary storage policy v1" "$file"
+      rm "$file"
+    done
+    for file in /etc/systemd/system/subyard-tmp-age.service \
+      /etc/systemd/system/subyard-tmp-age.timer \
+      /etc/subyard-guest-tmp-age.conf /usr/local/lib/subyard-guest-tmp-age; do
+      test -f "$file" && test ! -L "$file"
+      [ "$(stat -c %u:%g "$file")" = 0:0 ]
+      grep -q "Subyard guest temporary ageing policy v1" "$file"
       rm "$file"
     done
     systemctl daemon-reload
@@ -452,7 +543,9 @@ for kind in container vm; do
   disk_ready
   printf 'evidence: %s normal_minimal_creation=PASS\n' "$kind"
   policy_refusals
+  published_policy_transition
   periodic_cleanup
+  runtime_ageing
   shutdown_cleanup
   cleanup_failure_recovery
 

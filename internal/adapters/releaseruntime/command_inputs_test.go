@@ -2,9 +2,12 @@ package releaseruntime
 
 import (
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // Adapter fixtures describe original process inputs, never loaded yard settings.
@@ -17,6 +20,8 @@ func fixtureCommandInputs(values map[string]string) CommandInputs {
 		"STORAGE_PATH":          filepath.Join(values["HOME"], "storage"),
 		"HOST_BASE":             filepath.Join(values["HOME"], "host"),
 		"RESTRICTED_DISK_PATHS": filepath.Join(values["HOME"], "host"),
+		// Release process helpers coordinate under the test binary's lock root.
+		uninstall.OwnerLockRootEnvironment: os.Getenv(uninstall.OwnerLockRootEnvironment),
 	} {
 		if _, present := values[key]; !present {
 			values[key] = value

@@ -8,6 +8,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SUBYARD_NO_AUDIT=1
 CLI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cli-contract.XXXXXX")"
 trap 'rm -rf "$CLI_TMP"' EXIT
+# Every command runs against fixture homes and a private lock root, so neither
+# a direct nor a suite run coordinates the operator's real data home.
+real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "$(realpath -m -s -- "${SUBYARD_HOME:-$HOME/.subyard}")" | sha256sum | cut -d ' ' -f 1).lock"
+export HOME="$CLI_TMP/operator" SUBYARD_OPERATOR_HOME="$CLI_TMP/operator"
+export SUBYARD_CONFIG_HOME="$CLI_TMP/operator/.config/subyard" SUBYARD_HOME="$CLI_TMP/operator/.subyard"
+export SUBYARD_OWNER_LOCK_ROOT="$CLI_TMP/owner-locks"
+install -d -m 0700 "$HOME" "$SUBYARD_OWNER_LOCK_ROOT"
 
 commands="$($ROOT/bin/yard --list)"
 grep -qx security <<<"$commands" || fail "security command missing"
@@ -209,7 +216,8 @@ printf 'ok: CLI help, globals and profile completion contract\n'
   for path in source operator; do cp -a "$shared_root/$path" "$shared_root/$path.before"; done
   config_environment=(env -i "PATH=$PATH" "HOME=$operator" "SUBYARD_OPERATOR_HOME=$operator"
     "SUBYARD_CONFIG_HOME=$config_home" "SUBYARD_HOME=$data_home" "SUBYARD_NO_AUDIT=1"
-    "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0")
+    "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0"
+    "SUBYARD_OWNER_LOCK_ROOT=$SUBYARD_OWNER_LOCK_ROOT")
   shared_yard() { "${config_environment[@]}" "$asset_root/bin/yard" "$@"; }
   shared_terminal() {
     local command_line
@@ -238,4 +246,8 @@ printf 'ok: CLI help, globals and profile completion contract\n'
     && [ "$(git -C "$source" rev-parse HEAD)" = "$original_head" ] || fail 'shared onboarding changed Git inputs'
   [ "$(shared_yard config sync path)" = "$checkout" ] || fail 'wrong authoritative checkout'
   shared_yard config sync --check >/dev/null
+  # The fixture data home coordinates under the run's lock root, never in /tmp.
+  shared_lock="/tmp/subyard-owner-locks-$(id -u)/$(printf '%s' "$data_home" | sha256sum | cut -d ' ' -f 1).lock"
+  [ ! -e "$shared_lock" ] || fail 'fixture data home coordinated in the shared /tmp namespace'
 )
+[ ! -e "$SUBYARD_OWNER_LOCK_ROOT/$real_home_lock" ] || fail 'a command coordinated the real data home'

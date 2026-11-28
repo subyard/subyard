@@ -35,6 +35,12 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+# A direct run gets its own lock root, so the fixture never coordinates in /tmp.
+if [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ]; then
+  SUBYARD_OWNER_LOCK_ROOT="$TMP/owner-locks"
+  install -d -m 0700 "$SUBYARD_OWNER_LOCK_ROOT"
+fi
+export SUBYARD_OWNER_LOCK_ROOT
 
 # Copy today's public inputs because the packaging checks add local fixtures.
 bash "$ROOT/tests/helpers/source-files.sh" > "$TMP/source-files"

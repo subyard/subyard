@@ -15,7 +15,11 @@ def inherited_owner_descriptors():
     if not home.startswith('/') or os.path.normpath(home) != home:
         raise ValueError('invalid native owner scope')
     uid = os.getuid()
-    parent = Path('/tmp')/('subyard-owner-locks-'+str(uid))
+    # Test runs relocate owner coordination into their private root.
+    root = os.environ.get('SUBYARD_OWNER_LOCK_ROOT', '') or '/tmp'
+    if not root.startswith('/') or root.startswith('//') or os.path.normpath(root) != root:
+        raise ValueError('invalid owner lock root')
+    parent = Path(root)/('subyard-owner-locks-'+str(uid))
     parent_info = parent.lstat()
     if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != uid or stat.S_IMODE(parent_info.st_mode) != 0o700:
         raise ValueError('unsafe native owner barrier parent')

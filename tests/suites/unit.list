@@ -4,6 +4,7 @@ checkout-guard.sh
 developer-identity.sh
 docker-forwarding-convergence.sh
 lib-power-network.sh
+native-install-custody.sh
 p0-capacity.sh
 p0-release-smoke.sh
 runtime-privilege-reexec.sh

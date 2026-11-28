@@ -49,7 +49,12 @@ class NativeInstallCustody(unittest.TestCase):
         custody.claim(self.record, 'host-power', ('0',), 'a'*64)
         with self.assertRaises(ValueError): custody.claim(self.record, 'host-power', ('b'*64,), 'c'*64)
         with self.assertRaises(ValueError): custody.observe(self.record, 'test-vms-host-sink')
+        # Our own record with a drifted mode is repaired in place; a record that is
+        # not exactly one regular file of ours still refuses.
         self.record.chmod(0o666)
+        self.assertEqual(custody.observe(self.record, 'host-power'), 'a'*64)
+        self.assertEqual(self.record.stat().st_mode & 0o777, 0o644)
+        os.link(self.record, self.path/'second-name')
         with self.assertRaises(ValueError): custody.observe(self.record, 'host-power')
 
 

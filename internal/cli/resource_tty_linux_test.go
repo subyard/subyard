@@ -1027,5 +1027,5 @@ func TestMain(m *testing.M) {
 		}
 		return
 	}
-	os.Exit(m.Run())
+	os.Exit(testkit.RunWithOwnerLockRoot(m))
 }

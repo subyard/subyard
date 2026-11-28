@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 )
 
@@ -52,14 +53,44 @@ func TryOwnerLock(ctx context.Context, dataHome string) (Tree, func(), error) {
 	return ownerLock(ctx, dataHome, nil, false)
 }
 
+// OwnerLockRootEnvironment relocates owner coordination for test runs only.
+// Every release coordinates under /tmp; a run root removes its own copies.
+const OwnerLockRootEnvironment = "SUBYARD_OWNER_LOCK_ROOT"
+
+func ownerLockRoot() string {
+	if root := os.Getenv(OwnerLockRootEnvironment); root != "" {
+		return root
+	}
+	return "/tmp"
+}
+
+// ownerLockDirectory refuses a test binary that would create coordination
+// files in the shared /tmp namespace, where nothing removes them.
+func ownerLockDirectory() (string, error) {
+	root := os.Getenv(OwnerLockRootEnvironment)
+	switch {
+	case root == "" && testing.Testing():
+		return "", errors.New("owner coordination in a test binary needs a private root: run the package through testkit.RunWithOwnerLockRoot")
+	case root != "" && (!filepath.IsAbs(root) || filepath.Clean(root) != root):
+		return "", fmt.Errorf("%s must be a clean absolute path", OwnerLockRootEnvironment)
+	}
+	return ownerLockParent(), nil
+}
+
+func ownerLockParent() string {
+	return filepath.Join(ownerLockRoot(), "subyard-owner-locks-"+strconv.Itoa(os.Getuid()))
+}
+
 func ownerLock(ctx context.Context, dataHome string, expected *Tree, wait bool) (Tree, func(), error) {
 	uid := uint32(os.Getuid())
-	directory := filepath.Join("/tmp", "subyard-owner-locks-"+strconv.Itoa(os.Getuid()))
+	directory, err := ownerLockDirectory()
+	if err != nil {
+		return Tree{}, nil, err
+	}
 	if err := privateDirectory(directory); err != nil {
 		return Tree{}, nil, err
 	}
-	digest := sha256.Sum256([]byte(filepath.Clean(dataHome)))
-	path := filepath.Join(directory, hex.EncodeToString(digest[:])+".lock")
+	path := OwnerLockPath(dataHome)
 	if expected != nil {
 		if expected.Path != path {
 			return Tree{}, nil, errors.New("saved owner lock belongs to another installation")
@@ -180,7 +211,7 @@ func ownerLock(ctx context.Context, dataHome string, expected *Tree, wait bool) 
 // OwnerLockPath names shared coordination without creating it.
 func OwnerLockPath(dataHome string) string {
 	digest := sha256.Sum256([]byte(filepath.Clean(dataHome)))
-	return filepath.Join("/tmp", "subyard-owner-locks-"+strconv.Itoa(os.Getuid()), hex.EncodeToString(digest[:])+".lock")
+	return filepath.Join(ownerLockParent(), hex.EncodeToString(digest[:])+".lock")
 }
 
 func ReadOwnerEpoch(dataHome string) (uint64, error) {
