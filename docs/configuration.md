@@ -168,8 +168,9 @@ settings. Loading does not refuse it:
   shipped yard template or a command override, are still refused.
 - An unknown file under a Git `overrides/agents` directory is synced unchanged and read by nothing.
   Only its content is checked for secret material.
-- An integration that a newer release installed in the yard is not installed evidence: the
-  installed view drops it with its recorded `AGENT_<id>_*` settings.
+- An integration that another release shipped and installed in the yard, and this one does not
+  ship, is not installed evidence: the installed view drops it with its recorded `AGENT_<id>_*`
+  settings. An installed custom integration stays in the view after it leaves the configuration.
 
 `config show`, `config validate`, `status`, `yard update --check` (also in its JSON `configuration`
 array, with `reason` and `message`) and the `init` plan list each ignored assignment, selection

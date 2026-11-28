@@ -2,6 +2,8 @@ package config
 
 import (
 	"maps"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -88,19 +90,64 @@ func (catalog Catalog) ReadableAppliedIntegrationInitSettings(applied map[string
 	return result
 }
 
-// ReadableAppliedIntegrations keeps the applied integrations that this release
-// ships or retired, or that the desired values define. Another release's
-// integration, such as a newer one, is dropped with its AGENT_<id>_ metadata,
-// so its recorded command and sources are never read. A malformed ID stays and
-// is refused by selection resolution.
+// InheritedReleaseRoot matches a path below an inherited release root handle.
+var InheritedReleaseRoot = regexp.MustCompile(`^/proc/[0-9]+/fd/[0-9]+/(.+)$`)
+
+// ShippedReleasePath returns the shipped config path inside a release root:
+// an inherited /proc/<pid>/fd/<n> handle or a directory under releases/<id>.
+func ShippedReleasePath(path string) (string, bool) {
+	path = filepath.Clean(path)
+	relative := ""
+	if match := InheritedReleaseRoot.FindStringSubmatch(path); match != nil {
+		relative = match[1]
+	} else {
+		parts := strings.Split(path, "/")
+		for index := len(parts) - 3; index > 0; index-- {
+			if parts[index] == "releases" && parts[index+1] != "" {
+				relative = strings.Join(parts[index+2:], "/")
+				break
+			}
+		}
+	}
+	if relative == "" || !strings.HasPrefix(relative, "config/") || !filepath.IsLocal(relative) {
+		return "", false
+	}
+	return relative, true
+}
+
+// ReadableAppliedIntegrations drops the applied integrations that another
+// release shipped and this one does not: an ID this release neither ships nor
+// retired, that the desired values do not define, and whose recorded
+// AGENT_<id>_ metadata is absent or names a shipped release source. It goes
+// with that metadata, so its recorded command and sources are never read. An
+// applied custom integration, whose metadata names no release source, stays
+// installed evidence after it is removed from the desired values. A malformed
+// ID stays and is refused by selection resolution.
 func (catalog Catalog) ReadableAppliedIntegrations(desired map[string]string, selected []string, applied map[string]string) ([]string, map[string]string) {
+	shippedElsewhere := func(id string) bool {
+		if !catalog.UnknownIntegration(desired, id) {
+			return false
+		}
+		recorded := false
+		for _, suffix := range integrationMetadataSuffixes {
+			value, ok := applied["AGENT_"+id+"_"+suffix]
+			if !ok {
+				continue
+			}
+			recorded = true
+			if _, shipped := ShippedReleasePath(value); shipped {
+				return true
+			}
+		}
+		return !recorded
+	}
 	var dropped []string
 	kept := slices.DeleteFunc(slices.Clone(selected), func(id string) bool {
-		unknown := catalog.UnknownIntegration(desired, id)
-		if unknown {
+		drop := shippedElsewhere(id)
+		if drop {
 			dropped = append(dropped, id)
 		}
-		return unknown
+		return drop
 	})
 	if len(dropped) == 0 || applied == nil {
 		return kept, applied

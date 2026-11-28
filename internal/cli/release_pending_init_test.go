@@ -263,15 +263,16 @@ func TestPendingInitInspectsRunningYardsAndSkipsStoppedOnes(t *testing.T) {
 }
 
 // A newer release may have installed an integration this one does not ship.
-// Its record, with or without metadata and with sources this release cannot
-// read, is not installed evidence: the installed view stays readable.
+// Its record, without metadata or with shipped sources this release cannot
+// read, is not installed evidence: the installed view stays readable. A custom
+// integration removed from the configuration stays installed evidence.
 func TestPendingInitReadsInstalledIntegrationsOfNewerReleases(t *testing.T) {
 	fixture := newPendingInitFixture(t, false, nil)
 	executor := fixture.cli.options.Executor.(installedSettingsExecutor)
 	settings := maps.Clone(executor.settings)
 	for _, metadata := range []map[string]string{
 		{},
-		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "gone", "provision.sh")},
+		{"AGENT_futuretool_COMMAND": "futuretool", "AGENT_futuretool_PERSIST": ".futuretool", "AGENT_futuretool_PROVISION": filepath.Join(testkit.TempDir(t), "releases", "r2", "config", "agents", "futuretool", "provision.sh")},
 	} {
 		executor.settings = maps.Clone(settings)
 		maps.Copy(executor.settings, metadata)
@@ -289,6 +290,14 @@ func TestPendingInitReadsInstalledIntegrationsOfNewerReleases(t *testing.T) {
 		if err != nil || slices.Contains(target.Loaded.Integrations.Effective, "futuretool") || target.Loaded.Environment["AGENT_futuretool_COMMAND"] != "" {
 			t.Fatalf("installed view %#v %v", target.Loaded.Integrations, err)
 		}
+	}
+	executor.settings = maps.Clone(settings)
+	executor.settings["AGENT_custom_COMMAND"] = "custom"
+	executor.selected = []string{"codex", "custom"}
+	fixture.cli.options.Executor = executor
+	plan, err := fixture.cli.inspectPendingInit(context.Background(), fixture.cli.env["SUBYARD_CONFIG_HOME"])
+	if listing := strings.Join(plan.lines(), "\n"); err != nil || !strings.Contains(listing, "CODING_TOOL_INTEGRATIONS  codex custom -> codex") {
+		t.Fatalf("removed custom integration is not pending: %s %v", listing, err)
 	}
 }
 

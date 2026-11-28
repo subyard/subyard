@@ -152,9 +152,13 @@ func TestAppliedIntegrationsOfAnotherReleaseAreNotInstalledEvidence(t *testing.T
 		t.Fatal(err)
 	}
 	desired := map[string]string{"AGENT_custom_COMMAND": "custom"}
-	applied := map[string]string{"AGENT_futuretool_COMMAND": "future", "AGENT_futuretool_PERSIST": ".future", "AGENT_futuretool_extra_COMMAND": "kept", "AGENT_custom_COMMAND": "custom"}
-	selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"custom", "futuretool", "bad/name"}, applied)
-	if !slices.Equal(selected, []string{"custom", "bad/name"}) || len(settings) != 2 || settings["AGENT_custom_COMMAND"] != "custom" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 4 {
+	// futuretool was shipped by another release, bare has no record, and
+	// removed is a custom integration no longer in the desired values.
+	applied := map[string]string{"AGENT_futuretool_COMMAND": "future", "AGENT_futuretool_PROVISION": "/srv/subyard/releases/r2/config/agents/futuretool/provision.sh",
+		"AGENT_futuretool_extra_COMMAND": "kept", "AGENT_custom_COMMAND": "custom", "AGENT_removed_COMMAND": "removed", "AGENT_removed_CONFIG": "/home/dev/.config/subyard/overrides/host/agents/removed/config.toml"}
+	selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"custom", "futuretool", "bare", "removed", "bad/name"}, applied)
+	if !slices.Equal(selected, []string{"custom", "removed", "bad/name"}) || len(settings) != 4 || settings["AGENT_custom_COMMAND"] != "custom" ||
+		settings["AGENT_removed_CONFIG"] == "" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 6 {
 		t.Fatalf("selected %q settings %#v applied %#v", selected, settings, applied)
 	}
 	if selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"futuretool"}, nil); len(selected) != 0 || settings != nil {

@@ -695,7 +695,9 @@ including recorded provisioning inputs such as `CCUSAGE_PROVISION`. Complete int
 also record absence. A snapshot name this release does not read, retired or from a newer release,
 is ignored on read, never validated, projected or rendered, and the next capture replaces it. An
 applied integration that this release neither ships nor finds defined in the desired configuration,
-such as one a newer release installed, is dropped from the view with its `AGENT_<id>_*` settings. Init-owned values without an installed record, including profile-owned
+and whose recorded `AGENT_<id>_*` settings are absent or name a shipped release source, such as one a
+newer release installed, is dropped from the view with those settings. A custom integration's
+record names no release source, so it stays installed evidence until init removes it. Init-owned values without an installed record, including profile-owned
 settings, remain desired in both approving and resuming processes. Repairs by their owning runtimes
 use ordinary plan steps; these values are not listed as pending init. Unavailable unrecorded
 desired inputs retain their ordinary failures. Test-yard route inspection retains its ordinary
