@@ -151,15 +151,13 @@ cleanup() {
   fi
   # The emulator journal includes the guest console and survives lease release.
   # Telemetry tools keep native stderr private. Preserve the pool's numeric boot
-  # summary before teardown removes its journal with the disposable yard.
-  if [ "$status" -ne 0 ] && [ -n "$project" ] && [ -n "$instance" ]; then
-    case "$failed_phase" in
-      telemetry-profile|telemetry-native|telemetry-storage|telemetry-resource-observer) android_gradle_boot_evidence ;;
-    esac
+  # summary before teardown removes its journal with the disposable yard. Passing
+  # runs keep it too, as a record of the boot time margin.
+  if [ -n "$project" ] && [ -n "$instance" ]; then
+    android_gradle_boot_evidence
   fi
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
-    android_gradle_boot_evidence
     printf 'android-gradle evidence: emulator journal with guest kernel console\n' >&2
     android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' || true
