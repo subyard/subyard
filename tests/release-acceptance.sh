@@ -210,8 +210,11 @@ class TestAcceptance(unittest.TestCase):
             # The runner calls the shared apt helper beside it; no fixture source needs disabling.
             shutil.copy2(root / "dev/ci/apt-install.sh", directory / "apt-install.sh")
             (directory / "sources").mkdir()
+            (directory / "apt.conf.d").mkdir()
             (tools / "sudo").write_text('''#!/bin/bash
-[ "$1" = -n ] && [ "$2" = apt-get ] || exit 99
+[ "$1" = -n ] || exit 99
+if [ "$2" = install ]; then shift; exec "$@"; fi
+[ "$2" = apt-get ] || exit 99
 printf '%s\\n' "$3" >> "$TRACE"
 if [ "$3" = update ]; then exit "$UPDATE_EXIT"; fi
 [ "$3" = install ] || exit 99
@@ -241,7 +244,8 @@ exit "$COLLECTOR_EXIT"
                     env = dict(os.environ, PATH=str(tools) + ":" + os.environ["PATH"],
                         GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", READY=str(ready), TRACE=str(log),
                         RUNNER_TEMP=str(directory), UPDATE_EXIT=str(update), INSTALL_EXIT=str(install), COLLECTOR_EXIT=str(collector),
-                        SUBYARD_CI_APT_SOURCES=str(directory / "sources"))
+                        SUBYARD_CI_APT_SOURCES=str(directory / "sources"),
+                        SUBYARD_CI_APT_CONF=str(directory / "apt.conf.d"))
                     result = subprocess.run(["bash", str(runner), "acceptance", "fixture", "prepared", "output", "test"],
                         cwd=directory, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
