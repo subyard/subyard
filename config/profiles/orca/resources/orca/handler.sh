@@ -376,7 +376,7 @@ observe_registration_contract() {
   local desired
   local -a names=()
   desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
-  mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
+  mapfile -t names < <(registration_names)
   yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
     "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" \
@@ -404,7 +404,9 @@ stage_registration_contract() {
     || die "Orca guest staging returned an unsafe temporary path"
   incus file push "$sync" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/orca-sync" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  for source in "$RESOURCE_DIR"/registration/*.py; do
+  local -a sources=()
+  mapfile -t sources < <(registration_sources)
+  for source in "${sources[@]}"; do
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" \
       "${PROJ[@]}" --mode 0644 >/dev/null
   done
@@ -898,7 +900,7 @@ observe_bound_runtime_contract() {
 # one is a refusal of a guest-side check, which affects only this yard.
 refuse_unsafe_contract_links() {
   local -a names=()
-  mapfile -t names < <(cd "$RESOURCE_DIR/registration" && printf '%s\n' ./*.py | sed 's#^./##')
+  mapfile -t names < <(registration_names)
   yard_local_begin
   yexec bash -se -- orca-link-check "$ORCA_REGISTRATION" "${ORCA_FIXED_PATHS[@]}" "${names[@]}" <<'YARD' \
     || die "Orca runtime contract contains an unsafe symbolic link; remove it, or run 'orca remove', then retry yard init"
@@ -957,11 +959,12 @@ service_enabled() {
 
 # Run captured sources in memory when installed helpers still need repair.
 render_registration_observer() {
-  local name
+  local name source
   printf '%s\n' 'import sys,types'
   for name in discovery inventory state transport reconcile main; do
     printf 'module=types.ModuleType("%s");sys.modules["%s"]=module\nexec(compile(' "$name" "$name"
-    jq -Rs . "$RESOURCE_DIR/registration/$name.py" || return 1
+    source="$(registration_source "$name")" || return 1
+    jq -Rs . "$source" || return 1
     printf ',"%s.py","exec"),module.__dict__)\n' "$name"
   done
   if [ -n "${ORCA_METADATA_PROJECTION:-}" ]; then
@@ -1008,10 +1011,12 @@ projects_settled() {
 # A source digest makes a new profile helper invalidate an otherwise intact installed contract.
 
 registration_files() {
-  local source
-  for source in "$RESOURCE_DIR"/registration/*.py; do
-    [ -f "$source" ] || return 1
-    printf '%s/%s\n' "$ORCA_REGISTRATION" "${source##*/}"
+  local name
+  local -a names=()
+  mapfile -t names < <(registration_names)
+  [ "${#names[@]}" -gt 2 ] || return 1
+  for name in "${names[@]}"; do
+    printf '%s/%s\n' "$ORCA_REGISTRATION" "$name"
   done
 }
 

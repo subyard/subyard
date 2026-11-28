@@ -241,6 +241,8 @@ def stock_probe(arguments):
     phase = "version"
     server = None
     try:
+        if getattr(arguments, "library", ""):
+            sys.path.insert(0, arguments.library)
         sys.path.insert(0, arguments.registration)
         from reconcile import _records
         from settings import launch_defaults
@@ -663,6 +665,7 @@ def main():
     probe.add_argument("--binary", default="/usr/bin/orca-ide")
     probe.add_argument("--version", required=True)
     probe.add_argument("--registration", default="/usr/local/libexec/subyard/orca-registration")
+    probe.add_argument("--library", default="", help="shared checkout discovery sources outside --registration")
     probe.add_argument("--resource-settings", action="store_true",
                        help="check both resource isolation values through stock recovery and restart")
 

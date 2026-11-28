@@ -1,7 +1,34 @@
 # shellcheck shell=bash
+# Orca installs its own modules and the shared checkout discovery library into one
+# directory. Sources are listed in installed-name order.
+registration_sources() {
+  local library="$RESOURCE_DIR/../../../../../scripts/lib/checkout-discovery" source
+  for source in "$RESOURCE_DIR"/registration/*.py "$library/discovery.py" "$library/inventory.py"; do
+    [ -f "$source" ] || return 1
+    printf '%s\t%s\n' "${source##*/}" "$source"
+  done | LC_ALL=C sort | cut -f 2
+}
+
+registration_source() {
+  local source
+  while IFS= read -r source; do
+    if [ "${source##*/}" = "$1.py" ]; then printf '%s\n' "$source"; return 0; fi
+  done < <(registration_sources)
+  return 1
+}
+
+registration_names() {
+  registration_sources | sed 's#^.*/##'
+}
+
 registration_contract_version() {
-  local digest
-  digest="$(cd "$RESOURCE_DIR/registration" && sha256sum ./*.py | sha256sum | cut -d ' ' -f 1)" || return 1
+  local digest source
+  local -a sources=()
+  mapfile -t sources < <(registration_sources)
+  [ "${#sources[@]}" -gt 2 ] || return 1
+  digest="$(for source in "${sources[@]}"; do
+    printf '%s  ./%s\n' "$(sha256sum < "$source" | cut -d ' ' -f 1)" "${source##*/}"
+  done | sha256sum | cut -d ' ' -f 1)" || return 1
   printf '%s:%s\n' "$ORCA_CONTRACT_VERSION" "$digest"
 }
 
@@ -125,8 +152,10 @@ registration_desired_digest() {
     printf '755 0:0 '
     render_registration_hook | sha256sum | awk '{print $1}'
     local source
-    for source in "$RESOURCE_DIR"/registration/*.py; do
-      [ -f "$source" ] || return 1
+    local -a sources=()
+    mapfile -t sources < <(registration_sources)
+    [ "${#sources[@]}" -gt 2 ] || return 1
+    for source in "${sources[@]}"; do
       printf '644 0:0 %s ' "${source##*/}"
       sha256sum "$source" | awk '{print $1}'
     done

@@ -241,7 +241,18 @@ stock_orca_probe() {
   install_stock_orca_client
   python3 -B "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" stock-probe \
     --version "$ORCA_VERSION" \
-    --registration "$ROOT/config/profiles/orca/resources/orca/registration"
+    --registration "$ROOT/config/profiles/orca/resources/orca/registration" \
+    --library "$ROOT/scripts/lib/checkout-discovery"
+}
+
+# Installed registration sources of a runtime root: Orca modules plus the shared
+# checkout discovery library, which older releases kept among the Orca modules.
+registration_sources_of() {
+  local path
+  for path in "$1"/config/profiles/orca/resources/orca/registration/*.py \
+    "$1"/scripts/lib/checkout-discovery/discovery.py "$1"/scripts/lib/checkout-discovery/inventory.py; do
+    [ ! -f "$path" ] || printf '%s\t%s\n' "${path##*/}" "$path"
+  done | LC_ALL=C sort | cut -f 2
 }
 
 # Reads the catalog first: a failed or invalid read fails the fixture, so a negative use
@@ -264,9 +275,9 @@ orca_repo_id() {
 orca_registration_hash() {
   local files=() path
   if [ "$#" -gt 0 ]; then
-    for path in "$1"/config/profiles/orca/resources/orca/registration/*.py; do
+    while IFS= read -r path; do
       files+=("/usr/local/libexec/subyard/orca-registration/${path##*/}")
-    done
+    done < <(registration_sources_of "$1")
   fi
   guest_root sh -c '
     set -eu
@@ -285,10 +296,10 @@ orca_hook_hash() {
 release_orca_helper_hash() {
   local release_root="$1" path digest
   {
-    for path in "$release_root"/config/profiles/orca/resources/orca/registration/*.py; do
+    while IFS= read -r path; do
       digest="$(sha256sum "$path" | cut -d ' ' -f 1)"
       printf '%s  %s\n' "$digest" "${path##*/}"
-    done
+    done < <(registration_sources_of "$release_root")
   } | sha256sum | cut -d ' ' -f 1
 }
 

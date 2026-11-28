@@ -1018,7 +1018,8 @@ cmp -s "$ORCA_TEST_CAPTURE/subyard-orca.service" \
 if grep -Fq -- '--no-pairing' "$ORCA_TEST_CAPTURE/subyard-orca.service"; then
   fail 'service disabled stock startup pairing'
 fi
-for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py; do
+for source in "$ROOT"/config/profiles/orca/resources/orca/registration/*.py \
+  "$ROOT"/scripts/lib/checkout-discovery/discovery.py "$ROOT"/scripts/lib/checkout-discovery/inventory.py; do
   cmp -s "$source" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/${source##*/}" \
     || fail 'registration component was not installed intact'
 done

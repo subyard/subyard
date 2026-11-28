@@ -1,9 +1,20 @@
+import atexit
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 
-COMPONENT = Path(__file__).resolve().parents[5] / "config/profiles/orca/resources/orca/registration"
+SOURCE = Path(__file__).resolve().parents[5] / "config/profiles/orca/resources/orca/registration"
+LIBRARY = Path(__file__).resolve().parents[5] / "scripts/lib/checkout-discovery"
+# Orca installs its modules and the shared checkout discovery library into one
+# directory; tests run that layout.
+_installed = tempfile.TemporaryDirectory(prefix="subyard-orca-registration.", dir="/tmp")
+atexit.register(_installed.cleanup)
+COMPONENT = Path(_installed.name)
+for _source in [*SOURCE.glob("*.py"), LIBRARY / "discovery.py", LIBRARY / "inventory.py"]:
+    shutil.copyfile(_source, COMPONENT / _source.name)
 sys.path.insert(0, str(COMPONENT))
 
 

@@ -1153,8 +1153,10 @@ if ! yard init --yes >/dev/null; then
 import hashlib, json, sys
 from pathlib import Path
 root = Path(sys.argv[1]) / 'config/profiles/orca/resources/orca/registration'
+library = Path(sys.argv[1]) / 'scripts/lib/checkout-discovery'
+sources = [*root.glob('*.py'), library / 'discovery.py', library / 'inventory.py']
 print(json.dumps({path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                  for path in root.glob('*.py')}, sort_keys=True))
+                  for path in sources}, sort_keys=True))
 PY
 )"
   expected_dispatcher="$(sha256sum "$RUNTIME_ROOT/config/projects-changed.sh" | cut -d ' ' -f 1)"
