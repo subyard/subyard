@@ -5,6 +5,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-install-runtime-release-rollback.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+# The installer runs against a fixture home and a private lock root, so neither
+# a direct nor a suite run coordinates the operator's real data home.
+real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "${SUBYARD_HOME:-$HOME/.subyard}" | sha256sum | cut -d ' ' -f 1).lock"
+export HOME="$TMP/operator" SUBYARD_HOME="$TMP/operator/.subyard"
+export SUBYARD_OWNER_LOCK_ROOT="$TMP/owner-locks"
+install -d -m 0700 "$HOME" "$SUBYARD_OWNER_LOCK_ROOT"
 runtime_root="$TMP/runtime"
 engine="$TMP/yard-engine"
 capture="$TMP/engine-called"
@@ -149,3 +155,5 @@ grep -Fxq 'install-runtime-release: could not list bundle member types' "$TMP/st
   || { cat "$TMP/stderr" >&2; exit 1; }
 [ ! -e "$TMP/extracted" ]
 printf 'ok: runtime installer rejects a failed verbose listing before extraction\n'
+[ ! -e "$SUBYARD_OWNER_LOCK_ROOT/$real_home_lock" ] \
+  || { printf 'install runtime rollback: the installer coordinated the real data home\n' >&2; exit 1; }

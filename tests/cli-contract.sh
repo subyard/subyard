@@ -8,12 +8,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SUBYARD_NO_AUDIT=1
 CLI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cli-contract.XXXXXX")"
 trap 'rm -rf "$CLI_TMP"' EXIT
-# A direct run gets its own lock root too, so the shared-lock check always runs.
-if [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ]; then
-  SUBYARD_OWNER_LOCK_ROOT="$CLI_TMP/owner-locks"
-  install -d -m 0700 "$SUBYARD_OWNER_LOCK_ROOT"
-fi
-export SUBYARD_OWNER_LOCK_ROOT
+# Every command runs against fixture homes and a private lock root, so neither
+# a direct nor a suite run coordinates the operator's real data home.
+real_home_lock="subyard-owner-locks-$(id -u)/$(printf '%s' "${SUBYARD_HOME:-$HOME/.subyard}" | sha256sum | cut -d ' ' -f 1).lock"
+export HOME="$CLI_TMP/operator" SUBYARD_OPERATOR_HOME="$CLI_TMP/operator"
+export SUBYARD_CONFIG_HOME="$CLI_TMP/operator/.config/subyard" SUBYARD_HOME="$CLI_TMP/operator/.subyard"
+export SUBYARD_OWNER_LOCK_ROOT="$CLI_TMP/owner-locks"
+install -d -m 0700 "$HOME" "$SUBYARD_OWNER_LOCK_ROOT"
 
 commands="$($ROOT/bin/yard --list)"
 grep -qx security <<<"$commands" || fail "security command missing"
@@ -249,3 +250,4 @@ printf 'ok: CLI help, globals and profile completion contract\n'
   shared_lock="/tmp/subyard-owner-locks-$(id -u)/$(printf '%s' "$data_home" | sha256sum | cut -d ' ' -f 1).lock"
   [ ! -e "$shared_lock" ] || fail 'fixture data home coordinated in the shared /tmp namespace'
 )
+[ ! -e "$SUBYARD_OWNER_LOCK_ROOT/$real_home_lock" ] || fail 'a command coordinated the real data home'
