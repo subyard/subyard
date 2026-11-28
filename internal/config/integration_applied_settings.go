@@ -53,7 +53,33 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 	// activation reprovisions those agents with prompt, since their hooks changed.
 	result["DEV_SUDO"] = "prompt"
 	for name, value := range applied {
-		result[name] = value
+		if catalog.AppliedIntegrationInitSetting(name) {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+// AppliedIntegrationInitSetting reports whether an applied snapshot name is an
+// input this release reads. A snapshot written by another release can record
+// names this one does not classify, such as a newer release's settings.
+func (catalog Catalog) AppliedIntegrationInitSetting(name string) bool {
+	return name == "INTEGRATION_HOST_LINKS" || catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS"
+}
+
+// ReadableAppliedIntegrationInitSettings keeps the snapshot names this release
+// reads. Other names are ignored, never validated, projected or rendered; the
+// next capture replaces them. A nil snapshot stays nil (no baseline), and a
+// snapshot of only other names reads as complete and empty.
+func (catalog Catalog) ReadableAppliedIntegrationInitSettings(applied map[string]string) map[string]string {
+	if applied == nil {
+		return nil
+	}
+	result := make(map[string]string, len(applied))
+	for name, value := range applied {
+		if catalog.AppliedIntegrationInitSetting(name) {
+			result[name] = value
+		}
 	}
 	return result
 }

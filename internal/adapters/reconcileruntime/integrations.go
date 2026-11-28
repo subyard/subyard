@@ -966,8 +966,17 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if wire.Diagnostics != nil {
 			wire.Diagnostics.Digests = withoutRetiredSettings(wire.Diagnostics.Digests)
 		}
+		// Snapshots from other releases may record settings this one does not
+		// read, retired or newer; only the names it reads are inputs.
+		if wire.AppliedSettings != nil {
+			settings, err := config.LoadCatalog(runtime.RepositoryRoot)
+			if err != nil {
+				return observed, err
+			}
+			wire.AppliedSettings = settings.ReadableAppliedIntegrationInitSettings(wire.AppliedSettings)
+		}
 		observed = integrationObservation{Fingerprint: wire.Fingerprint, Changed: wire.Changed, Pending: wire.Pending, Initial: wire.Initial,
-			Installed: wire.Installed, Selected: wire.Selected, AppliedSettings: withoutRetiredSettings(wire.AppliedSettings), Diagnostics: wire.Diagnostics,
+			Installed: wire.Installed, Selected: wire.Selected, AppliedSettings: wire.AppliedSettings, Diagnostics: wire.Diagnostics,
 			Retired: catalog.retired(wire.Retired)}
 		observed.Facts = catalog.facts(wire.Facts, observed.Retired)
 		if observed.Adopted, err = catalog.adopted(wire.Adopted); err != nil {

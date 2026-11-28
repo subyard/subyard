@@ -304,19 +304,6 @@ func TestAppliedIntegrationSettingsRequireConvergenceAndRetainFailedIntent(t *te
 	}
 }
 
-func TestAppliedIntegrationConfigurationRejectsUnknownFields(t *testing.T) {
-	root := testkit.TempDir(t)
-	for _, settings := range []map[string]string{{"UNRELATED": "private-canary"}, {"AGENT_sample_CONFIG": "/private-canary"}, {"AGENT_sample_COMMAND": "unsafe command private-canary"}} {
-		payload, _ := json.Marshal(integrationObservation{Installed: true, AppliedSettings: settings})
-		executor := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: payload}}}}
-		runtime := Runtime{RepositoryRoot: root, Executor: executor, Integrations: []profile.IntegrationDefinition{}}
-		_, err := runtime.AppliedIntegrationConfiguration(context.Background())
-		if err == nil || strings.Contains(err.Error(), "private-canary") {
-			t.Fatalf("unsafe applied settings validation: %v", err)
-		}
-	}
-}
-
 func TestIntegrationInventoryRejectsArtifactAppearingAfterObservation(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")

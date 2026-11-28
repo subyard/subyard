@@ -115,3 +115,29 @@ func TestAppliedIntegrationSettingsRecordOnlyNonDefaultSudo(t *testing.T) {
 		}
 	}
 }
+
+// A snapshot can record names this release does not read, such as a newer
+// release's settings or process variables; they never reach the environment.
+func TestAppliedIntegrationSettingsProjectOnlyNamesThisReleaseReads(t *testing.T) {
+	catalog := Catalog{}
+	applied := map[string]string{"DEV_USER": "dev", "FUTURE_SETTING": "x", "PATH": "/injected"}
+	environment := catalog.WithAppliedIntegrationInitSettings(map[string]string{"PATH": "/usr/bin"}, applied)
+	if environment["DEV_USER"] != "dev" || environment["PATH"] != "/usr/bin" {
+		t.Fatalf("projected environment = %#v", environment)
+	}
+	if _, present := environment["FUTURE_SETTING"]; present {
+		t.Fatal("unknown snapshot name reached the environment")
+	}
+	if readable := catalog.ReadableAppliedIntegrationInitSettings(applied); len(readable) != 1 || readable["DEV_USER"] != "dev" {
+		t.Fatalf("readable = %#v", readable)
+	}
+	if catalog.ReadableAppliedIntegrationInitSettings(nil) != nil {
+		t.Fatal("absent baseline became a snapshot")
+	}
+	if readable := catalog.ReadableAppliedIntegrationInitSettings(map[string]string{"FUTURE_SETTING": "x"}); readable == nil || len(readable) != 0 {
+		t.Fatalf("snapshot of unknown names = %#v", readable)
+	}
+	if catalog.ValidateIntegrationInitSettings(map[string]string{"FUTURE_SETTING": "x"}) == nil {
+		t.Fatal("the writer's closed domain accepted an unknown field")
+	}
+}
