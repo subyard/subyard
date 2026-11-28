@@ -26,6 +26,8 @@ import uuid
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
 RESUME_COMMAND = 'resume --dir {} --task FILE'
+# --compact-window sets the native auto-compact threshold: a Claude environment value or a Codex config key.
+COMPACT_SETTINGS = {'claude': 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'codex': 'model_auto_compact_token_limit'}
 CLEANUP_UNVERIFIED = 'Cleanup unverified. Could not verify that the systemd user scope is empty or gone.'
 CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
                    'danger-full-access': 'dangerFullAccess'}
@@ -62,6 +64,12 @@ def event_redactor(env):
     return redact
 
 
+def codex_sandbox(mode):
+    if mode not in CODEX_SANDBOXES:
+        raise BridgeError('unknown Codex sandbox mode ' + json.dumps(mode))
+    return CODEX_SANDBOXES[mode]
+
+
 def codex_arguments(args):
     arguments = []
     sandbox = None
@@ -72,14 +80,14 @@ def codex_arguments(args):
             option, equals, value = arg[:2], '=', arg[2:]
         if option in ('-s', '--sandbox'):
             mode = value if equals else next(args, '')
-            sandbox = CODEX_SANDBOXES[mode]
+            sandbox = codex_sandbox(mode)
             arguments.extend(['-c', 'sandbox_mode=' + json.dumps(mode)])
         elif option in ('-c', '--config'):
             config = value if equals else next(args, '')
             arguments.extend(['-c', config])
             key, _, setting = config.partition('=')
             if key.strip().strip('"\'') == 'sandbox_mode':
-                sandbox = CODEX_SANDBOXES[setting.strip().strip('"\'')]
+                sandbox = codex_sandbox(setting.strip().strip('"\''))
         else:
             arguments.append(arg)
     return arguments, sandbox
@@ -923,6 +931,8 @@ def parse_args():
             command.add_argument('--role', choices=['developer', 'reviewer', 'observer'])
             command.add_argument('--name')
             command.add_argument('--env', action='append', default=[], metavar='K=V')
+            command.add_argument('--compact-window', type=int, metavar='TOKENS',
+                                 help='auto-compact the worker context at this many tokens')
             command.add_argument('--executable', type=Path,
                                  help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
             command.epilog = 'Pass native vendor arguments after --.'
@@ -944,6 +954,65 @@ def parse_args():
     if vendor_args and args.command != 'start':
         raise BridgeError('vendor arguments are set at start and retained on resume')
     return args, vendor_args
+
+
+def start_config(args, vendor_args, root):
+    """Return the worker configuration, the assignment and every independent start refusal, in stable order."""
+    refusals, task = [], None
+    if (root / 'state').exists():
+        refusals.append('worker already exists; use resume')
+    try:
+        task = read(args.task or root / 'task.md')
+    except FileNotFoundError:
+        refusals.append('start requires an assignment file. Supply --task FILE or put task.md in the worker directory.')
+    except (OSError, ValueError):
+        # Includes symlinks, non-regular files, unreadable files and invalid text.
+        refusals.append('The assignment file must be a readable regular text file, not a symlink.')
+    if args.role:
+        args.model = args.model or MODELS[args.vendor][args.role]
+        args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')
+    if not args.model or not args.effort:
+        refusals.append('start requires --role or explicit --model and --effort')
+    cwd = args.cwd.is_dir()
+    if not cwd:
+        refusals.append('worker cwd is not a directory')
+    env = {}
+    entries = [entry.partition('=') for entry in args.env]
+    valid_env = all(separator and key and '\0' not in key + value for key, separator, value in entries)
+    if valid_env:
+        env = {key: value for key, _, value in entries}
+    else:
+        refusals.append('invalid environment override')
+    native, sandbox = [], None
+    if args.vendor == 'codex':
+        try:
+            native, sandbox = codex_arguments(vendor_args)
+        except BridgeError as error:
+            refusals.append(str(error))
+    if args.role == 'reviewer' and args.vendor == 'codex' and sandbox:
+        refusals.append('An explicit --sandbox or sandbox_mode conflicts with --role reviewer, '
+                        'which fixes the sandbox.')
+    if args.compact_window is not None:
+        if args.compact_window <= 0:
+            refusals.append('--compact-window must be a positive number of tokens.')
+        explicit = ([key for key, _, _ in entries] if args.vendor == 'claude' else
+                    [setting.partition('=')[0].strip().strip('"\'')
+                     for option, setting in zip(native, native[1:]) if option == '-c'])
+        if COMPACT_SETTINGS[args.vendor] in explicit:
+            refusals.append(f'An explicit {COMPACT_SETTINGS[args.vendor]} conflicts with --compact-window.')
+    if args.compact_window and args.vendor == 'claude':
+        env[COMPACT_SETTINGS['claude']] = str(args.compact_window)
+    elif args.compact_window:
+        vendor_args = [*vendor_args, '-c', f'{COMPACT_SETTINGS["codex"]}={args.compact_window}']
+    config = dict(vendor=args.vendor, model=args.model, effort=args.effort, cwd=str(args.cwd.resolve()),
+                  role=args.role, name=args.name or root.name, env=env, vendor_args=vendor_args,
+                  executable=str(args.executable.resolve()) if args.executable else None)
+    if cwd and valid_env:
+        try:
+            role_arguments(config, {**os.environ, **env})
+        except BridgeError as error:
+            refusals.append(str(error))
+    return config, task, refusals
 
 
 def require_active_turn(root, state):
@@ -986,12 +1055,11 @@ def main():
     if starting:
         if os.path.lexists(root):
             directory(root, create=False)
-        try:
-            task = read(args.task or root / 'task.md')
-        except FileNotFoundError as error:
-            raise BridgeError(
-                'start requires an assignment file. Supply --task FILE or put task.md in the worker directory.'
-            ) from error
+        # Refuse before creating the worker directory; the command lock below fences a concurrent start.
+        config, task, refusals = start_config(args, vendor_args, root)
+        if refusals:
+            print('\n'.join(refusals), file=sys.stderr)
+            return 1
     try:
         directory(root, create=starting)
     except FileNotFoundError as error:
@@ -1112,27 +1180,6 @@ def main():
             if args.command == 'start':
                 if (root / 'state').exists():
                     raise BridgeError('worker already exists; use resume')
-                if args.role:
-                    args.model = args.model or MODELS[args.vendor][args.role]
-                    args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')
-                if args.role == 'reviewer' and args.vendor == 'codex' and codex_arguments(vendor_args)[1]:
-                    print('An explicit --sandbox or sandbox_mode conflicts with --role reviewer, which fixes the sandbox.',
-                          file=sys.stderr)
-                    return 1
-                if not args.model or not args.effort:
-                    raise BridgeError('start requires --role or explicit --model and --effort')
-                if not args.cwd.is_dir():
-                    raise BridgeError('worker cwd is not a directory')
-                env = {}
-                for entry in args.env:
-                    key, separator, value = entry.partition('=')
-                    if not separator or not key or '\0' in key + value:
-                        raise BridgeError('invalid environment override')
-                    env[key] = value
-                config = dict(vendor=args.vendor, model=args.model, effort=args.effort, cwd=str(args.cwd.resolve()),
-                              role=args.role, name=args.name or root.name, env=env, vendor_args=vendor_args,
-                              executable=str(args.executable.resolve()) if args.executable else None)
-                role_arguments(config, {**os.environ, **env})
                 state = dict(session_id=None, approval_sequence=0)
             else:
                 state = snapshot(root)
