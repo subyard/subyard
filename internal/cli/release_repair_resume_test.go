@@ -882,9 +882,9 @@ func (fixture unfinishedFactsExecutor) Exec(ctx context.Context, project, instan
 // incomplete. Once the collision is removed, the recovering journal prepares
 // every owner from the installed view exactly as with current facts, so the
 // repair can run again. An unfinished refresh that changed the profile
-// selection leaves the installed view unknown.
+// selection refuses the installed view and names the failed read.
 func TestRepairRecoveryReadsUnfinishedGuestFactsThatKeepTheSelection(t *testing.T) {
-	refused := map[string][]string{}
+	refused, rendered := map[string][]string{}, map[string][]string{}
 	for _, state := range []string{"current", "unfinished", "changed"} {
 		fixture := newPendingInitFixture(t, false, nil)
 		request, journal := repairRequest(t, fixture)
@@ -913,6 +913,11 @@ func TestRepairRecoveryReadsUnfinishedGuestFactsThatKeepTheSelection(t *testing.
 			}
 			if _, err := recovery.PrepareActivationRecovery(context.Background(), journal.Releases, releasetransition.ReleaseLinks{}); err != nil {
 				refused[state] = append(refused[state], owner.ID()+": "+err.Error())
+				var diagnostic interface{ ActivationDiagnostic() (string, string) }
+				if errors.As(err, &diagnostic) {
+					message, _ := diagnostic.ActivationDiagnostic()
+					rendered[state] = append(rendered[state], message)
+				}
 			}
 		}
 	}
@@ -922,5 +927,8 @@ func TestRepairRecoveryReadsUnfinishedGuestFactsThatKeepTheSelection(t *testing.
 	}
 	if len(refused["changed"]) <= len(refused["current"]) || !slices.ContainsFunc(refused["changed"], inspection) {
 		t.Fatalf("changed selection was read as installed: %q", refused["changed"])
+	}
+	if !slices.ContainsFunc(rendered["changed"], func(message string) bool { return strings.Contains(message, "(read=installed-profiles)") }) {
+		t.Fatalf("changed selection refusal does not name the failed read: %q", rendered["changed"])
 	}
 }

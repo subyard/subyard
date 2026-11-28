@@ -2734,8 +2734,9 @@ helper or profile runtime drift is still assessed independently. The installed
 profile selection is the last successful one; an incomplete refresh that keeps it,
 such as one stopped by a guest file collision, leaves it readable, so a recovering
 release repair can prepare and repeat the refresh. A profile operation refused by
-unfinished facts keeps its change in their target. An unfinished target that changes
-the selection refuses the installed view until `yard init` completes the refresh.
+unfinished facts keeps its change in their target. While an unfinished target changes
+the selection, the installed view is refused; `yard init` or a release activation
+completes the refresh, and reverting the profile operation makes the view readable.
 The developer identity read from guest facts, used when the integration baseline
 records no identity, still requires completed facts.
 
