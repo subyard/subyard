@@ -366,10 +366,12 @@ type ConfigDiagnostic struct {
 	seenNext     map[string]bool
 }
 
-// TypedRefusal is one rendered domain.ConfigRefusal with its fixed next step.
+// TypedRefusal is one rendered domain.ConfigRefusal with its fixed next step
+// and the validated names it refers to.
 type TypedRefusal struct {
 	Code       domain.ConfigRefusalCode
 	Text, Next string
+	Names      []string
 }
 
 // Complete reports that every cause is a typed refusal.
@@ -430,7 +432,7 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			return
 		case *domain.ConfigRefusal:
 			if diagnostic.addRefusal(typed.Error()) {
-				diagnostic.Typed = append(diagnostic.Typed, TypedRefusal{typed.Code(), typed.Error(), typed.Next()})
+				diagnostic.Typed = append(diagnostic.Typed, TypedRefusal{typed.Code(), typed.Error(), typed.Next(), typed.Names()})
 				diagnostic.typedAt = append(diagnostic.typedAt, len(diagnostic.Refusals)-1)
 			}
 			diagnostic.addNext(typed.Next())

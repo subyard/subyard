@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
+	"slices"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/application"
@@ -58,7 +59,11 @@ func (cli *CLI) runCurrentMigration(ctx context.Context, definition command.Defi
 		return cli.reportPreparationError(definition, err)
 	}
 	defer prepared.Close()
-	return cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+	exit := cli.runPreparedCommand(ctx, prepared, yes || cli.env["ASSUME_YES"] == "1")
+	if !slices.Contains(arguments, "--check") {
+		cli.publishAfterCommand(ctx, definition, loaded, arguments)
+	}
+	return exit
 }
 
 func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ *initBootstrap) error {

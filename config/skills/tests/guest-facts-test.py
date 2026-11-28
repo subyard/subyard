@@ -164,6 +164,79 @@ class Facts(unittest.TestCase):
         self.path.write_text('{broken')
         with self.assertRaises(ValueError): self.check(pending)
 
+    def host_snapshot(self, generated='2026-11-28T10:00:00.000000000Z', **changes):
+        value = dict(schema=1, yard='default', generated_at=generated,
+                     rpc=[dict(at='2026-11-28T09:00:00Z', last='2026-11-28T09:00:05Z', count=2,
+                               method='operation.plan', code='plan_failed')],
+                     updates=[dict(attempt='attempt-0011223344556677', at='2026-11-28T08:00:00Z', direction='activate',
+                                   phase='refresh', status='failure', code='refresh_failed', source='0.32.0', target='')],
+                     setup=[dict(attempt='attempt-8899aabbccddeeff', at='2026-11-28T07:00:00Z', phase='prepare',
+                                 status='failure', code='preparation_failed', omitted_refusals=0, incomplete=True,
+                                 refusals=[dict(source='config', code='profile-requires-host-access',
+                                                names=['ALLOWS_HOST_ACCESS'])])],
+                     omitted=dict(rpc=0, updates=0, setup=0), unavailable=[])
+        value.update(changes)
+        return value
+
+    def put(self, value):
+        facts.put_host_errors(value, self.root/'host-errors.json', self.machine)
+
+    def read_host(self):
+        return facts.host_errors(facts.load(self.root/'host-errors.json', facts.HOST_ERRORS_LIMIT), machine=self.machine)
+
+    def test_host_errors_store_facts_for_this_guest_and_replace_whole_snapshots(self):
+        self.put(self.host_snapshot())
+        stored = self.read_host()
+        self.assertEqual(stored['machine_id'], 'a'*32)
+        self.assertEqual(stored['setup'][0]['refusals'][0]['names'], ['ALLOWS_HOST_ACCESS'])
+        self.assertEqual((self.root/'host-errors.json').stat().st_mode & 0o777, 0o644)
+        # A whole snapshot replaces the previous one, even after an owner clock step back.
+        self.put(self.host_snapshot('2026-11-28T09:59:59.000000000Z', rpc=[]))
+        self.assertEqual(self.read_host()['rpc'], [])
+        self.assertLessEqual((self.root/'host-errors.json').stat().st_size, facts.HOST_ERRORS_LIMIT)
+        self.assertEqual(list(self.root.glob('.host-errors-*')), [])
+        self.machine.write_text('b'*32)
+        with self.assertRaisesRegex(ValueError, 'another guest'): self.read_host()
+
+    def test_host_errors_refuse_text_values_and_unknown_shape(self):
+        rpc = self.host_snapshot()['rpc'][0]
+        setup = self.host_snapshot()['setup'][0]
+        refusal = setup['refusals'][0]
+        for value in (
+                self.host_snapshot(rpc=[dict(rpc, code='plan failed: token=x')]),
+                self.host_snapshot(rpc=[dict(rpc, method='/home/owner')]),
+                self.host_snapshot(rpc=[dict(rpc, error='full text')]),
+                self.host_snapshot(rpc=[dict(rpc, count=0)]),
+                self.host_snapshot(rpc=[dict(rpc, count=True)]),
+                self.host_snapshot(rpc=[rpc]*11),
+                self.host_snapshot(setup=[dict(setup, refusals=[dict(refusal, text='value-free text')])]),
+                self.host_snapshot(setup=[dict(setup, refusals=[dict(refusal, names=['A=1'])])]),
+                self.host_snapshot(setup=[dict(setup, refusals=[refusal]*9)]),
+                self.host_snapshot(setup=[dict(setup, incomplete='yes')]),
+                self.host_snapshot(generated_at='2026-11-28T10:00:00Z'),
+                self.host_snapshot(yard='Other Yard'),
+                self.host_snapshot(unavailable=['rpc', 'rpc']),
+                self.host_snapshot(unavailable=['logs']),
+                self.host_snapshot(machine_id='a'*32),
+                dict(self.host_snapshot(), extra=1)):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.put(value)
+        self.assertFalse((self.root/'host-errors.json').exists())
+
+    def test_host_errors_reader_reports_missing_snapshot_as_unknown(self):
+        stderr = io.StringIO()
+        with patch.object(facts, 'HOST_ERRORS', self.root/'host-errors.json'), \
+             patch.object(facts.sys, 'argv', ['facts.py', 'host-errors']), contextlib.redirect_stderr(stderr):
+            self.assertEqual(facts.main(), 1)
+        self.assertIn('unknown', stderr.getvalue())
+        self.put(self.host_snapshot())
+        stdout = io.StringIO()
+        with patch.object(facts, 'HOST_ERRORS', self.root/'host-errors.json'), \
+             patch.object(facts, 'MACHINE', self.machine), \
+             patch.object(facts.sys, 'argv', ['facts.py', 'host-errors']), contextlib.redirect_stdout(stdout):
+            self.assertEqual(facts.main(), 0)
+        self.assertEqual(json.loads(stdout.getvalue())['yard'], 'default')
+
     def test_symlink_unsafe_mode_and_invalid_shape(self):
         self.apply('begin'); self.apply('commit')
         self.path.chmod(0o666)

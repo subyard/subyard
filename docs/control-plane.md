@@ -1575,7 +1575,30 @@ local error text) to the private `$SUBYARD_HOME/logs/rpc-errors.log`, keeping on
 256 KiB generation; `yard logs --rpc [-n N]` shows the newest records. Records are best effort:
 the session queues at most 64 and writes them after the response under the owner barrier of the
 installation generation it started in. A record that cannot take the barrier and the log lock
-within 250 ms is dropped, as are records beyond the queue.
+within 250 ms is dropped, as are records beyond the queue. Each record also names the yard the
+request operated on: the session's, or the init target, service yard or executed plan's yard its
+handler resolved; owner-services requests without one record none. `yard init` (`yard setup`) keeps one record per
+attempt under `$SUBYARD_HOME/logs/setup`, newest 30 per yard, like the update history: yard, phase,
+status, a code, and the typed configuration refusals as codes with the validated names they
+refer to, never text or values. An attempt is `unfinished` from the start of its execution
+under the owner barrier until it ends.
+
+The owner publishes a value-free snapshot of these histories into each running yard at
+`/etc/subyard/host-errors.json` (root, 0644), written by the release's guest facts helper
+after `init`, `start`, `update` and `migrate` (update and migrate refresh every local yard)
+and from an RPC session after failures and executed operations, at most once a minute and
+once at the session's end. A yard's snapshot holds its own RPC and setup records, RPC records
+without a yard (owner-services sessions, and records logged before yards were recorded) and every
+update attempt: method and error code from the RPC vocabulary
+(otherwise `unknown`), phases, statuses, codes, release versions, refusal codes and names,
+with consecutive identical RPC failures collapsed into a count. It never holds error text,
+request or operation IDs, values or paths. Each section keeps the newest 10 entries and
+counts the rest; `unavailable` names a history that could not be read. Publication is best
+effort with a 5-second bound, skipped after an interrupted command, and never changes a command's result: a stopped yard or a
+failing Incus keeps the previous snapshot, the last publication replaces the whole file, and
+a missing file means unknown. An init refused before its configuration loads has no known Incus
+target, so its record reaches the yard with the next publication. It is not a setting, a
+readiness input or drift.
 Explicit yard selectors continue through normal owner routing.
 
 Introduce a new protocol by first shipping support alongside V1 while continuing to send V1.

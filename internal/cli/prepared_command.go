@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/remotecontrol"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -619,6 +620,21 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		return domain.AdapterResult{}, err
 	}
 	defer finish()
+	// Setup history: the attempt begins and ends under the owner barrier, so
+	// it never changes the installation a plan bound; a refusal before the
+	// barrier is recorded as a terminal execute failure, with a bounded wait.
+	var setup *audit.SetupRecorder
+	recordSetup := prepared.Definition.Handler == "@init" && prepared.Loaded.Context.AccessKind == domain.AccessLocal &&
+		!prepared.remotePhased && !prepared.CLI.releaseTransitionChild
+	if recordSetup {
+		defer func() {
+			if setup == nil && err != nil {
+				outcome := setupOutcome(ctx, result, err)
+				prepared.CLI.recordSetupTerminal(prepared.Plan.OperationID, prepared.Loaded.Context.YardName,
+					"execute", outcome.Status, outcome.ErrorCode, err)
+			}
+		}()
+	}
 	admission := prepared.gateAdmission()
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
@@ -634,6 +650,11 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		}
 		if _, err := prepared.CLI.admitDeveloperIdentity(ctx, prepared.Loaded.Context.YardName, prepared.Definition.Handler, prepared.Arguments); err != nil {
 			return domain.AdapterResult{}, err
+		}
+		if recordSetup {
+			setup = prepared.CLI.beginSetupHistory(prepared.Plan.OperationID, prepared.Loaded.Context.YardName)
+			// Registered before the effect verification, so it records the final result.
+			defer func() { prepared.CLI.finishSetupHistory(ctx, setup, result, err) }()
 		}
 		// Still under the barrier: the repair left history as admitted.
 		effectCtx := ctx

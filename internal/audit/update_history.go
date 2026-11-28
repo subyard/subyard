@@ -4,18 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/safefs"
 )
 
 const (
@@ -194,169 +187,21 @@ func (history UpdateHistory) Terminal(record UpdateRecord, phase, status, errorC
 }
 
 func (history UpdateHistory) Read(limit int) ([]UpdateRecord, error) {
-	if history.Home == "" {
-		return nil, errors.New("update history home is required")
-	}
-	if limit < 1 {
-		return nil, errors.New("update history limit must be positive")
-	}
-	directory := filepath.Join(history.Home, "logs", "updates")
-	entries, err := os.ReadDir(directory)
-	if errors.Is(err, os.ErrNotExist) {
-		return []UpdateRecord{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	records := make([]UpdateRecord, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		record, err := readUpdateRecord(filepath.Join(directory, entry.Name()))
-		if err != nil {
-			return nil, err
-		}
-		if entry.Name() != record.AttemptID+".json" {
-			return nil, errors.New("update history filename does not match attempt ID")
-		}
-		records = append(records, record)
-	}
-	sort.Slice(records, func(left, right int) bool {
-		if records[left].StartedAt.Equal(records[right].StartedAt) {
-			return records[left].AttemptID > records[right].AttemptID
-		}
-		return records[left].StartedAt.After(records[right].StartedAt)
-	})
-	if limit > len(records) {
-		limit = len(records)
-	}
-	return records[:limit], nil
+	return history.store().read(limit)
 }
 
 func (history UpdateHistory) write(record UpdateRecord) error {
-	if history.BeforeWrite != nil {
-		release, write, err := history.BeforeWrite(context.Background())
-		if err != nil {
-			return err
-		}
-		if !write {
-			return nil
-		}
-		defer release()
-	}
-	logs := filepath.Join(history.Home, "logs")
-	if err := ensurePrivateDirectory(logs); err != nil {
-		return err
-	}
-	directory := filepath.Join(logs, "updates")
-	if err := ensurePrivateDirectory(directory); err != nil {
-		return err
-	}
-	lock, err := safefs.Lock(context.Background(), filepath.Join(logs, ".updates.lock"), false, 0)
-	if err != nil {
-		return err
-	}
-	defer lock.Release()
-	payload, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	payload = append(payload, '\n')
-	if len(payload) > maxUpdateRecordBytes {
-		return errors.New("update history record is too large")
-	}
-	path := filepath.Join(directory, record.AttemptID+".json")
-	if err := safefs.WriteFile(path, payload, safefs.Options{TempPattern: ".update-*.tmp"}); err != nil {
-		return err
-	}
-	return pruneUpdateHistory(directory)
+	return history.store().write(record)
 }
 
-func pruneUpdateHistory(directory string) error {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return err
+func (history UpdateHistory) store() attemptStore[UpdateRecord] {
+	return attemptStore[UpdateRecord]{
+		home: history.Home, beforeWrite: history.BeforeWrite, label: "update history",
+		directory: "updates", lock: ".updates.lock", temp: ".update-*.tmp",
+		retention: UpdateHistoryRetention, maxBytes: maxUpdateRecordBytes,
+		identity: func(record UpdateRecord) (string, time.Time) { return record.AttemptID, record.StartedAt },
+		valid:    validUpdateRecord,
 	}
-	type retained struct {
-		name    string
-		started time.Time
-	}
-	items := make([]retained, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		record, readErr := readUpdateRecord(filepath.Join(directory, entry.Name()))
-		if readErr != nil {
-			return readErr
-		}
-		if entry.Name() != record.AttemptID+".json" {
-			return errors.New("update history filename does not match attempt ID")
-		}
-		items = append(items, retained{name: entry.Name(), started: record.StartedAt})
-	}
-	sort.Slice(items, func(left, right int) bool {
-		if items[left].started.Equal(items[right].started) {
-			return items[left].name > items[right].name
-		}
-		return items[left].started.After(items[right].started)
-	})
-	if len(items) <= UpdateHistoryRetention {
-		return nil
-	}
-	for _, item := range items[UpdateHistoryRetention:] {
-		if err := os.Remove(filepath.Join(directory, item.name)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func readUpdateRecord(path string) (UpdateRecord, error) {
-	pathInfo, err := os.Lstat(path)
-	if err != nil {
-		return UpdateRecord{}, err
-	}
-	if !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || pathInfo.Size() > maxUpdateRecordBytes {
-		return UpdateRecord{}, errors.New("update history record is not a bounded regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return UpdateRecord{}, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return UpdateRecord{}, err
-	}
-	if !info.Mode().IsRegular() || info.Size() > maxUpdateRecordBytes {
-		return UpdateRecord{}, errors.New("update history record is not a bounded regular file")
-	}
-	var record UpdateRecord
-	decoder := json.NewDecoder(io.LimitReader(file, maxUpdateRecordBytes+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&record); err != nil {
-		return UpdateRecord{}, fmt.Errorf("decode update history record: %w", err)
-	}
-	if !validUpdateRecord(record) {
-		return UpdateRecord{}, errors.New("update history record is invalid")
-	}
-	return record, nil
-}
-
-func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("update history directory is not a directory")
-	}
-	return os.Chmod(path, 0o700)
 }
 
 func (history UpdateHistory) now() time.Time {
@@ -443,3 +288,6 @@ func newUpdateAttemptID() (string, error) {
 	}
 	return "attempt-" + hex.EncodeToString(suffix[:]), nil
 }
+
+// ValidHistoryCode reports whether value may be stored as a history code.
+func ValidHistoryCode(value string) bool { return safeHistoryToken(value) }

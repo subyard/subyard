@@ -269,6 +269,9 @@ func NewConfigRefusal(code ConfigRefusalCode, names ...ConfigName) *ConfigRefusa
 
 func (refusal *ConfigRefusal) Code() ConfigRefusalCode { return refusal.code }
 
+// Names returns the validated names the refusal refers to, in template order.
+func (refusal *ConfigRefusal) Names() []string { return slices.Clone(refusal.names) }
+
 func (refusal *ConfigRefusal) Error() string {
 	text, ok := configRefusalTexts[refusal.code]
 	if !ok || strings.Count(text.template, "%") != len(refusal.names) || slices.Contains(refusal.names, "") {
