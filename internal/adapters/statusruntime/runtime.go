@@ -353,6 +353,10 @@ func (runtime Runtime) RefreshSpace(
 
 // Incus 6.0.6 returns no disk state for managed / and /srv devices on both containers and VMs,
 // so detailed status keeps size off its foreground path and refreshes this compatible cache.
+// New test yards keep their inner pool at Incus' default path on /. The /srv/incus-e2e/storage
+// source stays for test yards whose live legacy pool is still there: reconcile keeps a live pool
+// in place, so without the exclusion its bytes would count twice, at the source and at its
+// bind-mounted alias.
 const spaceMeasureCommand = `
 set -- /
 if grep -qs " /srv " /proc/mounts; then
