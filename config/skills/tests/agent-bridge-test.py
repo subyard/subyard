@@ -798,7 +798,10 @@ runpy.run_path(bridge, run_name='__main__')
         root.chmod(0o700)
         (root / 'task.md').write_text('complete')
         scopes = set(self.scopes.iterdir())
-        with (root / 'command.lock').open('w') as lock:
+        # The bridge accepts only a private lock file; the mode must not depend on the umask.
+        (root / 'command.lock').touch(mode=0o600)
+        (root / 'command.lock').chmod(0o600)
+        with (root / 'command.lock').open() as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             process = subprocess.Popen([sys.executable, str(BRIDGE), 'start', '--dir', str(root),
                                         '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
@@ -1172,7 +1175,10 @@ runpy.run_path(bridge, run_name='__main__')
             fresh.mkdir(mode=0o700)
             fresh.chmod(0o700)
             (fresh / 'task.md').write_text('complete')
-            with (fresh / 'command.lock').open('w') as lock:
+            # The bridge accepts only a private lock file; the mode must not depend on the umask.
+            (fresh / 'command.lock').touch(mode=0o600)
+            (fresh / 'command.lock').chmod(0o600)
+            with (fresh / 'command.lock').open() as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 waiting = self.cli('start', fresh, '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
                                    '--cwd', str(self.root), *timeout, success=False)
