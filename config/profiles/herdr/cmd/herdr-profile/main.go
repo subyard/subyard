@@ -40,6 +40,8 @@ func run(args []string) error {
 		return errors.New("expected a guest operation")
 	}
 	switch args[0] {
+	case "discover":
+		return discoverCheckouts(path, "/srv/workspaces")
 	case "registration-ready":
 		return registrationReady(path, "/srv/workspaces")
 	case "observe", "status":
