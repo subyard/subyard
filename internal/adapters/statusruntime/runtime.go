@@ -355,7 +355,8 @@ func (runtime Runtime) RefreshSpace(
 // so detailed status keeps size off its foreground path and refreshes this compatible cache.
 // New test yards keep their inner pool at Incus' default path on /. The /srv/incus-e2e/storage
 // source stays for test yards whose live legacy pool is still there: reconcile keeps a live pool
-// in place, so without the exclusion its bytes would count under both / and /srv.
+// in place, so without the exclusion its bytes would count twice, at the source and at its
+// bind-mounted alias.
 const spaceMeasureCommand = `
 set -- /
 if grep -qs " /srv " /proc/mounts; then

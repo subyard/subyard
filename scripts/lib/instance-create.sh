@@ -86,7 +86,8 @@ subyard_image_metadata_cause() {
   local error
   error=$(LC_ALL=C tr -d '\000') || true
   case "$(printf '%s' "$error" | LC_ALL=C tr '[:upper:]' '[:lower:]')" in
-    *'no such host'* | *'temporary failure in name resolution'* | *'server misbehaving'*) printf 'dns\n' ;;
+    *'lookup '*': no such host'* | *'lookup '*': temporary failure in name resolution'* | \
+      *'lookup '*': server misbehaving'*) printf 'dns\n' ;;
     *'context deadline exceeded'* | *'i/o timeout'* | *'tls handshake timeout'*) printf 'timeout\n' ;;
     *'connection reset by peer'* | *'connection refused'* | *'network is unreachable'*) printf 'connection\n' ;;
     *'unexpected eof'*) printf 'interrupted\n' ;;
@@ -132,10 +133,14 @@ yard_instance_create() (
     fi
     # Cancellation and unknown errors are terminal. Retry only bounded read-only
     # metadata requests, with at most 95 seconds across attempts and backoff.
-    cause=unknown
-    [ "$rc" != 124 ] || cause=timeout
-    [ "$rc" != 1 ] || cause=$(subyard_image_metadata_cause < "$metadata/error")
-    if [ "$attempt" -lt 3 ] && [ "$cause" != unknown ]; then
+    case "$rc" in
+      124) cause=timeout ;;
+      1) cause=$(subyard_image_metadata_cause < "$metadata/error") || cause=unknown ;;
+      129 | 130 | 143) cause=cancelled ;;
+      *) cause=unknown ;;
+    esac
+    [ -n "$cause" ] || cause=unknown
+    if [ "$attempt" -lt 3 ] && [ "$cause" != unknown ] && [ "$cause" != cancelled ]; then
       sleep 1 || exit "$?"
     else
       # Name only the cause class: the CLI's own stderr stays private.
