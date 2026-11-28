@@ -30,6 +30,8 @@ type attemptStore[T any] struct {
 	// identity returns the attempt ID that names the file and the start time.
 	identity func(T) (string, time.Time)
 	valid    func(T) bool
+	// group, when set, applies the retention to each group separately.
+	group func(T) string
 }
 
 func (store attemptStore[T]) write(record T) error {
@@ -138,14 +140,20 @@ func (store attemptStore[T]) list(directory string) ([]T, []string, error) {
 }
 
 func (store attemptStore[T]) prune(directory string) error {
-	_, names, err := store.list(directory)
+	records, names, err := store.list(directory)
 	if err != nil {
 		return err
 	}
-	if len(names) <= store.retention {
-		return nil
-	}
-	for _, name := range names[store.retention:] {
+	kept := map[string]int{}
+	for index, name := range names {
+		key := ""
+		if store.group != nil {
+			key = store.group(records[index])
+		}
+		if kept[key] < store.retention {
+			kept[key]++
+			continue
+		}
 		if err := os.Remove(filepath.Join(directory, name)); err != nil {
 			return err
 		}

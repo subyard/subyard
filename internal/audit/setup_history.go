@@ -180,6 +180,8 @@ func (history SetupHistory) store() attemptStore[SetupRecord] {
 		retention: SetupHistoryRetention, maxBytes: maxSetupRecordBytes,
 		identity: func(record SetupRecord) (string, time.Time) { return record.AttemptID, record.StartedAt },
 		valid:    validSetupRecord,
+		// One yard's repeated refusals never evict another yard's attempts.
+		group: func(record SetupRecord) string { return record.Yard },
 	}
 }
 

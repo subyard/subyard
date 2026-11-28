@@ -1578,7 +1578,7 @@ installation generation it started in. A record that cannot take the barrier and
 within 250 ms is dropped, as are records beyond the queue. Each record also names the yard the
 request operated on: the session's, or the init target, service yard or executed plan's yard its
 handler resolved; owner-services requests without one record none. `yard init` (`yard setup`) keeps one record per
-attempt under `$SUBYARD_HOME/logs/setup`, newest 30, like the update history: yard, phase,
+attempt under `$SUBYARD_HOME/logs/setup`, newest 30 per yard, like the update history: yard, phase,
 status, a code, and the typed configuration refusals as codes with the validated names they
 refer to, never text or values. An attempt is `unfinished` from the start of its execution
 under the owner barrier until it ends.

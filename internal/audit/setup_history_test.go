@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,9 +110,22 @@ func TestSetupHistoryRetainsNewestThirtyAttempts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Another yard's attempt survives this yard's newer ones.
+	if err := history.Terminal("op-other", "other", "prepare", SetupOutcome{Status: "failure"}); err != nil {
+		t.Fatal(err)
+	}
+	for index := SetupHistoryRetention + 3; index < SetupHistoryRetention+6; index++ {
+		now = now.Add(time.Second)
+		if err := history.Terminal(fmt.Sprintf("op-%02d", index), "default", "prepare", SetupOutcome{Status: "failure"}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	records, err := history.Read(100)
-	if err != nil || len(records) != SetupHistoryRetention || records[0].OperationID != "op-32" ||
-		records[len(records)-1].OperationID != "op-03" {
+	if err != nil || len(records) != SetupHistoryRetention+1 || records[0].OperationID != "op-35" ||
+		records[len(records)-1].OperationID != "op-06" {
 		t.Fatalf("records=%d err=%v", len(records), err)
+	}
+	if !slices.ContainsFunc(records, func(record SetupRecord) bool { return record.Yard == "other" }) {
+		t.Fatal("another yard's attempt was evicted")
 	}
 }

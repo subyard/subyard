@@ -23,6 +23,8 @@ const (
 	SnapshotRefusals = 8
 	// rpcRecordLimit bounds the RPC records read from the two log generations.
 	rpcRecordLimit = 100000
+	// setupRecordLimit reads every retained setup attempt of every yard.
+	setupRecordLimit = 1 << 20
 	// GeneratedLayout orders snapshots by text; other times are in seconds.
 	GeneratedLayout = "2006-01-02T15:04:05.000000000Z"
 	timeLayout      = "2006-01-02T15:04:05Z"
@@ -127,7 +129,8 @@ func Build(home, yard string, now time.Time) Snapshot {
 		}
 		snapshot.Updates, snapshot.Omitted.Updates = newest(snapshot.Updates)
 	}
-	if records, err := (audit.SetupHistory{Home: home}).Read(audit.SetupHistoryRetention); err != nil {
+	// Retention is per yard, so read every attempt before taking this yard's.
+	if records, err := (audit.SetupHistory{Home: home}).Read(setupRecordLimit); err != nil {
 		snapshot.Unavailable = append(snapshot.Unavailable, "setup")
 	} else {
 		for _, record := range records {

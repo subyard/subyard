@@ -12,7 +12,7 @@
   appear in every yard's snapshot until the log rotates. The owner refreshes it after `init`, `start`, `update`, `migrate`
   and RPC failures; a stopped yard keeps the previous snapshot.
 - The owner now records each `yard init`/`yard setup` attempt in `$SUBYARD_HOME/logs/setup`
-  (newest 30, an interrupted attempt stays `unfinished`). RPC error records carry the
+  (newest 30 per yard, an interrupted attempt stays `unfinished`). RPC error records carry the
   yard the request operated on. Rollback ignores both; the yard keeps the last snapshot file
   `/etc/subyard/host-errors.json`, which older releases neither read nor refresh.
 
