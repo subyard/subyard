@@ -239,7 +239,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 			return facade.writeError("invalid_request", err.Error())
 		}
 		if eventErr := facade.recordSlot("lease.acquire", grant.SlotID, "", SlotProvisioning, nil); eventErr != nil {
-			_ = facade.quarantine(grant, eventErr)
+			facade.quarantineReporting(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		var session *acquireSession
@@ -278,12 +278,12 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 						return facade.writeError("cancelled", "acquisition cancelled; cleanup required")
 					}
 				}
-				_ = facade.quarantine(grant, err)
+				facade.quarantineReporting(grant, err)
 				return facade.writeError("quarantined", "slot provisioning failed")
 			}
 		}
 		if eventErr := facade.recordSlot("lease.held", grant.SlotID, SlotProvisioning, SlotHeld, nil); eventErr != nil {
-			_ = facade.quarantine(grant, eventErr)
+			facade.quarantineReporting(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
 		if session != nil {
@@ -338,6 +338,23 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 	default:
 		return facade.writeError("invalid_request", "unknown facade operation")
 	}
+}
+
+// quarantineReporting keeps the cause when acquire-time quarantine handling fails, for example
+// when a base build failed before its builder VM existed and no slot.quarantined event follows.
+// The reply stays quarantined; the owner's event says why and what handling refused.
+func (facade Facade) quarantineReporting(grant LeaseGrant, cause error) {
+	err := facade.quarantine(grant, cause)
+	if err == nil || facade.Events == nil {
+		return
+	}
+	// Report only to the owner of this lease, with the state the slot actually reached.
+	slot, inspectErr := storeSlot(facade.Store, grant.SlotID)
+	if inspectErr != nil || slot.LeaseEpoch != grant.LeaseEpoch {
+		return
+	}
+	_ = facade.recordSlotSnapshot("slot.quarantine_incomplete", slot, SlotProvisioning, slot.State,
+		errors.Join(fmt.Errorf("quarantine handling: %w", err), cause))
 }
 
 func (facade Facade) quarantine(grant LeaseGrant, cause error) error {

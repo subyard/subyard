@@ -206,3 +206,53 @@ base_finalize_image
 		t.Fatalf("finalizer did not write the base manifest: %v", err)
 	}
 }
+
+func TestBaseRecipeSteersAptToIPv4BeforeUpdate(t *testing.T) {
+	source, err := os.ReadFile("../../../scripts/e2e-lab/base.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
+	if !strings.HasPrefix(root, "/tmp/") {
+		t.Fatal("recipe fixtures require TMPDIR=/tmp")
+	}
+	conf := filepath.Join(root, "apt.conf.d")
+	if err := os.MkdirAll(conf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.ReplaceAll(string(source), "/etc/apt/apt.conf.d", conf)
+	testkit.WriteFile(t, filepath.Join(root, "base.sh"), []byte(body), 0o600)
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Each apt call records whether the IPv4 setting already exists.
+	stub := "#!/bin/bash\nif [ -f '" + filepath.Join(conf, "99force-ipv4") + "' ]; then s=ipv4; else s=missing; fi\n" +
+		"printf '%s %s\\n' \"$s\" \"$*\" >> \"$HOME/effects\"\n"
+	testkit.WriteFile(t, filepath.Join(bin, "apt-get"), []byte(stub), 0o700)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/bash", "-c", "set -euo pipefail\n. ./base.sh\nbase_update_distro\n")
+	command.Dir = root
+	command.Env = []string{"HOME=" + root, "PATH=" + bin + ":/usr/bin:/bin", "LC_ALL=C"}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("base distro update failed: %v\n%s", err, output)
+	}
+	setting, err := os.ReadFile(filepath.Join(conf, "99force-ipv4"))
+	if err != nil || string(setting) != "Acquire::ForceIPv4 \"true\";\n" {
+		t.Fatalf("apt IPv4 setting=%q err=%v", setting, err)
+	}
+	effects, err := os.ReadFile(filepath.Join(root, "effects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(effects)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("apt calls=%q", lines)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "ipv4 ") {
+			t.Fatalf("apt ran before the IPv4 setting: %q", lines)
+		}
+	}
+}

@@ -95,7 +95,8 @@ the broker's low-level override and keep freed guest RAM resident until the VM s
 
 Bases refresh on recipe changes, explicit request or after seven days. They take distro updates
 only then: leased guests have the apt-daily timers masked, so an unattended upgrade cannot change
-a guest during a lease or delay its release stop. Validation must pass before publication;
+a guest during a lease or delay its release stop. Like the yard, bases send apt over IPv4,
+since the bridge has no IPv6 route. Validation must pass before publication;
 active leases pin their bases and keep their disks through refresh.
 Legacy retained allocations need explicit safe retirement before reuse; releasing an active
 legacy lease retains its old disks. Preserve needed data before proposing retirement.
@@ -1481,7 +1482,9 @@ Provisioning or cleanup failure quarantines only the affected slot. Before destr
 the broker fsyncs a local incident and verifies project/VM ownership, refusing foreign or ambiguous
 resources. Recovery cleans the disposable allocation and returns an empty slot to the pool; the
 next lease provisions its requested environment from a validated base. Failure to persist the
-incident or prove ownership leaves the slot quarantined without deletion. Ordinary resource
+incident or prove ownership leaves the slot quarantined without deletion. When acquire-time
+quarantine handling fails, the owner's `slot.quarantine_incomplete` event keeps the provisioning
+cause and the refusal. Ordinary resource
 shortage is a retryable admission refusal and does not quarantine a healthy empty slot.
 
 Guest lease-key and context cleanup shares a five-second budget per running VM before stop.
