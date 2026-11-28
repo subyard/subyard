@@ -53,6 +53,9 @@ PATH/TMPDIR, are inherited. `--cwd` selects the worktree. Add arbitrary vendor
 arguments after `--`, e.g. Codex `-- -c key=value --profile NAME` or Claude
 `-- --permission-mode manual --max-turns 4 --append-system-prompt 'Extra context'`.
 Native flags are retained on resume and must preserve the stdio protocol.
+`start --compact-window TOKENS` sets the auto-compact threshold (no default): Claude
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, Codex `-c model_auto_compact_token_limit`; it is retained
+on resume, and an explicit `--env` or `-c` of the same setting conflicts with it.
 The bridge always sets Claude's permission host to stdio. For Codex, it
 translates `--sandbox` or `-s` to `sandbox_mode` and checks the reported sandbox
 before each turn. The Codex reviewer preset pins its permission profile and

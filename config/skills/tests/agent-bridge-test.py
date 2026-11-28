@@ -135,6 +135,7 @@ if os.environ.get('BRIDGE_TEST_CAPTURE'):
         'argv': sys.argv[1:], 'cwd': os.getcwd(),
         'env': {key: os.environ.get(key) for key in ('BRIDGE_TEST_VALUE', 'TMPDIR', 'PATH')},
         'otel': os.environ.get('OTEL_RESOURCE_ATTRIBUTES'),
+        'compact': os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW'),
         'sessions': [key for key in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID') if key in os.environ]}))
 
 def emit(message):
@@ -716,6 +717,108 @@ runpy.run_path(bridge, run_name='__main__')
                 self.assertEqual(self.done(root), 'resumed:next')
                 self.assertEqual(json.loads(capture.read_text())['env'], info['env'])
 
+    def test_compact_window_reaches_each_vendor_and_survives_resume(self):
+        self.env.pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW', None)
+        for vendor in ('codex', 'claude'):
+            for window in (None, '400000'):
+                with self.subTest(vendor=vendor, window=window):
+                    capture = self.root / f'compact-{vendor}-{window}.json'
+                    option = ('--compact-window', window) if window else ()
+                    root = self.start(vendor, 'complete', '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture), *option)
+                    self.done(root)
+                    for command in ('start', 'resume'):
+                        if command == 'resume':
+                            (root / 'task.md').write_text('next')
+                            self.cli('resume', root)
+                            self.assertEqual(self.done(root), 'resumed:next')
+                        info = json.loads(capture.read_text())
+                        limits = [config for option, config in zip(info['argv'], info['argv'][1:])
+                                  if option == '-c' and config.startswith('model_auto_compact_token_limit')]
+                        self.assertEqual(limits, ['model_auto_compact_token_limit=' + window]
+                                         if window and vendor == 'codex' else [])
+                        self.assertEqual(info['compact'], window if vendor == 'claude' else None)
+
+    def test_start_reports_every_independent_refusal(self):
+        root = self.root / 'refused'
+        task = self.root / 'refused-task.md'
+        task.write_text('complete')
+        assigned = ('--task', str(task))
+        fixture = (*assigned, '--model', 'fixture', '--effort', 'low', '--cwd', str(self.root))
+        reviewer = (*assigned, '--role', 'reviewer', '--cwd')
+        conflict = 'An explicit {} conflicts with --compact-window.'
+        positive = '--compact-window must be a positive number of tokens.'
+        unreadable = 'The assignment file must be a readable regular text file, not a symlink.'
+        link = self.root / 'refused-task-link.md'
+        link.symlink_to(task)
+        cases = (('claude', (*fixture, '--compact-window', '400000', '--env', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=3'),
+                  [conflict.format('CLAUDE_CODE_AUTO_COMPACT_WINDOW')]),
+                 ('codex', (*fixture, '--compact-window', '400000', '--', '-c', 'model_auto_compact_token_limit=3'),
+                  [conflict.format('model_auto_compact_token_limit')]),
+                 ('codex', (*fixture, '--compact-window', '400000', '--', '--config=model_auto_compact_token_limit=1'),
+                  [conflict.format('model_auto_compact_token_limit')]),
+                 ('claude', (*fixture, '--compact-window', '0'), [positive]),
+                 ('codex', (*reviewer, str(self.root), '--compact-window', '-1', '--',
+                            '-s=read-only', '-cmodel_auto_compact_token_limit=1'),
+                  ['An explicit --sandbox or sandbox_mode conflicts with --role reviewer, which fixes the sandbox.',
+                   positive, conflict.format('model_auto_compact_token_limit')]),
+                 ('codex', ('--cwd', str(self.root / 'missing'), '--env', 'NO_SEPARATOR', '--compact-window', '0',
+                            '--', '--sandbox', 'bogus'),
+                  ['start requires an assignment file. Supply --task FILE or put task.md in the worker directory.',
+                   'start requires --role or explicit --model and --effort', 'worker cwd is not a directory',
+                   'invalid environment override', 'unknown Codex sandbox mode "bogus"', positive]),
+                 ('codex', (*reviewer, '/tmp', '--compact-window', '1', '--', '-c', 'model_auto_compact_token_limit=2'),
+                  [conflict.format('model_auto_compact_token_limit'),
+                   'reviewer cwd must be distinct from temporary roots']),
+                 ('codex', ('--task', str(link), '--model', 'fixture', '--effort', 'low',
+                            '--cwd', str(self.root / 'missing')),
+                  [unreadable, 'worker cwd is not a directory']),
+                 ('claude', ('--task', str(self.root), '--cwd', str(self.root / 'missing')),
+                  [unreadable, 'start requires --role or explicit --model and --effort',
+                   'worker cwd is not a directory']),
+                 # An invalid entry suppresses the environment-dependent reviewer check in either order.
+                 ('codex', (*reviewer, '/tmp', '--env', '=x', '--env', 'TMPDIR=/tmp', '--env', 'NO_SEPARATOR'),
+                  ['invalid environment override']),
+                 ('codex', (*reviewer, '/tmp', '--env', 'NO_SEPARATOR', '--env', '=x', '--env', 'TMPDIR=/tmp'),
+                  ['invalid environment override']))
+        for vendor, args, refusals in cases:
+            with self.subTest(vendor=vendor, args=args):
+                result = self.cli('start', root, '--vendor', vendor, *args, success=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr.splitlines(), refusals)
+                self.assertFalse(root.exists())
+        existing = self.start('claude', 'complete')
+        self.done(existing)
+        result = self.cli('start', existing, '--vendor', 'claude', '--cwd', str(self.root), success=False)
+        self.assertEqual(result.stderr.splitlines(), ['worker already exists; use resume',
+                                                      'start requires --role or explicit --model and --effort'])
+
+    def test_start_rechecks_an_existing_worker_under_the_command_lock(self):
+        root = self.root / 'racing-start'
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        (root / 'task.md').write_text('complete')
+        scopes = set(self.scopes.iterdir())
+        # The bridge accepts only a private lock file; the mode must not depend on the umask.
+        (root / 'command.lock').touch(mode=0o600)
+        (root / 'command.lock').chmod(0o600)
+        with (root / 'command.lock').open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen([sys.executable, str(BRIDGE), 'start', '--dir', str(root),
+                                        '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
+                                        '--cwd', str(self.root), '--executable', str(self.bin / 'codex'),
+                                        '--timeout', '6'],
+                                       env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # The inbox is created after the preflight passed and before the lock wait.
+            self.until(lambda: (root / 'inbox').exists() or process.poll() is not None)
+            self.assertIsNone(process.poll())
+            (root / 'state').write_text('{}')
+            (root / 'state').chmod(0o600)
+        _, stderr = process.communicate(timeout=8)
+        self.assertEqual((process.returncode, stderr.strip()), (1, 'worker already exists; use resume'))
+        self.assertEqual((root / 'state').read_text(), '{}')
+        self.assertFalse((root / 'turns').exists())
+        self.assertEqual(set(self.scopes.iterdir()), scopes)
+
     def test_worker_resource_names_the_starting_session(self):
         for name in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'OTEL_RESOURCE_ATTRIBUTES'):
             self.env.pop(name, None)
@@ -1056,15 +1159,32 @@ runpy.run_path(bridge, run_name='__main__')
             request = self.approval(root)
             with (root / 'command.lock').open() as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
-                for command in ('start', 'resume', 'interrupt', 'stop', 'approve', 'deny'):
+                for command in ('resume', 'interrupt', 'stop', 'approve', 'deny'):
                     with self.subTest(command=command):
                         approval = [request.stem] if command in ('approve', 'deny') else []
-                        start = ['--vendor', 'codex', '--cwd', str(self.root)] if command == 'start' else []
-                        waiting = self.cli(command, root, *approval, *start, *timeout, success=False)
+                        waiting = self.cli(command, root, *approval, *timeout, success=False)
                         self.assertEqual(waiting.returncode, 124)
                         self.assertIn('command lock', waiting.stderr)
+                # Start refuses an existing worker before it waits for the lock.
+                refused = self.cli('start', root, '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
+                                   '--cwd', str(self.root), *timeout, success=False)
+                self.assertEqual((refused.returncode, refused.stderr.strip()), (1, 'worker already exists; use resume'))
                 self.assertFalse((self.turn(root) / 'interrupt').exists())
                 self.assertFalse(request.with_suffix('.reply').exists())
+            fresh = self.root / 'locked-start'
+            fresh.mkdir(mode=0o700)
+            fresh.chmod(0o700)
+            (fresh / 'task.md').write_text('complete')
+            # The bridge accepts only a private lock file; the mode must not depend on the umask.
+            (fresh / 'command.lock').touch(mode=0o600)
+            (fresh / 'command.lock').chmod(0o600)
+            with (fresh / 'command.lock').open() as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                waiting = self.cli('start', fresh, '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
+                                   '--cwd', str(self.root), *timeout, success=False)
+                self.assertEqual(waiting.returncode, 124)
+                self.assertIn('command lock', waiting.stderr)
+                self.assertFalse((fresh / 'state').exists())
             self.cli('stop', root, *timeout)
 
         for command, scenario in (('send', 'pending'), ('resume', 'complete')):

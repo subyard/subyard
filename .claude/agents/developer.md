@@ -6,6 +6,5 @@ effort: high
 autoCompactWindow: 400000
 ---
 
-Load the dev-flow skill and follow its `roles/developer.md`, together with the role additions
-in `.agents/skills/subyard-dev-flow/SKILL.md` from the repository root.
-Use the coordinator's assignment for scope, constraints, checks and the handoff target.
+Follow the coordinator's assignment: it gives the role brief, scope, constraints, checks and
+the handoff target.

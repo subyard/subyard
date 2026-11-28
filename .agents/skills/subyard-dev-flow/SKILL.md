@@ -140,10 +140,15 @@ Read by task; links are relative to this skill.
 
 | Role | Claude Code | Codex | Cross-vendor |
 | --- | --- | --- | --- |
-| Developer, reviewer | [native project agents](../../../.claude/agents/) `developer`, `reviewer` | `spawn_agent` with `fork_turns="none"` | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md) `--role developer\|reviewer` |
+| Developer, reviewer | [native project agents](../../../.claude/agents/) `developer`, `reviewer` | `spawn_agent` with the role brief, `fork_turns="none"`, model and reasoning effort from the models file | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md) `--role developer\|reviewer` |
 | Observer, describer, design consult | `general-purpose` agent with the role brief | `spawn_agent` with the role brief | `--role observer`, or the role brief as the task |
 
 - A brief is the loaded dev-flow skill's `roles/<role>.md` plus the role additions below.
+  Put it in every assignment, Claude project agents included: their definitions carry no process.
+- Pass no compact limit to Codex native subagents.
+- On every bridge `start`, pass the role class's `Compact at` (integer tokens) as `--compact-window`;
+  for "default" pass none. Pass it only when the installed bridge's `start --help` lists
+  `--compact-window`; otherwise launch without it.
 - Use the installed bridge skill.
   `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 - Scratch files are per session and disposable. Never rely on another session's scratch paths,
