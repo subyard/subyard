@@ -892,8 +892,8 @@ workflow run page. Contents differ by workflow:
 
 | Artifact | Contents, when produced by the check |
 | --- | --- |
-| Release VM `hosted-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `acceptance/<check>-*.log`, other collector logs, `acceptance/receipt.json`, `acceptance/events.jsonl`, `acceptance/attempts/*.json` and `acceptance/runs/*.json`; `runner/` probe logs/results and broker events; `p0/` failure snapshots; `cleanup.log` and `summary.json` |
-| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv`, service/yard broker events and, after a failure, `runner/broker-state.log`; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
+| Release VM `hosted-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `acceptance/<check>-*.log`, other collector logs, `acceptance/receipt.json`, `acceptance/events.jsonl`, `acceptance/attempts/*.json` and `acceptance/runs/*.json`; `runner/` probe logs/results, broker events and `broker-state.log`; `p0/` failure snapshots; `cleanup.log` and `summary.json` |
+| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv`, service/yard broker events and `runner/broker-state.log`; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
 | Release VM `ci-hosted-JOB_INDEX` | Strict validated native PASS evidence: `ci-execution.json`, receipt, events, logs, original attempts/manifests and invocation records. This is separate from diagnostic snapshots |
 
 `p0/` preserves the route-relative paths of `p0-*.failure.log` (keeper, redacted broker status,

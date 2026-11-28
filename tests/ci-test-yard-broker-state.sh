@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Host-free contract for the failed-lane broker state capture: periodic-e2e.sh keeps it with the
-# other diagnostics, and it prints a quarantine's cause and the redacted spool but no identities.
+# Host-free contract for the lane broker state capture: periodic-e2e.sh keeps it with the other
+# diagnostics, and it prints a quarantine's cause and the spool without identities or keys.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 python3 -B - "$ROOT" <<'PY'
@@ -27,7 +27,8 @@ with tempfile.TemporaryDirectory(prefix="subyard-ci-broker-state-", dir="/tmp") 
     secret = "secret-identity-value"
     (state / "leases.json").write_text(json.dumps({"slots": [{
         "slot_id": "slot-001", "state": "quarantined", "lease_epoch": 1,
-        "failure_reason": "incus init images:abc e2e-base-1 --vm: exit status 1",
+        "failure_reason": "incus exec e2e-vm-1 --env WORKER_KEY=ssh-ed25519 AAAAC3Nzworker --env x=1: exit status 1",
+        "state_note": secret,
         "lease_id": secret, "client_id": secret, "capability_hash": secret,
         "controller_fingerprint": secret, "acquire_owner": {"pid": 1, "id": secret}}]}))
     (state / "images.json").write_text(json.dumps({
@@ -35,20 +36,27 @@ with tempfile.TemporaryDirectory(prefix="subyard-ci-broker-state-", dir="/tmp") 
         "build": {"project": "subyard-e2e-vms-builder", "incident_id": "",
                   "readiness_failure": {"phase": "builder-preparation"}, "worker_key": secret,
                   "incident_slot": {"slot_id": "slot-001", "lease_epoch": 1, "client_id": secret}}}))
-    (state / "spool/events/0001.json").write_text('{"kind":"lease.acquire"}')
+    (state / "spool/events/0001.json").write_text('{"kind":"lease.acquire","token":"tok-value"}')
     (state / "spool/incidents/0001.json").write_text('{"incident_id":"i-1","error":"redacted"}')
     for tool in ("journalctl", "incus", "df"):
         (tools / tool).write_text(f"#!/bin/sh\necho {tool} ran\n")
         (tools / tool).chmod(0o700)
+    # Journals and errors can quote keys too; stderr is part of the uploaded log.
+    (tools / "journalctl").write_text("#!/bin/sh\necho journalctl ran\n"
+                                      "echo 'agent key ssh-rsa AAAAB3journal' >&2\n"
+                                      "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nkeybody\\n"
+                                      "-----END OPENSSH PRIVATE KEY-----\\n'\n")
     env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", SUBYARD_CI_BROKER_STATE=str(state))
     result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result
     out = result.stdout
-    for expected in ("incus init images:abc e2e-base-1 --vm: exit status 1", '"state": "quarantined"',
+    for expected in ("--env WORKER_KEY=ssh-key [redacted] --env x=1: exit status 1", '"state": "quarantined"',
+                     '"token":"[redacted]"', "agent key ssh-key [redacted]", "private-key [redacted]",
                      "base_build_failed", "builder-preparation", '"lease.acquire"', '"incident_id":"i-1"',
                      "journalctl ran", "incus ran", "df ran"):
         assert expected in out, (expected, out)
-    assert secret not in out, out
+    for leaked in (secret, "AAAAC3Nzworker", "AAAAB3journal", "tok-value", "keybody"):
+        assert leaked not in out + result.stderr, (leaked, out)
 
     # Unreadable state still prints the journal and Incus sections.
     for name in ("leases.json", "images.json"):
@@ -56,5 +64,5 @@ with tempfile.TemporaryDirectory(prefix="subyard-ci-broker-state-", dir="/tmp") 
     result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
     assert result.returncode == 0 and "leases.json: unreadable" in result.stdout, result
     assert "journalctl ran" in result.stdout, result.stdout
-print("ok: failed-lane diagnostics keep the test yard broker state without identities")
+print("ok: lane diagnostics keep the test yard broker state without identities or keys")
 PY
