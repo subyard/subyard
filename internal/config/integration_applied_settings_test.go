@@ -155,12 +155,12 @@ func TestAppliedIntegrationsOfAnotherReleaseAreNotInstalledEvidence(t *testing.T
 	// futuretool was shipped by another release, bare has no record, and
 	// removed is a custom integration no longer in the desired values.
 	applied := map[string]string{"AGENT_futuretool_COMMAND": "future", "AGENT_futuretool_PROVISION": "/srv/subyard/releases/r2/config/agents/futuretool/provision.sh",
-		"AGENT_futuretool_PERSIST": ".future:/srv/agents/future .shared:/srv/agents/shared", "AGENT_custom_PERSIST": ".shared:/srv/agents/shared",
+		"AGENT_futuretool_PERSIST": ".future:/srv/agents/future .shared:/srv/agents/shared", "AGENT_custom_PERSIST": ".shared:/srv/agents/shared", "AGENT_custom_DEPENDS": "futuretool removed",
 		"INTEGRATION_HOST_LINKS": ".future:/srv/agents/future .shared:/srv/agents/shared", "HOST_LINKS": ".operator:/srv/operator .future:/srv/agents/future .shared:/srv/agents/shared",
 		"AGENT_futuretool_extra_COMMAND": "kept", "AGENT_custom_COMMAND": "custom", "AGENT_removed_COMMAND": "removed", "AGENT_removed_CONFIG": "/home/dev/.config/subyard/overrides/host/agents/removed/config.toml"}
 	selected, settings := catalog.ReadableAppliedIntegrations(desired, []string{"custom", "futuretool", "bare", "removed", "bad/name"}, applied)
-	if !slices.Equal(selected, []string{"custom", "removed", "bad/name"}) || len(settings) != 7 || settings["AGENT_custom_COMMAND"] != "custom" ||
-		settings["AGENT_removed_CONFIG"] == "" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 10 ||
+	if !slices.Equal(selected, []string{"custom", "removed", "bad/name"}) || len(settings) != 8 || settings["AGENT_custom_DEPENDS"] != "removed" || settings["AGENT_custom_COMMAND"] != "custom" ||
+		settings["AGENT_removed_CONFIG"] == "" || settings["AGENT_futuretool_extra_COMMAND"] != "kept" || len(applied) != 11 ||
 		settings["INTEGRATION_HOST_LINKS"] != ".shared:/srv/agents/shared" || settings["HOST_LINKS"] != ".operator:/srv/operator .shared:/srv/agents/shared" {
 		t.Fatalf("selected %q settings %#v applied %#v", selected, settings, applied)
 	}

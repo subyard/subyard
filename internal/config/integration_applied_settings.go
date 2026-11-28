@@ -166,6 +166,14 @@ func (catalog Catalog) ReadableAppliedIntegrations(desired map[string]string, se
 		for _, link := range strings.Fields(applied["AGENT_"+id+"_PERSIST"]) {
 			delete(owned, link)
 		}
+		// A kept integration's recorded dependency on a dropped one goes too.
+		key := "AGENT_" + id + "_DEPENDS"
+		if value, ok := readable[key]; ok {
+			dependencies := strings.Fields(value)
+			if remaining := slices.DeleteFunc(slices.Clone(dependencies), func(dependency string) bool { return slices.Contains(dropped, dependency) }); len(remaining) != len(dependencies) {
+				readable[key] = strings.Join(remaining, " ")
+			}
+		}
 	}
 	// The dropped integrations' persist links leave the recorded link sets too;
 	// a link without a selected owner is otherwise refused.
