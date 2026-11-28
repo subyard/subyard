@@ -41,6 +41,7 @@ type facadeResponse struct {
 	ExpiresAt     *time.Time          `json:"expires_at,omitempty"`
 	Events        *[]BrokerEvent      `json:"events,omitempty"`
 	Incident      *IncidentArtifact   `json:"incident,omitempty"`
+	Errors        *[]JournalRecord    `json:"errors,omitempty"`
 }
 
 func (facade Facade) Run(originalCommand string) (runErr error) {
@@ -71,7 +72,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "disk-size-v1", "image-v1", "lease-logs-v1", "resource-observe-v1", "service-admission-fence-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "disk-size-v1", "image-v1", "lease-logs-v1", ErrorJournalCapability, "resource-observe-v1", "service-admission-fence-v1"}, Pool: &pool, Resources: resources,
 		})
 	case "observe-v1":
 		if len(fields) != 4 || facade.Events == nil {
@@ -152,6 +153,22 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 			return facade.writeError("unavailable", "agent logs are unavailable")
 		}
 		return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Events: &events})
+	case "errors-v1":
+		if facade.Events == nil {
+			return facade.writeError("unavailable", "error journal is unavailable")
+		}
+		if len(fields) != 4 || (fields[1] != "-" && !agentLogClientID.MatchString(fields[1])) {
+			return facade.writeError("invalid_request", "errors-v1 requires client_id|- slot_id|- count")
+		}
+		count, err := strconv.Atoi(fields[3])
+		if err != nil || count < 1 || count > maxJournalReadEvents || (fields[2] != "-" && !brokerSlotID.MatchString(fields[2])) {
+			return facade.writeError("invalid_request", "invalid error journal selection")
+		}
+		records, err := facade.Events.readJournal(fields[1], fields[2], count)
+		if err != nil {
+			return facade.writeError("unavailable", "error journal is unavailable")
+		}
+		return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Errors: &records})
 	case "acquire", "acquire-v2":
 		return facade.writeAcquireError("invalid_request", "unsupported_acquire", "use acquire-v3 with an explicit environment type")
 	case "acquire-v3", "acquire-v4":

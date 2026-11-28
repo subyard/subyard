@@ -92,12 +92,14 @@ func (runtime *Runtime) waitAgent(ctx context.Context, vm string) error {
 			err = fmt.Errorf("%s cloud-init did not complete successfully", vm)
 		}
 	}
-	if err != nil || cloudCtx.Err() != nil || !runtime.Now().Before(started.Add(runtime.Config.BootTimeout)) {
+	expired := cloudCtx.Err() != nil || !runtime.Now().Before(started.Add(runtime.Config.BootTimeout))
+	if err != nil || expired {
 		if err == nil {
 			err = context.DeadlineExceeded
 		}
 		return errors.Join(&readinessFailure{Label: "waiting for " + vm + " cloud-init", VM: vm, Phase: "cloud-init",
-			Budget: runtime.Config.BootTimeout, StartedAt: started, ObservedAt: runtime.Now(), LastProbe: readinessProbeMetadata(err)}, err)
+			Budget: runtime.Config.BootTimeout, StartedAt: started, ObservedAt: runtime.Now(), LastProbe: readinessProbeMetadata(err),
+			Expired: expired}, err)
 	}
 	return nil
 }

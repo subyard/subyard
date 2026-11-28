@@ -238,6 +238,10 @@ func (fake *fakeIncus) instance(project *fakeIncusProject, args []string) (strin
 			return "", nil
 		case command[0] == "fstrim" || slices.Contains(command, "/run/subyard-e2e-lease.json"):
 			return "", nil
+		case slices.Equal(command, []string{"systemctl", "list-jobs", "--no-pager"}):
+			return "JOB UNIT TYPE STATE\n42 fixture-stop.service stop running\n", nil
+		case slices.Equal(command, []string{"journalctl", "-b", "-n", "200", "--no-pager"}):
+			return "fixture boot journal for " + name + "\n", nil
 		}
 	}
 	return "", fake.unexpected(args)

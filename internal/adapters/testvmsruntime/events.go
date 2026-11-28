@@ -62,6 +62,14 @@ type BrokerEvent struct {
 	Error              string        `json:"error,omitempty"`
 	IncidentID         string        `json:"incident_id,omitempty"`
 	Context            *LeaseContext `json:"context,omitempty"`
+	// Typed failure facts for the pool error journal; see journalSteps.
+	Step      string `json:"step,omitempty"`
+	Outcome   string `json:"outcome,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	// Loop-protection hold of the slot; see countQuarantine.
+	HoldLevel  uint64    `json:"hold_level,omitempty"`
+	HoldUntil  time.Time `json:"hold_until,omitzero"`
+	HoldReason string    `json:"hold_reason,omitempty"`
 }
 
 type CommandEvidence struct {
@@ -163,7 +171,37 @@ func (recorder EventRecorder) Record(event BrokerEvent) (BrokerEvent, error) {
 	if err := recorder.archiveAgentRecord(event.agentClientID, "events", event.EventID, payload); err != nil {
 		return BrokerEvent{}, err
 	}
+	if record, ok := journalRecordFor(event); ok {
+		if err := recorder.archiveJournalRecord(record); err != nil {
+			return BrokerEvent{}, err
+		}
+	}
 	return event, nil
+}
+
+// recordLimited records event unless the same key recorded within interval.
+func (recorder EventRecorder) recordLimited(key string, interval time.Duration, event BrokerEvent) (bool, error) {
+	if recorder.StateDir == "" {
+		return false, errors.New("broker event state directory is required")
+	}
+	recorded := false
+	directory := filepath.Join(recorder.spoolRoot(), "limits")
+	err := withFileLock(filepath.Join(directory, ".lock"), func() error {
+		path := filepath.Join(directory, key)
+		if payload, err := os.ReadFile(path); err == nil {
+			last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(payload)))
+			// A clock moved back does not suppress records indefinitely.
+			if delta := recorder.now().Sub(last); parseErr == nil && delta >= 0 && delta < interval {
+				return nil
+			}
+		}
+		if _, err := recorder.Record(event); err != nil {
+			return err
+		}
+		recorded = true
+		return writeAtomicDurable(path, []byte(recorder.now().Format(time.RFC3339Nano)+"\n"), 0o600)
+	})
+	return recorded, err
 }
 
 func (recorder EventRecorder) SaveIncident(
@@ -204,7 +242,7 @@ func (recorder EventRecorder) SaveIncident(
 		if !safeIncidentSection(name) {
 			continue
 		}
-		if name == "vm_1_qmp_log" || name == "vm_2_qmp_log" {
+		if guestLogTailSection(name) {
 			artifact.Diagnostics[name] = redactBrokerLogTail(value)
 		} else {
 			artifact.Diagnostics[name] = redactBrokerText(value, 256<<10)
@@ -235,6 +273,16 @@ func (recorder EventRecorder) SaveIncident(
 		}
 	}
 	return artifact, nil
+}
+
+// Sections that keep only their redacted latest 64 KiB.
+func guestLogTailSection(name string) bool {
+	switch name {
+	case "vm_1_qmp_log", "vm_2_qmp_log", "vm_1_guest_jobs", "vm_2_guest_jobs",
+		"vm_1_guest_journal", "vm_2_guest_journal":
+		return true
+	}
+	return false
 }
 
 func (recorder EventRecorder) Export() (SpoolBatch, error) {
@@ -366,6 +414,10 @@ func validateBrokerEvent(event BrokerEvent) error {
 	}
 	if event.IncidentID != "" && !brokerRecordID.MatchString(event.IncidentID) {
 		return errors.New("invalid broker incident reference")
+	}
+	if !closedValue(event.Step, journalSteps) || !closedValue(event.Outcome, journalOutcomes) ||
+		!closedValue(event.Operation, journalOperations) || !closedValue(event.HoldReason, holdReasons) {
+		return errors.New("invalid broker event failure facts")
 	}
 	if event.Context != nil && validateLeaseContext(*event.Context) != nil {
 		return errors.New("invalid broker event attribution")

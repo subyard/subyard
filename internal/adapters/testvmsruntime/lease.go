@@ -119,6 +119,14 @@ type LeaseSlot struct {
 	RecoveryAttempt       uint64           `json:"recovery_attempt"`
 	NextRecoveryAt        time.Time        `json:"next_recovery_at,omitempty"`
 	RecoveryStartedAt     time.Time        `json:"recovery_started_at,omitempty"`
+	// Loop protection: see countQuarantine. Leases and recovery keep these.
+	RecentQuarantines []time.Time `json:"recent_quarantines,omitempty"`
+	HoldLevel         uint64      `json:"hold_level,omitempty"`
+	HoldStartedAt     time.Time   `json:"hold_started_at,omitzero"`
+	HoldUntil         time.Time   `json:"hold_until,omitzero"`
+	HoldResetAt       time.Time   `json:"hold_reset_at,omitzero"`
+	// holdLifted reports to the caller that an operator recovery ended a hold.
+	holdLifted bool
 }
 
 type LeasePool struct {
@@ -135,15 +143,20 @@ type leaseRecoveryJournal struct {
 }
 
 type leaseRecoverySlot struct {
-	SlotID             string    `json:"slot_id"`
-	ResourceGeneration uint64    `json:"resource_generation"`
-	LeaseEpoch         uint64    `json:"lease_epoch"`
-	State              SlotState `json:"state"`
-	LastFailureEventID string    `json:"last_failure_event_id,omitempty"`
-	IncidentID         string    `json:"incident_id,omitempty"`
-	RecoveryAttempt    uint64    `json:"recovery_attempt"`
-	NextRecoveryAt     time.Time `json:"next_recovery_at,omitempty"`
-	RecoveryStartedAt  time.Time `json:"recovery_started_at,omitempty"`
+	SlotID             string      `json:"slot_id"`
+	ResourceGeneration uint64      `json:"resource_generation"`
+	LeaseEpoch         uint64      `json:"lease_epoch"`
+	State              SlotState   `json:"state"`
+	LastFailureEventID string      `json:"last_failure_event_id,omitempty"`
+	IncidentID         string      `json:"incident_id,omitempty"`
+	RecoveryAttempt    uint64      `json:"recovery_attempt"`
+	NextRecoveryAt     time.Time   `json:"next_recovery_at,omitempty"`
+	RecoveryStartedAt  time.Time   `json:"recovery_started_at,omitempty"`
+	RecentQuarantines  []time.Time `json:"recent_quarantines,omitempty"`
+	HoldLevel          uint64      `json:"hold_level,omitempty"`
+	HoldStartedAt      time.Time   `json:"hold_started_at,omitzero"`
+	HoldUntil          time.Time   `json:"hold_until,omitzero"`
+	HoldResetAt        time.Time   `json:"hold_reset_at,omitzero"`
 }
 
 type LeaseGrant struct {
@@ -502,9 +515,11 @@ func (store LeaseStore) FinishDrain(slotID string, stopErr error) error {
 			return fmt.Errorf("slot %s is not draining", slotID)
 		}
 		if stopErr != nil {
+			now := store.now()
 			slot.State = SlotQuarantined
 			slot.FailureReason = boundedReason(stopErr.Error())
-			slot.NextRecoveryAt = store.now()
+			slot.NextRecoveryAt = now
+			countQuarantine(slot, now)
 			return nil
 		}
 		clearLease(slot)
@@ -637,6 +652,7 @@ func (store LeaseStore) Quarantine(grant LeaseGrant, cause error) error {
 		slot.State = SlotQuarantined
 		slot.FailureReason = boundedReason(cause.Error())
 		slot.NextRecoveryAt = now
+		countQuarantine(slot, now)
 		return nil
 	})
 }
@@ -703,15 +719,17 @@ func (store LeaseStore) BeginScheduledRecovery(
 			return fmt.Errorf("slot %s is %s, not quarantined", slotID, slot.State)
 		}
 		now := store.now()
-		if !force && !slot.NextRecoveryAt.IsZero() && now.Before(slot.NextRecoveryAt) {
+		if !force && recoveryDeferred(*slot, now) {
 			snapshot = *slot
 			return nil
 		}
+		lifted := force && liftHold(slot, now)
 		slot.State = SlotRecovering
 		slot.RecoveryAttempt++
 		slot.RecoveryStartedAt = now
 		slot.NextRecoveryAt = time.Time{}
 		snapshot = *slot
+		snapshot.holdLifted = lifted
 		started = true
 		return nil
 	})
@@ -742,12 +760,15 @@ func (store LeaseStore) BeginExpectedRecovery(
 			snapshot = *slot
 			return nil
 		case SlotQuarantined:
+			// The operator's recovery lifts a loop-protection hold.
 			now := store.now()
+			lifted := liftHold(slot, now)
 			slot.State = SlotRecovering
 			slot.RecoveryAttempt++
 			slot.RecoveryStartedAt = now
 			slot.NextRecoveryAt = time.Time{}
 			snapshot = *slot
+			snapshot.holdLifted = lifted
 			started = true
 			return nil
 		default:
@@ -801,16 +822,133 @@ func (store LeaseStore) FinishRecovery(
 		lastEvent := slot.LastFailureEventID
 		lastIncident := slot.IncidentID
 		attempt := slot.RecoveryAttempt
+		environment := slot.Environment
 		clearLease(slot)
 		slot.ResourceGeneration++
 		slot.State = SlotAvailable
 		slot.LastFailureEventID = lastEvent
 		slot.IncidentID = lastIncident
 		slot.RecoveryAttempt = attempt
+		if until := activeHoldUntil(*slot, now); !until.IsZero() {
+			// A cleaned slot waits out its hold, unreserved; the reaper then
+			// recovers its environment again, which any broker version can.
+			slot.State = SlotQuarantined
+			slot.Environment = environment
+			slot.FailureReason = "loop protection hold"
+			slot.HoldUntil = until
+			slot.NextRecoveryAt = until
+			boundHoldReset(slot, now)
+		} else {
+			slot.HoldStartedAt = time.Time{}
+			slot.HoldUntil = time.Time{}
+		}
 		snapshot = *slot
 		return nil
 	})
 	return snapshot, err
+}
+
+// Loop protection: a slot quarantined holdThreshold times within holdWindow
+// is held after recovery for holdBase, doubling per consecutive hold up to
+// holdCap. The level resets after holdResetAfter without a counted quarantine
+// or hold.
+const (
+	holdThreshold  = 5
+	holdWindow     = time.Hour
+	holdBase       = 2 * time.Hour
+	holdCap        = 24 * time.Hour
+	holdResetAfter = 24 * time.Hour
+)
+
+// countQuarantine counts a release or acquire quarantine of slot at now.
+// Recovery failures and interrupted recoveries are not counted.
+func countQuarantine(slot *LeaseSlot, now time.Time) {
+	boundHoldReset(slot, now)
+	if slot.HoldLevel > 0 && !now.Before(slot.HoldResetAt) {
+		slot.HoldLevel = 0
+		slot.HoldResetAt = time.Time{}
+	}
+	recent := make([]time.Time, 0, holdThreshold)
+	for _, at := range slot.RecentQuarantines {
+		if at.After(now) {
+			at = now // A clock moved back never extends the window.
+		}
+		if now.Sub(at) < holdWindow {
+			recent = append(recent, at)
+		}
+	}
+	if len(recent) >= holdThreshold {
+		recent = recent[len(recent)-holdThreshold+1:]
+	}
+	recent = append(recent, now)
+	slot.RecentQuarantines = recent
+	if len(recent) >= holdThreshold {
+		slot.HoldLevel++
+		slot.HoldStartedAt = now
+		slot.HoldUntil = now.Add(holdDuration(slot.HoldLevel))
+		slot.RecentQuarantines = nil
+	}
+	if slot.HoldLevel > 0 {
+		quiet := now
+		if slot.HoldUntil.After(quiet) {
+			quiet = slot.HoldUntil
+		}
+		slot.HoldResetAt = quiet.Add(holdResetAfter)
+	}
+}
+
+func holdDuration(level uint64) time.Duration {
+	duration := holdBase
+	for step := uint64(1); step < level && duration < holdCap; step++ {
+		duration *= 2
+	}
+	return min(duration, holdCap)
+}
+
+// activeHoldUntil is the end of slot's hold, or zero when none is active. A
+// clock moved back never makes a hold longer than holdCap from now.
+func activeHoldUntil(slot LeaseSlot, now time.Time) time.Time {
+	if slot.HoldUntil.IsZero() || !now.Before(slot.HoldUntil) {
+		return time.Time{}
+	}
+	if limit := now.Add(holdCap); slot.HoldUntil.After(limit) {
+		return limit
+	}
+	return slot.HoldUntil
+}
+
+// boundHoldReset keeps the level reset at most 24 hours after the end of the
+// active hold, or after now without one, so a clock moved back never delays it.
+func boundHoldReset(slot *LeaseSlot, now time.Time) {
+	if slot.HoldLevel == 0 {
+		return
+	}
+	limit := now
+	if until := activeHoldUntil(*slot, now); !until.IsZero() {
+		limit = until
+	}
+	if limit = limit.Add(holdResetAfter); slot.HoldResetAt.After(limit) {
+		slot.HoldResetAt = limit
+	}
+}
+
+// liftHold ends an active hold early and keeps its level, which now resets
+// 24 hours after this early end.
+func liftHold(slot *LeaseSlot, now time.Time) bool {
+	active := !activeHoldUntil(*slot, now).IsZero()
+	if active {
+		slot.HoldResetAt = now.Add(holdResetAfter)
+	}
+	slot.HoldStartedAt = time.Time{}
+	slot.HoldUntil = time.Time{}
+	return active
+}
+
+// recoveryDeferred says a quarantined slot waits for its next recovery time.
+// A clock moved back never defers recovery longer than the hold cap.
+func recoveryDeferred(slot LeaseSlot, now time.Time) bool {
+	return !slot.NextRecoveryAt.IsZero() && now.Before(slot.NextRecoveryAt) &&
+		slot.NextRecoveryAt.Sub(now) <= holdCap
 }
 
 func recoveryDelay(attempt uint64) time.Duration {
@@ -919,7 +1057,9 @@ func (store LeaseStore) recoveryJournalPath() string {
 func (store LeaseStore) writePool(pool LeasePool) error {
 	journal := leaseRecoveryJournal{SchemaVersion: LeaseRecoverySchemaVersion}
 	for _, slot := range pool.Slots {
-		if !slotHasRecoveryMetadata(slot) {
+		// Only recovery states are journaled: a recovered slot keeps its last
+		// incident while a pool resize drains it for retirement.
+		if !slotHasRecoveryMetadata(slot) || !recoveryJournalState(slot.State) {
 			continue
 		}
 		journal.Slots = append(journal.Slots, leaseRecoverySlot{
@@ -932,6 +1072,11 @@ func (store LeaseStore) writePool(pool LeasePool) error {
 			RecoveryAttempt:    slot.RecoveryAttempt,
 			NextRecoveryAt:     slot.NextRecoveryAt,
 			RecoveryStartedAt:  slot.RecoveryStartedAt,
+			RecentQuarantines:  slot.RecentQuarantines,
+			HoldLevel:          slot.HoldLevel,
+			HoldStartedAt:      slot.HoldStartedAt,
+			HoldUntil:          slot.HoldUntil,
+			HoldResetAt:        slot.HoldResetAt,
 		})
 	}
 	journalPath := store.recoveryJournalPath()
@@ -969,9 +1114,11 @@ func (store LeaseStore) mergeRecoveryJournal(pool *LeasePool) error {
 				!brokerRecordID.MatchString(recovery.IncidentID)) {
 			return fmt.Errorf("%w: invalid lease recovery metadata", ErrCorruptLeaseState)
 		}
-		switch recovery.State {
-		case SlotAvailable, SlotQuarantined, SlotRecovering:
-		default:
+		if recovery.State == SlotDraining {
+			// Older brokers journaled a recovered slot that a resize was retiring.
+			continue
+		}
+		if !recoveryJournalState(recovery.State) {
 			return fmt.Errorf("%w: invalid lease recovery state", ErrCorruptLeaseState)
 		}
 		seen[recovery.SlotID] = true
@@ -987,8 +1134,17 @@ func (store LeaseStore) mergeRecoveryJournal(pool *LeasePool) error {
 		slot.RecoveryAttempt = recovery.RecoveryAttempt
 		slot.NextRecoveryAt = recovery.NextRecoveryAt
 		slot.RecoveryStartedAt = recovery.RecoveryStartedAt
+		slot.RecentQuarantines = recovery.RecentQuarantines
+		slot.HoldLevel = recovery.HoldLevel
+		slot.HoldStartedAt = recovery.HoldStartedAt
+		slot.HoldUntil = recovery.HoldUntil
+		slot.HoldResetAt = recovery.HoldResetAt
 	}
 	return nil
+}
+
+func recoveryJournalState(state SlotState) bool {
+	return state == SlotAvailable || state == SlotQuarantined || state == SlotRecovering
 }
 
 func slotHasRecoveryMetadata(slot LeaseSlot) bool {
@@ -998,7 +1154,9 @@ func slotHasRecoveryMetadata(slot LeaseSlot) bool {
 		slot.IncidentID != "" ||
 		slot.RecoveryAttempt != 0 ||
 		!slot.NextRecoveryAt.IsZero() ||
-		!slot.RecoveryStartedAt.IsZero()
+		!slot.RecoveryStartedAt.IsZero() ||
+		len(slot.RecentQuarantines) != 0 ||
+		slot.HoldLevel != 0
 }
 
 func (store LeaseStore) rebuildCorruptPoolForRecovery(slotID string) error {

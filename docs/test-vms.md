@@ -1506,6 +1506,17 @@ The manual command starts the same slot recovery workflow immediately:
 yard test-vms recover --slot "$slot"
 ```
 
+Loop protection holds a slot that keeps failing. A release or acquire quarantine counts; failed or
+interrupted recoveries do not. The fifth counted quarantine within a sliding hour starts a hold:
+recovery still cleans the slot at once, but the slot stays `quarantined` and unreserved until
+`hold_until`, then the reaper recovers it again and publishes it. The first hold lasts 2 hours and
+each consecutive hold doubles, up to 24 hours. The level returns to zero after 24 hours without a
+counted quarantine or hold. `yard test-vms recover --slot "$slot"` lifts a hold at once and keeps
+its level, so the next hold is longer. Status shows `hold_level`, `hold_started_at`, `hold_until`
+and `hold_reset_at`; the journal marks the quarantine that started a hold with `hold_until` and
+records `slot.hold_ended` with `hold_reason` `expired` or `manual`. A clock moved back never makes
+a hold longer than 24 hours from the current time.
+
 ## Broker diagnostics
 
 Agents can read their own lease diagnostics through the existing restricted SSH facade:
@@ -1515,6 +1526,41 @@ dev/agent-e2e.sh --logs --slot 1 -n 50
 dev/agent-e2e.sh --logs --json
 dev/agent-e2e.sh --incident <incident_id>
 ```
+
+Any controller can also read the pool error journal, the broker's own failures across all slots:
+
+```sh
+dev/agent-e2e.sh --errors [--slot 1] [-n 50] [--json]
+```
+
+The broker records a journal entry for a failed or slow (30 seconds or more) release step,
+quarantine, failed recovery, planned or failed force stop, a fatal reaper pass and a slow or
+timed-out Incus call. Each entry has only typed fields: time, slot, resource generation, lease epoch,
+state transition, `step` (`fence-and-stop`, `delete-allocation`, `readiness`, `recovery`),
+`outcome` (`error`, `timeout`, `slow`), Incus `operation`, duration, recovery attempt and
+`incident_id`. It never carries lease attribution, lease or client IDs, error text or guest output;
+`own` marks entries of this controller's leases, whose full text `--logs` and `--incident` return.
+An Incus stop, start, delete or restart (and a project or network create or delete) is slow after
+30 seconds and other watched calls after 10 seconds; a still-running call is recorded at its
+threshold, at most once a minute per operation, and again when it returns. Exec, file transfer,
+image and publish calls keep their own phase budgets and are not watched. Journal entries follow
+the archive's 30-day retention and are also capped at 10,000 entries. They and the controller's own
+incidents remain readable after recovery and after a pool resize retires the slot. `--status` adds
+one line with the count and latest entry of the last 24 hours.
+
+When a release, provisioning or acquire meets a quarantine, the client prints the slot, its own run
+and the incident from its own journal entry, and the operator command:
+
+```text
+E2E_QUARANTINE slot=slot-003 run=c291a4ef incident_id=01795371892254664249-1843ff2f64712754
+agent-e2e: slot-003 was quarantined during release of run c291a4ef (incident 01795371892254664249-1843ff2f64712754); the broker recovers it automatically.
+agent-e2e: tell the operator and ask them to run: yard test-vms logs --slot 3
+```
+
+Another holder's quarantined slot names only the slot and incident. Without a readable journal the
+incident is `unavailable`. When the quarantine started a loop-protection hold, the machine line adds
+`hold_until=<time>` and the client prints when the slot returns and the operator's lift command,
+`yard test-vms recover --slot N`. `--status` prints the same line for every held slot.
 
 These reads never acquire, renew, release or recover a lease. The private random controller
 `client-id` is a diagnostic read capability; keep it private along with the controller identity.
@@ -1571,6 +1617,13 @@ agent, host-key and SSH/sudo probe. Expired budgets do not start another probe, 
 success is rejected. The parent request remains available for cleanup after a local timeout.
 Incident readiness fields retain only phase, timestamps, budget and classified latest-probe
 metadata; they exclude probe arguments and output.
+
+Before native collection, quarantine asks each owned running guest, the failed VM first, for
+`systemctl list-jobs` and `journalctl -b -n 200` through the guest agent, within one five-second
+budget. The incident keeps the redacted latest 64 KiB of each as `vm_N_guest_jobs` and
+`vm_N_guest_journal`, or the reason they are unavailable (missing, stopped or unverified guest,
+unresponsive agent, exhausted budget). A guest is never started for this, and only the controller
+whose allocation markers verify on that VM can read these sections.
 
 Local incident collection has a five-second budget with one-second native probes. It prioritizes
 the failed VM state, one guest console log read after lifecycle completion and QMP logs,

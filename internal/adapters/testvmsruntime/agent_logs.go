@@ -145,7 +145,8 @@ func agentIncident(artifact IncidentArtifact, clientID string) IncidentArtifact 
 		case "capacity", "force_stop_vm", "force_stop_state", "original_incident_id":
 			diagnostics[name] = strings.ReplaceAll(value, clientID, "[redacted]")
 		case "vm_1_state", "vm_2_state", "vm_1_info_log", "vm_2_info_log",
-			"vm_1_console_log", "vm_2_console_log", "vm_1_qmp_log", "vm_2_qmp_log":
+			"vm_1_console_log", "vm_2_console_log", "vm_1_qmp_log", "vm_2_qmp_log",
+			"vm_1_guest_jobs", "vm_2_guest_jobs", "vm_1_guest_journal", "vm_2_guest_journal":
 			if artifact.Diagnostics[name[:4]+"_allocation_verified"] == "true" {
 				diagnostics[name] = strings.ReplaceAll(value, clientID, "[redacted]")
 			}

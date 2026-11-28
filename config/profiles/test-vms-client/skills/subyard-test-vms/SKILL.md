@@ -29,4 +29,8 @@ release `lost`/`no-keeper` handles and acquire again.
 The VM has root and public Internet egress; it cannot reach this yard, the broker,
 other slots, the host or private networks. Only this client reaches it. Nothing in the VM survives
 release or expiry; copy results out with `exec` first. The outer yard remains operator-owned.
-Diagnostics: `client.sh logs --slot N -n 50`.
+Diagnostics: `client.sh logs --slot N -n 50` (own leases), `client.sh errors` (pool failures).
+After any test-VM failure, an `E2E_QUARANTINE` line or slowness, read `client.sh errors`
+and report the records and the printed operator command (`yard test-vms logs --slot N`).
+A slot with `hold_until` is held after repeated failures: use another slot or wait; only the
+operator lifts the hold (`yard test-vms recover --slot N`).

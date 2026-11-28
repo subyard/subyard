@@ -212,6 +212,10 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 				if validationFault == "tools" {
 					return nil, nil, errors.New("synthetic missing tool")
 				}
+				if validationFault == "tools-timeout" {
+					time.Sleep(40 * time.Millisecond)
+					return nil, nil, context.DeadlineExceeded
+				}
 			}
 			if strings.Contains(command, "cloud-init clean --logs --machine-id --seed") {
 				if !restartedAfterRecipe || !cloudAfterRestart || !toolsAfterRestart || !strings.Contains(command, "systemctl stop incus.service incus.socket") {
@@ -349,13 +353,19 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, phase := range []string{"cloud-init", "tools", "registry-write"} {
+	for _, phase := range []string{"cloud-init", "tools", "tools-timeout", "registry-write"} {
 		t.Run("failed post-upgrade "+phase+" preserves current image and held pins", func(t *testing.T) {
 			validationFault = phase
 			refresh := newRuntime()
+			if phase == "tools-timeout" {
+				refresh.Config.BootTimeout = 20 * time.Millisecond
+			}
 			refreshErr := refresh.RefreshBase(ctx, store, EnvironmentPair)
 			if refreshErr == nil {
 				t.Fatal("invalid base published")
+			}
+			if want := map[string]string{"tools": "error", "tools-timeout": "timeout"}[phase]; want != "" && failureOutcome(refreshErr) != want {
+				t.Errorf("base-tools failure outcome = %s, want %s: %v", failureOutcome(refreshErr), want, refreshErr)
 			}
 			if phase == "registry-write" && !errors.Is(refreshErr, syscall.ENOTDIR) {
 				t.Fatalf("actual registry write failure missing: %v", refreshErr)
@@ -486,8 +496,8 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		mu.Lock()
 		gotBuilds, gotPublications, gotDeletions = builds, publications, deletions
 		mu.Unlock()
-		if gotBuilds != 5 || gotPublications != 2 || gotDeletions != 5 {
-			t.Fatalf("refresh totals: builds=%d publications=%d staging deletions=%d; want five builds/deletions and two publications", gotBuilds, gotPublications, gotDeletions)
+		if gotBuilds != 6 || gotPublications != 2 || gotDeletions != 6 {
+			t.Fatalf("refresh totals: builds=%d publications=%d staging deletions=%d; want six builds/deletions and two publications", gotBuilds, gotPublications, gotDeletions)
 		}
 	})
 }
