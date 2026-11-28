@@ -834,7 +834,8 @@ The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots 
 tails [listed in hosted check diagnostics](reference/release-publication.md#exact-candidate-hosted-release-checks), uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
 `diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
 contains check output, including native cleanup output, and their broker event records survive
-interruption when final steps can run. Logs are staged under the runner temporary directory rather
+interruption when final steps can run. After a failure, `runner/broker-state.log` adds the test
+yard broker's slot failure reasons, image build state, redacted spool and Incus and broker journals. Logs are staged under the runner temporary directory rather
 than the managed candidate workspace; the upload path therefore matches the capture path. Jobs run
 as root on the runner and hold no secrets, so the workflow never runs pull request code.
 
