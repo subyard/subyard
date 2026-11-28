@@ -2,14 +2,44 @@
 
 ## Unreleased
 
-### Yard disk use
+### Before you update
+
+- **Yards that do not select `user-dotfiles` lose their agent instruction files.** The profile is
+  selected by default only in the yard named `default`, and only while its `ENVIRONMENT_PROFILES`
+  is unset at every scope. In every other yard the next init removes the unchanged host
+  instruction copies that earlier releases made and installs nothing in their place. After
+  updating, run `yard -Y NAME profile enable user-dotfiles` there to install instructions. The
+  shipped source installs generic instructions in every selected yard, including `default`; to
+  keep your own, set `USER_DOTFILES_SOURCE` to your repository first; see
+  [agent instructions from a dotfiles repository](#agent-instructions-from-a-dotfiles-repository).
+- **Some effects cannot be undone by a rollback:**
+  - Above `TELEMETRY_DISK_BUDGET` (default `30GiB`) the telemetry collector prunes the oldest raw
+    OTLP, session correlations and samples, never ones younger than 30 days, until the store fits
+    the budget. Raise the budget before updating to keep them.
+  - Running yards delete unused `/tmp` content older than two days every hour. Move anything you
+    keep in a yard's `/tmp` elsewhere before updating.
+  - Test yard provisioning deletes an earlier release's `/srv/incus-e2e` pool directory from a
+    `/srv` volume kept by `teardown --keep-data`, once no inner pool uses it.
+
+### Yard disk and memory use
 
 - Yards no longer keep downloaded APT packages. Provisioning writes
   `/etc/apt/apt.conf.d/99subyard-no-archive-cache`, so `apt-get` removes downloaded archives
   after a successful install, and clears the archives that earlier provisioning kept.
   Rollback leaves the file in place; delete it in the yard to keep archives again.
+- An idle OpenCode session holds about 0.6 GiB of RAM and peaks at about 1.1 GiB; count that per
+  running session when you size `LIMITS_MEMORY`; see
+  [coding-agent compatibility](configuration.md#coding-agent-compatibility).
+- **Running yards age `/tmp`.** The hourly `subyard-tmp-age.timer` removes `/tmp` entries older
+  than two days by every timestamp. It skips entries any process still references, flocked files,
+  sockets and mounts, `/tmp/subyard-disposable`, and the usual system entries (current-boot
+  `systemd-private-*`, SSH agent directories, X server locks and socket directories). Its first
+  run is 15 minutes after boot or install; installing it removes nothing. On `noatime` mounts,
+  reading a file does not keep it.
+- An interrupted boot-time `/tmp` cleanup no longer blocks yard readiness; the hourly ageing
+  removes what it left. Provision verification names every unmet condition, not only the first.
 
-### Test VM memory
+### Test VMs
 
 - On x86_64, test-vms broker VMs enable Free Page Reporting on their virtio balloon, so RAM
   a guest frees returns to the host instead of staying resident in QEMU. A VM that is
@@ -17,6 +47,23 @@
 - The default per-VM admission overhead `E2E_VM_OVERHEAD` is 256 MiB instead of 512 MiB; a
   broker without its own value admits a 4 GiB pair with 12.5 GiB available instead of 13 GiB.
   Measured QEMU memory outside guest RAM was 60–120 MiB per VM.
+- The test yard's inner Incus pool lives at the Incus default path on the yard root instead of
+  `/srv/incus-e2e/storage`, which newer Incus cannot mount read-only inside a nested container.
+  Existing test yards keep their pool. Provisioning removes a stale `/srv/incus-e2e` directory
+  from a `/srv` volume kept by `teardown --keep-data` once no inner pool uses it.
+- **Repeatedly quarantined slots are held.** The fifth release or acquire quarantine of a slot
+  within an hour keeps it `quarantined` until `hold_until`: 2 hours at first, doubling up to 24
+  hours, reset after a quiet day. `yard test-vms status` shows the hold, and
+  `yard test-vms recover --slot N` lifts it at once.
+- The broker keeps a value-free journal of pool failures (failed or slow release steps,
+  quarantines, failed recoveries, slow Incus calls) for 30 days. The `subyard-test-vms` skill's
+  `client.sh errors [--slot N] [-n N] [--json]` (`dev/agent-e2e.sh --errors` in a Subyard
+  checkout) reads it, and status shows the 24-hour count. Clients need an updated broker for it.
+- A quarantine tells the lease owner its cause and incident ID and names
+  `yard test-vms logs --slot N` for the operator. Quarantine incidents also record the guest's
+  systemd jobs and recent journal.
+- Test-VM bases mask `apt-daily.timer` and `apt-daily-upgrade.timer` and send apt over IPv4;
+  existing bases get this on their next rebuild. See [test VMs](test-vms.md).
 
 ### Telemetry disk budget
 
@@ -25,7 +72,8 @@
   30 days; usage, lifecycle and resource records stay. Below the budget nothing is pruned.
 - **Raw OTLP is no longer refused near the budget.** Only a data partition short of its reserve
   still refuses it. A store held above the budget by the last 30 days keeps growing, and
-  `stats`, `yard status` and `yard profile status telemetry` show the `storage-capacity` warning.
+  `stats`, `yard status` and `yard profile status telemetry` show the `storage-capacity` warning,
+  which now points to `stats` for the cause; `stats` reports `over_budget_since`.
   See [usage and attribution](telemetry.md#usage-and-attribution).
 
 ### Init on a busy yard
@@ -62,8 +110,6 @@
 
 - Claude provisioning installs `/etc/claude-code/CLAUDE.md`, which tells Claude to delete only by
   literal absolute path; `claude-policy-check` reports its absence and drift. Disabling Claude keeps it.
-- **Rollback to 0.32.0 keeps the file.** It is listed in the rollback plan output and result.
-  After rollback, back it up and remove it in each affected yard if you do not want the rule.
 
 ### Full uninstall recovery
 
@@ -96,16 +142,78 @@
   yard), or run `yard -Y default profile disable user-dotfiles` to opt out. Subyard never
   updates the clone: after `git pull` in it, run its install script again yourself. For
   [user skills](user-skills.md), no `yard init` is needed after a pull.
-- **Before rolling back to 0.32.0 or older,** run `yard -Y NAME profile disable user-dotfiles`
-  in each yard that uses the profile, move any file or link left at an instruction path away,
-  and unset `USER_DOTFILES_SOURCE` and `USER_DOTFILES_INSTALL_COMMAND` wherever you set them
+- Rolling back to 0.32.0 or older needs manual steps first; see
+  [rollback to 0.32.0](#rollback-to-0320).
+
+### User skills
+
+- GitHub skill sources clone in yards with the GitHub profile. Its Git wiring sends github.com
+  URLs through the `subyard-github` broker transport, which the user-skills clone did not allow,
+  so these sources were skipped with a clone warning. Run `yard init` or
+  `yard profile enable user-skills` after updating to clone them.
+- Apply re-checks a stale skill link after moving it aside and removes it only if it is still
+  Subyard's; anything else found there is moved back, or kept beside the path with a warning
+  when it cannot be.
+
+### Herdr
+
+- `yard herdr pair --from-host [--all | SHA256:FINGERPRINT...]` offers the keys in the owner
+  host account's `~/.ssh/authorized_keys`, labelled from their comments. Keys with options,
+  certificates and the Subyard owner key are never offered; pair a reviewed client key (for a
+  certificate, its plain public key) with `--key`. Removing a key from
+  that file does not revoke its grant; use `--revoke`.
+- Pairing suggests the machine label `<host-id>-<yard>` for `hc machine add` and an SSH `Host`
+  block; `yard herdr status` shows it.
+- Every Git checkout below `src`, and every repository directly beside it, gets its own space,
+  such as `Project/wt-feature`. A new clone appears within about a minute and a half through
+  `subyard-herdr-discovery.timer`. A checkout proven deleted loses its space once no terminal in
+  it is live; no terminal is stopped, and `yard herdr sync --restore` reopens closed spaces.
+  Orca and Herdr share the checkout discovery library. See [Herdr](herdr.md).
+
+### Logs and clients
+
+- `yard logs --rpc [-n LINES]` shows the newest failed `yard rpc --stdio` requests with their
+  request, operation, method, code and full error text, from `~/.subyard/logs/rpc-errors.log`
+  (two generations of 256 KiB, mode 0600). Veranda keeps its own value-free RPC error log in its
+  private store.
+- RPC errors carry up to 32 typed, value-free refusals from configuration and release gates, and
+  Veranda shows them. Older clients ignore them.
+- Veranda accepts the current and previous Subyard engine lines (0.33 and 0.32) instead of one
+  exact version, and refuses others as `incompatible_engine` with the supported lines. A Veranda
+  built for 0.32.0 accepts only 0.32.0; update it together with the owner.
+
+### Rollback to 0.32.0
+
+- **Before rollback,** in each yard that uses `user-dotfiles`, run
+  `yard -Y NAME profile disable user-dotfiles` (it runs the repository's `uninstall.sh` and keeps
+  the clone) and move any file or link left at `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` or
+  `~/.config/opencode/AGENTS.md` away. Unset `USER_DOTFILES_SOURCE` and
+  `USER_DOTFILES_INSTALL_COMMAND` wherever you set them
   (`yard -Y NAME config unset SETTING --scope SCOPE`, with `--git` for a setting saved with
-  `--git`). For 0.31.0 or older, also unset `USER_SKILL_SOURCES`, which those releases do not
-  know. A rollback to 0.31.0 or 0.32.0 that misses a step is refused with "the retained release
-  cannot provide a safe rollback plan" and this recovery, and one to 0.30.0 with a setting left
-  with "cannot read the yard settings"; the rollback plan lists these steps. After updating
-  again, set the unset settings again before re-enabling the profile, or run
-  `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the default
+  `--git`); for 0.31.0 or older, also unset `USER_SKILL_SOURCES` and complete
+  [rollback to 0.31.0](#rollback-to-0310). A rollback to 0.31.0 or 0.32.0
+  that misses a step is refused with "the retained release cannot provide a safe rollback plan"
+  and this recovery, and one to 0.30.0 with a setting left with "cannot read the yard settings".
+  After rollback, run `yard init`, then restart agent sessions.
+- **What survives:**
+  - `/etc/claude-code/CLAUDE.md` stays active and is listed in the rollback plan output and
+    result; back it up and remove it in each affected yard if you do not want the rule.
+  - `/etc/apt/apt.conf.d/99subyard-no-archive-cache` stays; delete it to keep archives again.
+  - `subyard-tmp-age.timer` keeps ageing `/tmp`, because 0.32.0 neither refuses nor manages it.
+    To stop it, run `systemctl disable --now subyard-tmp-age.timer` in the yard; after checking
+    that the files are Subyard's (exact content, root-owned), remove
+    `/etc/systemd/system/subyard-tmp-age.timer`, `/etc/systemd/system/subyard-tmp-age.service`,
+    `/usr/local/lib/subyard-guest-tmp-age` and `/etc/subyard-guest-tmp-age.conf`, then run
+    `systemctl daemon-reload`.
+  - `subyard-herdr-discovery.timer` keeps firing, but its condition skips every run; checkout
+    spaces remain as unmanaged spaces, and 0.32.0's `yard herdr down` leaves the timer enabled.
+    To remove it, run `systemctl disable --now subyard-herdr-discovery.timer` in the yard and
+    remove `/etc/systemd/system/subyard-herdr-discovery.timer` and
+    `/etc/systemd/system/subyard-herdr-discovery.service`, then run `systemctl daemon-reload`.
+  - `~/.subyard/logs/rpc-errors.log` stays and is ignored.
+- **After updating again,** set the unset settings again before
+  `yard -Y NAME profile enable user-dotfiles`, or, if the yard inherited its selection before,
+  run `yard -Y NAME config unset ENVIRONMENT_PROFILES --scope yard` to return to the default
   selection; see [user dotfiles](user-dotfiles.md).
 
 ## 0.32.0
@@ -144,13 +252,6 @@
 
 - Git and sudo approval policies are provisioned independently for Claude, Codex and OpenCode.
   Existing combined policies migrate on reprovision; the configured approval behavior stays the same.
-
-### User skills
-
-- GitHub skill sources clone in yards with the GitHub profile. Its Git wiring sends github.com
-  URLs through the `subyard-github` broker transport, which the user-skills clone did not allow,
-  so these sources were skipped with a clone warning. Run `yard init` or
-  `yard profile enable user-skills` after updating to clone them.
 
 ### Rollback to 0.31.0
 
