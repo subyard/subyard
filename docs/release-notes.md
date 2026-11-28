@@ -12,6 +12,10 @@
   shipped source installs generic instructions in every selected yard, including `default`; to
   keep your own, set `USER_DOTFILES_SOURCE` to your repository first; see
   [agent instructions from a dotfiles repository](#agent-instructions-from-a-dotfiles-repository).
+- **Select OpenCode explicitly to keep it.** The shipped default no longer selects OpenCode, so
+  otherwise the update retires it in running yards that inherit the default, and the next
+  `yard init` retires it in stopped ones. To keep the previous set:
+  `yard config set CODING_TOOL_INTEGRATIONS 'claude codex opencode pi' --scope host --local`.
 - **Some effects cannot be undone by a rollback:**
   - Above `TELEMETRY_DISK_BUDGET` (default `30GiB`) the telemetry collector prunes the oldest raw
     OTLP, session correlations and samples, never ones younger than 30 days, until the store fits
@@ -180,6 +184,8 @@
   that misses a step is refused with "the retained release cannot provide a safe rollback plan"
   and this recovery, and one to 0.30.0 with a setting left with "cannot read the yard settings".
   After rollback, run `yard init`, then restart agent sessions.
+- After a rollback to 0.32.0, inheriting yards select OpenCode again; run `yard init` in any yard
+  where it is not provisioned yet.
 - **What survives:**
   - `/etc/claude-code/CLAUDE.md` stays active and is listed in the rollback plan output and
     result; back it up and remove it in each affected yard if you do not want the rule.
