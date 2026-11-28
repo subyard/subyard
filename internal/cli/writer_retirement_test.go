@@ -389,7 +389,11 @@ func TestAdmittedSSHInputWaitSerializesBeforeFullRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := filepath.Join(program.options.RepositoryRoot, "native-worker")
-	testkit.WriteFile(t, worker, []byte(fmt.Sprintf("#!/bin/sh\nexec '%s' -test.run=^TestWriterUnlockDaemon$ -- \"$2\"\n", strings.ReplaceAll(binary, "'", "'\\''"))), 0700)
+	// The product starts its worker with a minimal environment; the test
+	// binary standing in for it keeps the run's owner lock root.
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+	testkit.WriteFile(t, worker, []byte(fmt.Sprintf("#!/bin/sh\nSUBYARD_OWNER_LOCK_ROOT=%s; export SUBYARD_OWNER_LOCK_ROOT\nexec %s -test.run=^TestWriterUnlockDaemon$ -- \"$2\"\n",
+		quote(os.Getenv(uninstall.OwnerLockRootEnvironment)), quote(binary))), 0700)
 	program.options.DispatcherPath = worker
 	waiting := filepath.Join(program.options.RepositoryRoot, "input-wait")
 	// ssh-add marks the native input boundary, then blocks until cancellation.

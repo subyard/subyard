@@ -29,7 +29,13 @@ func RunWithOwnerLockRoot(m *testing.M) int {
 	}
 	// A helper binary started without the variable keeps its root in the run's
 	// temporary directory when it has one.
-	return runWithOwnerLockRoot(os.TempDir(), m.Run)
+	// TMPDIR need not be clean; the root it yields must be.
+	parent, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "owner lock root:", err)
+		return 1
+	}
+	return runWithOwnerLockRoot(parent, m.Run)
 }
 
 func runWithOwnerLockRoot(parent string, run func() int) int {

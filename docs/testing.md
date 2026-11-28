@@ -760,7 +760,8 @@ refuses owner coordination without that variable; a package whose tests reach it
 them through `testkit.RunWithOwnerLockRoot` in its `TestMain`, which provides and removes
 a private root when no runner did; the next test binary removes a root whose binary was
 killed once no process holds it. Handlers that re-enter `yard` inherit the variable, and a
-shell test run directly gets a root below its own temporary root from `setup_test_context`.
+shell test run directly gets a root below its own temporary root from `setup_test_context`,
+or sets one itself when it builds its own data home.
 A test that starts a process with a hand-built environment passes the variable on; the cli
 fixtures fail a test whose data home still coordinated in the shared directory.
 

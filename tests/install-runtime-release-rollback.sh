@@ -74,6 +74,31 @@ for root in relative/locks "$TMP/lock-root/../lock-root" "/$TMP/lock-root"; do
     || { printf 'install runtime rollback: lock root %s accepted (status=%s)\n' "$root" "$status" >&2; exit 1; }
 done
 printf 'ok: owner barrier refuses an unsafe lock root\n'
+# The native helpers read the same root behind the privilege boundary.
+for root in relative/locks "$TMP/lock-root/../lock-root" "/$TMP/lock-root"; do
+  SUBYARD_OWNER_LOCK_ROOT="$root" SUBYARD_HOME="$TMP/home" SUBYARD_USER="$(id -un)" python3 -B - "$ROOT/scripts/lib" <<'PY' \
+    || { printf 'install runtime rollback: native helper accepted lock root %s\n' "$root" >&2; exit 1; }
+import importlib.util, os, sys
+def load(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), os.path.join(sys.argv[1], name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+def refused(call):
+    try:
+        call()
+    except ValueError as error:
+        return str(error) == 'invalid owner lock root'
+    return False
+barrier = load('native-owner-barrier')
+os.environ['SUBYARD_NATIVE_OWNER_FD3'] = '1'
+custody = load('native-install-custody')
+os.environ['SUBYARD_NATIVE_OWNER_STDIN'] = '1'
+sys.argv[1:] = ['owner-barrier', 'host-power', '/nonexistent']
+sys.exit(0 if refused(barrier.inherited_owner_descriptors) and refused(custody.main) else 1)
+PY
+done
+printf 'ok: native helpers refuse an unsafe lock root\n'
 
 # Put a harmless absolute member first, then enough names to exceed the pipe buffer.
 member="$TMP/$(printf '%0100d' 0)"

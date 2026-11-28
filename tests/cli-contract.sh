@@ -8,6 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SUBYARD_NO_AUDIT=1
 CLI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-cli-contract.XXXXXX")"
 trap 'rm -rf "$CLI_TMP"' EXIT
+# A direct run gets its own lock root too, so the shared-lock check always runs.
+if [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ]; then
+  SUBYARD_OWNER_LOCK_ROOT="$CLI_TMP/owner-locks"
+  install -d -m 0700 "$SUBYARD_OWNER_LOCK_ROOT"
+fi
+export SUBYARD_OWNER_LOCK_ROOT
 
 commands="$($ROOT/bin/yard --list)"
 grep -qx security <<<"$commands" || fail "security command missing"
@@ -210,7 +216,7 @@ printf 'ok: CLI help, globals and profile completion contract\n'
   config_environment=(env -i "PATH=$PATH" "HOME=$operator" "SUBYARD_OPERATOR_HOME=$operator"
     "SUBYARD_CONFIG_HOME=$config_home" "SUBYARD_HOME=$data_home" "SUBYARD_NO_AUDIT=1"
     "YARD_ENGINE_PATH=${YARD_ENGINE_PATH:-$ROOT/.build/yard}" "GIT_TERMINAL_PROMPT=0"
-    "SUBYARD_OWNER_LOCK_ROOT=${SUBYARD_OWNER_LOCK_ROOT:-}")
+    "SUBYARD_OWNER_LOCK_ROOT=$SUBYARD_OWNER_LOCK_ROOT")
   shared_yard() { "${config_environment[@]}" "$asset_root/bin/yard" "$@"; }
   shared_terminal() {
     local command_line
@@ -241,6 +247,5 @@ printf 'ok: CLI help, globals and profile completion contract\n'
   shared_yard config sync --check >/dev/null
   # The fixture data home coordinates under the run's lock root, never in /tmp.
   shared_lock="/tmp/subyard-owner-locks-$(id -u)/$(printf '%s' "$data_home" | sha256sum | cut -d ' ' -f 1).lock"
-  [ -z "${SUBYARD_OWNER_LOCK_ROOT:-}" ] || [ ! -e "$shared_lock" ] \
-    || fail 'fixture data home coordinated in the shared /tmp namespace'
+  [ ! -e "$shared_lock" ] || fail 'fixture data home coordinated in the shared /tmp namespace'
 )
