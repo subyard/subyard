@@ -224,3 +224,20 @@ func TestProjectLockUsesExactPermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestUnprovenCheckoutKeepsPendingReason(t *testing.T) {
+	const id, nested = "example", "example/src/private"
+	project := checkout{Name: "Example", Folder: "/srv/workspaces/example/src"}
+	rows := []any{checkoutSpace(id, project), checkoutSpace(nested, checkout{"Example/private", "/srv/workspaces/example/src/private"})}
+	_, spaces, err := loadLayout(jsonValue(map[string]any{"spaces": rows}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]registration{id: {ID: spaceID(id)}, nested: {ID: spaceID(nested), Pending: "space has live terminals"}}
+	partial := desired(map[string]checkout{id: project})
+	partial.Partial = true
+	planned, _, err := planSpaces(spaces, partial, state, nil, false)
+	if err != nil || len(planned) != 2 || state[nested].Pending != "space has live terminals" {
+		t.Fatalf("partial scan: %v %v %v", planned, state, err)
+	}
+}

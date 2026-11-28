@@ -211,16 +211,19 @@ func (result inventory) proveAbsence(workspaces string, known, folders []string,
 		absent[folder] = true
 	}
 	for _, key := range known {
-		if absent[knownFolder(workspaces, key)] {
-			result.Gone[key] = true
-			continue
-		}
-		if id, path := splitKey(key); path == "" && !present[id] {
+		if id, path := splitKey(key); path == "" && !present[id] && !absent[knownFolder(workspaces, key)] {
 			if info, err := os.Lstat(filepath.Join(workspaces, id)); err == nil && !info.IsDir() {
 				problem(id, "workspace %q is no longer a directory", id)
 			} else {
 				problem(id, "invalid project metadata for %q", id)
 			}
+		}
+	}
+	// A project with a problem, such as a missing src that makes every nested
+	// checkout read as absent, retires nothing.
+	for _, key := range known {
+		if id, _ := splitKey(key); absent[knownFolder(workspaces, key)] && !result.Kept[id] {
+			result.Gone[key] = true
 		}
 	}
 }

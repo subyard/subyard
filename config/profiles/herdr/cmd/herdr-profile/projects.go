@@ -257,7 +257,11 @@ func planSpaces(spaces []space, inventory inventory, state map[string]registrati
 					continue
 				}
 			}
-			// A checkout that is neither present nor proven absent keeps its space.
+			// A checkout that is neither present nor proven absent keeps its space
+			// and any pending cleanup reason.
+			if _, desired := inventory.Checkouts[key]; !desired && !inventory.Gone[key] {
+				record.Pending = state[key].Pending
+			}
 			state[key] = record
 		}
 		rows = append(rows, entry.fields)

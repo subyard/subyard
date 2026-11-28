@@ -404,7 +404,31 @@ func TestNestedCheckoutsAndWorktreesFollowTheirFolders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A missing src removes nothing; a removed project's spaces go with it.
+	// A missing src removes nothing, not even nested spaces with layout; a removed
+	// project's spaces go with it.
+	if err := os.MkdirAll(filepath.Join(src, "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, filepath.Join(src, "private"), "init", "-q")
+	// A known record lets sync see it without waiting for the periodic rescan.
+	state, err = loadRegistrations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state["example/src/private"] = registration{ID: spaceID("example/src/private")}
+	if err := saveRegistrations(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	herdr.live = []string{spaceID("example/src/private")}
+	if err := syncProjects(socket, workspaces, true, false); err != nil {
+		t.Fatal(err)
+	}
+	herdr.setTabs(t, "example/src/private", `[{"id":"tab"}]`)
+	want["example/src/private"] = `Example/private [{"id":"tab"}]`
+	if got := herdr.spaces(t); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("restored nested checkout: %v", got)
+	}
+	herdr.live = nil
 	moved := filepath.Join(project, "src.moved")
 	if err := os.Rename(src, moved); err != nil {
 		t.Fatal(err)
