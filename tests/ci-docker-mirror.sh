@@ -4,7 +4,7 @@
 # the yard's Docker config, restarts Docker and fails unless Docker reports the mirror.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP="$(mktemp -d /tmp/subyard-ci-docker-mirror.XXXXXX)"
+TMP="$(mktemp -d -t subyard-ci-docker-mirror.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 function_source() { sed -n "/^$2() {/,/^}$/p" "$1"; }
