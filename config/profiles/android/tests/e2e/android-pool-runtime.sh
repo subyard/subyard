@@ -282,6 +282,9 @@ yard init --yes
 project="$(yard config show INCUS_PROJECT | sed -n 's/^effective: //p')"
 instance="$(yard config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')"
 yard start --yes
+# shellcheck source=dev/e2e/lib-docker-mirror.sh
+. "$root/dev/e2e/lib-docker-mirror.sh"
+e2e_docker_mirror incus --project "$project" exec "$instance" --
 # Emulator lanes require the physical namespace boundary before downloading images.
 if [ "$lane" != full ] && [ "$lane" != skills ]; then
 incus --project "$project" exec "$instance" -- bash -ceu '

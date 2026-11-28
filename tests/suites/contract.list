@@ -34,6 +34,7 @@ test-vms.sh
 workflow-real-adapter-gate.sh
 ci-apt-install.sh
 ci-broker-state.sh
+ci-docker-mirror.sh
 pr-stats.sh
 cli-fixture-slice-check.sh
 litdiff.sh

@@ -316,6 +316,9 @@ write_guest_command() {
 	printf 'export SUBYARD_E2E_DISK_PER_VM=%q\n' "$GRANT_DISK_PER_VM"
 	printf 'export SUBYARD_E2E_BASE_FINGERPRINT=%q\n' "$BASE_FINGERPRINT"
 	printf 'export SUBYARD_E2E_VM=%q\n' "$vm"
+	# Hosted runs only; dev/e2e/lib-docker-mirror.sh applies it to lane yards.
+	[ -z "${SUBYARD_E2E_DOCKER_MIRROR:-}" ] \
+		|| printf 'export SUBYARD_E2E_DOCKER_MIRROR=%q\n' "$SUBYARD_E2E_DOCKER_MIRROR"
 	if [ "${1:-}" = ./bin/yard ]; then
 		printf '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build\n'
 	fi
